@@ -91,20 +91,6 @@ const travelEndDateInput = document.getElementById("travel-end-date");
 const itineraryTitleDisplay = document.getElementById(
   "itinerary-title-display"
 );
-const displayClientName = document.getElementById("display-client-name");
-const displayClientContact = document.getElementById("display-client-contact");
-const displayClientType = document.getElementById("display-client-type");
-const displayB2bClientNameContainer = document.getElementById(
-  "display-b2b-client-name-container"
-);
-const displayB2bClientName = document.getElementById("display-b2b-client-name");
-const displayCreator = document.getElementById("display-creator");
-const displayUniqueID = document.getElementById("display-unique-id");
-const displayCreationDate = document.getElementById("display-creation-date");
-const displayStartDateInput = document.getElementById(
-  "display-start-date-input"
-);
-const displayEndDateInput = document.getElementById("display-end-date-input");
 const itemSearchInput = document.getElementById("item-search-input");
 const dashboardSearchInput = document.getElementById("search-input");
 const dashboardSearchBtn = document.getElementById("search-btn");
@@ -695,209 +681,103 @@ const updateAddDayButtonState = () => {
 };
 
 const updateMetadataDisplay = () => {
+  // Main header elements that are always visible
   if (itineraryTitleDisplay)
     itineraryTitleDisplay.textContent = currentItineraryName || "Itinerary";
-  if (displayClientName)
-    displayClientName.textContent = currentClientName || "N/A";
-  let contactInfo = [currentClientEmail, currentClientTel]
-    .filter(Boolean)
-    .join(" / ");
-  if (displayClientContact)
-    displayClientContact.textContent = contactInfo || "N/A";
 
-  let clientTypeDisplayValue = "N/A";
-  if (currentClientType === "direct")
-    clientTypeDisplayValue = "Direct Traveller";
-  else if (currentClientType === "agent")
-    clientTypeDisplayValue = "Travel Agent/B2B";
-  if (displayClientType) displayClientType.textContent = clientTypeDisplayValue;
-
-  if (
-    currentClientType === "agent" &&
-    currentB2bClientId &&
-    allB2bClients.length > 0
-  ) {
-    const agent = allB2bClients.find((a) => a.id === currentB2bClientId);
-    if (agent && displayB2bClientName) {
-      displayB2bClientName.textContent = agent.client_name;
-      if (displayB2bClientNameContainer)
-        displayB2bClientNameContainer.style.display = "";
-    } else {
-      if (displayB2bClientNameContainer)
-        displayB2bClientNameContainer.style.display = "none";
-    }
-  } else {
-    if (displayB2bClientNameContainer)
-      displayB2bClientNameContainer.style.display = "none";
-  }
-
-  if (displayCreator)
-    displayCreator.textContent = itineraryCreatorName || "N/A";
-
-  // *** THIS IS THE CRUCIAL FIX ***
-  // Ensure we are using the correct state variable to update the UI.
-  if (displayUniqueID) displayUniqueID.textContent = itineraryUniqueID || "N/A";
-
-  // --- ADD/UPDATE THIS BLOCK ---
-  if (statusBadge) {
-    statusBadge.textContent = currentItineraryStatus;
-    statusBadge.className = `status-badge status-${currentItineraryStatus}`;
-  }
-  if (statusSelector) {
-    statusSelector.value = currentItineraryStatus;
-  }
-  // --- END OF BLOCK ---
-
-  if (displayCreationDate)
-    displayCreationDate.textContent = itineraryCreationDate
-      ? formatDisplayDateTime(new Date(itineraryCreationDate))
-      : "N/A";
-
-  // WITH THIS NEW BLOCK:
-  if (displayStartDateInput) {
-    const tripStartDateStr = travelStartDate ? formatDate(travelStartDate) : "";
-    const today = formatDate(new Date());
-    displayStartDateInput.value = tripStartDateStr;
-
-    // The min date is either its original start date (if in the past) or today.
-    displayStartDateInput.min =
-      tripStartDateStr && tripStartDateStr < today ? tripStartDateStr : today;
-    displayStartDateInput.max = travelEndDate ? formatDate(travelEndDate) : "";
-  }
-  if (displayEndDateInput) {
-    displayEndDateInput.value = travelEndDate ? formatDate(travelEndDate) : "";
-    displayEndDateInput.min = travelStartDate
-      ? formatDate(travelStartDate)
-      : "";
-  }
-  updateAddDayButtonState();
   const totalPax = (paxAdults || 0) + (paxChildren || 0);
   if (numPeopleInput) numPeopleInput.value = totalPax > 0 ? totalPax : 1;
-};
 
-const saveItinerary = async (showAlert = true) => {
-  // VALIDATION: Manually check for any occupancy warnings on the page before saving.
-  const totalPax = (paxAdults || 0) + (paxChildren || 0) || 1;
-  const itemsWithWarnings = [];
-  const allItems = daysContainer.querySelectorAll(".itinerary-item");
+  // Dynamically build the HTML for the accordion's content panel
+  const metadataContent = document.getElementById("metadata-content");
+  if (!metadataContent) return;
 
-  allItems.forEach((itemEl) => {
-    const itemCategory = itemEl.dataset.itemType;
-    const maxOccupancy = parseInt(itemEl.dataset.maxOccupancy) || 0;
-    if (
-      itemCategory &&
-      ["Transfer", "Safari", "Activity", "Vehicle"].includes(itemCategory) &&
-      maxOccupancy > 0 &&
-      totalPax > maxOccupancy
-    ) {
-      itemsWithWarnings.push(itemEl);
-    }
-  });
+  const agent = allB2bClients.find((a) => a.id === currentB2bClientId);
+  const b2bClientName = agent ? agent.client_name : "N/A";
 
-  if (itemsWithWarnings.length > 0 && showAlert) {
-    alert(
-      "Cannot save. Please resolve all occupancy warnings before continuing."
-    );
-    const firstOffendingItem = itemsWithWarnings[0];
-    firstOffendingItem.scrollIntoView({ behavior: "smooth", block: "center" });
-    firstOffendingItem.classList.add("warning-focus");
-    setTimeout(() => {
-      firstOffendingItem.classList.remove("warning-focus");
-    }, 2500);
-    return; // Stop the save process
-  }
+  metadataContent.innerHTML = `
+    <div class="meta-item">
+      <label>Travel Dates:</label>
+      <div class="meta-value date-edit-group">
+        <input type="date" id="display-start-date-input" value="${
+          travelStartDate ? formatDate(travelStartDate) : ""
+        }" aria-label="Edit start date">
+        <span> to </span>
+        <input type="date" id="display-end-date-input" value="${
+          travelEndDate ? formatDate(travelEndDate) : ""
+        }" aria-label="Edit end date">
+      </div>
+    </div>
+    <div class="meta-item">
+      <label>Client:</label>
+      <span class="meta-value">${currentClientName || "N/A"}</span>
+    </div>
+    <div class="meta-item">
+      <label>Contact:</label>
+      <span class="meta-value editable" title="Click to edit contact info (TODO)">${
+        [currentClientEmail, currentClientTel].filter(Boolean).join(" / ") ||
+        "N/A"
+      }</span>
+    </div>
+    <div class="meta-item">
+      <label>Client Type:</label>
+      <span class="meta-value">${
+        currentClientType === "direct" ? "Direct Traveller" : "Travel Agent/B2B"
+      }</span>
+    </div>
+    <div class="meta-item" style="${
+      currentClientType === "agent" ? "" : "display: none;"
+    }">
+      <label>B2B Client:</label>
+      <span class="meta-value">${b2bClientName}</span>
+    </div>
+    <div class="meta-item">
+      <label>Creator:</label>
+      <span class="meta-value">${itineraryCreatorName || "N/A"}</span>
+    </div>
+    <div class="meta-item">
+      <label>ID:</label>
+      <span class="meta-value">${itineraryUniqueID || "N/A"}</span>
+    </div>
+    <div class="meta-item">
+      <label>Status:</label>
+      <div class="meta-value status-group">
+        <span class="status-badge status-${currentItineraryStatus}">${currentItineraryStatus}</span>
+        <select id="status-selector">
+          <option value="quotation" ${
+            currentItineraryStatus === "quotation" ? "selected" : ""
+          }>Quotation</option>
+          <option value="confirmed" ${
+            currentItineraryStatus === "confirmed" ? "selected" : ""
+          }>Confirmed</option>
+          <option value="cancelled" ${
+            currentItineraryStatus === "cancelled" ? "selected" : ""
+          }>Cancelled</option>
+        </select>
+      </div>
+    </div>
+    <div class="meta-item">
+        <label>Created:</label>
+        <span class="meta-value">${
+          itineraryCreationDate
+            ? formatDisplayDateTime(new Date(itineraryCreationDate))
+            : "N/A"
+        }</span>
+    </div>
+  `;
 
-  if (isSaving || !currentItineraryRecordId || !currentUser) {
-    return;
-  }
-  isSaving = true;
-  if (showAlert) showLoadingSpinner("Saving...");
+  // CRITICAL FIX: Re-attach event listeners to the elements that were just created.
+  metadataContent
+    .querySelector("#display-start-date-input")
+    .addEventListener("change", handleMainDateChange);
+  metadataContent
+    .querySelector("#display-end-date-input")
+    .addEventListener("change", handleMainDateChange);
+  metadataContent
+    .querySelector("#status-selector")
+    .addEventListener("change", handleStatusChange);
 
-  try {
-    const itineraryData = {
-      itinerary_name: currentItineraryName,
-      lead_pax_name: currentClientName,
-      lead_pax_email: currentClientEmail,
-      lead_pax_tel: currentClientTel,
-      num_adults: paxAdults,
-      num_children: paxChildren,
-      pax_names: JSON.stringify(currentPaxNames),
-      sharing_option: sharingOption,
-      destination_country: destinationInfo.country,
-      destination_province: destinationInfo.province,
-      destination_region: destinationInfo.region,
-      travel_start_date: formatDate(travelStartDate),
-      travel_end_date: formatDate(travelEndDate),
-      markup_percentage: currentMarkupPercentage,
-      currency_code: currentItineraryCurrency,
-      client_id: currentB2bClientId,
-      status: currentItineraryStatus,
-    };
-
-    const daysData = [];
-    const dayElements = daysContainer.querySelectorAll(".day");
-    dayElements.forEach((dayEl, dayIndex) => {
-      const dayNumber = parseInt(dayEl.dataset.dayNumber || dayIndex + 1);
-      const dayDateInput = dayEl.querySelector(".day-date-input");
-      const dayDate = dayDateInput ? parseDateString(dayDateInput.value) : null;
-      const items = [];
-      const itemElements = dayEl.querySelectorAll(".itinerary-item");
-      itemElements.forEach((itemEl, itemIndex) => {
-        const isOverridden = itemEl.dataset.sellingPriceOverridden === "true";
-        const sellingPrice = parseFloat(itemEl.dataset.sellingPrice) || 0;
-
-        items.push({
-          id: itemEl.dataset.dbId || undefined,
-          itinerary_day_id: dayEl.dataset.dbId || undefined,
-          item_rate_id: itemEl.dataset.itemRateId || null,
-          item_text: itemEl.dataset.displayText,
-          item_price_per_person: parseFloat(itemEl.dataset.costPrice) || 0,
-          selling_price_per_person_override: isOverridden ? sellingPrice : null,
-          item_order: itemIndex + 1,
-          custom_item_description: itemEl.dataset.customDescription || null,
-          library_item_id: itemEl.dataset.libraryItemId || null,
-          service_config_id: itemEl.dataset.serviceConfigId || null,
-          is_included: itemEl.dataset.isIncluded === "true",
-          parent_day_item_id: itemEl.dataset.parentDayItemId || null,
-        });
-      });
-      daysData.push({
-        id: dayEl.dataset.dbId || undefined,
-        day_number: dayNumber,
-        day_date: dayDate ? formatDate(dayDate) : null,
-        items: items,
-      });
-    });
-
-    const url = `/api/itineraries/${currentItineraryRecordId}`;
-
-    const responseData = await fetchWithAuth(url, {
-      method: "PUT",
-      body: { itineraryData, daysData },
-    });
-
-    if (responseData && responseData.savedDays) {
-      responseData.savedDays.forEach((savedDay) => {
-        const dayEl = document.querySelector(
-          `.day[data-day-number="${savedDay.day_number}"]`
-        );
-        if (dayEl && !dayEl.dataset.dbId) {
-          dayEl.dataset.dbId = savedDay.id;
-          console.log(
-            `Day ${savedDay.day_number} updated with new DB ID: ${savedDay.id}`
-          );
-        }
-      });
-    }
-
-    if (showAlert) console.log("Itinerary saved via backend.");
-  } catch (error) {
-    console.error("Error saving itinerary via backend:", error);
-    if (showAlert) alert(`Save failed: ${error.message}`);
-  } finally {
-    if (showAlert) hideLoadingSpinner();
-    isSaving = false;
-  }
+  updateAddDayButtonState();
 };
 
 const loadItinerary = async (itineraryDbId) => {
@@ -1075,7 +955,7 @@ const loadItinerary = async (itineraryDbId) => {
     updateMetadataDisplay();
     updateServiceDayHighlights();
     updateAccommodationGroups();
-    updateContinuationButtons(); // Ensure continuation buttons are updated
+    updateContinuationButtons();
     showPage(mainAppWrapper);
     if (!builderListenersAttached) attachBuilderListeners();
 
@@ -1152,36 +1032,18 @@ const updateSubsequentDayDates = (cDE) => {
 function updateItemFinancialsDisplay(itemElement) {
   if (!itemElement) return;
 
-  itemElement.querySelector(".item-warning")?.remove();
-  itemElement.classList.remove("warning", "is-service-item");
-
   const currencyCode =
     itemElement.dataset.currencyCode || currentItineraryCurrency;
   const pricingModel = itemElement.dataset.pricingModel || "per_person";
-  const maxOccupancy = itemElement.dataset.maxOccupancy
-    ? parseInt(itemElement.dataset.maxOccupancy)
-    : null;
-  const subCategory = itemElement.dataset.subCategory;
-  const itemCategory = itemElement.dataset.itemType;
-  const serviceConfigs = JSON.parse(itemElement.dataset.serviceConfigs || "[]");
-
   const costPerBase = parseFloat(itemElement.dataset.costPrice) || 0;
   const totalPax = (paxAdults || 0) + (paxChildren || 0) || 1;
-
-  const itemMarkupInput = itemElement.querySelector(".item-markup-input");
   const itemMarkup = itemElement.dataset.itemMarkup;
 
-  let effectiveMarkup;
-  if (itemMarkup !== "" && itemMarkup !== undefined) {
-    effectiveMarkup = parseFloat(itemMarkup);
-    if (itemMarkupInput) itemMarkupInput.value = effectiveMarkup.toFixed(2); // <-- ADD THIS CHECK
-  } else {
-    effectiveMarkup = parseFloat(currentMarkupPercentage);
-    if (itemMarkupInput) {
-      itemMarkupInput.value = "";
-      itemMarkupInput.placeholder = effectiveMarkup.toFixed(2);
-    }
-  }
+  // Perform calculations in the background
+  const effectiveMarkup =
+    itemMarkup !== "" && itemMarkup !== undefined
+      ? parseFloat(itemMarkup)
+      : parseFloat(currentMarkupPercentage);
 
   let sellingPricePerBase = parseFloat(itemElement.dataset.sellingPrice) || 0;
   if (itemElement.dataset.sellingPriceOverridden !== "true") {
@@ -1189,78 +1051,15 @@ function updateItemFinancialsDisplay(itemElement) {
     itemElement.dataset.sellingPrice = sellingPricePerBase.toFixed(2);
   }
 
-  let totalCost = 0;
   let totalSell = 0;
-  let displayUnitText = "pp";
-
   if (pricingModel === "per_unit") {
-    displayUnitText = "per unit";
-    totalCost = costPerBase;
     totalSell = sellingPricePerBase;
   } else {
-    displayUnitText = "pp";
-    totalCost = costPerBase * totalPax;
     totalSell = sellingPricePerBase * totalPax;
   }
 
-  // in script.js, inside updateItemFinancialsDisplay...
-
-  // --- START OF NEW, CORRECTED CODE ---
-  // PERMANENT BORDER LOGIC: Check if this item has an occupancy issue.
-  if (
-    itemCategory &&
-    ["Transfer", "Safari", "Activity", "Vehicle"].includes(itemCategory) &&
-    maxOccupancy > 0 &&
-    totalPax > maxOccupancy
-  ) {
-    // If it does, add the .warning class for the orange border.
-    itemElement.classList.add("warning");
-  } else {
-    // Otherwise, ensure the warning class is not present.
-    itemElement.classList.remove("warning");
-  }
-  // --- END OF NEW, CORRECTED CODE ---
-
-  const configBtn = itemElement.querySelector(".configure-service-btn");
-  if (subCategory === "Guide" || subCategory === "Driver") {
-    itemElement.classList.add("is-service-item");
-    if (configBtn) configBtn.style.display = "inline-block";
-  } else {
-    if (configBtn) configBtn.style.display = "none";
-  }
-
-  const costDisplaySpan = itemElement.querySelector(".item-cost-display");
-  const sellingPriceValueSpan = itemElement.querySelector(
-    ".selling-price-value"
-  );
-  const totalItemCostSpan = itemElement.querySelector(".total-item-cost");
+  // ONLY update the elements that exist in the "at-a-glance" view
   const totalItemSellingSpan = itemElement.querySelector(".total-item-selling");
-
-  // These elements might not exist in the "at-a-glance" view, so we must check for them.
-  if (costDisplaySpan) {
-    const costPriceSpan = costDisplaySpan.querySelector(".editable-cost-price");
-    const costSuffixSpan = costDisplaySpan.querySelector(".cost-suffix");
-    if (costPriceSpan)
-      costPriceSpan.textContent = formatCurrency(costPerBase, currencyCode);
-    if (costSuffixSpan) costSuffixSpan.textContent = ` ${displayUnitText}`;
-  }
-
-  if (sellingPriceValueSpan) {
-    const perPersonSellEquivalent = totalPax > 0 ? totalSell / totalPax : 0;
-    sellingPriceValueSpan.textContent = formatCurrency(
-      perPersonSellEquivalent,
-      currencyCode
-    );
-  }
-
-  if (totalItemCostSpan) {
-    totalItemCostSpan.textContent = `Total Cost: ${formatCurrency(
-      totalCost,
-      currencyCode
-    )}`;
-  }
-
-  // This element DOES exist in the "at-a-glance" view, so it will always update.
   if (totalItemSellingSpan) {
     totalItemSellingSpan.textContent = `Total Sell: ${formatCurrency(
       totalSell,
@@ -1567,7 +1366,7 @@ const updateContinuationButtons = () => {
   // Group all items by their library ID
   allItems.forEach((itemEl, index) => {
     const libId = itemEl.dataset.libraryItemId;
-    if (!libId) return;
+    if (!libId) return; // Skip items without a library ID
     if (!itemRuns[libId]) {
       itemRuns[libId] = [];
     }
@@ -1604,10 +1403,10 @@ const addExtendButtonToLastItem = (run) => {
   if (run.length === 0) return;
 
   const lastItemInRun = run[run.length - 1].element;
-  const itemCategory = lastItemInRun.dataset.itemType || "";
+  const subCategory = lastItemInRun.dataset.subCategory;
 
-  // IMPORTANT: Only add the "Extend Stay" button for Accommodation ('Room') items.
-  if (itemCategory.toLowerCase() !== "room") {
+  // IMPORTANT: Do NOT add this button to Guides or Drivers
+  if (subCategory === "Guide" || subCategory === "Driver") {
     return;
   }
 
@@ -1616,7 +1415,7 @@ const addExtendButtonToLastItem = (run) => {
   if (nextDayEl && nextDayEl.classList.contains("day")) {
     const extendBtn = document.createElement("button");
     extendBtn.className = "extend-stay-btn";
-    extendBtn.textContent = "Extend Stay";
+    extendBtn.textContent = "Extend";
     extendBtn.title = "Add this item to the next day";
 
     // Add the button to the actions placeholder
@@ -1821,6 +1620,8 @@ const handleDrop = async (event) => {
               if (nextDayEl && nextDayEl.classList.contains("day")) {
                 const nextDropZone = nextDayEl.querySelector(".day-items-list");
                 const clonedItem = elementToAdd.cloneNode(true);
+                // The clone should not have the prompt
+                clonedItem.querySelector(".item-continuation-prompt")?.remove();
                 clonedItem.dataset.instanceId = `inst-${Date.now()}-${Math.random()
                   .toString(36)
                   .substr(2, 5)}`;
@@ -1832,11 +1633,13 @@ const handleDrop = async (event) => {
             }
           }
 
-          // CRITICAL: Call the UI updates immediately after placing all clones.
-          updateAccommodationGroups();
-          updateContinuationButtons(); // Ensure continuation buttons are updated
+          // CRITICAL FIX: Call ALL UI update functions after confirming.
           updateGrandTotal();
-          saveItinerary(false);
+          updateServiceDayHighlights();
+          updateAccommodationGroups();
+          updateAllItemOrderButtons();
+          updateContinuationButtons(); // <-- THIS IS THE MISSING CALL
+          saveItinerary();
         },
         { once: true }
       );
@@ -1921,7 +1724,7 @@ const handleDrop = async (event) => {
   updateServiceDayHighlights();
   updateAccommodationGroups();
   updateAllItemOrderButtons();
-  updateContinuationButtons(); // NEW: Ensure continuation buttons are updated
+  updateContinuationButtons();
   saveItinerary();
   currentlyDraggedElement = null;
 };
@@ -2093,7 +1896,6 @@ const handleDaysContainerClick = (event) => {
       // Update all UI elements and save
       updateContinuationButtons(); // This will move the button to the new last item
       updateAllItemOrderButtons();
-      updateContinuationButtons(); // Ensure continuation buttons are updated
       saveItinerary(false);
     }
     return;
@@ -2121,7 +1923,6 @@ const handleDaysContainerClick = (event) => {
 
     // Update the visual state of all buttons in this list and save
     updateAllItemOrderButtons();
-    updateContinuationButtons(); // Ensure continuation buttons are updated
     saveItinerary(false); // Save silently
     return;
   }
@@ -2183,14 +1984,6 @@ const handleDaysContainerClick = (event) => {
     return;
   }
 
-  if (target.classList.contains("edit-description-btn")) {
-    const itemElement = target.closest(".itinerary-item");
-    if (itemElement) {
-      openDescriptionEditor(itemElement);
-    }
-    return;
-  }
-
   if (target.classList.contains("configure-service-btn")) {
     const clickedItemEl = target.closest(".itinerary-item");
     const startDayEl = clickedItemEl.closest(".day");
@@ -2225,34 +2018,6 @@ const handleDaysContainerClick = (event) => {
       };
       openServiceConfigModal(itemData, startDayEl);
     }
-    return;
-  }
-
-  if (target.type === "checkbox" && target.id.startsWith("optional-")) {
-    const itemElement = target.closest(".itinerary-item");
-    if (!itemElement) return;
-
-    const itemTextElement = itemElement.querySelector(".item-text");
-    const existingLabel = itemTextElement.querySelector(".optional-label-text");
-
-    if (target.checked) {
-      itemElement.dataset.isIncluded = "true";
-      itemElement.classList.remove("is-optional-not-included");
-      if (existingLabel) {
-        existingLabel.remove();
-      }
-    } else {
-      itemElement.dataset.isIncluded = "false";
-      itemElement.classList.add("is-optional-not-included");
-      if (!existingLabel) {
-        const newLabel = document.createElement("span");
-        newLabel.className = "optional-label-text";
-        newLabel.textContent = "(Optional)";
-        itemTextElement.appendChild(newLabel);
-      }
-    }
-    updateGrandTotal();
-    // No need to save immediately, let user make multiple changes
     return;
   }
 
@@ -2308,6 +2073,7 @@ const handleDaysContainerClick = (event) => {
     updateGrandTotal();
     updateServiceDayHighlights();
     updateAllItemOrderButtons();
+    updateContinuationButtons();
     saveItinerary();
     return;
   }
@@ -2971,35 +2737,27 @@ const updateAccommodationGroups = () => {
     // Add badges and buttons to each item in the group
     groupWrapper.querySelectorAll(".itinerary-item").forEach((itemEl) => {
       // Clear any old controls first
-      itemEl.querySelector(".primary-badge")?.remove();
-      itemEl.querySelector(".set-primary-btn")?.remove();
+      const existingBadge = itemEl.querySelector(".primary-badge");
+      if (existingBadge) existingBadge.remove();
+      const existingBtn = itemEl.querySelector(".set-primary-btn");
+      if (existingBtn) existingBtn.remove();
 
-      // Find the necessary placeholders
       const itemText = itemEl.querySelector(".item-text");
-      const actionsPlaceholder = itemEl.querySelector(
-        ".item-actions-placeholder"
-      );
-
-      // Use instanceId for a reliable comparison
+      // Use instanceId for a reliable comparison, as dbId may not exist yet on new items
       if (itemEl.dataset.instanceId === primaryItem.dataset.instanceId) {
         // This is the primary
-        if (itemText) {
-          // CRITICAL: Check if the element exists
-          const badge = document.createElement("span");
-          badge.className = "primary-badge";
-          badge.textContent = "⭐ Primary";
-          itemText.appendChild(badge);
-        }
+        const badge = document.createElement("span");
+        badge.className = "primary-badge";
+        badge.textContent = "⭐ Primary";
+        itemText.appendChild(badge);
         itemEl.classList.remove("is-optional-not-included");
       } else {
         // This is an alternative
-        if (actionsPlaceholder) {
-          // CRITICAL: Check if the element exists
-          const setPrimaryBtn = document.createElement("button");
-          setPrimaryBtn.className = "set-primary-btn";
-          setPrimaryBtn.textContent = "Set as Primary";
-          actionsPlaceholder.appendChild(setPrimaryBtn);
-        }
+        const actionsDiv = itemEl.querySelector(".item-actions");
+        const setPrimaryBtn = document.createElement("button");
+        setPrimaryBtn.className = "set-primary-btn";
+        setPrimaryBtn.textContent = "Set as Primary";
+        actionsDiv.appendChild(setPrimaryBtn);
         itemEl.classList.add("is-optional-not-included");
       }
     });
@@ -3756,8 +3514,6 @@ const attachBuilderListeners = () => {
   daysContainer.addEventListener("change", handleDaysContainerChange);
   daysContainer.addEventListener("dblclick", handleDoubleClick);
   daysContainer.addEventListener("click", handleDaysContainerClick);
-  displayStartDateInput.addEventListener("change", handleMainDateChange);
-  displayEndDateInput.addEventListener("change", handleMainDateChange);
   closeModalBtn.addEventListener("click", handleCloseModal);
   cancelModalBtn.addEventListener("click", handleCloseModal);
   newItineraryModal.addEventListener("click", (e) => {
@@ -3776,8 +3532,6 @@ const attachBuilderListeners = () => {
   );
   itineraryCurrencyInput.addEventListener("change", () => {});
   b2bClientSelect.addEventListener("change", handleB2bClientSelection);
-  statusSelector.addEventListener("change", handleStatusChange); // <-- ADD THIS LINE
-  // ADD THESE TWO LINES
   populateSidebarCurrencyDropdown();
   sidebarCurrencySelect.addEventListener("change", () =>
     fetchAndDisplayAvailableItems(itemSearchInput.value)
@@ -3810,19 +3564,47 @@ const attachBuilderListeners = () => {
     }
   });
 
-  // POINT 2: This listener opens the modal when a user clicks on an item
+  // This single, delegated listener opens the modal when an item is clicked.
   daysContainer.addEventListener("click", (event) => {
-    // Check if the user specifically clicked on the item's title area
-    const itemTextElement = event.target.closest(".item-text");
+    // Find the parent itinerary item that was clicked
+    const itemElement = event.target.closest(".itinerary-item");
+    if (!itemElement) return; // Exit if the click wasn't on an item at all
 
-    if (itemTextElement) {
-      // If they did, find the parent item and open the modal
-      const itemElement = itemTextElement.closest(".itinerary-item");
-      if (itemElement) {
-        openItemDetailModal(itemElement);
-      }
+    // Check if the click was on a specific interactive element we want to IGNORE.
+    const isContinuationPrompt = event.target.closest(
+      ".item-continuation-prompt"
+    );
+    const isButton = event.target.closest("button");
+
+    // If the click was on the continuation prompt OR any button, do nothing.
+    if (isContinuationPrompt || isButton) {
+      return;
     }
+
+    // Otherwise, the click was on the main body of the item, so open the modal.
+    openItemDetailModal(itemElement);
   });
+
+  const accordionToggle = document.querySelector(".metadata-accordion-toggle");
+  const metadataContent = document.getElementById("metadata-content");
+
+  if (accordionToggle && metadataContent) {
+    accordionToggle.addEventListener("click", () => {
+      const isExpanded =
+        accordionToggle.getAttribute("aria-expanded") === "true";
+      if (isExpanded) {
+        // Collapse the section
+        metadataContent.style.display = "none";
+        accordionToggle.setAttribute("aria-expanded", "false");
+        accordionToggle.querySelector("span").textContent = "Show";
+      } else {
+        // Expand the section
+        metadataContent.style.display = ""; // Reset to default display (grid)
+        accordionToggle.setAttribute("aria-expanded", "true");
+        accordionToggle.querySelector("span").textContent = "Hide";
+      }
+    });
+  }
 
   // ADD THESE NEW LISTENERS (This is your existing line)
   descriptionEditorModal.querySelector(".close-modal-btn");

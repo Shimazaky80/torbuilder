@@ -1,34 +1,16 @@
-[![License: Source-Available](https://img.shields.io/badge/license-source--available-blueviolet)](LICENSE.md)
+# React + Vite
 
-# 🌍 TourBuilder App
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-**TourBuilder** is a smart, user-friendly application designed to help travel agencies and tour operators design, price, and present beautiful itineraries. From accommodation planning to transport logistics and dynamic pricing models, it's your all-in-one travel toolkit.
+Currently, two official plugins are available:
 
----
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-## ✨ Features
+## React Compiler
 
-- ✈️ Build and customize itineraries effortlessly
-- 🏨 Add accommodations, transport, meals, and services with flexible pricing rules
-- 💬 Generate multilingual quotes with customizable templates
-- 📊 Analyze cost breakdowns with visual dashboards
-- 🔐 Keep sensitive data private via `.gitignore` rules
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
----
+## Expanding the ESLint configuration
 
-## 🛠️ Tech Stack
-
-- **Frontend**: HTML, CSS, JavaScript  
-- **Backend**: Node.js, Express.js  
-- **Database**: Supabase (Web-hosted)  
-- **Automation**: Semantic Release via GitHub Actions  
-- **Tooling**: Git, GitHub
-
----
-
-## 🚀 Getting Started
-
-1. **Clone the repo**
-   ```bash
-   git clone https://github.com/your-username/tourbuilder.git
-   cd tourbuilder
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.

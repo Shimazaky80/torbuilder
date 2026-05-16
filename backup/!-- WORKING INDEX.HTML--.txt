@@ -1,3 +1,5 @@
+<!-- WORKING INDEX.HTML -->
+
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -310,17 +312,10 @@
         <button id="export-pdf-btn">Export PDF</button>
         <button id="edit-itinerary-details-btn">Edit Details</button>
       </div>
+
       <div class="app-container">
         <div class="sidebar" id="available-items-panel">
           <h2>Available Items</h2>
-          <div class="sidebar-controls">
-            <div class="form-group">
-              <label for="sidebar-currency-select">View Items In:</label>
-              <select id="sidebar-currency-select">
-                <!-- Options populated by JS -->
-              </select>
-            </div>
-          </div>
           <input
             type="text"
             id="item-search-input"
@@ -338,98 +333,79 @@
               <button id="undo-btn" disabled>Undo</button>
             </div>
           </div>
-          <div class="css-accordion">
-            <input
-              type="checkbox"
-              id="accordion-toggle"
-              class="accordion-toggle-input"
-            />
-            <label for="accordion-toggle" class="accordion-title"
-              >Show Travel Details</label
-            >
-            <div class="accordion-content">
-              <div class="itinerary-metadata-display">
-                <div class="meta-item">
-                  <label>Travel Dates:</label>
-                  <div class="meta-value date-edit-group">
-                    <input
-                      type="date"
-                      id="display-start-date-input"
-                      aria-label="Edit start date"
-                    />
-                    <span> to </span>
-                    <input
-                      type="date"
-                      id="display-end-date-input"
-                      aria-label="Edit end date"
-                    />
-                  </div>
-                </div>
-                <div class="meta-item">
-                  <label>Client:</label>
-                  <span class="meta-value" id="display-client-name">N/A</span>
-                </div>
-                <div class="meta-item">
-                  <label>Contact:</label>
-                  <span
-                    class="meta-value editable"
-                    id="display-client-contact"
-                    title="Click to edit contact info (TODO)"
-                    >N/A</span
-                  >
-                </div>
-                <div class="meta-item">
-                  <label>Client Type:</label>
-                  <span class="meta-value" id="display-client-type">N/A</span>
-                </div>
-                <div
-                  class="meta-item"
-                  id="display-b2b-client-name-container"
-                  style="display: none"
-                >
-                  <label>B2B Client:</label>
-                  <span class="meta-value" id="display-b2b-client-name"
-                    >N/A</span
-                  >
-                </div>
-                <div class="meta-item">
-                  <label>Creator:</label>
-                  <span class="meta-value" id="display-creator">N/A</span>
-                </div>
-                <div class="meta-item">
-                  <label>ID:</label>
-                  <span class="meta-value" id="display-unique-id">N/A</span>
-                </div>
-                <div class="meta-item">
-                  <label>Status:</label>
-                  <div class="meta-value status-group">
-                    <span
-                      id="status-badge"
-                      class="status-badge status-quotation"
-                      >Quotation</span
-                    >
-                    <select id="status-selector">
-                      <option value="quotation">Quotation</option>
-                      <option value="confirmed">Confirmed</option>
-                      <option value="cancelled">Cancelled</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="meta-item">
-                  <label>Created:</label>
-                  <span class="meta-value" id="display-creation-date">N/A</span>
-                </div>
+          <div class="itinerary-metadata-display">
+            <div class="meta-item">
+              <label>Travel Dates:</label>
+              <div class="meta-value date-edit-group">
+                <input
+                  type="date"
+                  id="display-start-date-input"
+                  aria-label="Edit start date"
+                /><span> to </span
+                ><input
+                  type="date"
+                  id="display-end-date-input"
+                  aria-label="Edit end date"
+                />
               </div>
+            </div>
+            <div class="meta-item">
+              <label>Client:</label
+              ><span class="meta-value" id="display-client-name">N/A</span>
+            </div>
+            <div class="meta-item">
+              <label>Contact:</label
+              ><span
+                class="meta-value editable"
+                id="display-client-contact"
+                title="Click to edit contact info (TODO)"
+                >N/A</span
+              >
+            </div>
+            <div class="meta-item">
+              <label>Client Type:</label
+              ><span class="meta-value" id="display-client-type">N/A</span>
+            </div>
+            <div
+              class="meta-item"
+              id="display-b2b-client-name-container"
+              style="display: none"
+            >
+              <label>B2B Client:</label
+              ><span class="meta-value" id="display-b2b-client-name">N/A</span>
+            </div>
+            <div class="meta-item">
+              <label>Creator:</label
+              ><span class="meta-value" id="display-creator">N/A</span>
+            </div>
+            <div class="meta-item">
+              <label>ID:</label
+              ><span class="meta-value" id="display-unique-id">N/A</span>
+            </div>
+            <!-- ADD THIS NEW BLOCK -->
+            <div class="meta-item">
+              <label>Status:</label>
+              <div class="meta-value status-group">
+                <span id="status-badge" class="status-badge status-quotation"
+                  >Quotation</span
+                >
+                <select id="status-selector">
+                  <option value="quotation">Quotation</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+              </div>
+            </div>
+            <!-- END OF NEW BLOCK -->
+            <div class="meta-item">
+              <label>Created:</label
+              ><span class="meta-value" id="display-creation-date">N/A</span>
             </div>
           </div>
 
           <div id="days-container"></div>
           <button id="add-day-btn">Add Day</button>
-        </div>
-        <!-- Sidebar 2: Totals -->
-        <div class="sidebar" id="totals-panel">
-          <h2>Totals</h2>
-          <!-- This is where you PASTE the code you just cut -->
+
           <div class="grand-total-container">
             <div>
               Wholesale Price:
@@ -450,135 +426,6 @@
               <span id="grand-total-profit-loss-value">$0.00</span>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <div
-      class="modal-overlay"
-      id="description-editor-modal"
-      style="display: none"
-    >
-      <div class="modal-content">
-        <button class="close-modal-btn" aria-label="Close">×</button>
-        <h2 id="description-modal-title">Edit Description</h2>
-        <form id="description-editor-form">
-          <div class="form-group">
-            <label for="item-description-textarea">Custom Description</label>
-            <textarea
-              id="item-description-textarea"
-              rows="10"
-              placeholder="Enter custom description, notes, or inclusions for this item..."
-            ></textarea>
-          </div>
-          <input type="hidden" id="editing-day-item-id" />
-          <div class="form-actions">
-            <button type="button" class="cancel-modal-btn">Cancel</button>
-            <button type="submit" class="save-description-btn">
-              Save Description
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <div class="modal-overlay" id="service-config-modal" style="display: none">
-      <div class="modal-content wide">
-        <button class="close-modal-btn" aria-label="Close">×</button>
-        <h2 id="service-config-modal-title">Configure Service</h2>
-        <form id="service-config-form">
-          <div class="service-duration-controls">
-            <div class="form-group">
-              <label>Service Start Day</label>
-              <input type="text" id="service-start-day-display" readonly />
-            </div>
-            <div class="form-group">
-              <label for="service-end-day-select">Service End Day</label>
-              <select id="service-end-day-select"></select>
-            </div>
-          </div>
-          <div id="service-days-config-container">
-            <!-- Day-by-day configuration rows will be generated here -->
-          </div>
-          <input type="hidden" id="configuring-item-instance-id" />
-          <input type="hidden" id="configuring-item-id" />
-          <div class="form-actions">
-            <button type="button" class="cancel-modal-btn">Cancel</button>
-            <button type="submit" class="confirm-service-btn">
-              Confirm Service
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- ===== Modal for Adding Alternative Accommodation ===== -->
-    <div class="modal-overlay" id="add-alternative-modal" style="display: none">
-      <div class="modal-content">
-        <button class="close-modal-btn" aria-label="Close">×</button>
-        <h2 id="alternative-modal-title">Add Alternative Accommodation</h2>
-        <div class="form-group">
-          <label for="alternative-item-search"
-            >Search for an alternative hotel/lodge:</label
-          >
-          <input
-            type="text"
-            id="alternative-item-search"
-            placeholder="Search by name, area, etc..."
-          />
-        </div>
-        <div id="alternative-items-list-container">
-          <!-- Search results will be populated here by JS -->
-        </div>
-        <input type="hidden" id="primary-day-item-id" />
-        <div class="form-actions">
-          <button type="button" class="cancel-modal-btn">Cancel</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ===== Modal for Editing Item Details ===== -->
-    <div class="modal-overlay" id="item-details-modal" style="display: none">
-      <div class="modal-content">
-        <button class="close-modal-btn" aria-label="Close">×</button>
-        <h2 id="item-modal-title">Item Details</h2>
-        <form id="item-details-form">
-          <!-- Pricing Section -->
-          <div id="item-modal-pricing" class="item-modal-section"></div>
-
-          <!-- Description Section -->
-          <div class="form-group item-modal-section">
-            <label>Custom Description</label>
-            <textarea
-              id="item-modal-description"
-              rows="6"
-              placeholder="Enter notes, inclusions, or a custom description for the client document..."
-            ></textarea>
-          </div>
-
-          <!-- Actions Section -->
-          <div id="item-modal-actions" class="item-modal-section"></div>
-
-          <input type="hidden" id="editing-item-instance-id" />
-          <div class="form-actions">
-            <button type="button" class="cancel-modal-btn">Cancel</button>
-            <button type="submit" class="save-item-details-btn">
-              Save Changes
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <div class="modal-overlay" id="replacement-modal" style="display: none">
-      <div class="modal-content">
-        <button class="close-modal-btn" aria-label="Close">×</button>
-        <h2 id="replacement-modal-title">Choose a Replacement Vehicle</h2>
-        <div id="replacement-options-container" class="form-group">
-          <!-- Dropdown will be built by JS here -->
-        </div>
-        <div class="form-actions">
-          <button type="button" class="cancel-modal-btn">Cancel</button>
         </div>
       </div>
     </div>
