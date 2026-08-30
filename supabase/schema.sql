@@ -10,6 +10,9 @@ DROP FUNCTION IF EXISTS public.is_super_admin() CASCADE;
 DROP FUNCTION IF EXISTS public.register_new_company(TEXT, TEXT, TEXT) CASCADE;
 
 -- 2. Drop existing tables with CASCADE (wipes all data)
+DROP TABLE IF EXISTS public.item_rates CASCADE;
+DROP TABLE IF EXISTS public.library_items CASCADE;
+DROP TABLE IF EXISTS public.suppliers CASCADE;
 DROP TABLE IF EXISTS public.invitations CASCADE;
 DROP TABLE IF EXISTS public.profiles CASCADE;
 DROP TABLE IF EXISTS public.companies CASCADE;
@@ -48,10 +51,94 @@ CREATE TABLE public.invitations (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
--- 6. Enable RLS
+-- 6. Recreate Suppliers Table
+CREATE TABLE public.suppliers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES public.companies(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    category TEXT,
+    email TEXT,
+    phone TEXT,
+    website TEXT,
+    contact_person TEXT,
+    address TEXT,
+    country TEXT,
+    province_state TEXT,
+    city TEXT,
+    city_location TEXT,
+    physical_address TEXT,
+    bank_name TEXT,
+    account_holder_name TEXT,
+    bank_account_number TEXT,
+    branch_code TEXT,
+    swift_code TEXT,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 7. Recreate Library Items Table
+CREATE TABLE public.library_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES public.companies(id) ON DELETE CASCADE,
+    supplier_id UUID NOT NULL REFERENCES public.suppliers(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    sub_category TEXT,
+    description TEXT,
+    location TEXT,
+    currency TEXT DEFAULT 'ZAR',
+    pricing_model TEXT DEFAULT 'per_person',
+    max_occupancy INTEGER DEFAULT 2,
+    max_adults INTEGER DEFAULT 2,
+    max_children INTEGER DEFAULT 2,
+    sharing_capacity_rules JSONB DEFAULT '[]'::jsonb,
+    child_age_ranges JSONB DEFAULT '[]'::jsonb,
+    images JSONB DEFAULT '[]'::jsonb,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 8. Recreate Item Rates Table
+CREATE TABLE public.item_rates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_id UUID NOT NULL REFERENCES public.library_items(id) ON DELETE CASCADE,
+    option_name TEXT DEFAULT 'Base Season',
+    room_type TEXT,
+    meal_plan TEXT,
+    unit_cost NUMERIC(12, 2) DEFAULT 0,
+    unit_price NUMERIC(12, 2) DEFAULT 0,
+    currency TEXT DEFAULT 'ZAR',
+    season_name TEXT DEFAULT 'Base Season',
+    valid_from DATE,
+    valid_to DATE,
+    price_1_adult NUMERIC(12, 2) DEFAULT 0,
+    price_2_adults NUMERIC(12, 2) DEFAULT 0,
+    price_3_plus_adults NUMERIC(12, 2) DEFAULT 0,
+    price_child_0_1 NUMERIC(12, 2) DEFAULT 0,
+    price_child_0_5 NUMERIC(12, 2) DEFAULT 0,
+    price_child_2_11 NUMERIC(12, 2) DEFAULT 0,
+    price_child_6_11 NUMERIC(12, 2) DEFAULT 0,
+    price_child_12_17 NUMERIC(12, 2) DEFAULT 0,
+    price_child_12_18 NUMERIC(12, 2) DEFAULT 0,
+    single_supplement NUMERIC(12, 2) DEFAULT 0,
+    child_discount NUMERIC(12, 2) DEFAULT 0,
+    single_room_rate NUMERIC(12, 2) DEFAULT 0,
+    double_twin_rate NUMERIC(12, 2) DEFAULT 0,
+    effective_single_rate NUMERIC(12, 2) DEFAULT 0,
+    rate_basis TEXT DEFAULT 'per_person_sharing',
+    child_sharing_policy TEXT DEFAULT 'sharing_with_adults',
+    child_rates_breakdown JSONB DEFAULT '{}'::jsonb,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 9. Enable RLS
 ALTER TABLE public.companies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.invitations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.suppliers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.library_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_rates ENABLE ROW LEVEL SECURITY;
 
 -- 7. Helper Function for RLS
 CREATE OR REPLACE FUNCTION public.is_super_admin()
@@ -198,26 +285,101 @@ CREATE POLICY "Super admins can manage invitations" ON public.invitations FOR AL
 -- Invitations: Public read by code
 CREATE POLICY "Anyone can read invitation by code" ON public.invitations FOR SELECT USING (true);
 
--- 11. Views for Super Admin
+-- Helper function to check user's company ID
+CREATE OR REPLACE FUNCTION public.get_user_company_id()
+RETURNS UUID AS $$
+  SELECT company_id FROM public.profiles WHERE id = auth.uid() LIMIT 1;
+$$ LANGUAGE sql STABLE SECURITY DEFINER;
 
--- View to see company admins with their emails
--- Note: auth.users is not directly joinable in some environments without service role, 
--- so we rely on profiles having the email or using a security definer function.
-CREATE OR REPLACE VIEW public.company_admin_details AS
-SELECT 
-    c.id as company_id,
-    c.name as company_name,
-    p.first_name,
-    p.last_name,
-    p.user_role,
-    u.email as admin_email
-FROM public.companies c
-JOIN public.profiles p ON c.id = p.company_id
-JOIN auth.users u ON p.id = u.id
-WHERE p.user_role = 'admin';
+-- Suppliers: Users can manage suppliers belonging to their company
+CREATE POLICY "Users can view company suppliers" ON public.suppliers 
+    FOR SELECT USING (company_id = public.get_user_company_id() OR public.is_super_admin());
+CREATE POLICY "Users can insert company suppliers" ON public.suppliers 
+    FOR INSERT WITH CHECK (company_id = public.get_user_company_id() OR public.is_super_admin());
+CREATE POLICY "Users can update company suppliers" ON public.suppliers 
+    FOR UPDATE USING (company_id = public.get_user_company_id() OR public.is_super_admin());
+CREATE POLICY "Users can delete company suppliers" ON public.suppliers 
+    FOR DELETE USING (company_id = public.get_user_company_id() OR public.is_super_admin());
 
--- Ensure Super Admin can read this view
-GRANT SELECT ON public.company_admin_details TO authenticated;
--- Note: RLS on the underlying tables will still apply unless the view is security definer.
--- For simplicity in this demo, we'll keep it as a standard view.
+-- Library Items: Users can manage library items belonging to their company
+CREATE POLICY "Users can view company library items" ON public.library_items 
+    FOR SELECT USING (company_id = public.get_user_company_id() OR public.is_super_admin());
+CREATE POLICY "Users can insert company library items" ON public.library_items 
+    FOR INSERT WITH CHECK (company_id = public.get_user_company_id() OR public.is_super_admin());
+CREATE POLICY "Users can update company library items" ON public.library_items 
+    FOR UPDATE USING (company_id = public.get_user_company_id() OR public.is_super_admin());
+CREATE POLICY "Users can delete company library items" ON public.library_items 
+    FOR DELETE USING (company_id = public.get_user_company_id() OR public.is_super_admin());
 
+-- Item Rates: Access tied to parent item's company ownership
+CREATE POLICY "Users can view company item rates" ON public.item_rates 
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM public.library_items 
+            WHERE library_items.id = item_rates.item_id 
+            AND (library_items.company_id = public.get_user_company_id() OR public.is_super_admin())
+        )
+    );
+CREATE POLICY "Users can insert company item rates" ON public.item_rates 
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM public.library_items 
+            WHERE library_items.id = item_rates.item_id 
+            AND (library_items.company_id = public.get_user_company_id() OR public.is_super_admin())
+        )
+    );
+CREATE POLICY "Users can update company item rates" ON public.item_rates 
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM public.library_items 
+            WHERE library_items.id = item_rates.item_id 
+            AND (library_items.company_id = public.get_user_company_id() OR public.is_super_admin())
+        )
+    );
+CREATE POLICY "Users can delete company item rates" ON public.item_rates 
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM public.library_items 
+            WHERE library_items.id = item_rates.item_id 
+            AND (library_items.company_id = public.get_user_company_id() OR public.is_super_admin())
+        )
+    );
+
+-- 11. Super Admin Functions & Access Control
+-- Replaces insecure view public.company_admin_details which exposed auth.users to PostgREST
+
+DROP VIEW IF EXISTS public.company_admin_details;
+
+CREATE OR REPLACE FUNCTION public.get_company_admin_details()
+RETURNS TABLE (
+    company_id UUID,
+    company_name TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    user_role TEXT,
+    admin_email TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+BEGIN
+    -- Enforce Super Admin authorization check
+    IF NOT public.is_super_admin() THEN
+        RAISE EXCEPTION 'Access Denied: Super Admin privilege required';
+    END IF;
+
+    RETURN QUERY
+    SELECT 
+        c.id as company_id,
+        c.name as company_name,
+        p.first_name,
+        p.last_name,
+        p.user_role,
+        u.email::TEXT as admin_email
+    FROM public.companies c
+    JOIN public.profiles p ON c.id = p.company_id
+    JOIN auth.users u ON p.id = u.id
+    WHERE p.user_role = 'admin';
+END;
+$$;
