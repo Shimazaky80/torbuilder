@@ -29,9 +29,11 @@ INSERT INTO public.library_categories (name, icon, color, sort_order) VALUES
     ('Activities / Tours',   'Compass',   '#10b981', 3),
     ('Flights / Charter',    'Plane',     '#6366f1', 4),
     ('Meals',                'Utensils',  '#f59e0b', 5),
-    ('Guide / Driver',       'UserCheck', '#8b5cf6', 6),
-    ('Extras',               'Sparkles',  '#ec4899', 7),
-    ('Car Rental',           'Car',       '#06b6d4', 8)
+    ('Guide',                'UserCheck', '#8b5cf6', 6),
+    ('Trains',               'TrainFront','#f97316', 7),
+    ('Tickets',              'Ticket',    '#14b8a6', 8),
+    ('Extras',               'Sparkles',  '#ec4899', 9),
+    ('Car Rental',           'Car',       '#06b6d4', 10)
 ON CONFLICT (name) DO NOTHING;
 
 NOTIFY pgrst, 'reload schema';

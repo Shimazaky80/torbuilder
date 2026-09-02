@@ -22,11 +22,12 @@ import {
   Bus, 
   Utensils, 
   Compass, 
-  Ticket, 
   UserCheck, 
   Sparkles,
   Plane,
   Car,
+  TrainFront,
+  Ticket,
   Calendar,
   DollarSign,
   Image as ImageIcon,
@@ -39,7 +40,12 @@ import {
   Download,
   Loader2,
   Navigation,
-  Leaf
+  Briefcase,
+  DoorOpen,
+  Cog,
+  Fuel,
+  Snowflake,
+  Zap
 } from 'lucide-react';
 
 
@@ -93,7 +99,7 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true });
   const url = import.meta.env.VITE_SUPABASE_URL;
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
@@ -110,7 +116,9 @@ export const LibraryItems = () => {
     { id: 'Activities / Tours', label: 'Activities / Tours', icon: Compass, color: '#10b981' },
     { id: 'Flights / Charter', label: 'Flights / Charter', icon: Plane, color: '#6366f1' },
     { id: 'Meals', label: 'Meals', icon: Utensils, color: '#f59e0b' },
-    { id: 'Guide / Driver', label: 'Guide / Driver', icon: UserCheck, color: '#8b5cf6' },
+    { id: 'Guide', label: 'Guide', icon: UserCheck, color: '#8b5cf6' },
+    { id: 'Trains', label: 'Trains', icon: TrainFront, color: '#f97316' },
+    { id: 'Tickets', label: 'Tickets', icon: Ticket, color: '#14b8a6' },
     { id: 'Extras', label: 'Extras', icon: Sparkles, color: '#ec4899' },
     { id: 'Car Rental', label: 'Car Rental', icon: Car, color: '#06b6d4' }
   ];
@@ -165,7 +173,46 @@ export const LibraryItems = () => {
 
   // Categories that use the simplified tour/transfer form: vehicle capacity,
   // per-vehicle / per-person / tiered pricing, and a minimal seasonal matrix.
-  const isTourStyleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours';
+  const isTourStyleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours' || category === 'Flights / Charter';
+  const isFlightCategory = (category) => category === 'Flights / Charter';
+  const isMealsCategory = (category) => category === 'Meals';
+  const isTrainCategory = (category) => category === 'Trains';
+  const isTicketCategory = (category) => category === 'Tickets';
+  const isExtrasCategory = (category) => category === 'Extras';
+  const isCarRentalCategory = (category) => category === 'Car Rental';
+  const isGuideCategory = (category) => category === 'Guide' || category === 'Guide / Driver';
+  const normalizeCategoryName = (name) => name === 'Guide / Driver' ? 'Guide' : name;
+  const legacyCategoryName = (name) => name === 'Guide' ? 'Guide / Driver' : null;
+  const isDriverEligibleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours';
+
+  // A dedicated driver is only provided for large vehicles (14+ seats) and the
+  // vehicle price already includes the driver — the option only triggers the
+  // driver's meals / accommodation in the itinerary builder (costs come from the
+  // Meals & Accommodation module rates).
+  const driverMealOptions = [
+    { id: 'lunch', label: 'Lunch' },
+    { id: 'dinner', label: 'Dinner' }
+  ];
+  // The Guide charges a different flat per-trip price depending on the service
+  // it accompanies. The itinerary builder picks the rate for the service at hand.
+  const guideServiceTypes = [
+    { id: 'transfer', field: 'guideTransferRate', label: 'Transfer price' },
+    { id: 'half_day', field: 'guideHalfDayRate', label: 'Half Day price' },
+    { id: 'full_day', field: 'guideFullDayRate', label: 'Full Day price' },
+    { id: 'overland', field: 'guideOverlandRate', label: 'Overland price' },
+    { id: 'dinner_transfer', field: 'guideDinnerRate', label: 'Dinner transfer price' }
+  ];
+  const getVehiclePax = (label) => vehicleOptions.find(o => o.label === label)?.pax || 0;
+  const getDefaultDriverMeals = (category, transferType) => {
+    if (category === 'Transfers') {
+      if (transferType === 'dinner') return ['dinner'];
+      if (transferType === 'overland') return ['lunch', 'dinner'];
+      return [];
+    }
+    return ['lunch'];
+  };
+  const getDefaultDriverAccommodation = (category, transferType) =>
+    category === 'Transfers' && transferType === 'overland';
 
   // Surcharge fees added on top of base rates.
   // - Entrance fees: per person and/or per vehicle (Accommodation + Transfers).
@@ -234,6 +281,31 @@ export const LibraryItems = () => {
     return result;
   }
 
+  function createCarRentalGroup() {
+    return {
+      groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      vehicleGroup: '',
+      vehicleName: '',
+      rateCode: '',
+      kmsUnlimited: true,
+      kmsIncluded: '',
+      validFrom: '',
+      validTo: '',
+      luggage: '',
+      doors: '',
+      passengers: '',
+      aircon: true,
+      gear: 'automatic',
+      fuelType: 'fuel',
+      ranges: [
+        { minDays: 1, maxDays: 3, price: '' },
+        { minDays: 4, maxDays: 6, price: '' },
+        { minDays: 7, maxDays: 14, price: '' },
+        { minDays: 15, maxDays: '', price: '' }
+      ]
+    };
+  }
+
   function createNewItemTemplate(index = 1) {
     const defaultAgeBands = [
       { id: 'band_1', name: 'Infants', ageFrom: 0, ageTo: 2 },
@@ -253,8 +325,19 @@ export const LibraryItems = () => {
       mealPlan: 'Bed & Breakfast',
       vehicleType: '',
       transferType: '',
-      feeType: 'none', // 'none' | 'entrance' | 'conservation'
-      levyBasis: 'per_night', // 'per_night' | 'per_stay' (conservation only)
+      flightNumber: '',
+      airlineName: '',
+      departureCity: '',
+      arrivalCity: '',
+      trainDepartureDate: '',
+      trainJourneyNights: 0,
+      trainCabinName: '',
+      ticketType: 'standard',
+      mealType: 'Breakfast',
+      menuType: 'a_la_carte',
+      mealGratuityPercent: 0,
+      feeType: 'none',
+      levyBasis: 'per_night',
       childAge: 12,
       pricingModel: 'per_person', // 'per_person' | 'per_room' | transfer: 'per_vehicle' | 'tiered'
       maxOccupancy: initialMaxOcc,
@@ -265,12 +348,18 @@ export const LibraryItems = () => {
         { adults: 2, maxChildren: 0 }
       ]),
       guideDriverOffered: false,
+      driverRequired: false,
+      driverMeals: [],
+      driverAccommodation: false,
+      guideMeals: [],
+      guideAccommodation: false,
       description: '',
       imageUrls: [],
       newImageUrlInput: '',
       contractUrl: '',
       contractName: '',
       childAgeRanges: defaultAgeBands,
+      carGroups: [createCarRentalGroup()],
       seasons: [
         {
           seasonName: 'Base Season',
@@ -284,6 +373,11 @@ export const LibraryItems = () => {
           childDiscount: 0,
           guideRate: 0, // Guide Room Rate per night (0 = fallback to Single rate)
           driverRate: 0, // Driver Room Rate per night (0 = fallback to Single rate)
+          guideTransferRate: 0,
+          guideHalfDayRate: 0,
+          guideFullDayRate: 0,
+          guideOverlandRate: 0,
+          guideDinnerRate: 0,
           guideMealPlan: 'Bed & Breakfast',
           driverMealPlan: 'Bed & Breakfast',
           adultRate: 0,
@@ -293,7 +387,8 @@ export const LibraryItems = () => {
           entranceFeePerson: 0,
           entranceFeeVehicle: 0,
           levyAdultRate: 0,
-          levyChildRate: 0
+          levyChildRate: 0,
+          taxesAndSurcharges: 0
         }
       ]
     };
@@ -394,6 +489,25 @@ export const LibraryItems = () => {
     }));
   };
 
+  const handleFastTrackChildRateChange = (tempId, seasonIdx, bandId, rate) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId === tempId) {
+        const updatedSeasons = item.seasons.map((s, idx) => {
+          if (idx === seasonIdx) {
+            const updatedChildRates = {
+              ...(s.fastTrackChildRates || {}),
+              [bandId]: rate
+            };
+            return { ...s, fastTrackChildRates: updatedChildRates };
+          }
+          return s;
+        });
+        return { ...item, seasons: updatedSeasons };
+      }
+      return item;
+    }));
+  };
+
   // ── Resolve company_id robustly ──────────────────────────────────────────
   // 1. Try profiles.company_id  (normal path)
   // 2. Fall back to companies.owner_id = auth user  (after schema reset)
@@ -459,7 +573,8 @@ export const LibraryItems = () => {
               contracts: libCols.includes('contract_url') && libCols.includes('contract_name'),
               tieredPricing: rateCols.includes('tiered_pricing'),
               transferType: libCols.includes('transfer_type'),
-              feeType: libCols.includes('fee_type') && rateCols.includes('entrance_fee_per_person') && rateCols.includes('conservation_levy_per_adult')
+              feeType: libCols.includes('fee_type') && rateCols.includes('entrance_fee_per_person') && rateCols.includes('conservation_levy_per_adult'),
+              driverOption: libCols.includes('driver_required') && libCols.includes('driver_meals') && libCols.includes('driver_accommodation')
             });
           }
         }
@@ -499,8 +614,9 @@ export const LibraryItems = () => {
           setCategories(catsData
             .filter(c => !legacyNames.includes(c.name))
             .map(c => {
-              const match = categoryOptions.find(o => o.id === c.name);
-              return { id: c.name, label: c.name, icon: match?.icon || Package, color: c.color || match?.color || '#334155' };
+              const id = normalizeCategoryName(c.name);
+              const match = categoryOptions.find(o => o.id === id);
+              return { id, label: id, icon: match?.icon || Package, color: c.color || match?.color || '#334155' };
             }));
         }
       } catch {
@@ -545,7 +661,9 @@ export const LibraryItems = () => {
         itemQuery = itemQuery.eq('supplier_id', selectedSupplierId);
       }
       if (categoryFilter !== 'All') {
-        itemQuery = itemQuery.eq('category', categoryFilter);
+        itemQuery = legacyCategoryName(categoryFilter)
+          ? itemQuery.in('category', [categoryFilter, legacyCategoryName(categoryFilter)])
+          : itemQuery.eq('category', categoryFilter);
       }
 
       const { data: items, error: itemsError } = await itemQuery;
@@ -557,6 +675,17 @@ export const LibraryItems = () => {
       const { data: ratesData } = itemIds.length > 0
         ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
         : { data: [] };
+
+      // Fetch car_rental_rates separately — no FK join
+      let carRatesData = [];
+      if (itemIds.length > 0) {
+        try {
+          const carRes = await supabase.from('car_rental_rates').select('*').in('item_id', itemIds);
+          carRatesData = carRes.data || [];
+        } catch (e) {
+          carRatesData = [];
+        }
+      }
 
       // Fetch suppliers separately — no FK join
       const { data: suppliersData } = await supabase
@@ -571,12 +700,20 @@ export const LibraryItems = () => {
         ratesMap[r.item_id].push(r);
       });
 
+      const carRatesMap = {};
+      (carRatesData || []).forEach(r => {
+        if (!carRatesMap[r.item_id]) carRatesMap[r.item_id] = [];
+        carRatesMap[r.item_id].push(r);
+      });
+
       const supplierMap = {};
       (suppliersData || []).forEach(s => { supplierMap[s.id] = s; });
 
       const merged = (items || []).map(item => ({
         ...item,
+        category: item.category === 'Guide / Driver' ? 'Guide' : item.category,
         item_rates: ratesMap[item.id] || [],
+        car_rental_rates: carRatesMap[item.id] || [],
         supplier: supplierMap[item.supplier_id] || null
       }));
 
@@ -607,6 +744,67 @@ export const LibraryItems = () => {
         return { ...item, [field]: value };
       }
       return item;
+    }));
+  };
+
+  // ── Car Rental groups ──────────────────────────────────────────────────────
+  const handleAddCarGroup = (tempId) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      return { ...item, carGroups: [...(item.carGroups || []), createCarRentalGroup()] };
+    }));
+  };
+
+  const handleRemoveCarGroup = (tempId, groupId) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).filter(g => g.groupId !== groupId);
+      return { ...item, carGroups: groups.length > 0 ? groups : [createCarRentalGroup()] };
+    }));
+  };
+
+  const handleCarGroupFieldChange = (tempId, groupId, field, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g =>
+        g.groupId === groupId ? { ...g, [field]: value } : g
+      );
+      return { ...item, carGroups: groups };
+    }));
+  };
+
+  const handleAddCarRange = (tempId, groupId) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g => {
+        if (g.groupId !== groupId) return g;
+        return { ...g, ranges: [...(g.ranges || []), { minDays: '', maxDays: '', price: '' }] };
+      });
+      return { ...item, carGroups: groups };
+    }));
+  };
+
+  const handleRemoveCarRange = (tempId, groupId, rangeIdx) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g => {
+        if (g.groupId !== groupId) return g;
+        const ranges = (g.ranges || []).filter((_, idx) => idx !== rangeIdx);
+        return { ...g, ranges: ranges.length > 0 ? ranges : [{ minDays: '', maxDays: '', price: '' }] };
+      });
+      return { ...item, carGroups: groups };
+    }));
+  };
+
+  const handleCarRangeChange = (tempId, groupId, rangeIdx, field, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g => {
+        if (g.groupId !== groupId) return g;
+        const ranges = (g.ranges || []).map((r, idx) => idx === rangeIdx ? { ...r, [field]: value } : r);
+        return { ...g, ranges };
+      });
+      return { ...item, carGroups: groups };
     }));
   };
 
@@ -871,16 +1069,24 @@ export const LibraryItems = () => {
               childDiscount: 0,
               guideRate: 0,
               driverRate: 0,
+              guideTransferRate: 0,
+              guideHalfDayRate: 0,
+              guideFullDayRate: 0,
+              guideOverlandRate: 0,
+              guideDinnerRate: 0,
               guideMealPlan: 'Bed & Breakfast',
               driverMealPlan: 'Bed & Breakfast',
-              adultRate: 0,
-              childRate: 0,
-              tiers: [],
+adultRate: 0,
+          childRate: 0,
+          fastTrackAdultRate: 0,
+          fastTrackChildRates: {},
+          tiers: [],
               vehicleRate: 0,
               entranceFeePerson: 0,
               entranceFeeVehicle: 0,
               levyAdultRate: 0,
-              levyChildRate: 0
+              levyChildRate: 0,
+              taxesAndSurcharges: 0
             }
           ]
         };
@@ -894,10 +1100,15 @@ export const LibraryItems = () => {
     const opt = vehicleOptions.find(o => o.label === label);
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
+      const pax = opt ? opt.pax : 0;
+      const driverEligible = isDriverEligibleCategory(item.category) && pax >= 14;
       return {
         ...item,
         vehicleType: label,
-        maxOccupancy: opt ? opt.pax : (parseInt(item.maxOccupancy) || 0)
+        maxOccupancy: pax || (parseInt(item.maxOccupancy) || 0),
+        driverRequired: driverEligible ? true : false,
+        driverMeals: driverEligible ? getDefaultDriverMeals(item.category, item.transferType) : [],
+        driverAccommodation: driverEligible ? getDefaultDriverAccommodation(item.category, item.transferType) : false
       };
     }));
   };
@@ -908,14 +1119,34 @@ export const LibraryItems = () => {
       if (item.tempId !== tempId) return item;
       let pricingModel = item.pricingModel;
       if (isTourStyleCategory(category)) {
-        if (!['per_vehicle', 'per_person', 'tiered'].includes(pricingModel)) pricingModel = 'per_vehicle';
+        if (isFlightCategory(category)) {
+          if (item.category === 'Flights / Charter') pricingModel = item.pricingModel;
+          else if (!item.pricingModel || !['per_person', 'per_vehicle'].includes(item.pricingModel)) pricingModel = 'per_person';
+        } else if (!['per_vehicle', 'per_person', 'tiered'].includes(pricingModel)) {
+          pricingModel = 'per_vehicle';
+        }
       } else if (category === 'Accommodation') {
         pricingModel = 'per_person';
+      } else if (isTicketCategory(category)) {
+        pricingModel = 'per_person';
+      } else if (isExtrasCategory(category)) {
+        pricingModel = 'per_person';
+      } else if (isCarRentalCategory(category)) {
+        pricingModel = 'per_vehicle';
       } else {
         if (['per_vehicle', 'tiered'].includes(pricingModel)) pricingModel = 'per_person';
       }
       const feeType = (category === 'Accommodation' || category === 'Transfers') ? (item.feeType || 'none') : 'none';
-      return { ...item, category, pricingModel, feeType };
+      const driverEligible = isDriverEligibleCategory(category) && getVehiclePax(item.vehicleType) >= 14;
+      return {
+        ...item,
+        category,
+        pricingModel,
+        feeType,
+        driverRequired: driverEligible ? true : false,
+        driverMeals: driverEligible ? getDefaultDriverMeals(category, item.transferType) : [],
+        driverAccommodation: driverEligible ? getDefaultDriverAccommodation(category, item.transferType) : false
+      };
     }));
   };
 
@@ -1052,9 +1283,35 @@ export const LibraryItems = () => {
           showToast(`Transfer Item ${i + 1} requires a Transfer Type`, 'warning');
           return;
         }
-        if (isTourStyleCategory(itemsToSave[i].category) && !itemsToSave[i].vehicleType) {
+        if (isTourStyleCategory(itemsToSave[i].category) && !isFlightCategory(itemsToSave[i].category) && !itemsToSave[i].vehicleType) {
           showToast(`${itemsToSave[i].category} Item ${i + 1} requires a Vehicle Type`, 'warning');
           return;
+        }
+        if (isCarRentalCategory(itemsToSave[i].category)) {
+          const groups = itemsToSave[i].carGroups || [];
+          if (groups.length === 0) {
+            showToast(`Car Rental Item ${i + 1} requires at least one Vehicle Group`, 'warning');
+            return;
+          }
+          for (const g of groups) {
+            if (!(g.vehicleGroup || '').trim()) {
+              showToast(`Car Rental Item ${i + 1}: every group requires a Vehicle Group (e.g. "C")`, 'warning');
+              return;
+            }
+            if (!(g.vehicleName || '').trim()) {
+              showToast(`Car Rental Item ${i + 1}: every group requires a Vehicle name (e.g. "Toyota Starlet")`, 'warning');
+              return;
+            }
+            if (!(g.rateCode || '').trim()) {
+              showToast(`Car Rental Item ${i + 1}: every group requires a Rate Code (e.g. "Classic Max (CM)")`, 'warning');
+              return;
+            }
+            const filledRanges = (g.ranges || []).filter(r => (r.minDays || '') !== '' && (parseFloat(r.price) || 0) > 0);
+            if (filledRanges.length < 4) {
+              showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" requires at least 4 rental-length ranges with a price`, 'warning');
+              return;
+            }
+          }
         }
       }
 
@@ -1065,17 +1322,60 @@ export const LibraryItems = () => {
         const sharingRules = itemData.sharingCapacityRules || ensureSharingRules(maxAdults, maxOcc, []);
         const maxChildren = sharingRules.length > 0 ? Math.max(...sharingRules.map(r => parseInt(r.maxChildren) || 0)) : 0;
         const isTourStyle = isTourStyleCategory(itemData.category);
+        const isFlight = isFlightCategory(itemData.category);
+        const isMeals = isMealsCategory(itemData.category);
+        const isExtras = isExtrasCategory(itemData.category);
+        const isCarRental = isCarRentalCategory(itemData.category);
+        const isGuide = isGuideCategory(itemData.category);
         const pricingModel = isTourStyle
-          ? (itemData.pricingModel || 'per_vehicle')
-          : (itemData.category === 'Accommodation' ? (itemData.pricingModel || 'per_person') : 'per_person');
+          ? (itemData.pricingModel || (itemData.category === 'Flights / Charter' ? 'per_person' : 'per_vehicle'))
+          : (itemData.category === 'Accommodation' || isTrainCategory(itemData.category) ? (itemData.pricingModel || 'per_person') : (isCarRental ? 'per_vehicle' : 'per_person'));
 
         const itemPayload = {
           company_id: companyId,
           supplier_id: targetSupplierId,
           name: itemData.name,
           category: itemData.category,
-          sub_category: isTourStyle ? (itemData.vehicleType || itemData.category) : itemData.category,
+          sub_category: isFlight ? itemData.category : (isTourStyle ? (itemData.vehicleType || itemData.category) : itemData.category),
           transfer_type: itemData.category === 'Transfers' && dbFeatures.transferType ? (itemData.transferType || null) : null,
+          ...(itemData.category === 'Flights / Charter'
+            ? {
+                flight_number: itemData.flightNumber || null,
+                airline_name: itemData.airlineName || null,
+                departure_city: itemData.departureCity || null,
+                arrival_city: itemData.arrivalCity || null
+              }
+            : {}),
+          ...(isTrainCategory(itemData.category)
+            ? {
+                train_departure_date: itemData.trainDepartureDate || null,
+                train_journey_nights: parseInt(itemData.trainJourneyNights) || 0,
+                train_cabin_name: itemData.trainCabinName || null
+              }
+            : {}),
+          ...(isTicketCategory(itemData.category)
+            ? { ticket_type: itemData.ticketType || 'standard' }
+            : {}),
+          ...(itemData.category === 'Meals'
+            ? {
+                meal_type: itemData.mealType || 'Breakfast',
+                menu_type: itemData.menuType || 'a_la_carte',
+                meal_gratuity_percent: parseFloat(itemData.mealGratuityPercent) || 0
+              }
+            : {}),
+          ...(isDriverEligibleCategory(itemData.category) && dbFeatures.driverOption
+            ? {
+                driver_required: !!itemData.driverRequired,
+                driver_meals: itemData.driverRequired ? ((itemData.driverMeals || []).join(',') || '') : '',
+                driver_accommodation: !!(itemData.driverRequired && itemData.driverAccommodation)
+              }
+            : {}),
+          ...(isGuide
+            ? {
+                guide_meals: (itemData.guideMeals || []).join(',') || '',
+                guide_accommodation: !!itemData.guideAccommodation
+              }
+            : {}),
           description: itemData.description,
           currency: itemData.currency,
           pricing_model: pricingModel,
@@ -1123,6 +1423,14 @@ export const LibraryItems = () => {
             .eq('item_id', targetItemId);
 
           if (delErr) throw delErr;
+
+          // Freshly replace car rental rates for the edited item
+          const { error: delCarErr } = await supabase
+            .from('car_rental_rates')
+            .delete()
+            .eq('item_id', targetItemId);
+
+          if (delCarErr) throw delCarErr;
         } else {
           const { data: newItem, error: itemErr } = await supabase
             .from('library_items')
@@ -1134,9 +1442,89 @@ export const LibraryItems = () => {
           targetItemId = newItem.id;
         }
 
-        // Insert Seasons Pricing Matrices
-        if (itemData.seasons.length > 0) {
+        // Insert Seasons Pricing Matrices (Car Rental uses its own group-based rates below)
+        if (!isCarRental && itemData.seasons.length > 0) {
           const ratesPayload = itemData.seasons.map(s => {
+            if (isGuide) {
+              return {
+                item_id: targetItemId,
+                option_name: s.seasonName || 'Base Season',
+                season_name: s.seasonName || 'Base Season',
+                meal_plan: null,
+                currency: itemData.currency,
+                valid_from: s.validFrom || null,
+                valid_to: s.validTo || null,
+                price_1_adult: 0,
+                price_2_adults: 0,
+                price_3_plus_adults: 0,
+                child_rates_breakdown: {},
+                single_supplement: 0,
+                child_discount: 0,
+                single_room_rate: 0,
+                double_twin_rate: 0,
+                effective_single_rate: 0,
+                rate_basis: 'per_trip',
+                child_sharing_policy: '',
+                unit_price: 0,
+                guide_transfer_rate: parseFloat(s.guideTransferRate) || 0,
+                guide_half_day_rate: parseFloat(s.guideHalfDayRate) || 0,
+                guide_full_day_rate: parseFloat(s.guideFullDayRate) || 0,
+                guide_overland_rate: parseFloat(s.guideOverlandRate) || 0,
+                guide_dinner_rate: parseFloat(s.guideDinnerRate) || 0
+              };
+            }
+            if (isMeals) {
+              const adultRate = parseFloat(s.adultRate) || 0;
+              const childRate = parseFloat(s.childRate) || 0;
+              return {
+                item_id: targetItemId,
+                option_name: s.seasonName || 'Base Season',
+                season_name: s.seasonName || 'Base Season',
+                meal_plan: null,
+                currency: itemData.currency,
+                valid_from: s.validFrom || null,
+                valid_to: s.validTo || null,
+                price_1_adult: adultRate,
+                price_2_adults: 0,
+                price_3_plus_adults: 0,
+                child_rates_breakdown: childRate > 0 ? { child: childRate } : {},
+                single_supplement: 0,
+                child_discount: 0,
+                single_room_rate: 0,
+                double_twin_rate: 0,
+                effective_single_rate: 0,
+                rate_basis: 'per_person',
+                child_sharing_policy: '',
+                unit_price: adultRate,
+                guide_rate: parseFloat(s.guideRate) || 0,
+                driver_rate: parseFloat(s.driverRate) || 0
+              };
+            }
+            if (isExtras) {
+              const adultRate = parseFloat(s.adultRate) || 0;
+              const childRate = parseFloat(s.childRate) || 0;
+              return {
+                item_id: targetItemId,
+                option_name: s.seasonName || 'Base Season',
+                season_name: s.seasonName || 'Base Season',
+                meal_plan: null,
+                currency: itemData.currency,
+                valid_from: s.validFrom || null,
+                valid_to: s.validTo || null,
+                price_1_adult: adultRate,
+                price_2_adults: 0,
+                price_3_plus_adults: 0,
+                child_rates_breakdown: childRate > 0 ? { child: childRate } : {},
+                single_supplement: 0,
+                child_discount: 0,
+                single_room_rate: 0,
+                double_twin_rate: 0,
+                effective_single_rate: 0,
+                rate_basis: 'per_person',
+                child_sharing_policy: '',
+                unit_price: adultRate
+              };
+            }
             if (isTourStyle) {
               const adultRate = parseFloat(s.adultRate) || 0;
               const vehicleRate = parseFloat(s.vehicleRate) || 0;
@@ -1175,7 +1563,42 @@ export const LibraryItems = () => {
                       conservation_levy_per_adult: itemData.feeType === 'conservation' ? (parseFloat(s.levyAdultRate) || 0) : 0,
                       conservation_levy_per_child: itemData.feeType === 'conservation' ? (parseFloat(s.levyChildRate) || 0) : 0
                     }
+                  : {}),
+                ...(isFlight
+                  ? {
+                      taxes_and_surcharges: parseFloat(s.taxesAndSurcharges) || 0
+                    }
                   : {})
+              };
+            }
+            if (isTicketCategory(itemData.category)) {
+              const adultRate = parseFloat(s.adultRate) || 0;
+              const childRatesMap = s.childRates || {};
+              const hasFastTrack = itemData.ticketType === 'both' || itemData.ticketType === 'fast_track';
+              const fastTrackAdultRate = hasFastTrack ? (parseFloat(s.fastTrackAdultRate) || 0) : 0;
+              const fastTrackChildRates = hasFastTrack ? (s.fastTrackChildRates || {}) : {};
+              return {
+                item_id: targetItemId,
+                option_name: s.seasonName || 'Base Season',
+                season_name: s.seasonName || 'Base Season',
+                meal_plan: null,
+                currency: itemData.currency,
+                valid_from: s.validFrom || null,
+                valid_to: s.validTo || null,
+                price_1_adult: adultRate,
+                price_2_adults: 0,
+                price_3_plus_adults: 0,
+                child_rates_breakdown: childRatesMap,
+                fast_track_adult_rate: fastTrackAdultRate,
+                fast_track_child_rates_breakdown: fastTrackChildRates,
+                single_supplement: 0,
+                child_discount: 0,
+                single_room_rate: 0,
+                double_twin_rate: 0,
+                effective_single_rate: 0,
+                rate_basis: 'per_person',
+                child_sharing_policy: 'by_age_range',
+                unit_price: adultRate
               };
             }
             const isFlatRoom = pricingModel === 'per_room';
@@ -1226,6 +1649,38 @@ export const LibraryItems = () => {
           const { error: ratesErr } = await supabase.from('item_rates').insert(ratesPayload);
           if (ratesErr) throw ratesErr;
         }
+
+        // Insert Car Rental group-based rates (flat per vehicle, bound to group+vehicle+rental length)
+        if (isCarRental && Array.isArray(itemData.carGroups) && itemData.carGroups.length > 0) {
+          const carRatesPayload = itemData.carGroups.flatMap(g => {
+            const kmsUnlimited = g.kmsUnlimited !== false;
+            return (g.ranges || []).map(r => ({
+              item_id: targetItemId,
+              vehicle_group: (g.vehicleGroup || '').trim(),
+              vehicle_name: (g.vehicleName || '').trim(),
+              rate_code: (g.rateCode || '').trim(),
+              kms_unlimited: kmsUnlimited,
+              kms_included: kmsUnlimited ? null : (parseFloat(g.kmsIncluded) || 0),
+              luggage: parseInt(g.luggage) || 0,
+              doors: parseInt(g.doors) || 0,
+              max_passengers: parseInt(g.passengers) || 0,
+              has_aircon: g.aircon !== false,
+              gear: g.gear || 'automatic',
+              fuel_type: g.fuelType || 'fuel',
+              min_days: parseInt(r.minDays) || 0,
+              max_days: r.maxDays === '' || r.maxDays == null ? null : (parseInt(r.maxDays) || 0),
+              price: parseFloat(r.price) || 0,
+              valid_from: g.validFrom || null,
+              valid_to: g.validTo || null,
+              currency: itemData.currency
+            }));
+          });
+
+          if (carRatesPayload.length > 0) {
+            const { error: carErr } = await supabase.from('car_rental_rates').insert(carRatesPayload);
+            if (carErr) throw carErr;
+          }
+        }
       }
 
       const isEditing = Object.keys(editingItems).length > 0;
@@ -1269,6 +1724,57 @@ export const LibraryItems = () => {
     childBands.forEach(b => { defaultChildRates[b.id] = 0; });
 
     const seasons = rates.length > 0 ? rates.map(r => {
+      if (isGuideCategory(item.category)) {
+        return {
+          seasonName: r.season_name || r.option_name || 'Base Season',
+          validFrom: r.valid_from || '',
+          validTo: r.valid_to || '',
+          guideTransferRate: parseFloat(r.guide_transfer_rate) || 0,
+          guideHalfDayRate: parseFloat(r.guide_half_day_rate) || 0,
+          guideFullDayRate: parseFloat(r.guide_full_day_rate) || 0,
+          guideOverlandRate: parseFloat(r.guide_overland_rate) || 0,
+          guideDinnerRate: parseFloat(r.guide_dinner_rate) || 0,
+          adultRate: 0,
+          childRate: 0,
+          tiers: [],
+          roomRate: 0,
+          price1Adult: 0,
+          price2Adults: 0,
+          price3PlusAdults: 0,
+          childRates: {},
+          singleSupplement: 0,
+          childDiscount: 0,
+          guideMealPlan: 'Bed & Breakfast',
+          driverMealPlan: 'Bed & Breakfast',
+          entranceFeePerson: parseFloat(r.entrance_fee_per_person) || 0,
+          entranceFeeVehicle: parseFloat(r.entrance_fee_per_vehicle) || 0,
+          levyAdultRate: parseFloat(r.conservation_levy_per_adult) || 0,
+          levyChildRate: parseFloat(r.conservation_levy_per_child) || 0,
+          taxesAndSurcharges: parseFloat(r.taxes_and_surcharges) || 0
+        };
+      }
+      if (isMealsCategory(item.category)) {
+        const mealChildRate = parseFloat((r.child_rates_breakdown || {}).child) || 0;
+        return {
+          seasonName: r.season_name || r.option_name || 'Base Season',
+          validFrom: r.valid_from || '',
+          validTo: r.valid_to || '',
+          adultRate: parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0,
+          childRate: mealChildRate,
+          guideRate: parseFloat(r.guide_rate) || 0,
+          driverRate: parseFloat(r.driver_rate) || 0
+        };
+      }
+      if (isExtrasCategory(item.category)) {
+        const extrasChildRate = parseFloat((r.child_rates_breakdown || {}).child) || 0;
+        return {
+          seasonName: r.season_name || r.option_name || 'Base Season',
+          validFrom: r.valid_from || '',
+          validTo: r.valid_to || '',
+          adultRate: parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0,
+          childRate: extrasChildRate
+        };
+      }
       if (isTourStyle) {
         const transferChildRate = parseFloat((r.child_rates_breakdown || {}).child) || 0;
         return {
@@ -1293,10 +1799,30 @@ export const LibraryItems = () => {
           entranceFeePerson: parseFloat(r.entrance_fee_per_person) || 0,
           entranceFeeVehicle: parseFloat(r.entrance_fee_per_vehicle) || 0,
           levyAdultRate: parseFloat(r.conservation_levy_per_adult) || 0,
-          levyChildRate: parseFloat(r.conservation_levy_per_child) || 0
+          levyChildRate: parseFloat(r.conservation_levy_per_child) || 0,
+          taxesAndSurcharges: parseFloat(r.taxes_and_surcharges) || 0
         };
       }
       const isFlat = pricingModel === 'per_room' || r.rate_basis === 'per_room';
+      if (isTicketCategory(item.category)) {
+        return {
+          seasonName: r.season_name || r.option_name || 'Base Season',
+          validFrom: r.valid_from || '',
+          validTo: r.valid_to || '',
+          adultRate: parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0,
+          roomRate: 0,
+          price1Adult: 0,
+          price2Adults: 0,
+          price3PlusAdults: 0,
+          childRates: r.child_rates_breakdown || defaultChildRates,
+          fastTrackAdultRate: parseFloat(r.fast_track_adult_rate) || 0,
+          fastTrackChildRates: r.fast_track_child_rates_breakdown || defaultChildRates,
+          singleSupplement: 0,
+          childDiscount: 0,
+          guideRate: 0,
+          driverRate: 0
+        };
+      }
       return {
         seasonName: r.season_name || r.option_name || 'Base Season',
         validFrom: r.valid_from || '',
@@ -1315,7 +1841,8 @@ export const LibraryItems = () => {
         entranceFeePerson: parseFloat(r.entrance_fee_per_person) || 0,
         entranceFeeVehicle: parseFloat(r.entrance_fee_per_vehicle) || 0,
         levyAdultRate: parseFloat(r.conservation_levy_per_adult) || 0,
-        levyChildRate: parseFloat(r.conservation_levy_per_child) || 0
+        levyChildRate: parseFloat(r.conservation_levy_per_child) || 0,
+        taxesAndSurcharges: parseFloat(r.taxes_and_surcharges) || 0
       };
     }) : [{
       seasonName: 'Base Season',
@@ -1330,17 +1857,58 @@ export const LibraryItems = () => {
       childDiscount: 0,
       guideRate: 0,
       driverRate: 0,
+      guideTransferRate: 0,
+      guideHalfDayRate: 0,
+      guideFullDayRate: 0,
+      guideOverlandRate: 0,
+      guideDinnerRate: 0,
       guideMealPlan: 'Bed & Breakfast',
       driverMealPlan: 'Bed & Breakfast',
       adultRate: 0,
       childRate: 0,
+      fastTrackAdultRate: 0,
+      fastTrackChildRates: {},
       tiers: [],
       vehicleRate: 0,
       entranceFeePerson: 0,
       entranceFeeVehicle: 0,
       levyAdultRate: 0,
-      levyChildRate: 0
+      levyChildRate: 0,
+      taxesAndSurcharges: 0
     }];
+
+    const carRatesRows = Array.isArray(item.car_rental_rates) ? item.car_rental_rates : [];
+    const carGroupsMap = {};
+    carRatesRows.forEach(r => {
+      const key = `${r.vehicle_group || ''}|${r.vehicle_name || ''}|${r.rate_code || ''}|${r.kms_unlimited !== false}|${r.kms_included || ''}|${r.valid_from || ''}|${r.valid_to || ''}`;
+      if (!carGroupsMap[key]) {
+        carGroupsMap[key] = {
+          groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+          vehicleGroup: r.vehicle_group || '',
+          vehicleName: r.vehicle_name || '',
+          rateCode: r.rate_code || '',
+          kmsUnlimited: r.kms_unlimited !== false,
+          kmsIncluded: r.kms_included ?? '',
+          validFrom: r.valid_from || '',
+          validTo: r.valid_to || '',
+          luggage: r.luggage ?? '',
+          doors: r.doors ?? '',
+          passengers: r.max_passengers ?? '',
+          aircon: r.has_aircon !== false,
+          gear: r.gear || 'automatic',
+          fuelType: r.fuel_type || 'fuel',
+          ranges: []
+        };
+      }
+      carGroupsMap[key].ranges.push({
+        minDays: r.min_days ?? '',
+        maxDays: r.max_days ?? '',
+        price: r.price ?? ''
+      });
+    });
+    const carGroups = Object.keys(carGroupsMap).length > 0
+      ? Object.values(carGroupsMap)
+      : [createCarRentalGroup()];
 
     return {
       tempId: Date.now() + Math.random(),
@@ -1351,6 +1919,17 @@ export const LibraryItems = () => {
       mealPlan: rates.find(r => r.meal_plan)?.meal_plan || 'Bed & Breakfast',
       vehicleType: isTourStyle ? (item.sub_category || '') : '',
       transferType: item.category === 'Transfers' ? (item.transfer_type || '') : '',
+      flightNumber: item.flight_number || '',
+      airlineName: item.airline_name || '',
+      departureCity: item.departure_city || '',
+      arrivalCity: item.arrival_city || '',
+      trainDepartureDate: item.train_departure_date || '',
+      trainJourneyNights: parseInt(item.train_journey_nights) || 0,
+      trainCabinName: item.train_cabin_name || '',
+      ticketType: item.ticket_type || 'standard',
+      mealType: item.meal_type || 'Breakfast',
+      menuType: item.menu_type || 'a_la_carte',
+      mealGratuityPercent: parseFloat(item.meal_gratuity_percent) || 0,
       feeType: (item.category === 'Accommodation' || item.category === 'Transfers') ? (item.fee_type || 'none') : 'none',
       levyBasis: item.conservation_levy_basis || 'per_night',
       childAge: isTourStyle ? (parseInt(childBands[0]?.ageTo) || 12) : 12,
@@ -1362,12 +1941,18 @@ export const LibraryItems = () => {
         ? item.sharing_capacity_rules
         : ensureSharingRules(maxAdults, maxOcc, []),
       guideDriverOffered: item.guide_driver_room_offered === true,
+      driverRequired: isDriverEligibleCategory(item.category) && item.driver_required === true,
+      driverMeals: isDriverEligibleCategory(item.category) ? ((item.driver_meals || '').split(',').filter(Boolean)) : [],
+      driverAccommodation: isDriverEligibleCategory(item.category) && item.driver_accommodation === true,
+      guideMeals: isGuideCategory(item.category) ? ((item.guide_meals || '').split(',').filter(Boolean)) : [],
+      guideAccommodation: isGuideCategory(item.category) && item.guide_accommodation === true,
       description: item.description || '',
       imageUrls: Array.isArray(item.images) ? item.images : [],
       newImageUrlInput: '',
       contractUrl: item.contract_url || '',
       contractName: item.contract_name || '',
       childAgeRanges: childBands,
+      carGroups,
       seasons
     };
   };
@@ -1934,14 +2519,28 @@ export const LibraryItems = () => {
                           ? 'e.g., Airport Transfer / Safari Transfer'
                           : (item.category === 'Activities / Tours'
                             ? 'e.g., Game Drive / Boat Cruise / Guided Walk'
-                            : 'e.g., Standard Room / Safari Transfer / Game Drive')}
+                            : (item.category === 'Flights / Charter'
+                              ? 'e.g., JNB–NBO Scheduled / Charter Flight'
+                              : (item.category === 'Meals'
+                              ? 'e.g., Buffet Lunch / À La Carte Dinner'
+                              : (isGuideCategory(item.category)
+                                ? 'e.g., Freelance Guide / Safari Guide / Walking Guide'
+                                : (isTrainCategory(item.category)
+                                ? 'e.g., CPT–PRY 3 Nights (Journey Name)'
+                                : (isTicketCategory(item.category)
+                                ? 'e.g., Park Entrance Ticket / Game Drive Ticket'
+                                : (isExtrasCategory(item.category)
+                                ? 'e.g., Spa Treatment / Laundry Service / Wi-Fi Pass'
+                                : (isCarRentalCategory(item.category)
+                                ? 'e.g., Self-Drive (Group C) — Toyota Starlet'
+                                : 'e.g., Standard Room / Safari Transfer / Game Drive'))))))))}
                         required
                         value={item.name}
                         onChange={(e) => handleItemFieldChange(item.tempId, 'name', e.target.value)}
                       />
                     </div>
 
-                    {isTourStyle ? (
+                    {isTourStyle && !isFlightCategory(item.category) ? (
                       <div>
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Vehicle Type *
@@ -1957,7 +2556,7 @@ export const LibraryItems = () => {
                           ))}
                         </select>
                       </div>
-                    ) : item.category === 'Accommodation' ? (
+                    ) : (item.category === 'Accommodation' || isTrainCategory(item.category)) ? (
                       <div>
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Meal Plan
@@ -1973,6 +2572,102 @@ export const LibraryItems = () => {
                         </select>
                       </div>
                     ) : null}
+
+                    {/* DRIVER OPTION (large vehicles: 14+ seats — Activities / Tours + Transfers) */}
+                    {dbFeatures.driverOption && isDriverEligibleCategory(item.category) && getVehiclePax(item.vehicleType) >= 14 && (
+                      <div style={{ background: '#f0fdfa', border: '1px solid #5eead4', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700, color: '#134e4a' }}>
+                          <input
+                            type="checkbox"
+                            checked={!!item.driverRequired}
+                            onChange={(e) => {
+                              handleItemFieldChange(item.tempId, 'driverRequired', e.target.checked);
+                              handleItemFieldChange(item.tempId, 'driverMeals', e.target.checked ? getDefaultDriverMeals(item.category, item.transferType) : []);
+                              handleItemFieldChange(item.tempId, 'driverAccommodation', e.target.checked ? getDefaultDriverAccommodation(item.category, item.transferType) : false);
+                            }}
+                          />
+                          🚗 Dedicated Driver Required
+                        </label>
+                        <div style={{ fontSize: '0.72rem', color: '#0f766e', marginTop: '0.25rem' }}>
+                          The vehicle price already includes the driver — this only triggers the driver's meals and accommodation in quotes.
+                        </div>
+                        {item.driverRequired && (
+                          <>
+                            <div style={{ marginTop: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569' }}>Driver Meals:</span>
+                              {driverMealOptions.map(o => {
+                                const checked = (item.driverMeals || []).includes(o.id);
+                                return (
+                                  <label key={o.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, color: '#334155' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        const next = new Set(item.driverMeals || []);
+                                        if (e.target.checked) next.add(o.id); else next.delete(o.id);
+                                        handleItemFieldChange(item.tempId, 'driverMeals', [...next]);
+                                      }}
+                                    />
+                                    {o.label}
+                                  </label>
+                                );
+                              })}
+                            </div>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, color: '#334155', marginTop: '0.55rem' }}>
+                              <input
+                                type="checkbox"
+                                checked={!!item.driverAccommodation}
+                                onChange={(e) => handleItemFieldChange(item.tempId, 'driverAccommodation', e.target.checked)}
+                              />
+                              Overnight accommodation for driver
+                            </label>
+                            <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.5rem', lineHeight: 1.45 }}>
+                              Driver meal and night costs are pulled from the Meals and Accommodation module rates in the itinerary builder.
+                            </div>
+                          </>
+                        )}
+</div>
+                    )}
+
+                    {/* GUIDE DETAILS (Guide only) */}
+                    {isGuideCategory(item.category) && (
+                      <div style={{ background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', fontWeight: 700, color: '#6b21a8' }}>
+                          <UserCheck size={16} /> Guide Details
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: '#7c3aed', marginTop: '0.25rem' }}>
+                          The guide rate is a flat per-trip rate shared among travellers. These flags only trigger the guide's meals &amp; accommodation in quotes — costs come from the Meals and Accommodation module rates.
+                        </div>
+                        <div style={{ marginTop: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569' }}>Guide Meals:</span>
+                          {driverMealOptions.map(o => {
+                            const checked = (item.guideMeals || []).includes(o.id);
+                            return (
+                              <label key={o.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, color: '#334155' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(e) => {
+                                    const next = new Set(item.guideMeals || []);
+                                    if (e.target.checked) next.add(o.id); else next.delete(o.id);
+                                    handleItemFieldChange(item.tempId, 'guideMeals', [...next]);
+                                  }}
+                                />
+                                {o.label}
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, color: '#334155', marginTop: '0.55rem' }}>
+                          <input
+                            type="checkbox"
+                            checked={!!item.guideAccommodation}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'guideAccommodation', e.target.checked)}
+                          />
+                          Overnight accommodation for guide
+                        </label>
+                      </div>
+                    )}
                   </div>
 
                   {/* GUIDE / DRIVER ROOM RATE TOGGLE (Accommodation only) */}
@@ -2029,6 +2724,214 @@ export const LibraryItems = () => {
                     </div>
                   )}
 
+                  {/* FLIGHT DETAILS CARD */}
+                  {item.category === 'Flights / Charter' && (
+                    <div style={{
+                      background: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '12px',
+                      padding: '1.25rem',
+                      marginBottom: '1.5rem',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                    }}>
+                      <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                        <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <Plane size={18} color="#6366f1" /> Flight Details
+                        </h4>
+                        <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                          Optional references to identify this flight. Route and times are shown in the itinerary builder.
+                        </span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.85rem' }}>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Flight Number <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional)</span>
+                          </label>
+                          <input
+                            type="text"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. SA 234"
+                            value={item.flightNumber || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'flightNumber', e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Airline Name <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional)</span>
+                          </label>
+                          <input
+                            type="text"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. South African Airways"
+                            value={item.airlineName || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'airlineName', e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Departure City
+                          </label>
+                          <input
+                            type="text"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. Johannesburg"
+                            value={item.departureCity || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'departureCity', e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Arrival City
+                          </label>
+                          <input
+                            type="text"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. Nairobi"
+                            value={item.arrivalCity || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'arrivalCity', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TRAIN JOURNEY DETAILS CARD */}
+                  {isTrainCategory(item.category) && (
+                    <div style={{
+                      background: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '12px',
+                      padding: '1.25rem',
+                      marginBottom: '1.5rem',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                    }}>
+                      <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                        <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <TrainFront size={18} color="#f97316" /> Train Journey Details
+                        </h4>
+                        <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                          Schedule and cabin identity for this journey. The departure date is the exact date the journey departs and is used as a stop in the itinerary builder — quotes wait until itinerary dates match. Departure and arrival times are handled in the itinerary builder.
+                        </span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.85rem' }}>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Departure Date
+                          </label>
+                          <input
+                            type="date"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            value={item.trainDepartureDate || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'trainDepartureDate', e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Journey Nights (Duration)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="30"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. 3"
+                            value={item.trainJourneyNights}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'trainJourneyNights', e.target.value)}
+                          />
+                          <span style={{ fontSize: '0.68rem', color: '#94a3b8', display: 'block' }}>Number of nights on board (e.g. 3 Nights)</span>
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Cabin (Room) Name
+                          </label>
+                          <input
+                            type="text"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. Pullman / Royal Suite"
+                            value={item.trainCabinName || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'trainCabinName', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* MEAL DETAILS CARD */}
+                  {item.category === 'Meals' && (
+                    <div style={{
+                      background: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '12px',
+                      padding: '1.25rem',
+                      marginBottom: '1.5rem',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                    }}>
+                      <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                        <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <Utensils size={18} color="#f59e0b" /> Meal Details
+                        </h4>
+                        <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                          Set the type of meal, the menu style, and any gratuity to add on top of the fare.
+                        </span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.85rem' }}>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Type of Meal
+                          </label>
+                          <select
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            value={item.mealType || 'Breakfast'}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'mealType', e.target.value)}
+                          >
+                            <option value="Breakfast">Breakfast</option>
+                            <option value="Lunch">Lunch</option>
+                            <option value="Dinner">Dinner</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Menu Type
+                          </label>
+                          <select
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            value={item.menuType || 'a_la_carte'}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'menuType', e.target.value)}
+                          >
+                            <option value="a_la_carte">À La Carte</option>
+                            <option value="buffet">Buffet</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                            Gratuity (%)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            className="pricing-select"
+                            style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                            placeholder="e.g. 10"
+                            value={item.mealGratuityPercent !== undefined ? item.mealGratuityPercent : 0}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'mealGratuityPercent', e.target.value)}
+                          />
+                          <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Optional service gratuity added to the fare</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* TRANSFER TYPE SELECTOR */}
                   {item.category === 'Transfers' && (
                     <div style={{
@@ -2061,7 +2964,13 @@ export const LibraryItems = () => {
                             <button
                               key={tt.id}
                               type="button"
-                              onClick={() => handleItemFieldChange(item.tempId, 'transferType', tt.id)}
+                              onClick={() => {
+                                handleItemFieldChange(item.tempId, 'transferType', tt.id);
+                                if (item.driverRequired) {
+                                  handleItemFieldChange(item.tempId, 'driverMeals', getDefaultDriverMeals(item.category, tt.id));
+                                  handleItemFieldChange(item.tempId, 'driverAccommodation', getDefaultDriverAccommodation(item.category, tt.id));
+                                }
+                              }}
                               style={{
                                 background: selected ? '#f5f3ff' : '#f8fafc',
                                 border: selected ? '2px solid #a855f7' : '1px solid #e2e8f0',
@@ -2097,18 +3006,20 @@ export const LibraryItems = () => {
                     }}>
                       <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
                         <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                          <Bus size={18} color="#3b82f6" /> {item.category === 'Transfers' ? 'Vehicle Capacity' : 'Transport Capacity'}
+                          {item.category === 'Flights / Charter' ? <Plane size={18} color="#6366f1" /> : <Bus size={18} color="#3b82f6" />} {item.category === 'Transfers' ? 'Vehicle Capacity' : item.category === 'Flights / Charter' ? 'Seat Capacity' : 'Transport Capacity'}
                         </h4>
                         <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
                           {item.category === 'Transfers'
                             ? 'Maximum number of passengers (pax) allowed in this vehicle.'
-                            : 'Maximum number of passengers (pax) per activity / tour departure.'}
+                            : item.category === 'Flights / Charter'
+                              ? 'Maximum number of passengers (pax) seats on this flight.'
+                              : 'Maximum number of passengers (pax) per activity / tour departure.'}
                         </span>
                       </div>
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'flex-end', gap: '0.6rem', flexWrap: 'wrap' }}>
                         <div style={{ flex: '1', minWidth: '180px' }}>
                           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>Maximum Occupancy</span>
-                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Max pax allowed (auto-filled from vehicle type, editable)</span>
+                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : item.category === 'Transfers' ? 'Max pax allowed (auto-filled from vehicle type, editable)' : 'Max pax allowed (auto-filled from vehicle type, editable)'}</span>
                           <input
                             type="number"
                             min="1"
@@ -2133,7 +3044,7 @@ export const LibraryItems = () => {
                         </div>
                       )}
                     </div>
-                  ) : item.category === 'Accommodation' ? (
+                  ) : (item.category === 'Accommodation' || isTrainCategory(item.category)) ? (
                   <div style={{
                     background: '#ffffff',
                     border: '1px solid #e2e8f0',
@@ -2144,10 +3055,12 @@ export const LibraryItems = () => {
                   }}>
                     <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
                       <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <Users size={18} color="#00665c" /> Room Occupancy & Capacity Limits
+                        <Users size={18} color="#00665c" /> {isTrainCategory(item.category) ? 'Cabin Occupancy & Capacity Limits' : 'Room Occupancy & Capacity Limits'}
                       </h4>
                       <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                        Configure maximum capacity per room for all-adult parties and conditional child sharing allowances.
+                        {isTrainCategory(item.category)
+                          ? 'Configure maximum capacity per cabin for all-adult parties and conditional child sharing allowances.'
+                          : 'Configure maximum capacity per room for all-adult parties and conditional child sharing allowances.'}
                       </span>
                     </div>
 
@@ -2158,7 +3071,7 @@ export const LibraryItems = () => {
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                         <div style={{ marginBottom: '0.4rem' }}>
                           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>Max Total Capacity</span>
-                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Overall room limit (Adults + Children)</span>
+                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{isTrainCategory(item.category) ? 'Overall cabin limit (Adults + Children)' : 'Overall room limit (Adults + Children)'}</span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                           <input
@@ -2232,7 +3145,9 @@ export const LibraryItems = () => {
                           Child Sharing Rules per Adult Count
                         </span>
                         <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                          Specify how many children are permitted to share when the room has 1, 2, or 3 adults.
+                          {isTrainCategory(item.category)
+                            ? 'Specify how many children are permitted to share when the cabin has 1, 2, or 3 adults.'
+                            : 'Specify how many children are permitted to share when the room has 1, 2, or 3 adults.'}
                         </span>
                       </div>
 
@@ -2267,7 +3182,7 @@ export const LibraryItems = () => {
                                   {currentAdults} {currentAdults === 1 ? 'Adult' : 'Adults'}
                                 </span>
                                 <span style={{ fontSize: '0.8rem', color: '#334155', fontWeight: 600 }}>
-                                  in room allows:
+                                  {isTrainCategory(item.category) ? 'in cabin allows:' : 'in room allows:'}
                                 </span>
                               </div>
 
@@ -2327,7 +3242,7 @@ export const LibraryItems = () => {
                           );
                         })}
                         <div style={{ marginTop: '0.2rem', color: '#15803d', fontWeight: 600 }}>
-                          • Overall Room Ceiling: <strong>{item.maxOccupancy || 2} Total Guests</strong>
+                          • {isTrainCategory(item.category) ? 'Cabin Ceiling' : 'Room Ceiling'}: <strong>{item.maxOccupancy || 2} Total Guests</strong>
                         </div>
                       </div>
                     </div>
@@ -2391,7 +3306,122 @@ export const LibraryItems = () => {
                   </div>
                   ) : null}
 
+                  {/* TICKET DETAILS CARD */}
+                  {isTicketCategory(item.category) ? (
+                  <div style={{
+                    background: '#ffffff',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '12px',
+                    padding: '1.25rem',
+                    marginBottom: '1.5rem',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                  }}>
+                    <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                      <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <Ticket size={18} color="#14b8a6" /> Ticket Details
+                      </h4>
+                      <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                        Tickets are always quoted per person. Set the child age ranges used for children pricing below.
+                      </span>
+                    </div>
+
+                    {/* ── Ticket Type ── */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.7rem 1rem' }}>
+                      <div>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>
+                          <Ticket size={16} color="#14b8a6" /> Ticket Type
+                        </span>
+                        <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                          Standard and Fast Track tickets have different prices.
+                        </span>
+                      </div>
+                      <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
+                        {[{ id: 'standard', label: '🎟️ Standard' }, { id: 'fast_track', label: '⚡ Fast Track' }, { id: 'both', label: '🎟️ ⚡ Both' }].map(opt => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            style={{
+                              padding: '0.4rem 0.9rem', fontSize: '0.8rem', fontWeight: 700, borderRadius: '6px', border: 'none', cursor: 'pointer', transition: 'all 0.15s ease',
+                              background: (item.ticketType || 'standard') === opt.id ? '#ffffff' : 'transparent',
+                              color: (item.ticketType || 'standard') === opt.id ? '#0f766e' : '#64748b',
+                              boxShadow: (item.ticketType || 'standard') === opt.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                            }}
+                            onClick={() => setItemsToSave(prev => prev.map(it => {
+                              if (it.tempId === item.tempId) return { ...it, ticketType: opt.id };
+                              return it;
+                            }))}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* ── Child Age Range Configuration (per supplier contract) ── */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                        <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155' }}>
+                          Child Age Ranges (per supplier contract)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleAddChildAgeBand(item.tempId)}
+                          style={{ fontSize: '0.75rem', padding: '0.25rem 0.65rem', background: '#f0fdfa', color: '#0f766e', border: '1px solid #99f6e4', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
+                        >
+                          + Add Age Tier
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        {(item.childAgeRanges || []).map((band, bandIdx) => (
+                          <div key={band.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '7px', padding: '0.45rem 0.65rem' }}>
+                            <input
+                              type="text"
+                              value={band.name}
+                              onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'name', e.target.value)}
+                              placeholder="Name"
+                              style={{ flex: '1', minWidth: '80px', fontSize: '0.8rem', padding: '0.25rem 0.4rem', border: '1px solid #cbd5e1', borderRadius: '5px', fontWeight: 600, color: '#1e293b' }}
+                            />
+                            <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>Ages</span>
+                            <input
+                              type="number"
+                              min="0"
+                              value={band.ageFrom}
+                              onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'ageFrom', e.target.value)}
+                              style={{ width: '52px', fontSize: '0.8rem', padding: '0.25rem 0.35rem', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'center' }}
+                            />
+                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
+                            <input
+                              type="number"
+                              min="0"
+                              value={band.ageTo}
+                              onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'ageTo', e.target.value)}
+                              style={{ width: '52px', fontSize: '0.8rem', padding: '0.25rem 0.35rem', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'center' }}
+                            />
+                            <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>yrs</span>
+                            {(item.childAgeRanges || []).length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveChildAgeBand(item.tempId, bandIdx)}
+                                style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0.1rem', lineHeight: 1 }}
+                                title="Remove age tier"
+                              >
+                                <X size={14} />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {(item.childAgeRanges || []).length === 0 && (
+                        <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.3rem' }}>
+                          No child age ranges set — only the adult rate will apply. Add a tier for children pricing.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  ) : null}
+
                   {/* PRICING MODEL SELECTOR */}
+                  {!isMealsCategory(item.category) && !isGuideCategory(item.category) && !isTicketCategory(item.category) && !isExtrasCategory(item.category) && !isCarRentalCategory(item.category) && (
                   <div style={{
                     background: '#f8fafc',
                     border: '1px solid #e2e8f0',
@@ -2406,18 +3436,41 @@ export const LibraryItems = () => {
                   }}>
                     <div>
                       <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <Tag size={16} color="#00665c" /> {isTourStyle
-                          ? (item.category === 'Transfers' ? 'Transfer Pricing Type:' : 'Activity / Tour Pricing Type:')
-                          : (item.category === 'Accommodation' ? 'Accommodation Pricing Model:' : 'Pricing Type:')}
+                        <Tag size={16} color="#00665c" /> {isFlightCategory(item.category)
+                          ? 'Flight Pricing Model:'
+                          : (isTourStyle
+                            ? (item.category === 'Transfers' ? 'Transfer Pricing Type:' : 'Activity / Tour Pricing Type:')
+                            : (item.category === 'Accommodation' ? 'Accommodation Pricing Model:'
+                              : (isTrainCategory(item.category) ? 'Train Journey Pricing Model:' : 'Pricing Type:')))}
                       </span>
                       <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
-                        {isTourStyle
-                          ? 'Choose how the rate is quoted: per vehicle, per person, or tiered by pax count.'
-                          : 'Choose whether rates are quoted per person sharing or as a flat room/unit price.'}
+                        {isFlightCategory(item.category)
+                          ? 'Choose whether the fare is quoted per person or per charter (whole flight).'
+                          : (isTourStyle
+                            ? 'Choose how the rate is quoted: per vehicle, per person, or tiered by pax count.'
+                            : 'Choose whether rates are quoted per person sharing or as a flat room/unit price.')}
                       </span>
                     </div>
 
-                    {isTourStyle ? (
+                    {isFlightCategory(item.category) ? (
+                      <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
+                        {[{ id: 'per_person', label: 'Per Person' }, { id: 'per_vehicle', label: 'Per Charter (Whole Flight)' }].map(opt => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => handleItemFieldChange(item.tempId, 'pricingModel', opt.id)}
+                            style={{
+                              padding: '0.4rem 0.9rem', fontSize: '0.8rem', fontWeight: 700, borderRadius: '6px', border: 'none', cursor: 'pointer', transition: 'all 0.15s ease',
+                              background: (item.pricingModel || 'per_person') === opt.id ? '#ffffff' : 'transparent',
+                              color: (item.pricingModel || 'per_person') === opt.id ? '#1d4ed8' : '#64748b',
+                              boxShadow: (item.pricingModel || 'per_person') === opt.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : isTourStyle ? (
                       <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
                         {transferPricingOptions.map(opt => (
                           (opt.id === 'tiered' && !dbFeatures.tieredPricing) ? null : (
@@ -2478,6 +3531,7 @@ export const LibraryItems = () => {
                     </div>
                     )}
                   </div>
+                  )}
 
                   {/* SURCHARGE FEES SELECTOR (Accommodation + Transfers) */}
                   {dbFeatures.feeType && (item.category === 'Accommodation' || item.category === 'Transfers') ? (
@@ -2545,7 +3599,337 @@ export const LibraryItems = () => {
                     </div>
                   ) : null}
 
+                  {/* CAR RENTAL GROUPS EDITOR */}
+                  {isCarRentalCategory(item.category) && (
+                    <div style={{
+                      background: '#f8fafc',
+                      borderRadius: '10px',
+                      padding: '1.25rem',
+                      border: '1px solid #e2e8f0',
+                      marginBottom: '1.5rem'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                        <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', margin: 0, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <Car size={18} color="#06b6d4" /> Car Rental Rates (Flat Per Vehicle)
+                        </h4>
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.85rem', lineHeight: 1.5 }}>
+                        Each group binds a <strong>Vehicle Group</strong>, a <strong>Vehicle</strong> and its <strong>Rate Code</strong> to a set of
+                        rental-length ranges. The price for a range is the flat per-vehicle rate for that vehicle rented for that many days.
+                        The <strong>Booking Validity</strong> is the reservation window during which this contract / tariff code can be booked —
+                        bookings outside it must not use these rates.
+                      </div>
+
+                      {(item.carGroups || []).map((group, groupIdx) => (
+                        <div key={group.groupId} style={{
+                          background: '#ffffff',
+                          border: '1px solid #67e8f9',
+                          borderRadius: '10px',
+                          padding: '1rem',
+                          marginBottom: '1rem'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                            <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#0e7490' }}>
+                              Vehicle Group {groupIdx + 1}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCarGroup(item.tempId, group.groupId)}
+                              style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                            >
+                              <Trash2 size={13} /> Remove Group
+                            </button>
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem', marginBottom: '0.85rem' }}>
+                            <div>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                Vehicle Group <span style={{ color: '#ef4444' }}>*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className="pricing-select"
+                                style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                                placeholder="e.g. C"
+                                value={group.vehicleGroup}
+                                onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'vehicleGroup', e.target.value)}
+                              />
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                Vehicle <span style={{ color: '#ef4444' }}>*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className="pricing-select"
+                                style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                                placeholder="e.g. Toyota Starlet"
+                                value={group.vehicleName}
+                                onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'vehicleName', e.target.value)}
+                              />
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                Rate Category / Code <span style={{ color: '#ef4444' }}>*</span>
+                              </label>
+                              <input
+                                type="text"
+                                className="pricing-select"
+                                style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                                placeholder="e.g. Classic Max (CM)"
+                                value={group.rateCode}
+                                onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'rateCode', e.target.value)}
+                              />
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                KMS Included
+                              </label>
+                              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                <label style={{ fontSize: '0.78rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.3rem', cursor: 'pointer' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={group.kmsUnlimited !== false}
+                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'kmsUnlimited', e.target.checked)}
+                                    style={{ width: '15px', height: '15px', accentColor: '#06b6d4', cursor: 'pointer' }}
+                                  />
+                                  Unlimited
+                                </label>
+                              </div>
+                              {group.kmsUnlimited === false && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.3rem' }}>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem', fontSize: '0.85rem', width: '120px' }}
+                                    placeholder="e.g. 200"
+                                    value={group.kmsIncluded ?? ''}
+                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'kmsIncluded', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.72rem', color: '#64748b' }}>km</span>
+                                </div>
+                              )}
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                              <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                  Booking Valid From
+                                </label>
+                                <input
+                                  type="date"
+                                  className="pricing-select"
+                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%' }}
+                                  value={group.validFrom}
+                                  onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'validFrom', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                  Booking Valid To
+                                </label>
+                                <input
+                                  type="date"
+                                  className="pricing-select"
+                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%' }}
+                                  value={group.validTo}
+                                  onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'validTo', e.target.value)}
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                Rate ({item.currency}) — Flat Per Vehicle
+                              </label>
+                              <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem' }}>
+                                Bookable between the validity dates above.
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Vehicle Features */}
+                          <div style={{ background: '#f0fdff', border: '1px solid #a5f3fc', borderRadius: '10px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
+                            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#155e75', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              <Car size={15} color="#0891b2" /> Vehicle Features
+                            </div>
+                            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                              {/* Numeric fields */}
+                              <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                <div>
+                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.25rem' }}>
+                                    <Briefcase size={14} /> Luggage
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '70px', textAlign: 'center' }}
+                                    placeholder="2"
+                                    value={group.luggage ?? ''}
+                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'luggage', e.target.value)}
+                                  />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.25rem' }}>
+                                    <DoorOpen size={14} /> Doors
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '70px', textAlign: 'center' }}
+                                    placeholder="4"
+                                    value={group.doors ?? ''}
+                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'doors', e.target.value)}
+                                  />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.25rem' }}>
+                                    <Users size={14} /> Max Passengers
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '70px', textAlign: 'center' }}
+                                    placeholder="5"
+                                    value={group.passengers ?? ''}
+                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'passengers', e.target.value)}
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Toggle-style features */}
+                              <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                {/* Aircon */}
+                                <div>
+                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.15rem' }}>Aircon</label>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'aircon', !(group.aircon !== false))}
+                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.7rem', borderRadius: '7px', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: (group.aircon !== false) ? '#ffffff' : '#64748b', background: (group.aircon !== false) ? '#0891b2' : '#e2e8f0' }}
+                                  >
+                                    <Snowflake size={14} /> {(group.aircon !== false) ? 'Yes' : 'No'}
+                                  </button>
+                                </div>
+                                {/* Gear */}
+                                <div>
+                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.15rem' }}>Gear</label>
+                                  <div style={{ display: 'inline-flex', border: '1px solid #67e8f9', borderRadius: '7px', overflow: 'hidden' }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'gear', 'automatic')}
+                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.gear === 'automatic' ? '#ffffff' : '#0e7490', background: group.gear === 'automatic' ? '#0891b2' : 'transparent' }}
+                                    >
+                                      <Cog size={13} /> Auto
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'gear', 'manual')}
+                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.gear === 'manual' ? '#ffffff' : '#0e7490', background: group.gear === 'manual' ? '#0891b2' : 'transparent' }}
+                                    >
+                                      Manual
+                                    </button>
+                                  </div>
+                                </div>
+                                {/* Fuel / Electric */}
+                                <div>
+                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.15rem' }}>Power</label>
+                                  <div style={{ display: 'inline-flex', border: '1px solid #67e8f9', borderRadius: '7px', overflow: 'hidden' }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'fuelType', 'fuel')}
+                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.fuelType === 'fuel' ? '#ffffff' : '#0e7490', background: group.fuelType === 'fuel' ? '#0891b2' : 'transparent' }}
+                                    >
+                                      <Fuel size={13} /> Fuel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'fuelType', 'electric')}
+                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.fuelType === 'electric' ? '#ffffff' : '#0e7490', background: group.fuelType === 'electric' ? '#0891b2' : 'transparent' }}
+                                    >
+                                      <Zap size={13} /> Electric
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Rental Length Ranges */}
+                          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', marginBottom: '0.4rem' }}>
+                            Rental Length Ranges <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.74rem' }}>(at least 4 ranges)</span>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                            {(group.ranges || []).map((range, rangeIdx) => (
+                              <div key={rangeIdx} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '0.5rem 0.75rem', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, whiteSpace: 'nowrap' }}>Day</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  className="pricing-select"
+                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '80px', textAlign: 'center' }}
+                                  placeholder="min"
+                                  value={range.minDays}
+                                  onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'minDays', e.target.value)}
+                                />
+                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  className="pricing-select"
+                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '80px', textAlign: 'center' }}
+                                  placeholder="max / blank = +"
+                                  value={range.maxDays}
+                                  onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'maxDays', e.target.value)}
+                                />
+                                <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, whiteSpace: 'nowrap' }}>days</span>
+                                <div style={{ flex: '1', minWidth: '160px', maxWidth: '220px', marginLeft: 'auto' }}>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%', textAlign: 'center', fontWeight: 700, color: '#0f766e' }}
+                                    placeholder={`Price (${item.currency})`}
+                                    value={range.price}
+                                    onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'price', e.target.value)}
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveCarRange(item.tempId, group.groupId, rangeIdx)}
+                                  style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0.1rem', lineHeight: 1 }}
+                                  title="Remove range"
+                                >
+                                  <X size={15} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary-btn"
+                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', marginTop: '0.6rem' }}
+                            onClick={() => handleAddCarRange(item.tempId, group.groupId)}
+                          >
+                            + Add Range
+                          </button>
+                        </div>
+                      ))}
+
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                        onClick={() => handleAddCarGroup(item.tempId)}
+                      >
+                        + Add Vehicle Group
+                      </button>
+                    </div>
+                  )}
+
                   {/* Seasonal Pricing Matrices Box */}
+                  {!isCarRentalCategory(item.category) && (
                   <div style={{
                     background: '#f8fafc',
                     borderRadius: '10px',
@@ -2555,13 +3939,75 @@ export const LibraryItems = () => {
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                       <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', margin: 0, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                        <Calendar size={18} color="#863bff" /> {isTourStyle
-                          ? `Seasonal Price Matrices (${item.pricingModel === 'tiered' ? 'Tiered by Pax Count' : item.pricingModel === 'per_vehicle' ? 'Flat Vehicle Rate' : 'Per Person Rates'})`
-                          : `Seasonal Pricing Matrices ${item.pricingModel === 'per_room' ? '(Flat Room Rates)' : '(Per Person Rates)'}`}
+                        <Calendar size={18} color="#863bff" /> {isFlightCategory(item.category)
+                          ? `Seasonal Flight Fares (${item.pricingModel === 'per_vehicle' ? 'Per Charter' : 'Per Person'})`
+                          : isGuideCategory(item.category)
+                            ? 'Seasonal Guide Rates (Per Service Type)'
+                            : isMealsCategory(item.category)
+                            ? 'Seasonal Meal Fares (Per Person)'
+                            : (isTrainCategory(item.category)
+                            ? `Seasonal Train Fares (${item.pricingModel === 'per_room' ? 'Flat Cabin Rate' : 'Per Person'})`
+                            : (isTicketCategory(item.category)
+                            ? 'Seasonal Ticket Fares (Per Person)'
+                            : (isExtrasCategory(item.category)
+                            ? 'Seasonal Extras Fares (Per Person)'
+                            : (isTourStyle
+                            ? `Seasonal Price Matrices (${item.pricingModel === 'tiered' ? 'Tiered by Pax Count' : item.pricingModel === 'per_vehicle' ? 'Flat Vehicle Rate' : 'Per Person Rates'})`
+                            : `Seasonal Pricing Matrices ${item.pricingModel === 'per_room' ? '(Flat Room Rates)' : '(Per Person Rates)'}`))))}
                       </h4>
                     </div>
 
                     {/* Rate Guide */}
+                    {isGuideCategory(item.category) && (
+                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#6b21a8', marginBottom: '0.2rem' }}>🚶 Guide Rate (Per Service Type):</div>
+                        <div>• <strong>Transfer / Half Day / Full Day / Overland / Dinner transfer:</strong> a separate flat per-trip price for each service the guide accompanies. The itinerary builder picks the rate for the service at hand.</div>
+                        <div>• <strong>Meals:</strong> lunch/dinner that trigger when the guide accompanies the trip.</div>
+                        <div>• <strong>Accommodation:</strong> overnight flag that triggers guide accommodation when required.</div>
+                      </div>
+                    )}
+                    {isMealsCategory(item.category) && (
+                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#b45309', marginBottom: '0.2rem' }}>🍽️ Meal Fares:</div>
+                        <div>• <strong>Adult Rate:</strong> per person meal price.</div>
+                        <div>• <strong>Child Rate:</strong> per child meal price.</div>
+                        <div>• <strong>Guide / Driver Rate:</strong> separate meal prices for the guide and driver when included.</div>
+                        {parseFloat(item.mealGratuityPercent) > 0 && (
+                          <div>• <strong>Gratuity:</strong> {item.mealGratuityPercent}% added on top of the fare.</div>
+                        )}
+                      </div>
+                    )}
+                    {isTicketCategory(item.category) && (
+                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🎟️ Ticket Fares:</div>
+                        <div>• <strong>Adult Rate:</strong> per person ticket price.</div>
+                        <div>• <strong>Child Rate:</strong> per child ticket price by age range.</div>
+                        <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.25rem' }}>
+                          Tickets are always quoted per person.
+                        </div>
+                      </div>
+                    )}
+                    {isExtrasCategory(item.category) && (
+                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#ec4899', marginBottom: '0.2rem' }}>✨ Extras Fares:</div>
+                        <div>• <strong>Adult Rate:</strong> per person extra service price.</div>
+                        <div>• <strong>Child Rate:</strong> per child extra service price.</div>
+                        <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
+                          Extras are always quoted per person.
+                        </div>
+                      </div>
+                    )}
+                    {isFlightCategory(item.category) && (
+                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#4338ca', marginBottom: '0.2rem' }}>✈️ Flight Fares:</div>
+                        <div>• <strong>Adult Rate:</strong> base fare per adult (per flight).</div>
+                        <div>• <strong>Child Rate:</strong> fare per child (up to the child age set below).</div>
+                        <div>• <strong>Taxes &amp; Surcharges:</strong> added on top of the base fare (fuel surcharge, airport fees, etc.).</div>
+                        <div style={{ color: '#4338ca', fontWeight: 600, marginTop: '0.25rem' }}>
+                          For charter flights, set the whole-flight rate as the Adult Rate.
+                        </div>
+                      </div>
+                    )}
                     {item.feeType === 'entrance' && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
                         <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🎟️ Entrance Fee Rates:</div>
@@ -2582,7 +4028,7 @@ export const LibraryItems = () => {
                         </div>
                       </div>
                     )}
-                    {isTourStyle ? (
+                    {isTourStyle && !isFlightCategory(item.category) ? (
                       item.pricingModel === 'tiered' ? (
                         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
                           <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>📊 Tiered Pricing Model:</div>
@@ -2608,20 +4054,20 @@ export const LibraryItems = () => {
                           </div>
                         </div>
                       )
-                    ) : (
+                    ) : (isFlightCategory(item.category) || isMealsCategory(item.category) || isGuideCategory(item.category) || isTicketCategory(item.category) || isExtrasCategory(item.category)) ? null : (
                     item.pricingModel === 'per_room' ? (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#166534', marginBottom: '0.2rem' }}>💡 Flat Room Rate Model:</div>
-                        <div>Contract charges a fixed rate per room/unit per night for up to <strong>{item.maxOccupancy || 2} Total Guests</strong> (regardless of adult or child mix).</div>
+                        <div style={{ fontWeight: 700, color: '#166534', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? '💡 Flat Cabin Rate Model:' : '💡 Flat Room Rate Model:'}</div>
+                        <div>Contract charges a fixed rate per {isTrainCategory(item.category) ? 'cabin per night' : 'room/unit per night'} for up to <strong>{item.maxOccupancy || 2} Total Guests</strong> (regardless of adult or child mix).</div>
                         <div style={{ color: '#00665c', fontWeight: 600, marginTop: '0.25rem' }}>
-                          In the Itinerary Builder, the per-person rate is automatically derived as: <code>Room Rate ÷ Number of Occupants</code>.
+                          In the Itinerary Builder, the per-person rate is automatically derived as: <code>{isTrainCategory(item.category) ? 'Cabin Rate' : 'Room Rate'} ÷ Number of Occupants</code>.
                         </div>
                       </div>
                     ) : (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.65rem 0.85rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#334155', marginBottom: '0.2rem' }}>💡 Per-Person Catalog Rates:</div>
+                        <div style={{ fontWeight: 700, color: '#334155', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? '💡 Per-Person Cabin Rates:' : '💡 Per-Person Catalog Rates:'}</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.35rem', marginTop: '0.2rem' }}>
-                          <div>• <strong>1 Adult:</strong> Single Room rate (per person)</div>
+                          <div>• <strong>1 Adult:</strong> Single Cabin rate (per person)</div>
                           <div>• <strong>2 Adults:</strong> Per Person Sharing (PPS) rate (each adult sharing)</div>
                           <div>• <strong>3+ Adults:</strong> Extra Adult rate (each additional adult sharing)</div>
 <div>• <strong>Children:</strong> Rate per child by age tier (sharing with adult/s)</div>
@@ -2672,7 +4118,330 @@ export const LibraryItems = () => {
                           </div>
 
                           {/* Flat Room Rate Input OR PPS Tier Inputs */}
-                          {isTourStyle ? (
+                          {isGuideCategory(item.category) ? (
+                            <div style={{ background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '1rem' }}>
+                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
+                                Guide Rates ({item.currency}) — Flat Per Trip by Service Type
+                              </label>
+                              <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.65rem', lineHeight: 1.45 }}>
+                                The Guide charges a different flat per-trip rate depending on the service it accompanies.
+                                The itinerary builder picks the price for the service at hand.
+                              </div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', maxWidth: '980px' }}>
+                                {guideServiceTypes.map(gst => (
+                                  <div key={gst.id}>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                      {gst.label} ({item.currency})
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      className="pricing-select"
+                                      style={{ padding: '0.45rem 0.75rem', fontSize: '0.95rem', fontWeight: 700, width: '100%' }}
+                                      placeholder="e.g. 1800"
+                                      value={season[gst.field] !== undefined ? season[gst.field] : ''}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, gst.field, e.target.value)}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
+                                Rates are shared among travellers. Meals &amp; accommodation triggers are set in Guide Details above.
+                              </div>
+                            </div>
+                          ) : isMealsCategory(item.category) ? (
+                            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
+                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
+                                Meal Fare ({item.currency}) — Per Person
+                              </label>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Adult Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 850"
+                                    value={season.adultRate !== undefined ? season.adultRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Child Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 450"
+                                    value={season.childRate !== undefined ? season.childRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Guide Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 500"
+                                    value={season.guideRate !== undefined ? season.guideRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)}
+                                  />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Driver Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 500"
+                                    value={season.driverRate !== undefined ? season.driverRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)}
+                                  />
+                                </div>
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
+                                Options include guide &amp; driver meals. A {item.currency} {(parseFloat(item.mealGratuityPercent) || 0) > 0 ? (parseFloat(item.mealGratuityPercent) || 0) + '% gratuity will be added to the fare.' : ''}
+                              </div>
+                            </div>
+                          ) : isTicketCategory(item.category) ? (
+                            <div style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '1rem' }}>
+                              {item.ticketType !== 'fast_track' && (
+                                <>
+                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
+                                Standard Ticket Fare ({item.currency}) — Per Person
+                              </label>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Adult Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 850"
+                                    value={season.adultRate !== undefined ? season.adultRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
+                                </div>
+                              </div>
+
+                              {/* Children Pricing per Age Range — Standard */}
+                              {bands.length > 0 && (
+                                <div style={{ marginTop: '1rem' }}>
+                                  <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
+                                    Children Pricing per Age Range (Per Person — {item.currency})
+                                  </label>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
+                                    {bands.map((band) => (
+                                      <div key={band.id}>
+                                        <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
+                                          {band.name} ({band.ageFrom}–{band.ageTo} yrs)
+                                        </span>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          className="pricing-select"
+                                          style={{ padding: '0.35rem' }}
+                                          placeholder={`Price (${item.currency})`}
+                                          value={season.childRates?.[band.id] !== undefined ? season.childRates[band.id] : ''}
+                                          onChange={(e) => handleChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)}
+                                        />
+                                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Per child</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                                </>
+                              )}
+
+                              {item.ticketType !== 'standard' && (
+                                <>
+                                  {item.ticketType === 'both' && (<hr style={{ border: 'none', borderTop: '1px dashed #99f6e4', marginTop: '1.2rem' }} />)}
+                                  <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem', marginTop: '0.4rem' }}>
+                                    Fast Track Ticket Fare ({item.currency}) — Per Person
+                                  </label>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
+                                    <div>
+                                      <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                        Adult Rate ({item.currency})
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        className="pricing-select"
+                                        style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                        placeholder="e.g. 1200"
+                                        value={season.fastTrackAdultRate !== undefined ? season.fastTrackAdultRate : ''}
+                                        onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'fastTrackAdultRate', e.target.value)}
+                                      />
+                                      <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Children Pricing per Age Range — Fast Track */}
+                                  {bands.length > 0 && (
+                                    <div style={{ marginTop: '1rem' }}>
+                                      <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
+                                        Fast Track Children Pricing per Age Range (Per Person — {item.currency})
+                                      </label>
+                                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
+                                        {bands.map((band) => (
+                                          <div key={band.id}>
+                                            <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
+                                              {band.name} ({band.ageFrom}–{band.ageTo} yrs)
+                                            </span>
+                                            <input
+                                              type="number"
+                                              min="0"
+                                              className="pricing-select"
+                                              style={{ padding: '0.35rem' }}
+                                              placeholder={`Price (${item.currency})`}
+                                              value={season.fastTrackChildRates?.[band.id] !== undefined ? season.fastTrackChildRates[band.id] : ''}
+                                              onChange={(e) => handleFastTrackChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)}
+                                            />
+                                            <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Per child</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                              <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
+                                Tickets are always quoted per person. Child rates apply by age range (configured above).
+                              </div>
+                            </div>
+                          ) : isExtrasCategory(item.category) ? (
+                            <div style={{ background: '#fdf2f8', border: '1px solid #fbcfe8', borderRadius: '8px', padding: '1rem' }}>
+                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
+                                Extra Service Fare ({item.currency}) — Per Person
+                              </label>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Adult Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 850"
+                                    value={season.adultRate !== undefined ? season.adultRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Child Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 450"
+                                    value={season.childRate !== undefined ? season.childRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
+                                </div>
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
+                                Extras are always quoted per person. Set the child rate if children pay a different price.
+                              </div>
+                            </div>
+                          ) : isFlightCategory(item.category) ? (
+                            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
+                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
+                                Flight Fare ({item.currency}) {item.pricingModel === 'per_vehicle' ? '— Per Charter (Whole Flight)' : '— Per Person'}
+                              </label>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    {item.pricingModel === 'per_vehicle' ? 'Charter Rate' : 'Adult Rate'} ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder={item.pricingModel === 'per_vehicle' ? 'e.g. 200000' : 'e.g. 8500'}
+                                    value={season.adultRate !== undefined ? season.adultRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
+                                    {item.pricingModel === 'per_vehicle' ? 'Charged once for the whole flight' : 'Charged per adult'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Child Rate ({item.currency}) <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional)</span>
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 4500"
+                                    value={season.childRate !== undefined ? season.childRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Taxes &amp; Surcharges ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                    placeholder="e.g. 900"
+                                    value={season.taxesAndSurcharges !== undefined ? season.taxesAndSurcharges : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'taxesAndSurcharges', e.target.value)}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Fuel surcharge, airport fees, etc.</span>
+                                </div>
+                              </div>
+
+                              <div style={{ maxWidth: '220px', marginTop: '1rem' }}>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                  Child Age Limit (yrs)
+                                </label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="17"
+                                  className="pricing-select"
+                                  style={{ padding: '0.45rem 0.75rem', fontSize: '0.95rem', width: '100%' }}
+                                  value={item.childAge || 12}
+                                  onChange={(e) => handleItemFieldChange(item.tempId, 'childAge', e.target.value)}
+                                />
+                              </div>
+                            </div>
+                          ) : isTourStyle ? (
                             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
                               {item.pricingModel === 'tiered' ? (
                                 <>
@@ -2819,7 +4588,7 @@ export const LibraryItems = () => {
                           isFlatRoom ? (
                             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
-                                Room / Unit Rate per Night ({item.currency})
+                                {isTrainCategory(item.category) ? 'Cabin / Unit Rate per Night' : 'Room / Unit Rate per Night'} ({item.currency})
                               </label>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '320px' }}>
                                 <input 
@@ -2830,7 +4599,7 @@ export const LibraryItems = () => {
                                   value={season.roomRate !== undefined ? season.roomRate : ''}
                                   onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'roomRate', e.target.value)}
                                 />
-                                <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Room / Night</span>
+                                <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ {isTrainCategory(item.category) ? 'Cabin' : 'Room'} / Night</span>
                               </div>
                               <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
                                 Flat price for up to <strong>{item.maxOccupancy || 2} Persons</strong>. In quotes, rate per person is: <code>{item.currency} {parseFloat(season.roomRate) || 0} ÷ (Occupants)</code>.
@@ -2845,7 +4614,7 @@ export const LibraryItems = () => {
                                 </label>
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                   <div>
-                                    <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>1 Adult (Single Room)</span>
+                                    <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>1 Adult ({isTrainCategory(item.category) ? 'Single Cabin' : 'Single Room'})</span>
                                     <input 
                                       type="number" 
                                       className="pricing-select"
@@ -3102,6 +4871,7 @@ export const LibraryItems = () => {
                       + Add Season
                     </button>
                   </div>
+                  )}
 
                   {/* Description Field */}
                   <div style={{ marginBottom: '1.5rem' }}>
@@ -3435,6 +5205,28 @@ export const LibraryItems = () => {
                             {transType.icon} {transType.label}
                           </span>
                         )}
+                        {item.driver_required === true && isDriverEligibleCategory(item.category) && (
+                          <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdfa', border: '1px solid #5eead4', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                            🚗 Driver{(item.driver_meals || '').split(',').filter(Boolean).map(id => driverMealOptions.find(o => o.id === id)?.label || id).join(' + ')}
+                            {item.driver_accommodation === true ? ' (Overnight)' : ''}
+                          </span>
+                        )}
+                        {isGuideCategory(item.category) && (
+                          <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#6b21a8', background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                            🚶 Guide{(item.guide_meals || '').split(',').filter(Boolean).map(id => driverMealOptions.find(o => o.id === id)?.label || id).join(' + ')}
+                            {item.guide_accommodation === true ? ' (Overnight)' : ''}
+                          </span>
+                        )}
+                        {isTrainCategory(item.category) && (
+                          <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                            🚂 {(item.train_departure_date || '—')} {parseInt(item.train_journey_nights) > 0 ? `· ${item.train_journey_nights} Night${parseInt(item.train_journey_nights) > 1 ? 's' : ''}` : ''} {item.train_cabin_name ? `· ${item.train_cabin_name}` : ''}
+                          </span>
+                        )}
+                        {isTicketCategory(item.category) && (
+                          <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                            🎟️ {item.child_age_ranges && item.child_age_ranges.length > 0 ? `${item.child_age_ranges.length} Child Age Tier${item.child_age_ranges.length > 1 ? 's' : ''}` : 'Adults Only'}
+                          </span>
+                        )}
                         {item.description && (
                           <span 
                             onClick={() => setDescriptionPopup(item.description)}
@@ -3478,16 +5270,22 @@ export const LibraryItems = () => {
                   </td>
                   <td>
                     <div style={{ fontSize: '0.85rem', color: '#475569' }}>
-                      <div>Max Occ: <strong>{item.max_occupancy || 2} Persons</strong></div>
-                      {item.category === 'Accommodation' && Array.isArray(item.sharing_capacity_rules) && item.sharing_capacity_rules.length > 0 ? (
-                        <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem', lineHeight: '1.35' }}>
-                          {item.sharing_capacity_rules.map(r => `${r.adults}A (+${r.maxChildren}Ch)`).join(' · ')}
-                        </div>
-                      ) : item.category === 'Accommodation' ? (
-                        <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.2rem' }}>
-                          Max {item.max_adults || item.max_occupancy || 2} Adults
-                        </div>
-                      ) : null}
+                      {isTicketCategory(item.category) || isExtrasCategory(item.category) || isCarRentalCategory(item.category) ? (
+                        <div style={{ fontWeight: 600, color: isExtrasCategory(item.category) ? '#db2777' : (isCarRentalCategory(item.category) ? '#0e7490' : '#0f766e') }}>{(isCarRentalCategory(item.category)) ? 'Per Vehicle' : 'Per Person'}</div>
+                      ) : (
+                        <>
+                          <div>Max Occ: <strong>{item.max_occupancy || 2} Persons</strong></div>
+                          {(item.category === 'Accommodation' || isTrainCategory(item.category)) && Array.isArray(item.sharing_capacity_rules) && item.sharing_capacity_rules.length > 0 ? (
+                            <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem', lineHeight: '1.35' }}>
+                              {item.sharing_capacity_rules.map(r => `${r.adults}A (+${r.maxChildren}Ch)`).join(' · ')}
+                            </div>
+                          ) : (item.category === 'Accommodation' || isTrainCategory(item.category)) ? (
+                            <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.2rem' }}>
+                              Max {item.max_adults || item.max_occupancy || 2} Adults
+                            </div>
+                          ) : null}
+                        </>
+                      )}
                     </div>
                   </td>
                   <td>
@@ -3503,7 +5301,11 @@ export const LibraryItems = () => {
                           🌿 Conservation Levy {item.conservation_levy_basis === 'per_stay' ? '(Per Stay)' : '(Per Night)'}
                         </span>
                       )}
-                      {isTourStyle && item.pricing_model === 'per_vehicle' ? (
+                      {item.category === 'Flights / Charter' ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                          ✈️ {item.pricing_model === 'per_vehicle' ? 'Per Charter' : 'Per Person'}
+                        </span>
+                      ) : isTourStyle && item.pricing_model === 'per_vehicle' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
                           🚐 Flat Rate (Per Vehicle)
                         </span>
@@ -3515,9 +5317,21 @@ export const LibraryItems = () => {
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#047857', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
                           👤 Per Person
                         </span>
+                      ) : isTicketCategory(item.category) ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                          🎟️ Per Person
+                        </span>
+                      ) : isExtrasCategory(item.category) ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#db2777', background: '#fdf2f8', border: '1px solid #f9a8d4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                          ✨ Per Person
+                        </span>
+                      ) : isCarRentalCategory(item.category) ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0e7490', background: '#ecfeff', border: '1px solid #67e8f9', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                          🚗 Flat Rate (Per Vehicle)
+                        </span>
                       ) : item.pricing_model === 'per_room' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🏠 Flat Room Rate
+                          {isTrainCategory(item.category) ? '🚂 Flat Cabin Rate' : '🏠 Flat Room Rate'}
                         </span>
                       ) : (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#047857', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
@@ -3553,7 +5367,75 @@ export const LibraryItems = () => {
                               <div style={{ fontWeight: 700, color: '#1e293b', marginBottom: '0.15rem' }}>
                                 {rate.season_name || 'Season'}:
                               </div>
-                              {isTourStyle ? (
+{item.category === 'Guide' ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#6b21a8', background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                          🚶 Per Trip
+                        </span>
+                      ) : item.category === 'Flights / Charter' ? (
+                                <>{(item.departure_city || item.arrival_city) && (
+                                    <div style={{ color: '#4338ca', fontWeight: 600, marginBottom: '0.15rem' }}>
+                                      {[item.departure_city, item.arrival_city].filter(Boolean).join(' → ')}
+                                      {item.flight_number ? ` · ${item.flight_number}` : ''}
+                                    </div>
+                                  )}
+                                  <div style={{ color: '#4338ca', fontWeight: 600 }}>
+                                    <strong>{item.pricing_model === 'per_vehicle' ? 'Charter:' : 'Adult:'}</strong> {item.currency} {transferAdultRate.toLocaleString()}{item.pricing_model === 'per_vehicle' ? ' / flight' : ''}
+                                  </div>
+                                  {transferChildRate > 0 && (
+                                    <div style={{ color: '#64748b', fontSize: '0.72rem', marginTop: '0.15rem' }}>
+                                      <strong>Child (up to {parseInt(childBands[0]?.ageTo) || 12} yrs):</strong> {item.currency} {transferChildRate.toLocaleString()}
+                                    </div>
+                                  )}
+                                  {(parseFloat(rate.taxes_and_surcharges) || 0) > 0 && (
+                                    <div style={{ color: '#b45309', fontWeight: 600, marginTop: '0.15rem' }}>
+                                      <strong>Taxes &amp; Surcharges:</strong> {item.currency} {(parseFloat(rate.taxes_and_surcharges) || 0).toLocaleString()}
+                                    </div>
+                                  )}
+                                </>
+                              ) : isTicketCategory(item.category) ? (
+                                <>
+                                  <div style={{ color: '#0f766e', fontWeight: 600 }}>
+                                    <strong>{item.ticket_type === 'fast_track' ? 'Fast Track' : 'Standard'}:</strong> {item.currency} {(parseFloat(item.ticket_type === 'fast_track' ? (rate.fast_track_adult_rate || rate.price_1_adult) : rate.price_1_adult) || 0).toLocaleString()} / person
+                                  </div>
+                                  {(item.ticket_type === 'both') && (
+                                    <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.15rem' }}>
+                                      <strong>Fast Track:</strong> {item.currency} {(parseFloat(rate.fast_track_adult_rate) || 0).toLocaleString()} / person
+                                    </div>
+                                  )}
+                                  {childBands.length > 0 && childBands.map((band) => {
+                                    const bandRate = parseFloat(childRatesMap[band.id]) || 0;
+                                    return bandRate > 0 ? (
+                                      <div key={band.id} style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
+                                        <strong>{band.name} ({band.ageFrom}–{band.ageTo} yrs):</strong> {item.currency} {bandRate.toLocaleString()} / child
+                                      </div>
+                                    ) : null;
+                                  })}
+                                  {item.ticket_type === 'both' && (
+                                    (() => {
+                                      const fastTrackChildRatesMap = rate.fast_track_child_rates_breakdown || {};
+                                      return childBands.length > 0 ? childBands.map((band) => {
+                                        const bandRate = parseFloat(fastTrackChildRatesMap[band.id]) || 0;
+                                        return bandRate > 0 ? (
+                                          <div key={`ft-${band.id}`} style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
+                                            <strong>FT {band.name} ({band.ageFrom}–{band.ageTo} yrs):</strong> {item.currency} {bandRate.toLocaleString()} / child
+                                          </div>
+                                        ) : null;
+                                      }) : null;
+                                    })()
+                                  )}
+                                </>
+                              ) : isExtrasCategory(item.category) ? (
+                                <>
+                                  <div style={{ color: '#db2777', fontWeight: 600 }}>
+                                    <strong>Adult:</strong> {item.currency} {transferAdultRate.toLocaleString()} / person
+                                  </div>
+                                  {transferChildRate > 0 && (
+                                    <div style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
+                                      <strong>Child:</strong> {item.currency} {transferChildRate.toLocaleString()} / child
+                                    </div>
+                                  )}
+                                </>
+                              ) : isTourStyle ? (
                                 <>
                                   {item.pricing_model === 'per_vehicle' || rate.rate_basis === 'per_vehicle' ? (
                                     <div style={{ color: '#1d4ed8', fontWeight: 600 }}>
@@ -3587,9 +5469,30 @@ export const LibraryItems = () => {
                                     </div>
                                   )}
                                 </>
+                              ) : isGuideCategory(item.category) ? (
+                                <div style={{ color: '#6b21a8', fontWeight: 600, lineHeight: 1.55 }}>
+                                  {guideServiceTypes.map(gst => {
+                                    const colMap = {
+                                      transfer: 'guide_transfer_rate',
+                                      half_day: 'guide_half_day_rate',
+                                      full_day: 'guide_full_day_rate',
+                                      overland: 'guide_overland_rate',
+                                      dinner_transfer: 'guide_dinner_rate'
+                                    };
+                                    const svcRate = parseFloat(rate[colMap[gst.id]]) || 0;
+                                    return svcRate > 0 ? (
+                                      <div key={gst.id} style={{ fontSize: '0.74rem' }}>
+                                        <strong>{gst.label}:</strong> {item.currency} {svcRate.toLocaleString()}
+                                      </div>
+                                    ) : null;
+                                  })}
+                                  <span style={{ fontWeight: 400, color: '#64748b', fontSize: '0.72rem' }}>
+                                    (per trip, shared among travellers)
+                                  </span>
+                                </div>
                               ) : isFlat ? (
                                 <div style={{ color: '#7c3aed', fontWeight: 600 }}>
-                                  Flat Rate: {item.currency} {flatRate.toLocaleString()} / room
+                                  Flat Rate: {item.currency} {flatRate.toLocaleString()} / {isTrainCategory(item.category) ? 'cabin' : 'room'}
                                   <span style={{ fontWeight: 400, color: '#64748b', marginLeft: '0.4rem', fontSize: '0.72rem' }}>
                                     (÷ occupants for per-person rate)
                                   </span>
@@ -3649,6 +5552,63 @@ export const LibraryItems = () => {
                             </div>
                           );
                         })
+                      ) : isCarRentalCategory(item.category) ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                          {(item.car_rental_rates && item.car_rental_rates.length > 0) ? (
+                            (() => {
+                              const groupKeys = {};
+                              const carRateGroups = [];
+                              (item.car_rental_rates || []).forEach(r => {
+                                const key = `${r.vehicle_group || ''}|${r.vehicle_name || ''}|${r.rate_code || ''}`;
+                                if (!groupKeys[key]) {
+                                  groupKeys[key] = { vehicleGroup: r.vehicle_group || '', vehicleName: r.vehicle_name || '', rateCode: r.rate_code || '', ranges: [], validFrom: r.valid_from || '', validTo: r.valid_to || '', kmsUnlimited: r.kms_unlimited !== false, kmsIncluded: r.kms_included, luggage: r.luggage ?? '', doors: r.doors ?? '', passengers: r.max_passengers ?? '', aircon: r.has_aircon !== false, gear: r.gear === 'manual' ? 'Manual' : 'Auto', fuelType: r.fuel_type === 'electric' ? 'Electric' : 'Fuel' };
+                                  carRateGroups.push(groupKeys[key]);
+                                }
+                                groupKeys[key].ranges.push(r);
+                              });
+                              return carRateGroups.map((g, gi) => (
+                                <div key={gi} style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '6px', padding: '0.4rem 0.55rem', marginTop: '0.1rem' }}>
+                                  <div style={{ fontWeight: 700, color: '#0e7490', marginBottom: '0.15rem' }}>
+                                    {g.vehicleGroup && `${g.vehicleGroup} · `}{g.vehicleName || 'Vehicle'}
+                                    {g.rateCode && <span style={{ color: '#155e75', fontWeight: 600 }}> — {g.rateCode}</span>}
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.2rem', fontSize: '0.7rem', color: '#0e7490' }}>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                      <Briefcase size={11} /> {g.luggage ? `${g.luggage} bags` : '—'}
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                      <DoorOpen size={11} /> {g.doors ? `${g.doors}` : '—'}
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                      <Users size={11} /> {g.passengers ? `Max ${g.passengers} pax` : '—'}
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                      <Snowflake size={11} /> {g.aircon ? 'AC' : 'No AC'}
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                      <Cog size={11} /> {g.gear}
+                                    </span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                      {g.fuelType === 'Electric' ? <Zap size={11} /> : <Fuel size={11} />} {g.fuelType}
+                                    </span>
+                                  </div>
+                                  {g.ranges.sort((a, b) => ((a.min_days ?? 99) - (b.min_days ?? 99))).map((r, ri) => (
+                                    <div key={ri} style={{ color: '#334155', fontSize: '0.74rem', lineHeight: 1.5 }}>
+                                      {`${r.min_days}${(r.max_days && r.max_days !== r.min_days) ? `–${r.max_days}` : '+'} days: `}
+                                      {item.currency} {(parseFloat(r.price) || 0).toLocaleString()} / vehicle
+                                    </div>
+                                  ))}
+                                  <div style={{ color: '#64748b', fontSize: '0.7rem', marginTop: '0.2rem' }}>
+                                    {g.kmsUnlimited ? 'Unlimited km' : `${g.kmsIncluded || 0} km incl.`}
+                                    {(g.validFrom || g.validTo) && ` · Bookable ${g.validFrom || '…'} → ${g.validTo || '…'}`}
+                                  </div>
+                                </div>
+                              ));
+                            })()
+                          ) : (
+                            <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No car rental rates configured</span>
+                          )}
+                        </div>
                       ) : (
                         <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No rates defined</span>
                       )}
