@@ -4,6 +4,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Login } from './pages/Login';
 import { SuperAdmin } from './pages/SuperAdmin';
 import { Suppliers } from './pages/Suppliers';
+import { Clients } from './pages/Clients';
 import { LibraryItems } from './pages/LibraryItems';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { ToastProvider } from './context/ToastContext';
@@ -26,7 +27,7 @@ function App() {
                       <Route path="dashboard" element={<Dashboard />} />
                       <Route path="" element={<Navigate to="dashboard" replace />} />
                       <Route path="super-admin" element={<SuperAdmin />} />
-                      <Route path="clients" element={<div>Clients Module (Coming Soon)</div>} />
+                      <Route path="clients" element={<Clients />} />
                       <Route path="suppliers" element={<Suppliers />} />
                       <Route path="services" element={<Navigate to="/library-items" replace />} />
                       <Route path="library-items" element={<LibraryItems />} />
