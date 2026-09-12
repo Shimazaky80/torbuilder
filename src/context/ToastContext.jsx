@@ -10,9 +10,9 @@ export const ToastProvider = ({ children }) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
 
-  const showToast = useCallback((message, type = 'info') => {
+  const showToast = useCallback((message, type = 'info', title = null) => {
     const id = Math.random().toString(36).substr(2, 9);
-    setToasts((prev) => [...prev, { id, message, type }]);
+    setToasts((prev) => [...prev, { id, message, type, title }]);
 
     // Auto remove after 10 seconds
     setTimeout(() => {
@@ -32,7 +32,10 @@ export const ToastProvider = ({ children }) => {
               {toast.type === 'warning' && <AlertTriangle size={20} />}
               {toast.type === 'info' && <Info size={20} />}
             </div>
-            <div className="toast-message">{toast.message}</div>
+            <div className="toast-content">
+              {toast.title && <div className="toast-title">{toast.title}</div>}
+              <div className="toast-message">{toast.message}</div>
+            </div>
             <button className="toast-close" onClick={() => removeToast(toast.id)}>
               <X size={16} />
             </button>

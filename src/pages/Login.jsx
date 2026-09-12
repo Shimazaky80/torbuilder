@@ -8,6 +8,7 @@ import { useToast } from '../context/ToastContext';
 export const Login = () => {
   const [view, setView] = useState('login');
   const [regStep, setRegStep] = useState('choice');
+  const [forgotEmail, setForgotEmail] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -28,10 +29,31 @@ export const Login = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
-      showToast('Welcome back!', 'success');
+
+      const name = data.user?.user_metadata?.full_name || data.user?.email?.split('@')[0] || 'User';
+      showToast(`Welcome back, ${name}!`, 'success', 'Login successful.');
       navigate('/dashboard');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail, {
+        redirectTo: `${window.location.origin}/reset-password`
+      });
+      if (error) throw error;
+      showToast('A password reset link has been sent to your email.', 'success', 'Reset link sent.');
+      setView('login');
+      setEmail(forgotEmail);
+      setForgotEmail('');
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -118,15 +140,26 @@ export const Login = () => {
           <p style={{ color: '#64748b' }}>Your all-in-one tour planning solution</p>
         </div>
 
-        <div className="view-switcher">
-          <button className={`switch-btn ${view === 'login' ? 'active' : ''}`} onClick={() => { setView('login'); setRegStep('choice'); }}>Login</button>
-          <button className={`switch-btn ${view === 'register' ? 'active' : ''}`} onClick={() => setView('register')}>Register</button>
-          <div className={`switch-indicator ${view}`} />
-        </div>
+        {view !== 'forgot' && (
+          <div className="view-switcher">
+            <button className={`switch-btn ${view === 'login' ? 'active' : ''}`} onClick={() => { setView('login'); setRegStep('choice'); }}>Login</button>
+            <button className={`switch-btn ${view === 'register' ? 'active' : ''}`} onClick={() => setView('register')}>Register</button>
+            <div className={`switch-indicator ${view}`} />
+          </div>
+        )}
 
         <div className="auth-divider" />
 
-        {view === 'login' ? (
+        {view === 'forgot' ? (
+          <form onSubmit={handleForgotPassword} className="auth-form">
+            <div className="form-group">
+              <label>Forgot your password?</label>
+              <div className="input-with-icon"><Mail size={18} /><input type="email" placeholder="Enter your registered email" value={forgotEmail} onChange={(e) => setForgotEmail(e.target.value)} required /></div>
+            </div>
+            <button type="submit" className="primary-btn" disabled={loading}>{loading ? 'Sending reset link...' : 'Send Reset Link'}</button>
+            <button type="button" onClick={() => setView('login')} style={{ display: 'flex', alignItems: 'center', gap: '8px', border: 'none', background: 'none', color: '#64748b', cursor: 'pointer', margin: '0 auto' }}><ArrowLeft size={16} /> Back to Login</button>
+          </form>
+        ) : view === 'login' ? (
           <form onSubmit={handleLogin} className="auth-form">
             <div className="form-group">
               <label>Email Address</label>
@@ -136,7 +169,8 @@ export const Login = () => {
               <label>Password</label>
               <div className="input-with-icon"><Lock size={18} /><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></div>
             </div>
-            <button type="submit" className="primary-btn" disabled={loading}>{loading ? '...' : 'Sign In'}</button>
+            <button type="submit" className="primary-btn" disabled={loading}>{loading ? 'Logging in...' : 'Sign In'}</button>
+            <button type="button" onClick={() => setView('forgot')} style={{ border: 'none', background: 'none', color: '#0d7478', cursor: 'pointer', textDecoration: 'underline' }}>Forgot password?</button>
           </form>
         ) : (
           regStep === 'choice' ? (
@@ -155,7 +189,7 @@ export const Login = () => {
               <div className="form-group"><label>Full Name</label><div className="input-with-icon"><User size={18} /><input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} required /></div></div>
               <div className="form-group"><label>Email Address</label><div className="input-with-icon"><Mail size={18} /><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></div></div>
               <div className="form-group"><label>Password</label><div className="input-with-icon"><Lock size={18} /><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></div></div>
-              <button type="submit" className="primary-btn" disabled={loading}>{loading ? '...' : 'Register & Join'}</button>
+              <button type="submit" className="primary-btn" disabled={loading}>{loading ? 'Joining team...' : 'Register & Join'}</button>
               <button type="button" onClick={() => setRegStep('choice')} style={{ display: 'flex', alignItems: 'center', gap: '8px', border: 'none', background: 'none', color: '#64748b', cursor: 'pointer', margin: '0 auto' }}><ArrowLeft size={16} /> Back</button>
             </form>
           ) : (
@@ -164,7 +198,7 @@ export const Login = () => {
               <div className="form-group"><label>Full Name</label><div className="input-with-icon"><User size={18} /><input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} required /></div></div>
               <div className="form-group"><label>Email Address</label><div className="input-with-icon"><Mail size={18} /><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></div></div>
               <div className="form-group"><label>Password</label><div className="input-with-icon"><Lock size={18} /><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></div></div>
-              <button type="submit" className="primary-btn" disabled={loading}>{loading ? '...' : 'Register Company'}</button>
+              <button type="submit" className="primary-btn" disabled={loading}>{loading ? 'Creating account...' : 'Register Company'}</button>
               <button type="button" onClick={() => setRegStep('choice')} style={{ display: 'flex', alignItems: 'center', gap: '8px', border: 'none', background: 'none', color: '#64748b', cursor: 'pointer', margin: '0 auto' }}><ArrowLeft size={16} /> Back</button>
             </form>
           )

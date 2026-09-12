@@ -276,7 +276,7 @@ export const Suppliers = () => {
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Building2 size={22} color="#047857" /> {editingSupplier ? `Edit Supplier: ${editingSupplier.name}` : 'Add New Supplier'}
+              <Building2 size={22} color="#0d7478" /> {editingSupplier ? `Edit Supplier: ${editingSupplier.name}` : 'Add New Supplier'}
             </h2>
             <button 
               onClick={() => { setShowInlineForm(false); setEditingSupplier(null); }} 
@@ -533,11 +533,12 @@ export const Suppliers = () => {
               <button 
                 type="button" 
                 className="secondary-btn" 
+                style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
                 onClick={() => { setShowInlineForm(false); setEditingSupplier(null); }}
               >
                 Cancel
               </button>
-              <button type="submit" className="primary-btn" style={{ background: '#047857' }}>
+              <button type="submit" className="primary-btn" style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }}>
                 {editingSupplier ? 'Save Changes' : 'Create Supplier'}
               </button>
             </div>
@@ -580,7 +581,7 @@ export const Suppliers = () => {
           <div className="action-buttons">
             <button 
               className="primary-btn" 
-              style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#047857' }} 
+              style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478' }} 
               onClick={handleOpenAddForm}
             >
               <Plus size={18} /> Add New Supplier
@@ -608,7 +609,7 @@ export const Suppliers = () => {
                 <td colSpan="6" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
                   <Building2 size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
                   <h3>No Suppliers Found</h3>
-                  <p>Click "+ Add New Supplier" above to create supplier records.</p>
+                  <p>Click "Add New Supplier" above to create supplier records.</p>
                 </td>
               </tr>
             ) : filteredSuppliers.map((supplier) => (

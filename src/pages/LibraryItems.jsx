@@ -59,6 +59,7 @@ export const LibraryItems = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
+  const [supplierFilter, setSupplierFilter] = useState('All');
   const [showInlineForm, setShowInlineForm] = useState(true);
 
   // Editing state: when set, the inline form updates these items instead of inserting.
@@ -99,7 +100,7 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true });
   const url = import.meta.env.VITE_SUPABASE_URL;
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
@@ -136,12 +137,31 @@ export const LibraryItems = () => {
     'All Inclusive'
   ];
 
-  const vehicleOptions = [
-    { label: 'Sedans (up to 3 pax)', pax: 3 },
-    { label: 'Minivan (up to 8 pax)', pax: 8 },
-    { label: 'Microbus (up to 14 pax)', pax: 14 },
-    { label: 'Minibus (up to 26 pax)', pax: 26 },
-    { label: 'Coach (up to 52 pax)', pax: 52 }
+  const tourTypes = [
+    {
+      id: 'half_day',
+      label: 'Half Day',
+      icon: '🌤️',
+      description: 'Typically 3–5 hours — a morning or afternoon activity.'
+    },
+    {
+      id: 'full_day',
+      label: 'Full Day',
+      icon: '🌞',
+      description: 'Typically 6–10 hours — a full day of sightseeing or activity.'
+    },
+    {
+      id: 'escorted_dinner_lunch',
+      label: 'Escorted Dinner / Lunch',
+      icon: '🍽️',
+      description: 'A hosted meal (dinner or lunch) with escort / guide.'
+    },
+    {
+      id: 'overland_transfer',
+      label: 'Overland Transfer',
+      icon: '🛤️',
+      description: 'Long-haul transfer that stays away from the origin overnight.'
+    }
   ];
 
   const transferPricingOptions = [
@@ -202,7 +222,7 @@ export const LibraryItems = () => {
     { id: 'overland', field: 'guideOverlandRate', label: 'Overland price' },
     { id: 'dinner_transfer', field: 'guideDinnerRate', label: 'Dinner transfer price' }
   ];
-  const getVehiclePax = (label) => vehicleOptions.find(o => o.label === label)?.pax || 0;
+  const getVehiclePax = (maxOccupancy) => parseInt(maxOccupancy) || 0;
   const getDefaultDriverMeals = (category, transferType) => {
     if (category === 'Transfers') {
       if (transferType === 'dinner') return ['dinner'];
@@ -324,6 +344,7 @@ export const LibraryItems = () => {
       currency: 'ZAR',
       mealPlan: 'Bed & Breakfast',
       vehicleType: '',
+      tourType: '',
       transferType: '',
       flightNumber: '',
       airlineName: '',
@@ -540,7 +561,7 @@ export const LibraryItems = () => {
 
   useEffect(() => {
     fetchLibraryItems();
-  }, [categoryFilter, selectedSupplierId]);
+  }, [categoryFilter, supplierFilter]);
 
   useEffect(() => {
     if (!lightbox) return;
@@ -573,6 +594,7 @@ export const LibraryItems = () => {
               contracts: libCols.includes('contract_url') && libCols.includes('contract_name'),
               tieredPricing: rateCols.includes('tiered_pricing'),
               transferType: libCols.includes('transfer_type'),
+              tourType: libCols.includes('tour_type'),
               feeType: libCols.includes('fee_type') && rateCols.includes('entrance_fee_per_person') && rateCols.includes('conservation_levy_per_adult'),
               driverOption: libCols.includes('driver_required') && libCols.includes('driver_meals') && libCols.includes('driver_accommodation')
             });
@@ -657,8 +679,8 @@ export const LibraryItems = () => {
         .eq('company_id', profile.company_id)
         .order('created_at', { ascending: false });
 
-      if (selectedSupplierId) {
-        itemQuery = itemQuery.eq('supplier_id', selectedSupplierId);
+      if (supplierFilter !== 'All') {
+        itemQuery = itemQuery.eq('supplier_id', supplierFilter);
       }
       if (categoryFilter !== 'All') {
         itemQuery = legacyCategoryName(categoryFilter)
@@ -914,9 +936,9 @@ export const LibraryItems = () => {
     const validFiles = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const isJpeg = file.type === 'image/jpeg' || file.type === 'image/jpg' || file.name.match(/\.(jpe?g)$/i);
+      const isJpeg = file.type === 'image/jpeg' || file.type === 'image/jpg' || file.type === 'image/png' || file.name.match(/\.(jpe?g|png)$/i);
       if (!isJpeg) {
-        showToast(`"${file.name}" skipped: Only JPEG (.jpg / .jpeg) image files are allowed.`, 'warning');
+        showToast(`"${file.name}" skipped: Only JPEG (.jpg / .jpeg) and PNG (.png) image files are allowed.`, 'warning');
         continue;
       }
       validFiles.push(file);
@@ -1097,10 +1119,9 @@ adultRate: 0,
 
   // Transfer: pick a vehicle type (auto-fills max occupancy from its pax capacity)
   const handleVehicleTypeChange = (tempId, label) => {
-    const opt = vehicleOptions.find(o => o.label === label);
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
-      const pax = opt ? opt.pax : 0;
+      const pax = label ? (parseInt(item.maxOccupancy) || 0) : 0;
       const driverEligible = isDriverEligibleCategory(item.category) && pax >= 14;
       return {
         ...item,
@@ -1137,7 +1158,7 @@ adultRate: 0,
         if (['per_vehicle', 'tiered'].includes(pricingModel)) pricingModel = 'per_person';
       }
       const feeType = (category === 'Accommodation' || category === 'Transfers') ? (item.feeType || 'none') : 'none';
-      const driverEligible = isDriverEligibleCategory(category) && getVehiclePax(item.vehicleType) >= 14;
+      const driverEligible = isDriverEligibleCategory(category) && getVehiclePax(item.maxOccupancy) >= 14;
       return {
         ...item,
         category,
@@ -1283,6 +1304,10 @@ adultRate: 0,
           showToast(`Transfer Item ${i + 1} requires a Transfer Type`, 'warning');
           return;
         }
+        if (itemsToSave[i].category === 'Activities / Tours' && dbFeatures.tourType && !itemsToSave[i].tourType) {
+          showToast(`Activity / Tour Item ${i + 1} requires a Tour Type`, 'warning');
+          return;
+        }
         if (isTourStyleCategory(itemsToSave[i].category) && !isFlightCategory(itemsToSave[i].category) && !itemsToSave[i].vehicleType) {
           showToast(`${itemsToSave[i].category} Item ${i + 1} requires a Vehicle Type`, 'warning');
           return;
@@ -1338,6 +1363,7 @@ adultRate: 0,
           category: itemData.category,
           sub_category: isFlight ? itemData.category : (isTourStyle ? (itemData.vehicleType || itemData.category) : itemData.category),
           transfer_type: itemData.category === 'Transfers' && dbFeatures.transferType ? (itemData.transferType || null) : null,
+          tour_type: itemData.category === 'Activities / Tours' && dbFeatures.tourType ? (itemData.tourType || null) : null,
           ...(itemData.category === 'Flights / Charter'
             ? {
                 flight_number: itemData.flightNumber || null,
@@ -1918,6 +1944,7 @@ adultRate: 0,
       currency: item.currency || 'ZAR',
       mealPlan: rates.find(r => r.meal_plan)?.meal_plan || 'Bed & Breakfast',
       vehicleType: isTourStyle ? (item.sub_category || '') : '',
+      tourType: item.tour_type || '',
       transferType: item.category === 'Transfers' ? (item.transfer_type || '') : '',
       flightNumber: item.flight_number || '',
       airlineName: item.airline_name || '',
@@ -1973,7 +2000,7 @@ adultRate: 0,
   // Filter list
   const filteredList = libraryItemsList.filter(item => {
     const matchesSearch = item.name.toLowerCase().includes(search.toLowerCase()) ||
-                          (item.suppliers?.name && item.suppliers.name.toLowerCase().includes(search.toLowerCase()));
+                          (item.supplier?.name && item.supplier.name.toLowerCase().includes(search.toLowerCase()));
     return matchesSearch;
   });
 
@@ -1995,8 +2022,8 @@ adultRate: 0,
             />
           </div>
 
-          {/* Category Filter Dropdown on Header Bar */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          {/* Filter Dropdowns on Header Bar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
             <div style={{ position: 'relative' }}>
               <select 
                 className="pricing-select"
@@ -2007,7 +2034,7 @@ adultRate: 0,
                   margin: 0,
                   paddingRight: '2rem',
                   fontWeight: 600,
-                  minWidth: '200px',
+                  minWidth: '190px',
                   borderColor: '#cbd5e1'
                 }}
               >
@@ -2018,13 +2045,35 @@ adultRate: 0,
               </select>
             </div>
 
+            {/* Supplier Filter Dropdown on Header Bar */}
+            <div style={{ position: 'relative' }}>
+              <select 
+                className="pricing-select"
+                value={supplierFilter}
+                onChange={(e) => setSupplierFilter(e.target.value)}
+                style={{
+                  height: '42px',
+                  margin: 0,
+                  paddingRight: '2rem',
+                  fontWeight: 600,
+                  minWidth: '190px',
+                  borderColor: '#cbd5e1'
+                }}
+              >
+                <option value="All">All Suppliers</option>
+                {suppliers.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+
             {/* Toggle Add Library Item Inline Form */}
             <button 
               className="primary-btn" 
-              style={{ width: 'auto', padding: '0.625rem 1.25rem', height: '42px', background: '#047857' }}
+              style={{ width: 'auto', padding: '0.625rem 1.25rem', height: '42px', background: '#0d7478' }}
               onClick={() => setShowInlineForm(!showInlineForm)}
             >
-              <Plus size={18} /> {showInlineForm ? 'Close Form' : '+ Add Library Item'}
+              <Plus size={18} /> {showInlineForm ? 'Close Form' : 'Add Library Item'}
             </button>
           </div>
 
@@ -2045,7 +2094,7 @@ adultRate: 0,
           
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Package size={22} color="#047857" />
+              <Package size={22} color="#0d7478" />
               {Object.keys(editingItems).length > 0 ? `Edit Library Item: ${itemsToSave[0]?.name || ''}` : 'Add New Library Item'}
             </h2>
             <button 
@@ -2069,7 +2118,7 @@ adultRate: 0,
               
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
                 <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Building2 size={20} color="#047857" /> Supplier
+                  <Building2 size={20} color="#0d7478" /> Supplier
                 </h3>
 
                 {/* Right Top Action Link */}
@@ -2077,7 +2126,7 @@ adultRate: 0,
                   <button 
                     type="button" 
                     onClick={() => setSupplierMode('existing')} 
-                    style={{ color: '#047857', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
+                    style={{ color: '#0d7478', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
                   >
                     Select Existing
                   </button>
@@ -2085,9 +2134,9 @@ adultRate: 0,
                   <button 
                     type="button" 
                     onClick={() => setSupplierMode('new')} 
-                    style={{ color: '#047857', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
+                    style={{ color: '#0d7478', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
                   >
-                    + Add New Supplier
+<Plus size={14} /> Add New Supplier
                   </button>
                 )}
               </div>
@@ -2337,47 +2386,27 @@ adultRate: 0,
                   </div>
 
                   {/* Dedicated Save Supplier & Cancel Buttons */}
-                  <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-start', alignItems: 'center', marginTop: '0.5rem', paddingTop: '1.25rem', borderTop: '1px solid #e2e8f0' }}>
+                  <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', alignItems: 'center', marginTop: '0.5rem', paddingTop: '1.25rem', borderTop: '1px solid #e2e8f0' }}>
+                    <span style={{ fontSize: '0.8rem', color: '#64748b', marginRight: 'auto' }}>
+                      (Saving supplier enables library item creation below)
+                    </span>
                     <button 
                       type="button" 
-                      onClick={handleSaveSupplierOnly} 
-                      disabled={savingSupplier}
-                      style={{
-                        background: '#00665c',
-                        border: 'none',
-                        color: '#ffffff',
-                        padding: '0.55rem 1.25rem',
-                        borderRadius: '6px',
-                        fontSize: '0.875rem',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.4rem',
-                        boxShadow: '0 2px 4px rgba(0,102,92,0.15)'
-                      }}
-                    >
-                      <Check size={16} /> {savingSupplier ? 'Saving Supplier...' : 'Save Supplier'}
-                    </button>
-                    <button 
-                      type="button" 
-                      onClick={handleCancelSupplierForm} 
-                      style={{
-                        background: '#ffffff',
-                        border: '1px solid #cbd5e1',
-                        color: '#1e293b',
-                        padding: '0.55rem 1.25rem',
-                        borderRadius: '6px',
-                        fontSize: '0.875rem',
-                        fontWeight: 500,
-                        cursor: 'pointer'
-                      }}
+                      className="secondary-btn" 
+                      style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
+                      onClick={handleCancelSupplierForm}
                     >
                       Cancel
                     </button>
-                    <span style={{ fontSize: '0.8rem', color: '#64748b', marginLeft: '0.5rem' }}>
-                      (Saving supplier enables library item creation below)
-                    </span>
+                    <button 
+                      type="button" 
+                      className="primary-btn" 
+                      style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }}
+                      onClick={handleSaveSupplierOnly} 
+                      disabled={savingSupplier}
+                    >
+                      <Check size={16} /> {savingSupplier ? 'Saving Supplier...' : 'Save Supplier'}
+                    </button>
                   </div>
 
                 </div>
@@ -2401,7 +2430,7 @@ adultRate: 0,
                 gap: '0.5rem'
               }}>
                 <Building2 size={18} color="#b45309" />
-                <span>Please select a supplier above, or click "+ Add New Supplier" and save it, to activate the library item form below.</span>
+                <span>Please select a supplier above, or click "Add New Supplier" and save it, to activate the library item form below.</span>
               </div>
             )}
 
@@ -2545,16 +2574,13 @@ adultRate: 0,
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Vehicle Type *
                         </label>
-                        <select 
+                        <input 
+                          type="text" 
                           className="pricing-select"
+                          placeholder={item.category === 'Transfers' ? 'e.g. Land Cruiser / Safari Minivan' : 'e.g. Safari Vehicle / Boat / Van'}
                           value={item.vehicleType}
                           onChange={(e) => handleVehicleTypeChange(item.tempId, e.target.value)}
-                        >
-                          <option value="">Select vehicle type...</option>
-                          {vehicleOptions.map(v => (
-                            <option key={v.label} value={v.label}>{v.label}</option>
-                          ))}
-                        </select>
+                        />
                       </div>
                     ) : (item.category === 'Accommodation' || isTrainCategory(item.category)) ? (
                       <div>
@@ -2574,7 +2600,7 @@ adultRate: 0,
                     ) : null}
 
                     {/* DRIVER OPTION (large vehicles: 14+ seats — Activities / Tours + Transfers) */}
-                    {dbFeatures.driverOption && isDriverEligibleCategory(item.category) && getVehiclePax(item.vehicleType) >= 14 && (
+                    {dbFeatures.driverOption && isDriverEligibleCategory(item.category) && getVehiclePax(item.maxOccupancy) >= 14 && (
                       <div style={{ background: '#f0fdfa', border: '1px solid #5eead4', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700, color: '#134e4a' }}>
                           <input
@@ -2994,6 +3020,62 @@ adultRate: 0,
                     </div>
                   )}
 
+                  {/* TOUR TYPE SELECTOR (Activities / Tours only) */}
+                  {item.category === 'Activities / Tours' && (
+                    <div style={{
+                      background: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '12px',
+                      padding: '1.25rem',
+                      marginBottom: '1.5rem',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                    }}>
+                      <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                        <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <Compass size={18} color="#10b981" /> Tour Type <span style={{ color: '#ef4444' }}>*</span>
+                        </h4>
+                        <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                          This labels the service in the itinerary builder (Half Day, Full Day, Escorted Dinner / Lunch, or Overland Transfer).
+                        </span>
+                      </div>
+
+                      {!dbFeatures.tourType && (
+                        <div style={{ background: '#fefce8', border: '1px solid #facc15', borderRadius: '6px', padding: '0.5rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.74rem', fontWeight: 600, color: '#854d0e' }}>
+                          Tour Type will be saved after the database migration is applied.
+                        </div>
+                      )}
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.6rem' }}>
+                        {tourTypes.map(tt => {
+                          const selected = item.tourType === tt.id;
+                          return (
+                            <button
+                              key={tt.id}
+                              type="button"
+                              onClick={() => handleItemFieldChange(item.tempId, 'tourType', tt.id)}
+                              style={{
+                                background: selected ? '#ecfdf5' : '#f8fafc',
+                                border: selected ? '2px solid #10b981' : '1px solid #e2e8f0',
+                                borderRadius: '10px',
+                                padding: '0.75rem 0.85rem',
+                                textAlign: 'left',
+                                cursor: 'pointer',
+                                transition: 'all 0.15s ease'
+                              }}
+                            >
+                              <span style={{ fontWeight: 700, fontSize: '0.85rem', color: selected ? '#047857' : '#1e293b', display: 'block' }}>
+                                {tt.icon} {tt.label} {selected && '✓'}
+                              </span>
+                              <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginTop: '0.2rem', lineHeight: 1.35 }}>
+                                {tt.description}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {/* MAXIMUM OCCUPANCY & CAPACITY CARD */}
                   {isTourStyle ? (
                     <div style={{
@@ -3019,7 +3101,7 @@ adultRate: 0,
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'flex-end', gap: '0.6rem', flexWrap: 'wrap' }}>
                         <div style={{ flex: '1', minWidth: '180px' }}>
                           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>Maximum Occupancy</span>
-                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : item.category === 'Transfers' ? 'Max pax allowed (auto-filled from vehicle type, editable)' : 'Max pax allowed (auto-filled from vehicle type, editable)'}</span>
+                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : 'Max pax allowed — set the capacity for your vehicle type'}</span>
                           <input
                             type="number"
                             min="1"
@@ -3256,9 +3338,9 @@ adultRate: 0,
                         <button
                           type="button"
                           onClick={() => handleAddChildAgeBand(item.tempId)}
-                          style={{ fontSize: '0.75rem', padding: '0.25rem 0.65rem', background: '#f0fdf4', color: '#00665c', border: '1px solid #bbf7d0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
+                          style={{ fontSize: '0.75rem', padding: '0.25rem 0.65rem', background: '#f0fdf4', color: '#00665c', border: '1px solid #bbf7d0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                         >
-                          + Add Age Tier
+                          <Plus size={13} /> Add Age Tier
                         </button>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -3366,9 +3448,9 @@ adultRate: 0,
                         <button
                           type="button"
                           onClick={() => handleAddChildAgeBand(item.tempId)}
-                          style={{ fontSize: '0.75rem', padding: '0.25rem 0.65rem', background: '#f0fdfa', color: '#0f766e', border: '1px solid #99f6e4', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
+                          style={{ fontSize: '0.75rem', padding: '0.25rem 0.65rem', background: '#f0fdfa', color: '#0f766e', border: '1px solid #99f6e4', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                         >
-                          + Add Age Tier
+                          <Plus size={13} /> Add Age Tier
                         </button>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -3909,10 +3991,10 @@ adultRate: 0,
                           <button
                             type="button"
                             className="secondary-btn"
-                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', marginTop: '0.6rem' }}
+                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', marginTop: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                             onClick={() => handleAddCarRange(item.tempId, group.groupId)}
                           >
-                            + Add Range
+                            <Plus size={13} /> Add Range
                           </button>
                         </div>
                       ))}
@@ -3920,10 +4002,10 @@ adultRate: 0,
                       <button
                         type="button"
                         className="secondary-btn"
-                        style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                        style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                         onClick={() => handleAddCarGroup(item.tempId)}
                       >
-                        + Add Vehicle Group
+                        <Plus size={14} /> Add Vehicle Group
                       </button>
                     </div>
                   )}
@@ -4865,10 +4947,10 @@ adultRate: 0,
                     <button 
                       type="button" 
                       className="secondary-btn" 
-                      style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem' }}
+                      style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                       onClick={() => handleAddSeasonRow(item.tempId)}
                     >
-                      + Add Season
+                      <Plus size={13} /> Add Season
                     </button>
                   </div>
                   )}
@@ -4897,7 +4979,7 @@ adultRate: 0,
                       type="file" 
                       id={`file-input-${item.tempId}`}
                       multiple 
-                      accept=".jpg,.jpeg,image/jpeg"
+                      accept=".jpg,.jpeg,.png,image/jpeg,image/png"
                       style={{ display: 'none' }}
                       onChange={(e) => {
                         handleImageFilesUpload(item.tempId, e.target.files);
@@ -5094,37 +5176,20 @@ adultRate: 0,
               )}
 
               {/* Bottom Right Actions */}
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', alignItems: 'center', borderTop: '1px solid #f1f5f9', paddingTop: '1.25rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', alignItems: 'center', borderTop: '1px solid #f1f5f9', paddingTop: '1.25rem' }}>
                 <button 
                   type="button" 
+                  className="secondary-btn" 
+                  style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
                   onClick={() => { setShowInlineForm(false); setEditingItems({}); }}
-                  style={{
-                    background: '#ffffff',
-                    border: '1px solid #cbd5e1',
-                    color: '#1e293b',
-                    padding: '0.6rem 1.4rem',
-                    borderRadius: '6px',
-                    fontSize: '0.9rem',
-                    fontWeight: 500,
-                    cursor: 'pointer'
-                  }}
                 >
                   Cancel
                 </button>
                 <button 
                   type="submit" 
+                  className="primary-btn" 
+                  style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }}
                   disabled={saving}
-                  style={{
-                    background: '#00665c',
-                    border: 'none',
-                    color: '#ffffff',
-                    padding: '0.6rem 1.6rem',
-                    borderRadius: '6px',
-                    fontSize: '0.9rem',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    boxShadow: '0 2px 4px rgba(0,102,92,0.15)'
-                  }}
                 >
                   {saving ? 'Saving...' : (Object.keys(editingItems).length > 0 ? 'Save Changes' : 'Add Library Item(s)')}
                 </button>
@@ -5166,7 +5231,7 @@ adultRate: 0,
                 <td colSpan="8" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
                   <Package size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
                   <h3>No Library Items Found</h3>
-                  <p>Click "+ Add Library Item" above to build your item catalog.</p>
+                  <p>Click "Add Library Item" above to build your item catalog.</p>
                 </td>
               </tr>
             ) : filteredList.map((item) => {
@@ -5196,10 +5261,15 @@ adultRate: 0,
                       <div>
                         <span style={{ fontWeight: 700, color: '#0f172a', display: 'block' }}>{item.name}</span>
                         {isTourStyle && item.sub_category && item.sub_category !== 'Transfers' && (
-                          <span style={{ display: 'inline-block', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                            🚐 {item.sub_category} · {item.max_occupancy || 4} pax
-                          </span>
-                        )}
+                            <span style={{ display: 'inline-block', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                              🚐 {item.sub_category} · {item.max_occupancy || 4} pax
+                            </span>
+                          )}
+                          {item.category === 'Activities / Tours' && item.tour_type && (
+                            <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#047857', background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                              {tourTypes.find(t => t.id === item.tour_type)?.icon || '🧭'} {(tourTypes.find(t => t.id === item.tour_type)?.label || item.tour_type)}
+                            </span>
+                          )}
                         {transType && (
                           <span style={{ display: 'inline-block', marginLeft: '0.35rem', fontSize: '0.72rem', fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
                             {transType.icon} {transType.label}
@@ -5770,7 +5840,7 @@ adultRate: 0,
                   target="_blank"
                   rel="noreferrer"
                   download={contractPopup.name}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', background: '#00665c', color: '#fff', border: 'none', padding: '0.45rem 1rem', borderRadius: '6px', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', textDecoration: 'none' }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', background: '#0d7478', color: '#fff', border: 'none', padding: '0.45rem 1rem', borderRadius: '6px', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', textDecoration: 'none' }}
                 >
                   <Download size={15} /> Download
                 </a>
