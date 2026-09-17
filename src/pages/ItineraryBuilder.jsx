@@ -1,19 +1,1714 @@
+﻿import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Map, ArrowLeft, Check } from 'lucide-react';
+import {
+  Map as MapIcon,
+  ArrowLeft,
+  Search,
+  Copy,
+  FileDown,
+  Save,
+  Send,
+  MoreVertical,
+  Trash2,
+  Layers,
+  Eraser,
+  Plus,
+  Check,
+  X,
+  Calendar,
+  Package,
+  User,
+  Receipt,
+  StickyNote,
+  Route,
+  FileText,
+  FileSpreadsheet,
+  Printer,
+  Link2,
+  GripVertical,
+  CheckCircle2,
+  Edit3,
+  Pencil,
+  ChevronDown,
+  Mail,
+  Plane,
+  Ticket,
+  Lock
+} from 'lucide-react';
+import { supabase } from '../lib/supabase';
+import { useToast } from '../context/ToastContext';
+import { useCurrencies } from '../hooks/useCurrencies';
+import ClientTourForm from '../components/ClientTourForm';
+import { usePageGuard } from '../context/NavigationGuardContext';
+
+/* â”€â”€â”€ Pure helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+const toISODate = (iso) => (iso ? String(iso).slice(0, 10) : '');
+
+const ymdOf = (iso) => {
+  const [y, m, d] = toISODate(iso).split('-').map(Number);
+  return [y || 0, m || 0, d || 0];
+};
+
+const addDaysToDate = (iso, n) => {
+  const [y, m, d] = ymdOf(iso);
+  if (!y || !m || !d) return toISODate(iso);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+
+const daysInRange = (start, end) => {
+  const s = toISODate(start);
+  const e = toISODate(end);
+  if (!s || !e) return 1;
+  const [sy, sm, sd] = ymdOf(s);
+  const [ey, em, ed] = ymdOf(e);
+  if (!sy || !sm || !sd || !ey || !em || !ed) return 1;
+  const diff = Date.UTC(ey, em - 1, ed) - Date.UTC(sy, sm - 1, sd);
+  return Math.max(1, Math.round(diff / 86400000) + 1);
+};
+
+const formatDateLong = (iso) => {
+  const s = toISODate(iso);
+  if (!s) return '';
+  const [y, m, d] = s.split('-').map(Number);
+  if (!y || !m || !d) return s;
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  });
+};
+
+/* Compact DD/MM/YYYY used in mailout bodies so drafts stay locale-agnostic. */
+
+/* GM-local DD/MM/YYYY rendering used in outbound emails (keeps every draft
+   free of regional ambiguity regardless of the operator's locale). */
+const formatDateShort = (iso) => {
+  const s = toISODate(iso);
+  if (!s) return '';
+  const [y, m, d] = s.split('-').map(Number);
+  if (!y || !m || !d) return s;
+  return `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
+};
+
+const numOr = (v, fallback) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/* VAT split for a VAT-INCLUSIVE amount: the amount already includes tax, so the
+   embedded VAT is amount × rate/(100+rate). Used for output VAT (on the sell
+   price charged to the client) and input VAT (on the supplier buy price). The
+   margin-only net VAT = output VAT − input VAT. */
+const vatOfInclusive = (amount, rate) => {
+  const r = Number(rate) || 0;
+  if (!r) return 0;
+  return round2((Number(amount) || 0) * r / (100 + r));
+};
+
+const fmtMoney = (n, sym = '') =>
+  `${sym}${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
+const rateForItem = (item, code) => {
+  if (!item) return null;
+  const rates = item.item_rates || [];
+  if (!rates.length) return null;
+  const codeU = (code || '').toUpperCase();
+  const byCurr = rates.find((r) => (r.currency || '').toUpperCase() === codeU);
+  return byCurr || rates[0];
+};
+
+const effectiveAdultRate = (rate) =>
+  rate ? parseFloat(rate.price_1_adult) || parseFloat(rate.unit_price) || 0 : 0;
+
+// Contract pricing model â€” drives whether a rate is charged per traveller or
+// once (flat / per vehicle / per trip). A flat-rate item (e.g. a city tour
+// charged per vehicle) must NOT be multiplied by pax: its per-person figure is
+// the contract total divided by the travellers, so per-pax Ã— pax == contract.
+const FLAT_BASIS = new Set(['per_vehicle', 'per_trip', 'per_room', 'flat']);
+
+const basisOfItem = (item, code) => {
+  const rate = rateForItem(item, code);
+  return rate?.rate_basis || item?.pricing_model || 'per_person';
+};
+
+const isFlatBasis = (basis) => FLAT_BASIS.has(basis);
+
+const basisLabelOf = (basis) => {
+  switch (basis) {
+    case 'per_vehicle': return 'Flat rate';
+    case 'per_trip': return 'Per trip';
+    case 'per_room': return 'Per room';
+    case 'per_person': return 'Per person';
+    case 'per_person_sharing': return 'Per person sharing';
+    case 'tiered': return 'Tiered';
+    case 'flat': return 'Flat rate';
+    default: return 'Per person';
+  }
+};
+
+const tierRateForPax = (rate, pax) => {
+  const tiers = Array.isArray(rate?.tiered_pricing) ? rate.tiered_pricing : [];
+  if (!tiers.length) return 0;
+  const p = Number(pax) || 0;
+  let chosen = null;
+  for (const t of tiers) {
+    const minP = parseInt(t.min_pax, 10) || 0;
+    const maxP = parseInt(t.max_pax, 10) || 0;
+    if (p >= minP && (maxP === 0 || p <= maxP)) { chosen = t; break; }
+  }
+  if (!chosen) chosen = tiers[tiers.length - 1];
+  const total = parseFloat(chosen?.rate) || 0;
+  return p > 0 ? total / p : total;
+};
+
+// Accommodation rates are quoted per room occupancy, not per traveller:
+//   1 traveller -> single rate (price_1_adult / single_room_rate)
+//   2 travellers -> per-person sharing rate (price_2_adults / double_twin_rate)
+//   3+ travellers -> per-person rate for 3+ sharing
+// Returns the per-person figure for the current group size, so the line
+// (perPax x pax) reproduces the contracted room cost for the whole group.
+const accommodationPaxRate = (rate, pax) => {
+  const p = Number(pax) || 0;
+  const num = (v) => parseFloat(v) || 0;
+  if (p <= 1) return num(rate?.price_1_adult) || num(rate?.single_room_rate) || num(rate?.unit_price) || 0;
+  if (p === 2) return num(rate?.price_2_adults) || num(rate?.double_twin_rate) || 0;
+  return num(rate?.price_3_plus_adults) || num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
+};
+
+// Per-person buy figure implied by a contract, given the traveller count.
+//   per_person items: the rate itself is per person.
+//   per_person_sharing (accommodation): single rate when 1 traveller,
+//   per-person sharing rate when 2+, keyed by occupancy (never the single
+//   rate multiplied by pax).
+//   flat / per_vehicle / per_trip / per_room: contract total Ã· travellers,
+//   so the line (perPax Ã— pax) reproduces the contract amount exactly.
+const contractPaxRate = (item, code, pax) => {
+  const rate = rateForItem(item, code);
+  const raw = effectiveAdultRate(rate);
+  const basis = basisOfItem(item, code);
+  const p = Number(pax) || 0;
+  if (basis === 'tiered') return tierRateForPax(rate, p);
+  if (basis === 'per_person_sharing') return accommodationPaxRate(rate, p);
+  if (isFlatBasis(basis)) return p > 0 ? raw / p : raw;
+  return raw;
+};
+
+const visibleInCurrency = (item, code) => {
+  const codeU = (code || '').toUpperCase();
+  const hasRateCurr = (item.item_rates || []).some((r) => (r.currency || '').toUpperCase() === codeU);
+  if (hasRateCurr) return true;
+  const itemCurr = (item.currency || '').toUpperCase();
+  if (itemCurr) return itemCurr === codeU;
+  return codeU === 'ZAR';
+};
+
+const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+
+const htmlEscape = (v) =>
+  String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const STATUS_OPTIONS = [
+  { value: 'quotation', label: 'Quotation' },
+  { value: 'provisional', label: 'Provisional Booking' },
+  { value: 'confirmed', label: 'Confirmed Booking' },
+  { value: 'in_progress', label: 'In Progress' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' }
+];
+
+const STATUS_MOD = {
+  quotation: 'quotation',
+  provisional: 'provisional',
+  confirmed: 'confirmed',
+  in_progress: 'in_progress',
+  completed: 'completed',
+  cancelled: 'cancelled'
+};
+
+const statusLabelOf = (v) => STATUS_OPTIONS.find((s) => s.value === v)?.label || v;
+
+/* ─── Email tooling (default tenant mail client via mailto) ─────────────────
+   There is no SMTP backend in this build; the tenant's default email client
+   handles sending. We compose fully prefilled mailto: drafts for every
+   supplier / service so the user simply presses Send. Vouchers and service
+   requests are strictly derived from persisted data — they cannot be edited. */
+
+const mailTo = (email, subject, body) =>
+  `mailto:${(email || '').trim()}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+const emailOf = (sup) =>
+  (sup && (sup.email || sup.contact_email || sup.email_address || '').trim()) || '';
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Text decode guard. Library rows (names/notes) arrive from any era of the
+   tenant DB and can carry mojibake from a legacy import (UTF-8 bytes read as
+   Latin-1/CP1252, then re-stored). We only fix display, never the DB: replace
+   the classic double-encoded sequences at render time. Pure + idempotent —
+   returns its input unchanged when nothing needs decoding, so it is a no-op
+   on already-clean strings. This forces every day-by-day label back to
+   plain English/ASCII while leaving the persisted rows untouched.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+
+/* Repair classic UTF-8-misread-as-Latin-1 mojibake in text that arrived via a
+   legacy-codepage import (Ã©→é, Ã±→ñ, â€™→’, â€“→–, â€”→—, Ã¤→ä, Ã¸→ø, …).
+   Pure no-op on clean strings; used only to normalise on-screen day-by-day
+   library labels + notes. Never touches the database. */
+const repairText = (txt) => {
+  if (!txt || typeof txt !== 'string') return txt || '';
+  const TR = [
+    [/Ã©/g, 'é'], [/Ã¨/g, 'è'], [/Ãª/g, 'ê'], [/Ã«/g, 'ë'],
+    [/Ã¢/g, 'â'], [/Ã´/g, 'ô'], [/Ã¶/g, 'ö'], [/Ã¼/g, 'ü'], [/Ã¹/g, 'ù'],
+    [/Ã¤/g, 'ä'], [/Ã¶/g, 'ö'], [/Ãº/g, 'ú'], [/Ã­/g, 'í'], [/Ã³/g, 'ó'], [/Ã¡/g, 'á'],
+    [/Ã±/g, 'ñ'], [/Ã§/g, 'ç'], [/Ã±/g, 'ñ'], [/Ã¸/g, 'ø'], [/Ã¦/g, 'æ'], [/ÃŸ/g, 'ß'],
+    [/Ã˜/g, 'Ø'], [/Ã…/g, 'Å'], [/Ã‰/g, 'É'], [/Ãˆ/g, 'È'], [/Ãœ/g, 'Ü'], [/Ã–/g, 'Ö'], [/Ã„/g, 'Ä'], [/Ã�/g, 'Ã'],
+    [/â€™/g, '’'], [/â€œ/g, '“'], [/â€�/g, '”'], [/â€“/g, '–'], [/â€”/g, '—'],
+    [/â€¦/g, '…'], [/â€˜/g, '‘'], [/â€š/g, '‚'],
+    [/Â¶/g, '·'], [/Âº/g, '·'], [/Â°…/g, '·'], [/Â¿/g, '·'],
+    [/Â·/g, '·'], [/Â°/g, '°'], [/Â±/g, '±'], [/Â²/g, '²'], [/Â³/g, '³'],
+    [/Â´/g, '´'], [/Âµ/g, 'µ'], [/Â¶/g, '¶'], [/Â¸/g, '¸'], [/Â¹/g, '¹'],
+    [/Â»/g, '»'], [/Â¼/g, '¼'], [/Â½/g, '½'], [/Â¾/g, '¾']
+  ];
+  let out = String(txt);
+  for (const [r, rep] of TR) out = String(out).replace(r, rep);
+  return out;
+};
+
+const serviceNotes = (sv, libraryItems) => {
+  const li = (libraryItems || []).find((it) => it.id === sv.itemId);
+  return sv.notes || sv.notesOverride || sv.descOverride || li?.description || '';
+};
+
+const timeRangeOf = (sv) => {
+  const st = sv.startTime ? sv.startTime.slice(0, 5) : '';
+  const en = sv.endTime ? sv.endTime.slice(0, 5) : '';
+  if (st && en) return `${st} – ${en}`;
+  return st || en || '';
+};
+
+/* Optional per-service notes override persisted on the row. */
+const svNote = (sv) => (sv.notes !== undefined && sv.notes !== null ? String(sv.notes) : '');
+const svTime = (sv) => `${sv.startTime || ''}${sv.startTime && sv.endTime ? '→' : ''}${sv.endTime || ''}`;
+
+const servicesBySupplier = (days, libraryItems) => {
+  const groups = {};
+  const order = [];
+  (days || []).forEach((day) => {
+    (day.services || []).forEach((sv) => {
+      const key = sv.supplierId || sv.supplier_id || sv.supplier || 'unknown';
+      if (!groups[key]) {
+        const li = (libraryItems || []).find((it) => it.id === sv.itemId);
+        const sup = li?.supplier || sv.supplierObj || null;
+        groups[key] = {
+          key,
+          sup,
+          label: sv.supplierName || sv.supplier_name || sup?.name || sv.supplier || 'Unknown supplier',
+          email: emailOf(sup) || sv.supplierEmail || '',
+          svcs: []
+        };
+        order.push(key);
+      }
+      groups[key].svcs.push({ sv, day });
+    });
+  });
+  return order.map((k) => groups[k]);
+};
+
+/* One combined mailto body for every service going to a single supplier. */
+const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount) => {
+  const adults = Number(meta.numAdults) || 0;
+  const children = Number(meta.numChildren) || 0;
+  const bodies = group.svcs.map(({ sv, day }) => {
+    const totalSell = round2((Number(sv.sellPP) || 0) * paxCount);
+    return [
+      `Service: ${repairText(sv.name)}`,
+      day.date ? `Date: ${formatDateLong(day.date)}` : '',
+      timeRangeOf(sv) ? `Time: ${timeRangeOf(sv)}` : '',
+      serviceNotes(sv) ? `Notes: ${serviceNotes(sv)}` : '',
+      `Guests: ${adults || 0} Adult(s)${children ? ` / ${children} Child(ren)` : ''} (${paxCount} total)`,
+      `Estimated net: ${currencySymbol}${totalSell.toFixed(2)}`
+    ].filter((l) => l !== '').join('\n');
+  });
+  const body = [
+    `We would like to place a provisional request for the following services:`,
+    '',
+    bodies.join('\n\n---\n\n'),
+    '',
+    `Our reference: ${meta.referenceNumber || meta.reference || '—'}`,
+    `Client: ${meta.client?.name || '—'}${meta.client?.nationality ? ` (${meta.client.nationality})` : ''}`,
+    `Agency / Direct: ${meta.agencyRef || meta.agency_reference || '—'}`,
+    '',
+    `Thank you for your assistance.`,
+    '',
+    `Kind regards,`
+  ].join('\n');
+  return {
+    to: group.email,
+    subject: `Provisional Service Request — ${meta.referenceNumber || meta.reference || ''}`,
+    body
+  };
+};
+
+/* Per-item email line group shared by the single-service draft and the
+   combined-per-supplier draft so both styles carry the exact same fields in
+   the exact same order (Service → Dates → Time → Guests → Special Req).      */
+const serviceItemLines = (sv, day, meta, currencySymbol, paxCount) => {
+  const adults = Number(meta.numAdults) || 0;
+  const children = Number(meta.numChildren) || 0;
+  const dayShot = formatDateShort(day.date);
+  const endDate = dayShot && formatDateShort(meta.travelEnd) && formatDateShort(meta.travelEnd) !== dayShot
+    ? formatDateShort(meta.travelEnd)
+    : dayShot;
+  return [
+    `Service: ${repairText(sv.name)}`,
+    dayShot ? `Dates: Arrival ${dayShot}, Departure ${endDate}` : '',
+    timeRangeOf(sv) ? `Time: ${timeRangeOf(sv)}` : '',
+    `Number of Guests: ${adults || 0} Adult(s)${children ? ` / ${children} Child(ren)` : ''}`,
+    serviceNotes(sv, libraryItems) ? `Special Requirements: ${serviceNotes(sv, libraryItems)}` : 'Special Requirements: None'
+  ].filter((l) => l !== '').join('\n');
+};
+
+/* One mailto draft per item, sent straight to the item's supplier. */
+const serviceItemEmail = (sv, day, amount, meta, currencySymbol, paxCount) => {
+  const agencyLabel = meta.agencyRef || meta.agency_reference || meta.client?.name || 'Direct Client';
+  const body = [
+    `We would like to place a provisional request for the following service on behalf of our client:`,
+    '',
+    serviceItemLines(sv, day, meta, currencySymbol, paxCount),
+    '',
+    `Estimated net: ${currencySymbol}${amount.toFixed(2)}`,
+    `Our Reference#: ${meta.referenceNumber || meta.reference || '—'}`,
+    `Agency/Direct Client: ${agencyLabel}`,
+    `Client Nationality: ${meta.client?.nationality || '—'}`
+  ].join('\n');
+  return {
+    to: emailOf(sv.sup || sv.supplierObj) || sv.supplierEmail || '',
+    subject: `Provisional Service Request — ${meta.referenceNumber || meta.reference || ''}`,
+    body
+  };
+};
+
+/* Read-only supplier voucher (emailed individually, cannot be edited). */
+const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
+  const dateStr = (day) => (day.date ? formatDateLong(day.date) : '');
+  const lines = group.svcs.map(({ sv, day }) => [
+    `• ${repairText(sv.name)}`,
+    dateStr(day) ? `  Date: ${dateStr(day)}` : '',
+    timeRangeOf(sv) ? `  Time: ${timeRangeOf(sv)}` : '',
+    serviceNotes(sv) ? `  Notes: ${serviceNotes(sv)}` : ''
+  ].filter((l) => l !== '').join('\n'));
+  return [
+    `SERVICE VOUCHER`,
+    `Supplier: ${group.label}`,
+    `Itinerary: ${meta.itineraryName}`,
+    `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
+    `Client: ${meta.client?.name || '—'}`,
+    `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
+    `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
+    '',
+    lines.join('\n\n'),
+    '',
+    `Thank you for your cooperation.`
+  ].join('\n');
+};
+
+/* Copy text to the clipboard with a legacy textarea fallback. */
+const clipboardCopy = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch { /* noop */ }
+    document.body.removeChild(ta);
+  }
+};
+
+/* ─── Stage-aware document drafts (all strict mailto) ─────────────────────
+   Each lifecycle stage only unlocks the documents the CSV lifecycle defines:
+     Quotation            → quotation PDF/Word (Export menu)
+     Provisional Booking  → Deposit Invoice / Deposit Request
+     Confirmed Booking    → Final Invoice, Vouchers, Travel Documents
+     In Progress          → keeps confirmed docs, adds daily service briefs
+     Completed            → feedback form + expense reconciliation
+     Cancelled            → cancellation notice + refund statement (docs revoked) */
+
+const DEPOSIT_PCT = 30;
+
+const invoiceHeaderLines = (meta) => [
+  `Itinerary: ${meta.itineraryName}`,
+  `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
+  `Client: ${meta.client?.name || '—'}`,
+  `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
+  `Dates: ${meta.travelStart} to ${meta.travelEnd}`
+];
+
+const depositInvoiceFor = (meta, totalInclTax, vat, currencySymbol) => {
+  const total = Number(totalInclTax) || 0;
+  const vatAmt = Number(vat) || 0;
+  const subtotal = round2(total - vatAmt);
+  const deposit = round2(total * (DEPOSIT_PCT / 100));
+  const balance = round2(total - deposit);
+  const body = [
+    'DEPOSIT INVOICE / DEPOSIT REQUEST',
+    '',
+    ...invoiceHeaderLines(meta),
+    '',
+    `Subtotal (Excl. VAT): ${currencySymbol}${subtotal.toFixed(2)}`,
+    `VAT: ${currencySymbol}${vatAmt.toFixed(2)}`,
+    `TOTAL DUE (INCL. VAT): ${currencySymbol}${total.toFixed(2)}`,
+    `Deposit required (${DEPOSIT_PCT}%): ${currencySymbol}${deposit.toFixed(2)}`,
+    `Balance due after deposit: ${currencySymbol}${balance.toFixed(2)}`,
+    '',
+    `Terms & conditions: the deposit secures this booking. This itinerary stays`,
+    `provisional until the deposit is received; the remaining balance is due net`,
+    `14 days before travel.`,
+    '',
+    'Thank you for your business.'
+  ].join('\n');
+  return {
+    to: meta.client?.email || meta.client?.contact_email || '',
+    subject: `Deposit Invoice / Deposit Request — ${meta.referenceNumber || meta.reference || meta.itineraryName || ''}`,
+    body
+  };
+};
+
+const finalInvoiceFor = (meta, totalInclTax, vat, currencySymbol) => {
+  const total = Number(totalInclTax) || 0;
+  const vatAmt = Number(vat) || 0;
+  const subtotal = round2(total - vatAmt);
+  const body = [
+    'FINAL INVOICE',
+    '',
+    ...invoiceHeaderLines(meta),
+    '',
+    `Subtotal (Excl. VAT): ${currencySymbol}${subtotal.toFixed(2)}`,
+    `VAT: ${currencySymbol}${vatAmt.toFixed(2)}`,
+    `TOTAL DUE (INCL. VAT): ${currencySymbol}${total.toFixed(2)}`,
+    '',
+    `Payment terms: the balance is due net 14 days before travel.`,
+    '',
+    'Thank you for your business.'
+  ].join('\n');
+  return {
+    to: meta.client?.email || meta.client?.contact_email || '',
+    subject: `Final Invoice — ${meta.referenceNumber || meta.reference || meta.itineraryName || ''}`,
+    body
+  };
+};
+
+/* Daily service brief for one day — operational handover for guides/suppliers. */
+const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
+  const lines = (day.services || []).map((sv) => {
+    const line = round2((Number(sv.sellPP) || 0) * paxCount);
+    return [
+      `• ${repairText(sv.name)}`,
+      timeRangeOf(sv) ? `  Time: ${timeRangeOf(sv)}` : '',
+      `  Supplier: ${sv.supplierName || '—'}`,
+      serviceNotes(sv) ? `  Notes: ${serviceNotes(sv)}` : '',
+      `  Estimated value: ${currencySymbol}${line.toFixed(2)}`
+    ].filter((l) => l !== '').join('\n');
+  });
+  const guests = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
+  return [
+    `DAILY SERVICE BRIEF — Day ${day.dayNumber}`,
+    day.date ? `Date: ${formatDateLong(day.date)}` : '',
+    `Itinerary: ${meta.itineraryName} (${meta.referenceNumber || meta.reference || '—'})`,
+    `Travellers: ${guests}`,
+    `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
+    '',
+    ...lines,
+    '',
+    'Operational contact: ' + (meta.client?.phone || '—')
+  ].join('\n');
+};
+
+/* Post-tour feedback form (completed stage). */
+const feedbackRequestEmail = (meta) => {
+  const body = [
+    `We would love your feedback on your recent tour with us.`,
+    '',
+    `Itinerary: ${meta.itineraryName}`,
+    `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
+    `Travel dates: ${meta.travelStart} to ${meta.travelEnd}`,
+    '',
+    `Please reply to this email with your thoughts on:`,
+    '',
+    `• Overall experience (1–10)`,
+    `• Accommodation & meals`,
+    `• Transfers, guides and activities`,
+    `• Anything we could improve`,
+    '',
+    `Your feedback helps us tailor future trips. Thank you!`,
+    '',
+    `Kind regards,`
+  ].join('\n');
+  return {
+    to: meta.client?.email || meta.client?.contact_email || '',
+    subject: `Post-tour feedback — ${meta.itineraryName || meta.referenceNumber || ''}`,
+    body
+  };
+};
+
+/* Expense reconciliation statement (completed stage): income vs supplier cost. */
+const reconciliationStatementFor = (meta, income, cost, currencySymbol) => {
+  const net = round2((Number(income) || 0) - (Number(cost) || 0));
+  const body = [
+    'EXPENSE RECONCILIATION STATEMENT',
+    '',
+    ...invoiceHeaderLines(meta),
+    '',
+    `Total invoiced to client (incl. tax): ${currencySymbol}${(Number(income) || 0).toFixed(2)}`,
+    `Total supplier costs (buy): ${currencySymbol}${(Number(cost) || 0).toFixed(2)}`,
+    `Net result: ${currencySymbol}${net.toFixed(2)}`,
+    '',
+    'Closing & reporting document — generated on completion.'
+  ].join('\n');
+  return {
+    to: meta.client?.email || meta.client?.contact_email || '',
+    subject: `Expense reconciliation — ${meta.referenceNumber || meta.reference || meta.itineraryName || ''}`,
+    body
+  };
+};
+
+/* Cancellation notice + refund statement (cancelled stage — docs revoked). */
+const cancellationNoticeEmail = (meta, totalInclTax, vat, depositPct, currencySymbol) => {
+  const total = Number(totalInclTax) || 0;
+  const vatAmt = Number(vat) || 0;
+  const subtotal = round2(total - vatAmt);
+  const deposit = round2(total * ((Number(depositPct) || DEPOSIT_PCT) / 100));
+  const body = [
+    'CANCELLATION NOTICE',
+    '',
+    ...invoiceHeaderLines(meta),
+    '',
+    `This itinerary has been cancelled.`,
+    `Cancellation date: ${new Date().toISOString().slice(0, 10)}`,
+    '',
+    `REFUND STATEMENT`,
+    `Subtotal (Excl. VAT): ${currencySymbol}${subtotal.toFixed(2)}`,
+    `VAT: ${currencySymbol}${vatAmt.toFixed(2)}`,
+    `TOTAL DUE (INCL. VAT): ${currencySymbol}${total.toFixed(2)}`,
+    `Deposit retained (${Number(depositPct) || DEPOSIT_PCT}%): ${currencySymbol}${deposit.toFixed(2)}`,
+    `Refund due to client: ${currencySymbol}${round2(total - deposit).toFixed(2)}`,
+    '',
+    'All previously issued vouchers, travel documents and invoices are now void.',
+    '',
+    'Thank you.'
+  ].join('\n');
+  return {
+    to: meta.client?.email || meta.client?.contact_email || '',
+    subject: `Cancellation & refund — ${meta.referenceNumber || meta.reference || meta.itineraryName || ''}`,
+    body
+  };
+};
+
+
+
+/* â”€â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 export const ItineraryBuilder = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const data = location.state || null;
+  const { showToast } = useToast();
+  const { currencies } = useCurrencies();
+
+  const [meta, setMeta] = useState({
+    itineraryId: data?.itineraryId || null,
+    referenceNumber: data?.referenceNumber || null,
+    itineraryName: data?.itineraryName || '',
+    client: data?.client || null,
+    travelStart: data?.travelStart || '',
+    travelEnd: data?.travelEnd || '',
+    travellers: data?.travellers || [],
+    numAdults: data?.numAdults || 0,
+    numChildren: data?.numChildren || 0,
+    agencyRef: data?.agencyRef || null,
+    status: data?.status || 'quotation',
+    notes: ''
+  });
+
+  const [companyId, setCompanyId] = useState(null);
+  const [libraryItems, setLibraryItems] = useState([]);
+  const [loadingItems, setLoadingItems] = useState(true);
+  const [taxRates, setTaxRates] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [currencyCode, setCurrencyCode] = useState('ZAR');
+  const [currencyOpen, setCurrencyOpen] = useState(false);
+  const [currencySearch, setCurrencySearch] = useState('');
+  const [days, setDays] = useState([]);
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [activeTab, setActiveTab] = useState('itinerary');
+  const [paymentReceived, setPaymentReceived] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [kebabFor, setKebabFor] = useState(null);
+  const [dragOverKey, setDragOverKey] = useState(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [copySourceId, setCopySourceId] = useState('');
+  const [copyInsertDay, setCopyInsertDay] = useState(1);
+  const [availableItineraries, setAvailableItineraries] = useState([]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [editSvc, setEditSvc] = useState(null);
+  const [dayNotesDay, setDayNotesDay] = useState(null);
+  const [bootedState, setBootedState] = useState(false);
+  const [lastSavedKey, setLastSavedKey] = useState(null);
+
+  const idSeq = useRef(0);
+  const booted = useRef(false);
+  const nextId = useCallback(() => {
+    idSeq.current += 1;
+    return `t${idSeq.current}`;
+  }, []);
+
+  const currencyObj = currencies.find((c) => (c.code || '').toUpperCase() === currencyCode.toUpperCase());
+  const currencySymbol = currencyObj?.symbol || currencyCode;
+  const paxCount = (Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0);
+  const markupPct = Number(meta.client?.markup_percentage) || 0;
+  const currentDay = days[selectedDayIndex] || null;
+  const stage = meta.status || 'quotation';
+  const isProvisional = stage === 'provisional';
+  const isConfirmed = stage === 'confirmed';
+  const isInProgress = stage === 'in_progress';
+  const isCompleted = stage === 'completed';
+  const isCancelled = stage === 'cancelled';
+  const isReadOnly = isCompleted || isCancelled;
+  const completedRef = useRef(isReadOnly);
+
+  useEffect(() => {
+    completedRef.current = isReadOnly;
+  }, [isReadOnly]);
+  const defaultTax = taxRates.find((t) => t.is_active && t.is_default)
+    || taxRates.find((t) => t.is_active) || null;
+  const defaultTaxRate = Number(defaultTax?.rate ?? 15);
+  const defaultTaxLabel = defaultTax?.name || 'VAT';
+
+  /* Financial totals used by the stage-aware invoices / reconciliation. */
+  const paxBalanceTotal = useMemo(() => {
+    let t = 0;
+    days.forEach((d) => {
+      (d.services || []).forEach((sv) => {
+        const line = (Number(sv.sellPP) || 0) * paxCount;
+        t += line;
+      });
+    });
+    return round2(t);
+  }, [days, paxCount, defaultTaxRate]);
+
+  /* VAT embedded in the client total — used to show Subtotal (Excl. VAT) /
+     VAT / TOTAL DUE (INCL. VAT) on the client-facing invoice drafts. */
+  const paxBalanceVAT = useMemo(() => {
+    let t = 0;
+    days.forEach((d) => {
+      (d.services || []).forEach((sv) => {
+        const line = (Number(sv.sellPP) || 0) * paxCount;
+        const rate = numOr(sv.taxRate, defaultTaxRate);
+        t += vatOfInclusive(line, rate);
+      });
+    });
+    return round2(t);
+  }, [days, paxCount, defaultTaxRate]);
+
+  const itineraryCostTotal = useMemo(() => {
+    let c = 0;
+    days.forEach((d) => {
+      (d.services || []).forEach((sv) => {
+        c += (Number(sv.buyPP) || 0) * paxCount;
+      });
+    });
+    return round2(c);
+  }, [days, paxCount]);
+
+  /* ── Stage-based document unlocks ──────────────────────────────────────
+     Each lifecycle stage only shows the tabs the CSV lifecycle defines:
+     quotation / pending → planning tabs only; provisional adds the deposit
+     invoice + supplier service request; confirmed (and in progress) release
+     the full travel pack; in progress adds operational briefs; completed
+     shows post-tour closure; cancelled shows the cancellation module and
+     revokes everything else. */
+  const visibleTabIds = useMemo(() => {
+    const ids = ['itinerary', 'client', 'pricing', 'notes'];
+    if (isProvisional) ids.push('service-request', 'invoices');
+    if (isConfirmed || isInProgress) ids.push('travel-docs', 'invoices', 'vouchers');
+    if (isInProgress) ids.push('operations');
+    if (isCompleted) ids.push('post-tour');
+    if (isCancelled) ids.push('cancellation');
+    return ids;
+  }, [isProvisional, isConfirmed, isInProgress, isCompleted, isCancelled]);
+  const tab = visibleTabIds.includes(activeTab) ? activeTab : 'itinerary';
+
+  // Navigation-guard dirty tracking: compare the current serialised working
+  // state against the last state that was persisted (boot / save), so ANY
+  // edit to days or meta automatically marks the workspace as dirty.
+  const stateKey = useMemo(
+    () => (bootedState ? JSON.stringify({ days, meta }) : ''),
+    [bootedState, days, meta]
+  );
+  const dirty = bootedState && lastSavedKey !== null && stateKey !== lastSavedKey;
+
+  useEffect(() => {
+    if (!bootedState) return;
+    setLastSavedKey(stateKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bootedState]);
+
+  const fetchCompanyId = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('company_id')
+      .eq('id', user.id)
+      .single();
+    return profile?.company_id || null;
+  }, []);
+
+  const fetchLibraryItems = useCallback(async () => {
+    setLoadingItems(true);
+    try {
+      const cid = await fetchCompanyId();
+      if (!cid) return;
+      const { data: items } = await supabase
+        .from('library_items')
+        .select('*')
+        .eq('company_id', cid)
+        .order('created_at', { ascending: false });
+      const ids = (items || []).map((i) => i.id);
+      const { data: ratesData } = ids.length
+        ? await supabase.from('item_rates').select('*').in('item_id', ids)
+        : { data: [] };
+      let carRates = [];
+      if (ids.length) {
+        try {
+          const { data } = await supabase
+            .from('car_rental_rates')
+            .select('*')
+            .in('item_id', ids);
+          carRates = data || [];
+        } catch {
+          carRates = [];
+        }
+      }
+      const { data: suppliers } = await supabase
+        .from('suppliers')
+        .select('id, name, email')
+        .eq('company_id', cid);
+      const rateMap = {};
+      (ratesData || []).forEach((r) => {
+        if (!rateMap[r.item_id]) rateMap[r.item_id] = [];
+        rateMap[r.item_id].push(r);
+      });
+      const supMap = {};
+      (suppliers || []).forEach((s) => { supMap[s.id] = s; });
+      const merged = (items || []).map((it) => ({
+        ...it,
+        name: repairText(it.name),
+        description: repairText(it.description),
+        category: it.category === 'Guide / Driver' ? 'Guide' : it.category,
+        item_rates: rateMap[it.id] || [],
+        car_rental_rates: carRates.filter((r) => r.item_id === it.id),
+        supplier: supMap[it.supplier_id] || null
+      }));
+      setLibraryItems(merged);
+      setCompanyId(cid);
+      const { data: taxData } = await supabase
+        .from('tax_rates')
+        .select('*')
+        .eq('company_id', cid);
+      setTaxRates(taxData || []);
+    } catch {
+      showToast('Failed to load library items', 'error');
+    } finally {
+      setLoadingItems(false);
+    }
+  }, [fetchCompanyId, showToast]);
+
+  const initDaysFromRange = useCallback(() => {
+    const count = daysInRange(meta.travelStart, meta.travelEnd);
+    const built = Array.from({ length: count }, (_, i) => ({
+      key: nextId(),
+      dayNumber: i + 1,
+      date: meta.travelStart ? addDaysToDate(meta.travelStart, i) : '',
+      notes: '',
+      services: []
+    }));
+    setDays(built);
+    setSelectedDayIndex(0);
+  }, [meta.travelStart, meta.travelEnd, nextId]);
+
+  const loadExistingDays = useCallback(async () => {
+    const id = data?.itineraryId;
+    if (!id) return false;
+    try {
+      const { data: it } = await supabase
+        .from('itineraries')
+        .select('*')
+        .eq('id', id)
+        .single();
+      if (it) {
+        let client = meta.client || null;
+        if (it.client_id && !client?.markup_percentage) {
+          const { data: c } = await supabase
+            .from('clients')
+            .select('id, name, client_type, email, phone, country, markup_percentage')
+            .eq('id', it.client_id)
+            .single();
+          if (c) client = c;
+        }
+        setMeta((prev) => ({
+          ...prev,
+          client,
+          itineraryName: it.itinerary_name || prev.itineraryName,
+          referenceNumber: it.reference_number || prev.referenceNumber,
+          travelStart: toISODate(it.travel_start_date) || prev.travelStart,
+          travelEnd: toISODate(it.travel_end_date) || prev.travelEnd,
+          status: it.status || prev.status,
+          notes: it.notes || '',
+          numAdults: it.num_adults ?? prev.numAdults,
+          numChildren: it.num_children ?? prev.numChildren,
+          agencyRef: it.agency_reference || prev.agencyRef
+        }));
+      }
+      const { data: dayRows } = await supabase
+        .from('itinerary_days')
+        .select('*, itinerary_day_items(*)')
+        .eq('itinerary_id', id)
+        .order('day_number', { ascending: true });
+      if (dayRows && dayRows.length) {
+        const built = dayRows.map((rd, di) => ({
+          key: nextId(),
+          dayNumber: rd.day_number || di + 1,
+          date: toISODate(rd.day_date) || addDaysToDate(meta.travelStart, di),
+          notes: rd.notes || '',
+          services: (rd.itinerary_day_items || []).map((ii) => {
+            const buyPP = Number(ii.unit_cost) || 0;
+            const mRaw = Number(ii.markup_percentage);
+            const m = Number.isFinite(mRaw) ? mRaw : (Number(meta.client?.markup_percentage) || 0);
+            return {
+              key: nextId(),
+              itemId: ii.item_id || null,
+              name: ii.item_name || '',
+              category: ii.category || '',
+              supplierName: ii.supplier_name || '',
+              currencyCode: ii.currency_code || 'ZAR',
+              basis: ii.rate_basis || 'per_person',
+              buyPP,
+              markup: m,
+              sellPP: round2(buyPP * (1 + m / 100)),
+              pax: Number(ii.pax) || ((Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0)),
+              quantity: Number(ii.quantity) || 1,
+              descOverride: ii.description_override || '',
+              taxRate: numOr(ii.tax_rate, 15),
+              taxLabel: ii.tax_label || 'VAT'
+            };
+          })
+        }));
+        setDays(built);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, [data, meta.travelStart, meta.numAdults, meta.numChildren, meta.client, nextId]);
+
+  useEffect(() => {
+    const boot = async () => {
+      if (booted.current) return;
+      booted.current = true;
+      await fetchLibraryItems();
+      const hasId = !!(data && data.itineraryId);
+      const foundSaved = hasId ? await loadExistingDays() : false;
+      if (!foundSaved) initDaysFromRange();
+      setBootedState(true);
+    };
+    boot();
+  }, [data, fetchLibraryItems, loadExistingDays, initDaysFromRange]);
+
+  /* â”€â”€ Derived lists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+  const categoryOptions = useMemo(() => {
+    const set = new Set();
+    libraryItems.forEach((it) => {
+      if (it.category) set.add(it.category);
+    });
+    return Array.from(set).sort();
+  }, [libraryItems]);
+
+  const filteredCurrencies = useMemo(() => {
+    const term = currencySearch.trim().toLowerCase();
+    if (!term) return currencies;
+    return currencies.filter((c) =>
+      `${c.code} ${c.name} ${c.symbol}`.toLowerCase().includes(term)
+    );
+  }, [currencies, currencySearch]);
+
+  const symbolByCode = useMemo(() => {
+    const m = new Map();
+    currencies.forEach((c) => m.set((c.code || '').toUpperCase(), c.symbol || c.code));
+    return m;
+  }, [currencies]);
+
+  const svcSymbol = useCallback((code) => {
+    const sym = symbolByCode.get((code || 'ZAR').toUpperCase());
+    return sym || code || 'ZAR';
+  }, [symbolByCode]);
+
+  const filteredItems = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    const hasAnyFilter = categoryFilter !== '' || term.length > 0;
+    if (!hasAnyFilter) return [];
+    return libraryItems.filter((it) => {
+      if (categoryFilter !== '' && it.category !== categoryFilter) return false;
+      if (!visibleInCurrency(it, currencyCode)) return false;
+      if (term) {
+        const hay = `${it.name} ${it.category} ${it.supplier?.name || ''}`.toLowerCase();
+        if (!hay.includes(term)) return false;
+      }
+      return true;
+    });
+  }, [libraryItems, categoryFilter, currencyCode, searchTerm]);
+
+  const pricingGroups = useMemo(() => {
+    const order = [];
+    const map = new Map();
+    days.forEach((d) => {
+      const byCurr = {};
+      (d.services || []).forEach((sv) => {
+        const code = sv.currencyCode || 'ZAR';
+        if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {} };
+        const line = (Number(sv.sellPP) || 0) * paxCount;
+        const buyLine = (Number(sv.buyPP) || 0) * paxCount;
+        const rate = numOr(sv.taxRate, defaultTaxRate);
+        const taxAmt = vatOfInclusive(line, rate);
+        const taxInAmt = vatOfInclusive(buyLine, rate);
+        const label = sv.taxLabel || 'VAT';
+        byCurr[code].buy += buyLine;
+        byCurr[code].sell += line;
+        byCurr[code].tax += taxAmt;
+        byCurr[code].taxIn += taxInAmt;
+        if (!byCurr[code].taxByLabel[label]) byCurr[code].taxByLabel[label] = { amount: 0, rate };
+        byCurr[code].taxByLabel[label].amount += taxAmt;
+        byCurr[code].count += 1;
+      });
+      Object.keys(byCurr).forEach((code) => {
+        if (!map.has(code)) {
+          map.set(code, { code, days: [] });
+          order.push(code);
+        }
+        map.get(code).days.push({ day: d.dayNumber, date: d.date, ...byCurr[code] });
+      });
+    });
+    return order.map((code) => {
+      const g = map.get(code);
+      const cur = currencies.find((c) => (c.code || '').toUpperCase() === code.toUpperCase());
+      const taxByLabel = {};
+      g.days.forEach((r) => {
+        Object.entries(r.taxByLabel || {}).forEach(([label, info]) => {
+          if (!taxByLabel[label]) taxByLabel[label] = { amount: 0, rate: info.rate };
+          taxByLabel[label].amount += info.amount;
+        });
+      });
+      return {
+        code,
+        symbol: cur?.symbol || code,
+        name: cur?.name || '',
+        days: g.days,
+        count: g.days.reduce((a, r) => a + r.count, 0),
+        totalBuy: round2(g.days.reduce((a, r) => a + r.buy, 0)),
+        totalSell: round2(g.days.reduce((a, r) => a + r.sell, 0)),
+        totalTax: round2(g.days.reduce((a, r) => a + r.tax, 0)),
+        totalTaxIn: round2(g.days.reduce((a, r) => a + (r.taxIn || 0), 0)),
+        totalTaxNet: round2(g.days.reduce((a, r) => a + (r.tax || 0) - (r.taxIn || 0), 0)),
+        totalInclTax: round2(g.days.reduce((a, r) => a + r.sell, 0)),
+        totalExcl: round2(g.days.reduce((a, r) => a + r.sell, 0) - g.days.reduce((a, r) => a + r.tax, 0)),
+        taxEntries: Object.entries(taxByLabel).map(([label, info]) => ({
+          label,
+          rate: info.rate,
+          amount: round2(info.amount)
+        }))
+      };
+    });
+  }, [days, paxCount, currencies, defaultTaxRate]);
+
+  /* â”€â”€ Day / pricing helpers (called from handlers, not render) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+  const normalizeDays = useCallback((arr) => arr.map((d, i) => ({
+    ...d,
+    dayNumber: i + 1,
+    date: meta.travelStart ? addDaysToDate(meta.travelStart, i) : d.date || ''
+  })), [meta.travelStart]);
+
+  const applyDateExtension = useCallback((arr) => {
+    const last = arr[arr.length - 1];
+    if (!last?.date) return;
+    setMeta((prev) => {
+      if (!prev.travelEnd || last.date > toISODate(prev.travelEnd)) {
+        return { ...prev, travelEnd: last.date };
+      }
+      return prev;
+    });
+  }, []);
+
+  const dayTotals = useCallback((day) => {
+    let buy = 0;
+    let sell = 0;
+    let taxOut = 0;
+    let taxIn = 0;
+    (day.services || []).forEach((sv) => {
+      const mergeLine = (Number(sv.sellPP) || 0) * paxCount;
+      const rate = numOr(sv.taxRate, defaultTaxRate);
+      buy += (Number(sv.buyPP) || 0) * paxCount;
+      sell += mergeLine;
+      taxOut += vatOfInclusive(mergeLine, rate);
+      taxIn += vatOfInclusive((Number(sv.buyPP) || 0) * paxCount, rate);
+    });
+    return {
+      buy: round2(buy),
+      sell: round2(sell),
+      tax: round2(taxOut),
+      inputTax: round2(taxIn),
+      netTax: round2(taxOut - taxIn),
+      total: round2(sell),
+      count: (day.services || []).length
+    };
+  }, [paxCount, defaultTaxRate]);
+
+  const addService = useCallback((dayIndex, item, via) => {
+    if (completedRef.current) return;
+    const basis = basisOfItem(item, currencyCode);
+    const buyPP = round2(contractPaxRate(item, currencyCode, paxCount));
+    const markup = Number(markupPct) || 0;
+    const svc = {
+      key: nextId(),
+      itemId: item.id,
+      name: item.name,
+      category: item.category || '',
+      supplierName: item.supplier?.name || '',
+      currencyCode,
+      basis,
+      buyPP,
+      markup,
+      sellPP: round2(buyPP * (1 + markup / 100)),
+      pax: paxCount,
+      quantity: 1,
+      descOverride: '',
+      taxRate: defaultTaxRate,
+      taxLabel: defaultTaxLabel
+    };
+    setDays((prev) => prev.map((d, i) => (
+      i === dayIndex ? { ...d, services: [...d.services, svc] } : d
+    )));
+    const dayLabel = days[dayIndex] ? `Day ${days[dayIndex].dayNumber}` : 'the selected day';
+    showToast(`${via === 'double-click' ? 'Added' : 'Dropped'} "${item.name}" into ${dayLabel}`, 'success');
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast]);
+
+  const handleItemDragStart = useCallback((e, item) => {
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('text/plain', JSON.stringify({ itemId: item.id }));
+  }, []);
+
+  const handleDayDrop = useCallback((dayIndex, e) => {
+    if (completedRef.current) return;
+    e.preventDefault();
+    setIsDragOver(false);
+    const raw = e.dataTransfer.getData('text/plain');
+    let payload = null;
+    try {
+      payload = raw ? JSON.parse(raw) : null;
+    } catch {
+      payload = null;
+    }
+    if (!payload?.itemId) return;
+    const item = libraryItems.find((it) => it.id === payload.itemId);
+    if (item) addService(dayIndex, item, 'drop');
+  }, [libraryItems, addService]);
+
+  const removeService = useCallback((dayIdx, svcKey) => {
+    if (completedRef.current) return;
+    setDays((prev) => prev.map((d, i) => (
+      i === dayIdx ? { ...d, services: d.services.filter((s) => s.key !== svcKey) } : d
+    )));
+  }, []);
+
+  const updateServicePricing = useCallback((dayIdx, svcKey, field, rawValue) => {
+    if (completedRef.current) return;
+    const num = Number(rawValue);
+    const value = Number.isFinite(num) ? num : 0;
+    setDays((prev) => prev.map((d, i) => {
+      if (i !== dayIdx) return d;
+      return {
+        ...d,
+        services: d.services.map((s) => {
+          if (s.key !== svcKey) return s;
+          if (field === 'buyPP') {
+            const buyPP = round2(value);
+            const m = Number(s.markup) || 0;
+            return { ...s, buyPP, sellPP: round2(buyPP * (1 + m / 100)) };
+          }
+          if (field === 'markup') {
+            const m = value;
+            return { ...s, markup: m, sellPP: round2((Number(s.buyPP) || 0) * (1 + m / 100)) };
+          }
+          return s;
+        })
+      };
+    }));
+  }, []);
+
+  const moveService = useCallback((dayIdx, fromKey, toKey) => {
+    if (completedRef.current) return;
+    setDays((prev) => prev.map((d, i) => {
+      if (i !== dayIdx) return d;
+      const arr = [...d.services];
+      const fi = arr.findIndex((s) => s.key === fromKey);
+      const ti = arr.findIndex((s) => s.key === toKey);
+      if (fi === -1 || ti === -1) return d;
+      const [moved] = arr.splice(fi, 1);
+      arr.splice(ti, 0, moved);
+      return { ...d, services: arr };
+    }));
+  }, []);
+
+  const handleServiceDragStart = useCallback((e, dayIdx, svcKey) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', JSON.stringify({ type: 'reorder', dayIdx, svcKey }));
+  }, []);
+
+  const handleServiceDrop = useCallback((e, dayIdx, targetKey) => {
+    e.preventDefault();
+    setDragOverKey(null);
+    const raw = e.dataTransfer.getData('text/plain');
+    let payload = null;
+    try {
+      payload = raw ? JSON.parse(raw) : null;
+    } catch {
+      payload = null;
+    }
+    if (!payload || payload.type !== 'reorder' || payload.svcKey === targetKey) return;
+    if (Number(payload.dayIdx) !== dayIdx) return;
+    moveService(dayIdx, payload.svcKey, targetKey);
+  }, [moveService]);
+
+  const addDay = useCallback(() => {
+    if (completedRef.current) return;
+    const next = normalizeDays([...days, { key: nextId(), dayNumber: days.length + 1, date: '', notes: '', services: [] }]);
+    setDays(next);
+    applyDateExtension(next);
+    setSelectedDayIndex(days.length);
+  }, [days, normalizeDays, applyDateExtension, nextId]);
+
+  const duplicateDay = useCallback((idx) => {
+    if (completedRef.current) return;
+    const src = days[idx];
+    if (!src) return;
+    const clone = {
+      ...src,
+      key: nextId(),
+      dayNumber: 0,
+      date: '',
+      services: (src.services || []).map((s) => ({ ...s, key: nextId() }))
+    };
+    const next = normalizeDays([...days.slice(0, idx + 1), clone, ...days.slice(idx + 1)]);
+    setDays(next);
+    applyDateExtension(next);
+    setSelectedDayIndex(idx + 1);
+    setKebabFor(null);
+  }, [days, normalizeDays, applyDateExtension, nextId]);
+
+  const clearDay = useCallback((idx) => {
+    if (completedRef.current) return;
+    setDays((prev) => prev.map((d, i) => (i === idx ? { ...d, services: [] } : d)));
+    setKebabFor(null);
+  }, []);
+
+  const deleteDay = useCallback((idx) => {
+    if (completedRef.current) return;
+    if (days.length <= 1) {
+      showToast('An itinerary needs at least one day', 'warning');
+      return;
+    }
+    const next = normalizeDays(days.filter((_, i) => i !== idx));
+    setDays(next);
+    applyDateExtension(next);
+    setSelectedDayIndex((prev) => Math.max(0, Math.min(prev, next.length - 1)));
+    setKebabFor(null);
+  }, [days, normalizeDays, applyDateExtension, showToast]);
+
+  /* â”€â”€ Copy / Export / Save â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+  const openCopy = useCallback(async () => {
+    setCopyOpen(true);
+    setCopySourceId('');
+    setCopyInsertDay(1);
+    try {
+      const { data } = await supabase
+        .from('itineraries')
+        .select('id, itinerary_name, reference_number')
+        .neq('id', meta.itineraryId || '')
+        .order('created_at', { ascending: false });
+      setAvailableItineraries(data || []);
+    } catch {
+      setAvailableItineraries([]);
+    }
+  }, [meta.itineraryId]);
+
+  const confirmCopy = useCallback(async () => {
+    if (completedRef.current) return;
+    if (!copySourceId) {
+      showToast('Select an itinerary to copy from first', 'warning');
+      return;
+    }
+    const insertIdx = Math.max(0, Math.min((Number(copyInsertDay) || 1) - 1, days.length));
+    setSaving(true);
+    try {
+      const { data: srcDays } = await supabase
+        .from('itinerary_days')
+        .select('*, itinerary_day_items(*)')
+        .eq('itinerary_id', copySourceId)
+        .order('day_number', { ascending: true });
+      if (!srcDays || !srcDays.length) {
+        showToast('That itinerary has no days copied yet', 'warning');
+        setSaving(false);
+        return;
+      }
+      const src = srcDays.map((rd) => ({
+        key: nextId(),
+        dayNumber: 0,
+        date: '',
+        notes: rd.notes || '',
+        services: (rd.itinerary_day_items || []).map((ii) => {
+          const buyPP = Number(ii.unit_cost) || 0;
+          const mRaw = Number(ii.markup_percentage);
+          const m = Number.isFinite(mRaw) ? mRaw : (Number(markupPct) || 0);
+          return {
+            key: nextId(),
+            itemId: ii.item_id || null,
+            name: ii.item_name || '',
+            category: ii.category || '',
+            supplierName: ii.supplier_name || '',
+            currencyCode: ii.currency_code || currencyCode,
+            buyPP,
+            markup: m,
+            basis: ii.rate_basis || 'per_person',
+            sellPP: round2(buyPP * (1 + m / 100)),
+            pax: Number(ii.pax) || paxCount,
+            quantity: Number(ii.quantity) || 1,
+            descOverride: ii.description_override || '',
+            taxRate: numOr(ii.tax_rate, 15),
+            taxLabel: ii.tax_label || 'VAT'
+          };
+        })
+      }));
+      const merged = [...days.slice(0, insertIdx), ...src, ...days.slice(insertIdx)];
+      const next = normalizeDays(merged);
+      setDays(next);
+      applyDateExtension(next);
+      setSelectedDayIndex(insertIdx);
+      setCopyOpen(false);
+      const srcName = availableItineraries.find((a) => a.id === copySourceId)?.itinerary_name || 'itinerary';
+      showToast(`Copied ${src.length} day(s) from "${srcName}"`, 'success');
+    } catch {
+      showToast('Failed to copy itinerary days', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast]);
+
+  const handleCopy = useCallback(() => {
+    if (!meta.itineraryId) {
+      showToast('Save the itinerary once before using Copy', 'warning');
+      return;
+    }
+    openCopy();
+  }, [meta.itineraryId, openCopy, showToast]);
+
+  const downloadBlob = useCallback((content, filename, type) => {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, []);
+
+  const buildRows = useCallback(() => {
+    const rows = [];
+    days.forEach((d) => {
+      const t = dayTotals(d);
+      rows.push({
+        day: d.dayNumber,
+        date: formatDateLong(d.date),
+        svcCount: t.count,
+        sell: t.sell,
+        tax: t.tax,
+        total: t.total
+      });
+    });
+      const grandSell = round2(rows.reduce((a, r) => a + r.sell, 0));
+      const grandTax = round2(rows.reduce((a, r) => a + r.tax, 0));
+      const grandInTax = round2(rows.reduce((a, r) => a + (r.taxIn || 0), 0));
+      const grandNetTax = round2(rows.reduce((a, r) => a + ((r.tax || 0) - (r.taxIn || 0)), 0));
+      const grandTotal = round2(rows.reduce((a, r) => a + r.total, 0));
+      return { rows, grandSell, grandTax, grandInTax, grandNetTax, grandTotal };
+  }, [days, dayTotals]);
+
+  const handleExport = useCallback((format) => {
+    setExportOpen(false);
+    const ref = meta.referenceNumber || meta.itineraryName || 'itinerary';
+    const safeName = String(ref).replace(/[^\w-]+/g, '_');
+    if (format === 'link') {
+      showToast('Digital itinerary link sharing is coming soon', 'info');
+      return;
+    }
+    if (format === 'excel') {
+      const header = ['Day', 'Date', 'Services', 'Subtotal (Excl. VAT)', 'VAT', 'Total (Incl. VAT)'];
+      const lines = [
+        header.map(csvEscape).join(','),
+        `"Itinerary: ${csvEscape(meta.itineraryName)}"`,
+        `"Reference: ${csvEscape(meta.referenceNumber || '')}"`,
+        `"Client: ${csvEscape(meta.client?.name || '')}"`,
+        `"Dates: ${csvEscape(meta.travelStart)} to ${csvEscape(meta.travelEnd)}"`,
+        ''
+      ];
+      const { rows, grandTax, grandSell, grandTotal } = buildRows();
+      const subtotalExcl = round2(grandSell - grandTax);
+      rows.forEach((r) => {
+        lines.push([r.day, r.date, r.svcCount, round2(r.sell - r.tax), r.tax, r.total].map(csvEscape).join(','));
+      });
+      lines.push(['Subtotal (Excl. VAT)', '', '', '', '', subtotalExcl].map(csvEscape).join(','));
+      lines.push(['VAT', '', '', '', '', grandTax].map(csvEscape).join(','));
+      lines.push(['TOTAL DUE (INCL. VAT)', '', '', '', '', grandTotal].map(csvEscape).join(','));
+      downloadBlob(lines.join('\n'), `${safeName}.csv`, 'text/csv;charset=utf-8');
+      showToast('Itinerary exported as Excel (CSV)', 'success');
+      return;
+    }
+    const esc = htmlEscape;
+    if (format === 'word') {
+      const { rows, grandTax, grandSell, grandTotal } = buildRows();
+      const subtotalExcl = round2(grandSell - grandTax);
+      const escape = htmlEscape;
+      const taxLabel = defaultTaxLabel || 'VAT';
+      const taxLine = `<b>VAT (${escape(taxLabel)} ${defaultTaxRate}%)</b>`;
+  const body = `
+    <h1>${escape(meta.itineraryName)}</h1>
+    <p><b>Reference:</b> ${escape(meta.referenceNumber || '—')} &nbsp;·&nbsp; <b>Status:</b> ${escape(statusLabelOf(meta.status))}</p>
+    <p><b>Client:</b> ${escape(meta.client?.name || '—')} &nbsp;·&nbsp; <b>Travellers:</b> ${paxCount}</p>
+    <p><b>Dates:</b> ${escape(meta.travelStart)} &rarr; ${escape(meta.travelEnd)}</p>
+        <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
+          <tr><th>Day</th><th>Date</th><th>#</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
+          ${rows.map((r) => `<tr><td>Day ${escape(r.day)}</td><td>${escape(r.date)}</td><td>${r.svcCount}</td><td>${fmtMoney(round2(r.sell - r.tax), currencySymbol)}</td><td>${fmtMoney(r.tax, currencySymbol)}</td><td>${fmtMoney(r.total, currencySymbol)}</td></tr>`).join('')}
+          <tr><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td><b>${fmtMoney(subtotalExcl, currencySymbol)}</b></td></tr>
+          <tr><td colspan="5" align="right">${taxLine}</td><td><b>${fmtMoney(grandTax, currencySymbol)}</b></td></tr>
+          <tr><td colspan="5" align="right"><b>TOTAL DUE (INCL. VAT)</b></td><td><b>${fmtMoney(grandTotal, currencySymbol)}</b></td></tr>
+        </table>
+        <p><i>Generated by torbuilder</i></p>`;
+      downloadBlob(`<html><head><meta charset="utf-8"></head><body>${body}</body></html>`, `${safeName}.doc`, 'application/msword');
+      showToast('Itinerary exported as Word', 'success');
+      return;
+    }
+    if (format === 'pdf') {
+      const { rows, grandTax, grandSell, grandTotal } = buildRows();
+      const subtotalExcl = round2(grandSell - grandTax);
+      const w = window.open('', '_blank', 'width=900,height=700');
+      if (!w) {
+        showToast('Please allow pop-ups to export the PDF', 'warning');
+        return;
+      }
+      const taxLabel = defaultTaxLabel || 'VAT';
+      w.document.write(`<!doctype html><html><head><title>${esc(meta.itineraryName)}</title><style>
+        body{font-family:Arial,sans-serif;margin:32px;color:#111}
+        h1{margin:0 0 6px} .muted{color:#666;font-size:13px;margin:2px 0}
+        table{border-collapse:collapse;width:100%;margin-top:16px}
+        th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}
+        th{background:#eee} .grand{font-weight:700} td.num{text-align:right}</style></head><body>
+        <h1>${esc(meta.itineraryName)}</h1>
+        <p class="muted">Reference: ${esc(meta.referenceNumber || '—')}  ·  ${esc(statusLabelOf(meta.status))}</p>
+        <p class="muted">Client: ${esc(meta.client?.name || '—')}  ·  ${paxCount} traveller(s)</p>
+        <p class="muted">Dates: ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
+        <table><tr><th>Day</th><th>Date</th><th>Services</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
+        ${rows.map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date)}</td><td>${r.svcCount}</td><td class="num">${fmtMoney(round2(r.sell - r.tax), currencySymbol)}</td><td class="num">${fmtMoney(r.tax, currencySymbol)}</td><td class="num">${fmtMoney(r.total, currencySymbol)}</td></tr>`).join('')}
+        <tr class="grand"><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td class="num">${fmtMoney(subtotalExcl, currencySymbol)}</td></tr>
+        <tr class="grand"><td colspan="5" align="right">VAT (${esc(taxLabel)} ${defaultTaxRate}%)</td><td class="num">${fmtMoney(grandTax, currencySymbol)}</td></tr>
+        <tr class="grand"><td colspan="5" align="right">TOTAL DUE (INCL. VAT)</td><td class="num">${fmtMoney(grandTotal, currencySymbol)}</td></tr></table>
+        <p class="muted"><i>Generated by torbuilder</i></p>
+        </body></html>`);
+      w.document.close();
+      w.focus();
+      setTimeout(() => w.print(), 350);
+      showToast('Itinerary PDF opened in a new window', 'success');
+    }
+  }, [meta, paxCount, currencySymbol, defaultTaxLabel, defaultTaxRate, buildRows, downloadBlob, showToast]);
+
+  const handleSave = useCallback(async () => {
+    if (!companyId) {
+      showToast('Company not found', 'error');
+      return false;
+    }
+    setSaving(true);
+    try {
+      const finalStart = toISODate(meta.travelStart);
+      const finalEnd = toISODate(meta.travelEnd) || finalStart;
+      const headerPayload = {
+        itinerary_name: meta.itineraryName,
+        travel_start_date: finalStart || null,
+        travel_end_date: finalEnd || null,
+        num_adults: Number(meta.numAdults) || 0,
+        num_children: Number(meta.numChildren) || 0,
+        travellers: meta.travellers || [],
+        agency_reference: meta.agencyRef || null,
+        notes: meta.notes || null,
+        status: meta.status || 'quotation'
+      };
+      let id = meta.itineraryId;
+      let persistedMeta = meta;
+      if (!id) {
+        const { data: ref, error: refErr } = await supabase
+          .rpc('get_next_itinerary_reference', { p_company_id: companyId });
+        if (!ref || refErr) throw new Error(refErr?.message || 'Could not allocate itinerary reference');
+        const { data: created, error } = await supabase
+          .from('itineraries')
+          .insert([{
+            ...headerPayload,
+            company_id: companyId,
+            client_id: meta.client?.id || null,
+            reference_number: ref,
+            currency_code: currencyCode
+          }])
+          .select()
+          .single();
+        if (error) throw error;
+        id = created.id;
+        persistedMeta = { ...meta, itineraryId: id, referenceNumber: ref };
+        setMeta((prev) => ({ ...prev, itineraryId: id, referenceNumber: ref }));
+      } else {
+        const { error: upErr } = await supabase
+          .from('itineraries')
+          .update(headerPayload)
+          .eq('id', id);
+        if (upErr) throw upErr;
+      }
+
+      const { error: delErr } = await supabase
+        .from('itinerary_days')
+        .delete()
+        .eq('itinerary_id', id);
+      if (delErr) throw delErr;
+
+      for (let di = 0; di < days.length; di += 1) {
+        const day = days[di];
+        const { data: newDay, error: dayErr } = await supabase
+          .from('itinerary_days')
+          .insert([{
+            itinerary_id: id,
+            company_id: companyId,
+            day_number: day.dayNumber,
+            day_date: day.date || null,
+            notes: day.notes || null
+          }])
+          .select()
+          .single();
+        if (dayErr) throw dayErr;
+        const svcRows = (day.services || []).map((s, si) => ({
+          itinerary_day_id: newDay.id,
+          company_id: companyId,
+          item_id: s.itemId || null,
+          item_name: s.name,
+          description_override: s.descOverride || null,
+          category: s.category || null,
+          supplier_name: s.supplierName || null,
+          currency_code: s.currencyCode || currencyCode,
+          unit_cost: s.buyPP || 0,
+          unit_price: s.sellPP || 0,
+          markup_percentage: Number(s.markup) || 0,
+          rate_basis: s.basis || 'per_person',
+          item_price_per_person: s.sellPP || 0,
+          quantity: s.quantity || 1,
+          pax: s.pax || paxCount,
+          total_buy: round2((s.buyPP || 0) * paxCount),
+          total_sell: round2((s.sellPP || 0) * paxCount),
+          tax_rate: numOr(s.taxRate, 15),
+          tax_label: s.taxLabel || 'VAT',
+          is_included: true,
+          sort_order: si
+        }));
+        if (svcRows.length) {
+          const { error: itemsErr } = await supabase
+            .from('itinerary_day_items')
+            .insert(svcRows);
+          if (itemsErr) throw itemsErr;
+        }
+      }
+      setSaved(true);
+      showToast('Itinerary saved', 'success');
+      setLastSavedKey(JSON.stringify({ days, meta: persistedMeta }));
+      return true;
+    } catch (err) {
+      showToast(err.message || 'Failed to save itinerary', 'error');
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [companyId, meta, currencyCode, days, paxCount, showToast]);
+
+  /* ── Unsaved-changes guard ────────────────────────────────────────────────
+     The app ships a NavigationGuardProvider (mounted in App.jsx) that shows a
+     "Save & Leave / Discard & Leave / Cancel" modal whenever the page is dirty
+     and the user navigates away, and it also warns on browser tab close via
+     beforeunload. Register this page with it so a partially-built itinerary
+     (services added but not yet saved) is never silently lost: the guard uses
+     handleSave's return value (true=proceed, false=stay) to decide whether the
+     navigation may complete. */
+  usePageGuard('itinerary-builder', 'this itinerary', dirty, handleSave);
+
+  /* â”€â”€ Edit itinerary details (Client & Tour) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+  const handleDetailsSave = useCallback(async (payload) => {
+    if (completedRef.current) return;
+    if (!meta.itineraryId) {
+      showToast('Save the itinerary once before editing its details', 'warning');
+      return;
+    }
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('itineraries')
+        .update({
+          itinerary_name: payload.itineraryName,
+          client_id: payload.clientId,
+          travel_start_date: payload.travelStart,
+          travel_end_date: payload.travelEnd,
+          travellers: payload.travellers,
+          num_adults: payload.numAdults,
+          num_children: payload.numChildren,
+          agency_reference: payload.agencyRef
+        })
+        .eq('id', meta.itineraryId);
+      if (error) throw error;
+
+      const nextClient = payload.selectedClient || meta.client;
+      const nextMeta = {
+        ...meta,
+        itineraryName: payload.itineraryName,
+        client: nextClient,
+        travelStart: payload.travelStart,
+        travelEnd: payload.travelEnd,
+        travellers: payload.travellers,
+        numAdults: payload.numAdults,
+        numChildren: payload.numChildren,
+        agencyRef: payload.agencyRef
+      };
+      const nextDays = days.map((d, i) => ({
+        ...d,
+        dayNumber: i + 1,
+        date: payload.travelStart ? addDaysToDate(payload.travelStart, i) : d.date || ''
+      }));
+      setMeta((prev) => ({ ...prev, ...nextMeta }));
+      setDays(nextDays);
+      setLastSavedKey(JSON.stringify({ days: nextDays, meta: nextMeta }));
+      setDetailsOpen(false);
+      setSaved(true);
+      showToast('Itinerary details updated', 'success');
+    } catch (err) {
+      showToast(err.message || 'Failed to update itinerary details', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }, [meta.itineraryId, meta.client, showToast]);
+
+  /* â”€â”€ Edit a day service (name + description override) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+  const openServiceEditor = useCallback((dayIdx, sv) => {
+    const li = sv.itemId ? libraryItems.find((x) => x.id === sv.itemId) : null;
+    setEditSvc({
+      dayIdx,
+      key: sv.key,
+      name: sv.name || '',
+      descOverride: sv.descOverride || '',
+      defaultDesc: li?.description || '',
+      taxRate: numOr(sv.taxRate, 15),
+      taxLabel: sv.taxLabel || 'VAT'
+    });
+  }, [libraryItems]);
+
+  const saveServiceDetails = useCallback(() => {
+    if (completedRef.current) return;
+    if (!editSvc) return;
+    const name = editSvc.name.trim();
+    if (!name) {
+      showToast('Service name is required', 'warning');
+      return;
+    }
+    setDays((prev) => prev.map((d, i) => {
+      if (i !== editSvc.dayIdx) return d;
+      return {
+        ...d,
+        services: d.services.map((s) =>
+          s.key === editSvc.key
+            ? { ...s, name, descOverride: editSvc.descOverride.trim(), taxRate: numOr(editSvc.taxRate, defaultTaxRate), taxLabel: editSvc.taxLabel || defaultTaxLabel }
+            : s
+        )
+      };
+    }));
+    setSaved(false);
+    setEditSvc(null);
+    showToast('Service updated', 'success');
+  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast]);
+
+  /* â”€â”€ Render: no data guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+  if (!data) {
+    return (
+      <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
+        <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
+          <div className="header-title">
+            <MapIcon className="header-icon" />
+            <div>
+              <h1>Itinerary Builder</h1>
+              <p>Build the tour day plan for this itinerary</p>
+            </div>
+          </div>
+          <button
+            className="secondary-btn"
+            style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
+            onClick={() => navigate('/itineraries')}
+          >
+            <ArrowLeft size={18} /> Back to Itineraries
+          </button>
+        </header>
+        <div style={{ background: '#fff', borderRadius: '16px', padding: '3rem', border: '1px solid #cbd5e1', textAlign: 'center', color: '#64748b' }}>
+          <MapIcon size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
+          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>No itinerary data</h3>
+          <p>Create an itinerary first, then open it from the Itineraries list.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
-      <header className="page-header" style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
+    <div className="super-admin-page" style={{ paddingBottom: '1rem' }}>
+      <header className="page-header" style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
         <div className="header-title">
-          <Map className="header-icon" />
+          <MapIcon className="header-icon" />
           <div>
             <h1>Itinerary Builder</h1>
-            <p>Build the tour day plan for this itinerary</p>
+            <p>Plan the day-by-day tour services</p>
           </div>
         </div>
         <button
@@ -21,64 +1716,514 @@ export const ItineraryBuilder = () => {
           style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
           onClick={() => navigate('/itineraries')}
         >
-          <ArrowLeft size={18} /> Back to Client &amp; Tour
+          <ArrowLeft size={18} /> Back to Itineraries
         </button>
       </header>
 
-      {data ? (
-        <div style={{
-          background: '#fff',
-          borderRadius: '16px',
-          padding: '2rem',
-          border: '1px solid #cbd5e1',
-          boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', color: '#0f766e' }}>
-            <Check size={18} />
-            <span style={{ fontWeight: 700 }}>Itinerary created — ready to build</span>
+      <div className="builder-layout">
+        {/* â”€â”€ Builder sidebar: library item picker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        <aside className="builder-sidebar">
+          <div className="builder-sidebar-header">
+            <div className="sidebar-search">
+              <Search size={16} />
+              <input
+                placeholder="Search library items..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+            <div className="sidebar-field">
+              <label>Currency</label>
+              <div className="menu-popover currency-popover">
+                <button
+                  type="button"
+                  className="currency-trigger"
+                  onClick={() => { setCurrencyOpen((p) => !p); setCurrencySearch(''); }}
+                >
+                  <span className="currency-trigger-sym">{currencySymbol}</span>
+                  <span className="currency-trigger-code">{currencyCode}</span>
+                  <span className="currency-trigger-name">{currencyObj?.name || ''}</span>
+                  <ChevronDown size={14} className={`currency-chevron ${currencyOpen ? 'open' : ''}`} />
+                </button>
+                {currencyOpen && (
+                  <>
+                    <div className="menu-overlay" onClick={() => setCurrencyOpen(false)} />
+                    <div className="menu-panel currency-panel">
+                      <div className="sidebar-search" style={{ margin: 0 }}>
+                        <Search size={14} />
+                        <input
+                          autoFocus
+                          placeholder="Search currency..."
+                          value={currencySearch}
+                          onChange={(e) => setCurrencySearch(e.target.value)}
+                        />
+                      </div>
+                      <div className="currency-list">
+                        {filteredCurrencies.map((c) => (
+                          <button
+                            key={c.code}
+                            type="button"
+                            className={`menu-item ${c.code === currencyCode ? 'active' : ''}`}
+                            onClick={() => {
+                              setCurrencyCode(c.code);
+                              setCurrencyOpen(false);
+                            }}
+                          >
+                            <span className="currency-opt-sym">{c.symbol}</span>
+                            <span className="currency-opt-code">{c.code}</span>
+                            <span className="currency-opt-name">{c.name}</span>
+                            {c.code === currencyCode && <Check size={14} className="currency-opt-check" />}
+                          </button>
+                        ))}
+                        {filteredCurrencies.length === 0 && (
+                          <div className="currency-empty">No currency matches "{currencySearch}"</div>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="sidebar-field">
+              <label>Filter</label>
+              <div className="category-filters">
+                {categoryOptions.map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    className={`category-chip ${categoryFilter === cat ? 'active' : ''}`}
+                    onClick={() => setCategoryFilter((cur) => (cur === cat ? '' : cat))}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="clear-filters-btn"
+                onClick={() => { setCategoryFilter(''); setSearchTerm(''); }}
+              >
+                Clear filters
+              </button>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            <div>
-              <h2 style={{ fontSize: '1.3rem', fontWeight: 800, color: '#1e293b', marginBottom: '0.25rem', display: 'inline-flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                {data.itineraryName}
-                {data.referenceNumber && (
-                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#0d7478', fontFamily: 'monospace', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '0.2rem 0.6rem' }}>
-                    {data.referenceNumber}
-                  </span>
-                )}
-              </h2>
-              <p style={{ color: '#64748b', fontSize: '0.9rem', margin: 0 }}>
-                Client &amp; Tour details captured successfully.
-              </p>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
-                <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.4rem' }}>Client</div>
-                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b' }}>{data.client?.name || '—'}</div>
-                <div style={{ fontSize: '0.8rem', color: '#64748b' }}>{data.client?.client_type === 'Travel Agency' ? 'Travel Agency' : 'Direct'}</div>
-              </div>
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
-                <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.4rem' }}>Travel Dates</div>
-                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b' }}>{data.travelStart} → {data.travelEnd}</div>
-              </div>
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
-                <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.4rem' }}>Travellers</div>
-                <div style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b' }}>
-                  {data.travellers?.length || 0} <span style={{ color: '#64748b', fontWeight: 500, fontSize: '0.85rem' }}>({data.numAdults} adults / {data.numChildren} children)</span>
+          <div className="builder-items-list">
+            {loadingItems ? (
+              <div className="builder-items-empty">Loading library items...</div>
+            ) : filteredItems.length === 0 ? (
+              <div className="builder-items-empty">
+                <Package size={36} style={{ opacity: 0.5 }} />
+                <div style={{ fontWeight: 700, color: '#64748b' }}>
+                  {categoryFilter === '' && !searchTerm.trim() ? 'Pick a category or search' : 'No library items found'}
+                </div>
+                <div style={{ fontSize: '0.8rem' }}>
+                  {categoryFilter === '' && !searchTerm.trim()
+                    ? 'Select a category above (or search) to browse your library items.'
+                    : 'Try a different search, category, or currency.'}
                 </div>
               </div>
-            </div>
+            ) : (
+              filteredItems.map((item) => {
+                const basis = basisOfItem(item, currencyCode);
+                const price = contractPaxRate(item, currencyCode, paxCount);
+                return (
+                  <div
+                    key={item.id}
+                    className={`draggable-item ${isReadOnly ? 'locked' : ''}`}
+                    draggable={!isReadOnly}
+                    onDragStart={(e) => { if (isReadOnly) return; handleItemDragStart(e, item); }}
+                    onDoubleClick={() => { if (isReadOnly) return; addService(selectedDayIndex, item, 'double-click'); }}
+                    title={isReadOnly ? 'Locked itinerary is read-only' : 'Drag or double-click to add to the selected day'}
+                  >
+                    <div className="draggable-item-top">
+                      <span className="draggable-item-name">{item.name}</span>
+                      <GripVertical size={16} style={{ color: '#cbd5e1', flexShrink: 0 }} />
+                    </div>
+                    <div className="draggable-item-meta">
+                      <span className="item-cat-tag">{item.category || 'General'}</span>
+                      <span className="item-price-tag">{fmtMoney(price, currencySymbol)}<span style={{ color: '#94a3b8', fontWeight: 500 }}>/pax</span></span>
+                    </div>
+                    <div className="draggable-item-supplier">
+                      {item.supplier?.name || ''}
+                      {isFlatBasis(basis) ? <span className="basis-tag">{basisLabelOf(basis)}</span> : null}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </aside>
 
-            {data.agencyRef && (
-              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '0.9rem 1.25rem', fontSize: '0.85rem', color: '#1e40af' }}>
-                <strong>Agency Reference:</strong> {data.agencyRef}
+        {/* â”€â”€ Main panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        <div className="builder-main">
+          {/* Header card */}
+          <div className="builder-header-card">
+            <div>
+              <h2>
+                {meta.itineraryName}
+                {meta.referenceNumber && <span className="ref-badge">{meta.referenceNumber}</span>}
+              </h2>
+              <div className="builder-info-row">
+                <span className="builder-info-piece">
+                  <Calendar size={14} /> <strong>{meta.travelStart || '—'}</strong> &rarr; <strong>{meta.travelEnd || '—'}</strong>
+                </span>
+                <span className="builder-info-piece">
+                  <User size={14} /> <strong>{meta.client?.name || 'No client'}</strong>
+                </span>
+                <div className="menu-popover status-popover">
+                  <button
+                    type="button"
+                    className={`status-badge ${STATUS_MOD[meta.status] || ''}`}
+                    style={{ border: '1px solid transparent', cursor: 'pointer' }}
+                    onClick={() => setStatusMenuOpen((prev) => !prev)}
+                  >
+                    {statusLabelOf(meta.status)}
+                  </button>
+                  {statusMenuOpen && (
+                    <>
+                      <div className="menu-overlay" onClick={() => setStatusMenuOpen(false)} />
+                      <div className="menu-panel" style={{ right: 0, top: 'calc(100% + 6px)', minWidth: '160px' }}>
+                        {STATUS_OPTIONS.map((s) => (
+                          <button
+                            type="button"
+                            key={s.value}
+                            className="menu-item"
+                            style={{ fontWeight: meta.status === s.value ? 700 : 600, background: meta.status === s.value ? '#f0fdfa' : 'transparent' }}
+                            onClick={() => {
+                              setMeta((prev) => ({ ...prev, status: s.value }));
+                              setStatusMenuOpen(false);
+                            }}
+                          >
+                            <span className={`status-dot ${s.value}`} /> {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {saved && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.78rem', fontWeight: 700, color: '#166534' }}>
+                    <CheckCircle2 size={14} /> Saved
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="builder-actions">
+<button type="button" className="icon-btn outline" onClick={handleCopy} disabled={isReadOnly} title={isReadOnly ? 'Copying days is locked on this itinerary' : 'Copy days from another itinerary'}>
+                <Copy size={15} />
+              </button>
+              <button type="button" className="icon-btn outline" onClick={() => setDetailsOpen(true)} disabled={isReadOnly} title={isReadOnly ? 'Details are locked on this itinerary' : 'Edit client & tour details'}>
+                <Edit3 size={16} /> Edit
+              </button>
+              {!isCancelled && (
+              <div className="menu-popover">
+                <button type="button" className="icon-btn outline" onClick={() => setExportOpen(!exportOpen)}>
+                  <FileDown size={16} /> Export
+                </button>
+                {exportOpen && (
+                  <>
+                    <div className="menu-overlay" style={{ inset: 0 }} onClick={() => setExportOpen(false)} />
+                    <div className="menu-panel" style={{ right: 0, top: 'calc(100% + 4px)' }}>
+                      <button type="button" className="menu-item" onClick={() => handleExport('word')}>
+                        <FileText size={15} /> Word
+                      </button>
+                      <button type="button" className="menu-item" onClick={() => handleExport('excel')}>
+                        <FileSpreadsheet size={15} /> Excel
+                      </button>
+                      <button type="button" className="menu-item" onClick={() => handleExport('pdf')}>
+                        <Printer size={15} /> PDF
+                      </button>
+                      <button type="button" className="menu-item" onClick={() => handleExport('link')}>
+                        <Link2 size={15} /> Digital Link
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
+              <button type="button" className="icon-btn teal" disabled={saving} onClick={handleSave}>
+                <Save size={16} /> {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
 
-            <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1.25rem' }}>
-              <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', marginBottom: '0.75rem' }}>Traveller List</h3>
+          {/* Tabs — hidden stages are locked out of their documents */}
+          <div className="builder-tabs">
+            <button type="button" className={`builder-tab ${activeTab === 'itinerary' ? 'active' : ''}`} onClick={() => setActiveTab('itinerary')}>
+              <Route size={15} /> Itinerary
+            </button>
+            <button type="button" className={`builder-tab ${activeTab === 'client' ? 'active' : ''}`} onClick={() => setActiveTab('client')}>
+              <User size={15} /> Travelers Info
+            </button>
+            <button type="button" className={`builder-tab ${activeTab === 'pricing' ? 'active' : ''}`} onClick={() => setActiveTab('pricing')}>
+              <Receipt size={15} /> Pricing
+            </button>
+            <button type="button" className={`builder-tab ${activeTab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
+              <StickyNote size={15} /> Notes
+            </button>
+            {isProvisional && (
+              <>
+                <button type="button" className={`builder-tab ${activeTab === 'service-request' ? 'active' : ''}`} onClick={() => setActiveTab('service-request')}>
+                  <Mail size={15} /> Service Request
+                </button>
+                <button type="button" className={`builder-tab ${activeTab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
+                  <Receipt size={15} /> Deposit Request
+                </button>
+              </>
+            )}
+            {(isConfirmed || isInProgress) && (
+              <>
+                <button type="button" className={`builder-tab ${activeTab === 'travel-docs' ? 'active' : ''}`} onClick={() => setActiveTab('travel-docs')}>
+                  <Plane size={15} /> Travel Documents
+                </button>
+                <button type="button" className={`builder-tab ${activeTab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
+                  <Receipt size={15} /> Invoices
+                </button>
+                <button type="button" className={`builder-tab ${activeTab === 'vouchers' ? 'active' : ''}`} onClick={() => setActiveTab('vouchers')}>
+                  <Ticket size={15} /> Vouchers
+                </button>
+              </>
+            )}
+            {isInProgress && (
+              <button type="button" className={`builder-tab ${activeTab === 'operations' ? 'active' : ''}`} onClick={() => setActiveTab('operations')}>
+                <Calendar size={15} /> Operations
+              </button>
+            )}
+            {isCompleted && (
+              <button type="button" className={`builder-tab ${activeTab === 'post-tour' ? 'active' : ''}`} onClick={() => setActiveTab('post-tour')}>
+                <CheckCircle2 size={15} /> Post-Tour
+              </button>
+            )}
+            {isCancelled && (
+              <button type="button" className={`builder-tab ${activeTab === 'cancellation' ? 'active' : ''}`} onClick={() => setActiveTab('cancellation')}>
+                <X size={15} /> Cancellation
+              </button>
+            )}
+          </div>
+
+          {/* Day-by-day */}
+          {tab === 'itinerary' && (
+            <>
+              {isReadOnly && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: isCancelled ? '#fee2e2' : '#f3e8ff', border: `1px solid ${isCancelled ? '#fecaca' : '#e9d5ff'}`, color: isCancelled ? '#b91c1c' : '#6b21a8', borderRadius: '12px', padding: '0.85rem 1.1rem', fontSize: '0.88rem', fontWeight: 600, marginBottom: '1rem' }}>
+                  <Lock size={16} />
+                  {isCancelled
+                    ? <>This itinerary is <strong>Cancelled</strong> and revoked. Change its status from the badge above to re-open it.</>
+                    : <>This itinerary is <strong>Completed</strong> and read-only. Change its status from the badge above to edit it again.</>}
+                </div>
+              )}
+              <div className="day-strip-wrap" style={{ flexShrink: 0 }}>
+                <div className="day-strip">
+                  {days.map((d, i) => {
+                    const t = dayTotals(d);
+                    return (
+                      <button
+                        key={d.key}
+                        type="button"
+                        className={`day-strip-card ${selectedDayIndex === i ? 'active' : ''}`}
+                        onClick={() => { setSelectedDayIndex(i); setDragOverKey(null); }}
+                      >
+                        <div className="day-strip-card-title">Day {d.dayNumber}</div>
+                        <div className="day-strip-card-date">{formatDateLong(d.date) || ''}</div>
+                        <div className="day-strip-card-summary">
+                          <span>{t.count} item{t.count === 1 ? '' : 's'}</span>
+                          <span>{fmtMoney(t.sell, currencySymbol)}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                  <button type="button" className="day-add-chip" onClick={addDay} disabled={isReadOnly} title={isReadOnly ? 'Locked itinerary is read-only' : 'Add Day'}>
+                    <Plus size={15} /> Add Day
+                  </button>
+                </div>
+              </div>
+
+              {currentDay && (
+                <div
+                  className={`day-workspace ${isDragOver ? 'dragging' : ''}`}
+                  onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={(e) => handleDayDrop(selectedDayIndex, e)}
+                >
+                  <div className="day-workspace-header">
+                    <div className="day-workspace-title">
+                      <h3>Day {currentDay.dayNumber}</h3>
+                      <span className="day-date">{formatDateLong(currentDay.date) || ''}</span>
+                      <span className="selected-chip"><Check size={12} /> Selected</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <div className="day-totals">
+                        {(() => {
+                          const t = dayTotals(currentDay);
+                          return (
+                            <>
+                              <span className="day-total-pill buy"><span className="label">Total Buy</span>{fmtMoney(t.buy, currencySymbol)}</span>
+                              <span className="day-total-pill sell"><span className="label">Total Sell</span>{fmtMoney(t.sell, currencySymbol)}</span>
+                            </>
+                          );
+                        })()}
+                      </div>
+                      <div className="day-workspace-actions">
+                        {!isReadOnly && (
+                        <div className="menu-popover">
+                          <button type="button" className="action-btn" title="Day options" onClick={() => setKebabFor(kebabFor === selectedDayIndex ? null : selectedDayIndex)}>
+                            <MoreVertical size={16} />
+                          </button>
+                          {kebabFor === selectedDayIndex && (
+                            <>
+                              <div className="menu-overlay" onClick={() => setKebabFor(null)} />
+                              <div className="menu-panel">
+                                  <button type="button" className="menu-item" onClick={() => { setKebabFor(null); setDayNotesDay(selectedDayIndex); }}>
+                                    <StickyNote size={15} /> Day Notes…
+                                  </button>
+                                  <button type="button" className="menu-item" onClick={() => duplicateDay(selectedDayIndex)}>
+                                    <Layers size={15} /> Duplicate Day
+                                  </button>
+                                <button type="button" className="menu-item" onClick={() => clearDay(selectedDayIndex)}>
+                                  <Eraser size={15} /> Clear All Services
+                                </button>
+                                <button type="button" className="menu-item danger" onClick={() => deleteDay(selectedDayIndex)}>
+                                  <Trash2 size={15} /> Delete Day
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="day-services">
+                    {(currentDay.services && currentDay.services.length > 0) && (
+                      <div className="svc-grid-head">
+                        <span className="svc-grip-cell" />
+                        <span>Service</span>
+                        <span className="svc-head-buy">Buy /pax</span>
+                        <span className="svc-head-markup">Markup</span>
+                        <span className="svc-head-sell">Sell /pax</span>
+                        <span className="svc-head-line">Line</span>
+                        <span />
+                      </div>
+                    )}
+                    {(currentDay.services || []).map((sv) => {
+                      const sellLine = round2((Number(sv.sellPP) || 0) * paxCount);
+                      return (
+                        <div
+                          key={sv.key}
+                          className={`service-row ${dragOverKey === sv.key ? 'drag-over' : ''}`}
+                          draggable={!isReadOnly}
+                          onDragStart={(e) => { if (isReadOnly) return; handleServiceDragStart(e, selectedDayIndex, sv.key); }}
+                          onDragOver={(e) => { if (isReadOnly) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragOverKey(sv.key); }}
+                          onDragLeave={() => setDragOverKey((cur) => (cur === sv.key ? null : cur))}
+                          onDrop={(e) => { if (isReadOnly) return; handleServiceDrop(e, selectedDayIndex, sv.key); }}
+                        >
+                          <div className="svc-grip-cell">
+                            {isReadOnly ? null : <GripVertical size={16} style={{ color: '#cbd5e1', cursor: 'grab' }} />}
+                          </div>
+<div className="service-row-main">
+                            <button
+                              type="button"
+                              className="service-row-name"
+                              title={isReadOnly ? 'Locked on this itinerary' : 'Edit service name & description'}
+                              disabled={isReadOnly}
+                              onClick={() => { if (isReadOnly) return; openServiceEditor(selectedDayIndex, sv); }}
+                            >
+                              {repairText(sv.name)}
+                              {isReadOnly ? null : <Pencil size={13} className="service-row-name-edit" />}
+                            </button>
+                            <div className="service-row-meta">
+                              {sv.category || 'General'}
+                              {sv.supplierName ? ` · ${sv.supplierName}` : ''}
+                              {paxCount > 0 ? ` · ${paxCount} pax` : ''}
+                              {sv.currencyCode ? ` · ${sv.currencyCode}` : ''}
+                              <span className={`basis-tag ${isFlatBasis(sv.basis) ? 'flat' : ''}`}>
+                                {basisLabelOf(sv.basis)}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="svc-cell">
+                            <input
+                              className="svc-price-input buy"
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={sv.buyPP}
+                              disabled={isReadOnly}
+                              onChange={isReadOnly ? undefined : (e) => updateServicePricing(selectedDayIndex, sv.key, 'buyPP', e.target.value)}
+                              title="Buy price â€” the supplier rate per person. Edit it directly to negotiate."
+                            />
+                          </div>
+                          <div className="svc-cell svc-markup-cell">
+                            <input
+                              className="svc-price-input markup"
+                              type="number"
+                              min="0"
+                              step="0.5"
+                              value={sv.markup ?? 0}
+                              disabled={isReadOnly}
+                              onChange={isReadOnly ? undefined : (e) => updateServicePricing(selectedDayIndex, sv.key, 'markup', e.target.value)}
+                              title="Markup percentage applied to this service"
+                            />
+                            <span className="svc-markup-suffix">%</span>
+                          </div>
+                          <div className="svc-cell svc-sell-cell">
+                            <span className="service-price sell">{fmtMoney(sv.sellPP, svcSymbol(sv.currencyCode))}</span>
+                          </div>
+                          <div className="svc-cell svc-line-cell">
+                            <span className="service-price line">{fmtMoney(sellLine, svcSymbol(sv.currencyCode))}</span>
+                          </div>
+                          {isReadOnly ? null : (
+                            <button type="button" className="service-remove" title="Remove" onClick={() => removeService(selectedDayIndex, sv.key)}>
+                              <X size={16} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {!currentDay.services.length && (
+                      <div style={{ textAlign: 'center', color: '#94a3b8', padding: '1.25rem 0 0.25rem', fontSize: '0.9rem' }}>
+                        No services added to this day yet. Drag from the left, or double-click an item.
+                      </div>
+                    )}
+                  </div>
+
+                  {!isReadOnly && (
+                  <div
+                    className={`day-drop-zone ${isDragOver ? 'dragging' : ''}`}
+                    onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+                    onDragLeave={() => setIsDragOver(false)}
+                    onDrop={(e) => handleDayDrop(selectedDayIndex, e)}
+                  >
+                    <Plus size={16} /> Drop services here
+                  </div>
+                  )}
+
+                  {!isReadOnly && (
+                  <div className="day-add-row">
+                    <button type="button" className="secondary-btn" onClick={addDay}>
+                      <Plus size={16} /> Add Another Day
+                    </button>
+                  </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Travelers Info tab */}
+          {tab === 'client' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', margin: '0 0 0.25rem' }}>Travelers Info</h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.25rem' }}>
+                {paxCount} traveller(s) on this itinerary.
+              </p>
+              {meta.agencyRef && (
+                <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '0.9rem 1.25rem', fontSize: '0.85rem', color: '#1e40af', marginBottom: '1.25rem' }}>
+                  <strong>Agency Reference:</strong> {meta.agencyRef}
+                </div>
+              )}
               <table className="admin-table">
                 <thead>
                   <tr>
@@ -89,48 +2234,786 @@ export const ItineraryBuilder = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {(data.travellers || []).map((t, i) => (
+                  {(meta.travellers || []).map((t, i) => (
                     <tr key={i}>
                       <td style={{ color: '#94a3b8', fontWeight: 700 }}>{i + 1}</td>
-                      <td>{t.name}</td>
-                      <td>{t.surname}</td>
+                      <td>{t.name || '—'}</td>
+                      <td>{t.surname || '—'}</td>
                       <td>{t.age || '—'}</td>
                     </tr>
                   ))}
+                  {!meta.travellers?.length && (
+                    <tr>
+                      <td colSpan="4" style={{ color: '#94a3b8' }}>No traveller details recorded.</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', margin: '1.5rem 0 0.75rem' }}>Client</h4>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
+                  <div className="company-id">Name</div>
+                  <div style={{ fontWeight: 700, color: '#1a202c' }}>{meta.client?.name || '—'}</div>
+                  <div className="company-id" style={{ marginTop: '0.25rem' }}>{meta.client?.client_type || ''}</div>
+                </div>
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
+                  <div className="company-id">Contact</div>
+                  <div style={{ fontWeight: 600, color: '#1a202c' }}>{meta.client?.email || '—'}</div>
+                  <div className="company-id" style={{ marginTop: '0.25rem' }}>{meta.client?.phone || '—'}</div>
+                </div>
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
+                  <div className="company-id">Country</div>
+                  <div style={{ fontWeight: 600, color: '#1a202c' }}>{meta.client?.country || '—'}</div>
+                </div>
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
+                  <div className="company-id">Markup</div>
+                  <div style={{ fontWeight: 700, color: '#1a202c' }}>{markupPct}%</div>
+                </div>
+              </div>
             </div>
-          </div>
+          )}
 
-          <div style={{
-            marginTop: '2rem',
-            background: '#f0fdfa',
-            border: '1px dashed #5eead4',
-            borderRadius: '12px',
-            padding: '1.25rem',
-            color: '#0f766e',
-            fontSize: '0.9rem'
-          }}>
-            <strong>Next up:</strong> the itinerary builder (Section 2) — day planning, adding library items, and pricing will be built here.
-          </div>
+          {/* Pricing tab */}
+          {tab === 'pricing' && (
+            <div className="builder-panel-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', margin: 0 }}>Pricing Summary</h3>
+                <span style={{ fontSize: '0.85rem', color: '#64748b' }}>
+                  {paxCount} traveller(s) Â· client markup {markupPct}%
+                </span>
+              </div>
+              {pricingGroups.length === 0 && (
+                <div style={{ textAlign: 'center', color: '#94a3b8', padding: '2rem 0' }}>
+                  Add services to a day to see the pricing breakdown.
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                {pricingGroups.map((g) => (
+                  <section key={g.code} className="pricing-currency-section">
+                    <div className="pricing-currency-head">
+                      <span className="pricing-currency-sym">{g.symbol}</span>
+                      <span className="pricing-currency-code">{g.code}</span>
+                      {g.name && <span className="pricing-currency-name">{g.name}</span>}
+                      <span className="pricing-currency-meta">{g.count} service{g.count === 1 ? '' : 's'}</span>
+                    </div>
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Day</th>
+                          <th>Date</th>
+                          <th>Services</th>
+                          <th>Buy (VAT-incl)</th>
+                          <th>Sell (VAT-incl)</th>
+                          <th>Output VAT</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.days.map((r) => (
+                          <tr key={r.day}>
+                            <td style={{ fontWeight: 700 }}>Day {r.day}</td>
+                            <td>{r.date || '—'}</td>
+                            <td>{r.count}</td>
+                            <td style={{ color: '#b45309', fontWeight: 700 }}>{fmtMoney(r.buy, g.symbol)}</td>
+                            <td style={{ color: '#0d7478', fontWeight: 700 }}>{fmtMoney(r.sell, g.symbol)}</td>
+                            <td style={{ color: '#7c3aed', fontWeight: 700 }}>{fmtMoney(r.tax, g.symbol)}</td>
+                          </tr>
+                        ))}
+                        <tr style={{ background: '#f8fafc' }}>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Subtotal (Excl VAT)</td>
+                          <td style={{ color: '#0d7478', fontWeight: 800 }}>{fmtMoney(g.totalExcl, g.symbol)}</td>
+                        </tr>
+                        {g.taxEntries.map((te) => (
+                          <tr key={te.label} style={{ background: '#f8fafc' }}>
+                            <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>
+                              VAT <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.8rem' }}>({te.label} {Number(te.rate)}%)</span>
+                            </td>
+                            <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(te.amount, g.symbol)}</td>
+                          </tr>
+                        ))}
+                        <tr style={{ background: '#f8fafc' }}>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Input VAT (on Buy, embedded)</td>
+                          <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(g.totalTaxIn, g.symbol)}</td>
+                        </tr>
+                        <tr style={{ background: '#f8fafc' }}>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Net VAT to SARS (Output − Input)</td>
+                          <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(g.totalTaxNet, g.symbol)}</td>
+                        </tr>
+                        <tr style={{ background: '#f0fdfa' }}>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 900, fontSize: '1rem' }}>
+                            {g.code} TOTAL DUE (INCL VAT)
+                          </td>
+                          <td style={{ color: '#0d7478', fontWeight: 900, fontSize: '1rem' }}>
+                            {fmtMoney(g.totalInclTax, g.symbol)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </section>
+                ))}
+              </div>
+              <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '1.25rem' }}>
+                Prices are grouped by currency, as an itinerary can mix currencies. Buy and Sell are both
+                VAT-inclusive: the Sell price is the supplier amount plus markup (VAT included), so the client is
+                charged the Sell total as-is. Subtotal (Excl VAT) plus the VAT rows equal TOTAL DUE (INCL. VAT).
+                Input VAT (embedded in Buy) and Net VAT to SARS (Output minus Input, i.e. tax on the markup) are
+                shown for internal tax records only and are never sent to the client. Each section uses its own currency.
+              </p>
+            </div>
+          )}
+
+          {/* Notes tab */}
+          {tab === 'notes' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.5rem' }}>Itinerary Notes</h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1rem' }}>
+                Internal notes for this itinerary. Saved with the rest of the itinerary.
+              </p>
+              <textarea
+                style={{ width: '100%', minHeight: '240px', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem', fontFamily: 'inherit', fontSize: '0.9rem', resize: 'vertical', outline: 'none' }}
+                placeholder="Anything useful to remember about this tour..."
+                value={meta.notes || ''}
+                readOnly={isReadOnly}
+                onChange={(e) => setMeta((prev) => ({ ...prev, notes: e.target.value }))}
+              />
+              <button type="button" className="primary-btn" style={{ width: 'auto', marginTop: '1rem', padding: '0.65rem 1.5rem', fontSize: '0.95rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }} disabled={saving} onClick={handleSave}>
+                <Save size={16} /> Save Itinerary
+              </button>
+            </div>
+          )}
+
+          {/* Copy modal */}
+          {copyOpen && (
+            <div className="modal-overlay">
+              <div className="modal-content">
+                <div className="modal-header">
+                  <h2>Copy Itinerary Days</h2>
+                  <button className="close-btn" onClick={() => setCopyOpen(false)}><X size={20} /></button>
+                </div>
+                <div className="sidebar-field">
+                  <label>Copy from</label>
+                  <select className="sidebar-select" value={copySourceId} onChange={(e) => setCopySourceId(e.target.value)}>
+                    <option value="">Select an itinerary...</option>
+                    {availableItineraries.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.itinerary_name}{a.reference_number ? ` (${a.reference_number})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {availableItineraries.length === 0 && (
+                    <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.4rem' }}>
+                      No other itineraries available to copy from.
+                    </div>
+                  )}
+                </div>
+                <div className="sidebar-field">
+                  <label>Insert after day</label>
+                  <select className="sidebar-select" value={copyInsertDay} onChange={(e) => setCopyInsertDay(Number(e.target.value))}>
+                    {Array.from({ length: days.length + 1 }, (_, i) => (
+                      <option key={i} value={i + 1}>
+                        {i === days.length ? `After Day ${i} (at the end)` : `After Day ${i + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '1rem' }}>
+                  The copied days are inserted into this itinerary. If they exceed the current date range, the travel end date is extended automatically.
+                </p>
+                <div className="form-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setCopyOpen(false)}>Cancel</button>
+                  <button type="button" className="primary-btn" style={{ flex: 1 }} disabled={saving} onClick={confirmCopy}>
+                    {saving ? 'Copying...' : 'Copy Days'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Edit Client & Tour details modal */}
+          {detailsOpen && (
+            <div className="modal-overlay">
+              <div className="modal-content" style={{ maxWidth: '880px', maxHeight: '86vh', overflowY: 'auto' }}>
+                <div className="modal-header">
+                  <h2>Client &amp; Tour</h2>
+                  <button className="close-btn" onClick={() => setDetailsOpen(false)}><X size={20} /></button>
+                </div>
+                <ClientTourForm
+                  initial={{
+                    itineraryName: meta.itineraryName,
+                    clientId: meta.client?.id || '',
+                    travelStart: meta.travelStart,
+                    travelEnd: meta.travelEnd,
+                    travellers: Array.isArray(meta.travellers) ? meta.travellers : [],
+                    agencyRef: meta.agencyRef || ''
+                  }}
+                  submitLabel="Save Itinerary"
+                  submitIcon={<Check size={18} />}
+                  onCancel={() => setDetailsOpen(false)}
+                  onSubmit={handleDetailsSave}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ─── Service Request (provisional) ───────────────────────────────────────
+     One combined email per supplier + per-service individual emails, all as
+     prefilled mailto: drafts to the supplier's address. Body is derived from
+     persisted data only; it cannot be hand-edited. render of the "Send"
+     button is guarded on the group having at least one email.                    */}
+          {tab === 'service-request' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Provisional Service Request
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '720px' }}>
+                Booking enquiries for every supplier on this tour, composed as prefilled
+                <strong> mailto:</strong> drafts sent through your default email client. You can send
+                <strong> one combined request per supplier</strong> or <strong>one email per service</strong>.
+                The body is strictly derived from the itinerary — it cannot be edited.
+              </p>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1.25rem' }}>
+                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                  const perm = servicesBySupplier(days, libraryItems).filter((g) => emailOf(g.sup));
+                  if (!perm.length) { showToast('No supplier email on file', 'warning'); return; }
+                  const first = perm[0];
+                  const m = supplierRequestEmail(first, days, meta, currencySymbol, paxCount);
+                  window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                }}>
+                  <Mail size={15} /> Compose all requests
+                </button>
+                <span style={{ alignSelf: 'center', fontSize: '0.78rem', color: '#94a3b8' }}>
+                  Opens one mailto draft per supplier. Send each from your mail client.
+                </span>
+              </div>
+
+              {servicesBySupplier(days, libraryItems).map((grp) => (
+                <div key={grp.key} className="supplier-request-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden' }}>
+                  <div className="supplier-request-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', padding: '0.85rem 1rem', background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+                      <strong style={{ fontSize: '0.92rem', color: '#1a202c' }}>{grp.label}</strong>
+                      <span style={{ fontSize: '0.78rem', color: `${emailOf(grp.sup) ? '#16a34a' : '#dc2626'}` }}>
+                        {emailOf(grp.sup) ? `✉ ${emailOf(grp.sup)}` : 'No email on file — add one in Suppliers'}
+                      </span>
+                    </div>
+                    <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
+                  </div>
+                  <div style={{ padding: '0.85rem 1rem' }}>
+                    <ul style={{ margin: 0, paddingLeft: '1.1rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                      {grp.svcs.map(({ sv, day }) => (
+                        <li key={sv.key} style={{ fontSize: '0.85rem', color: '#334155' }}>
+                          <strong>{repairText(sv.name)}</strong>
+                          {day.date ? <span style={{ color: '#64748b' }}> — {formatDateLong(day.date)}</span> : null}
+                          {timeRangeOf(sv) ? <span style={{ color: '#64748b' }}> ({timeRangeOf(sv)})</span> : null}
+                          {serviceNotes(sv, libraryItems) ? (
+                            <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '0.15rem' }}>{serviceNotes(sv, libraryItems)}</div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => {
+                        const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount);
+                        window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                      }}>
+                        <Mail size={14} /> Compose ({grp.label}) request
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ─── Travel Documents (confirmed) ──────────────────────────────────── */}
+          {tab === 'travel-docs' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Travel Documents
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '720px' }}>
+                Ready-to-send <strong>service confirmations</strong> for each supplier. These follow up the
+                earlier provisional service request with the same service details. Like all outbound mail, they
+                are prefilled <strong>mailto:</strong> drafts — one per supplier — opened through your default
+                email client. Read-only; derived from persisted data.
+              </p>
+
+              {servicesBySupplier(days, libraryItems).map((grp) => (
+                <div key={grp.key} className="supplier-request-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden' }}>
+                  <div className="supplier-request-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', padding: '0.85rem 1rem', background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+                      <strong style={{ fontSize: '0.92rem', color: '#1a202c' }}>{grp.label}</strong>
+                      <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Follow-up confirmation of secured services</span>
+                    </div>
+                    <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
+                  </div>
+                  <div style={{ padding: '0.85rem 1rem' }}>
+                    <ul style={{ margin: 0, paddingLeft: '1.1rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                      {grp.svcs.map(({ sv, day }) => (
+                        <li key={sv.key} style={{ fontSize: '0.85rem', color: '#334155' }}>
+                          <strong>{repairText(sv.name)}</strong>
+                          {day.date ? <span style={{ color: '#64748b' }}> — {formatDateLong(day.date)}</span> : null}
+                          {timeRangeOf(sv) ? <span style={{ color: '#64748b' }}> ({timeRangeOf(sv)})</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => {
+                        const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount);
+                        window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                      }}>
+                        <FileText size={14} /> Compose travel-doc draft
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ─── Invoices (provisional → deposit request, confirmed+ → final) ── */}
+          {tab === 'invoices' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                {isProvisional ? 'Deposit Request' : 'Final Invoice'}
+              </h3>
+              {isProvisional ? (
+                <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.6rem', maxWidth: '720px' }}>
+                  A <strong>provisional booking</strong> only unlocks this deposit invoice — no vouchers or
+                  travel documents yet. Once the deposit is received, move the itinerary to
+                  <strong> Confirmed</strong> to release the full travel pack.
+                </p>
+              ) : (
+                <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.6rem', maxWidth: '720px' }}>
+                  Final client invoice. Marking the payment as received is what unlocks the
+                  <strong> Confirmed</strong> status — until the receipt is confirmed on
+                  your side, the itinerary stays <strong>provisional</strong>.
+                </p>
+              )}
+
+              <div className="inline-invoice-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', alignItems: 'flex-start', marginBottom: '1.15rem' }}>
+                {[{ label: 'Reference', value: meta.referenceNumber || meta.reference || '—' },
+                  { label: 'Client', value: meta.client?.name || '—' },
+                  { label: 'Days', value: `${days.length}` },
+                  { label: 'Pax', value: `${paxCount}` }
+                ].map((row) => (
+                  <div key={row.label} style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                    <span style={{ fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8' }}>{row.label}</span>
+                    <span style={{ fontSize: '0.92rem', fontWeight: 700, color: '#1a202c' }}>{row.value}</span>
+                  </div>
+                ))}
+              </div>
+
+              {isProvisional ? (
+                <div className="invoice-total" style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.15rem' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#1e40af', fontWeight: 700, marginBottom: '0.25rem' }}>Total itinerary price</div>
+                  <div style={{ fontSize: '1.6rem', fontWeight: 900, color: '#1e40af' }}>
+                    {currencySymbol}{paxBalanceTotal.toFixed(2)}
+                  </div>
+                  <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
+                      Deposit due ({DEPOSIT_PCT}%): <strong>{currencySymbol}{round2(paxBalanceTotal * (DEPOSIT_PCT / 100)).toFixed(2)}</strong>
+                    </span>
+                    <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
+                      Balance after deposit: <strong>{currencySymbol}{round2(paxBalanceTotal * (1 - DEPOSIT_PCT / 100)).toFixed(2)}</strong>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="invoice-total" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.15rem' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#16a34a', fontWeight: 700, marginBottom: '0.25rem' }}>Outstanding balance</div>
+                  <div style={{ fontSize: '1.6rem', fontWeight: 900, color: '#15803d' }}>
+                    {currencySymbol}{paxBalanceTotal.toFixed(2)}
+                  </div>
+                </div>
+              )}
+
+              {!isProvisional && (
+                <div className="payment-receipt-box" style={{ border: '1.5px dashed #cbd5e1', borderRadius: '14px', padding: '1rem 1.25rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
+                    <Receipt size={18} style={{ color: '#475569' }} />
+                    <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Payment receipt</strong>
+                  </div>
+                  <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
+                    Confirm that the client's payment has been received. This is the gate that lets you mark this
+                    itinerary as <strong>Confirmed</strong>.
+                  </p>
+                  <label className="check-row" style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', cursor: 'pointer', fontSize: '0.9rem', color: '#334155', userSelect: 'none' }}>
+                    <input
+                      type="checkbox"
+                      checked={paymentReceived}
+                      onChange={(e) => {
+                        setPaymentReceived(e.target.checked);
+                        if (e.target.checked) {
+                          showToast('Payment receipt confirmed — status can now be set to Confirmed', 'success');
+                        } else if (meta.status === 'confirmed' || meta.status === 'in_progress') {
+                          showToast('Receipt unconfirmed — itinerary reverts to provisional', 'warning');
+                          setMeta((prev) => ({ ...prev, status: 'provisional' }));
+                        }
+                      }}
+                    />
+                    Payment received &amp; confirmed
+                  </label>
+                </div>
+              )}
+
+              <div className="invoice-actions" style={{ marginTop: '1.2rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                  const m = isProvisional
+                    ? depositInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol)
+                    : finalInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol);
+                  if (!m.to) { showToast('No client email on file', 'warning'); return; }
+                  window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                }}>
+                  <Send size={15} /> {isProvisional ? 'Email deposit request to client' : 'Email final invoice to client'}
+                </button>
+                <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                  const m = isProvisional
+                    ? depositInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol)
+                    : finalInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol);
+                  void clipboardCopy(`${m.subject}\n\n${m.body}`);
+                  showToast(isProvisional ? 'Deposit request copied to clipboard' : 'Invoice draft copied to clipboard', 'success');
+                }}>
+                  <Copy size={15} /> Copy to clipboard
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Vouchers (confirmed, read-only) ───────────────────────────────── */}
+          {tab === 'vouchers' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Supplier Vouchers
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '720px' }}>
+                One <strong>read-only service voucher</strong> per supplier, per email. Vouchers cannot be
+                edited — they strictly mirror the persisted itinerary (travellers, dates, times, notes and
+                supplier reference). The client only ever sees the voucher; suppliers receive theirs
+                individually via your default email client.
+              </p>
+
+              {servicesBySupplier(days, libraryItems).map((grp) => {
+                const m = voucherFor(grp, days, meta, currencySymbol, paxCount);
+                return (
+                  <div key={grp.key} className="voucher-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden', background: '#fffefb', borderLeft: '4px solid #d4b106' }}>
+                    <div style={{ padding: '0.9rem 1rem', background: '#fffbeb', borderBottom: '1px solid #fdeab0' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                        <Ticket size={16} style={{ color: '#b45309' }} />
+                        <strong style={{ fontSize: '0.95rem', color: '#78350f' }}>{grp.label}</strong>
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#b45309', marginTop: '0.3rem' }}>
+                        {emailOf(grp.sup) ? `Sent to: ${emailOf(grp.sup)}` : 'No supplier email on file'}
+                      </div>
+                    </div>
+                    <div style={{ padding: '0.9rem 1rem' }}>
+                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: '0.82rem', color: '#475569', lineHeight: 1.6 }}>{m}</pre>
+                    </div>
+                    <div style={{ padding: '0 1rem 0.9rem', display: 'flex', justifyContent: 'flex-end' }}>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => window.open(mailTo(emailOf(grp.sup), `Voucher — ${grp.label}`, m), '_blank')}>
+                        <Mail size={14} /> Email voucher to this supplier
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ─── Operations (in progress) ─────────────────────────────────────── */}
+          {tab === 'operations' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Operations &amp; Daily Briefs
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1rem', maxWidth: '720px' }}>
+                The tour is <strong>in progress</strong>. Generate a daily handover brief for each day of the
+                trip — guides and suppliers get their service times, contact details and expected values.
+              </p>
+              {days.map((d) => {
+                const brief = dailyBriefFor(d, meta, paxCount, currencySymbol);
+                return (
+                  <div key={d.key} className="voucher-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden', background: '#ffffff', borderLeft: '4px solid #0f766e' }}>
+                    <div style={{ padding: '0.9rem 1rem', background: '#f0fdfa', borderBottom: '1px solid #99f6e4' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                          <Calendar size={16} style={{ color: '#0f766e' }} />
+                          <strong style={{ fontSize: '0.95rem', color: '#134e4a' }}>Day {d.dayNumber} {formatDateLong(d.date) ? `— ${formatDateLong(d.date)}` : ''}</strong>
+                        </div>
+                        <span style={{ fontSize: '0.8rem', color: '#64748b' }}>{(d.services || []).length} service{(d.services || []).length === 1 ? '' : 's'}</span>
+                      </div>
+                    </div>
+                    <div style={{ padding: '0.9rem 1rem', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.78rem', color: '#334155', lineHeight: '1.6' }}>
+                      {brief}
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
+                <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                  const all = days.map((d) => dailyBriefFor(d, meta, paxCount, currencySymbol)).join('\n\n══════════════════════════════════════\n\n');
+                  void clipboardCopy(all);
+                  showToast('All daily briefs copied to clipboard', 'success');
+                }}>
+                  <Copy size={15} /> Copy all briefs
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Post-Tour (completed) ────────────────────────────────────────── */}
+          {tab === 'post-tour' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Post-Tour Closure
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1rem', maxWidth: '720px' }}>
+                The itinerary is <strong>completed</strong>. Request client feedback and reconcile final
+                income against supplier costs.
+              </p>
+
+              <div className="payment-receipt-box" style={{ border: '1.5px dashed #cbd5e1', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.15rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
+                  <Mail size={18} style={{ color: '#475569' }} />
+                  <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Client feedback form</strong>
+                </div>
+                <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
+                  Send the client a structured post-tour feedback request.
+                </p>
+                <div className="invoice-actions" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                    const m = feedbackRequestEmail(meta);
+                    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+                    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                  }}>
+                    <Send size={15} /> Email feedback request
+                  </button>
+                  <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                    const m = feedbackRequestEmail(meta);
+                    void clipboardCopy(`${m.subject}\n\n${m.body}`);
+                    showToast('Feedback request copied to clipboard', 'success');
+                  }}>
+                    <Copy size={15} /> Copy to clipboard
+                  </button>
+                </div>
+              </div>
+
+              <div className="payment-receipt-box" style={{ border: '1.5px dashed #cbd5e1', borderRadius: '14px', padding: '1rem 1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
+                  <CheckCircle2 size={18} style={{ color: '#16a34a' }} />
+                  <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Expense reconciliation</strong>
+                </div>
+                <div className="invoice-total" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.85rem 1.1rem', margin: '0.6rem 0 0.85rem', display: 'flex', gap: '1.75rem', flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Income (invoiced, incl. tax)</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{currencySymbol}{paxBalanceTotal.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: '#dc2626', fontWeight: 700 }}>Supplier cost (buy)</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#b91c1c' }}>{currencySymbol}{itineraryCostTotal.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 700 }}>Net result</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: round2(paxBalanceTotal - itineraryCostTotal) >= 0 ? '#15803d' : '#b91c1c' }}>{currencySymbol}{round2(paxBalanceTotal - itineraryCostTotal).toFixed(2)}</div>
+                  </div>
+                </div>
+                <div className="invoice-actions" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                    const m = reconciliationStatementFor(meta, paxBalanceTotal, itineraryCostTotal, currencySymbol);
+                    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+                    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                  }}>
+                    <Send size={15} /> Email reconciliation statement
+                  </button>
+                  <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                    const m = reconciliationStatementFor(meta, paxBalanceTotal, itineraryCostTotal, currencySymbol);
+                    void clipboardCopy(`${m.subject}\n\n${m.body}`);
+                    showToast('Reconciliation statement copied to clipboard', 'success');
+                  }}>
+                    <Copy size={15} /> Copy to clipboard
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Cancellation (cancelled) ─────────────────────────────────────── */}
+          {tab === 'cancellation' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Cancellation
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1rem', maxWidth: '720px' }}>
+                This itinerary is <strong>cancelled</strong>. All vouchers, travel documents and invoices have
+                been revoked and the itinerary is locked. Issue the client a cancellation notice plus refund
+                statement.
+              </p>
+
+              <div className="payment-receipt-box" style={{ border: '1.5px dashed #fecaca', borderRadius: '14px', padding: '1rem 1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
+                  <X size={18} style={{ color: '#b91c1c' }} />
+                  <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Cancellation notice &amp; refund statement</strong>
+                </div>
+                <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
+                  Retains the deposit ({DEPOSIT_PCT}%) and details the refund due back to the client.
+                </p>
+                <div
+                  className="invoice-total"
+                  style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '12px', padding: '0.85rem 1.1rem', margin: '0.6rem 0 0.85rem', display: 'flex', gap: '1.75rem', flexWrap: 'wrap' }}
+                >
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Total itinerary price</div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c' }}>{currencySymbol}{paxBalanceTotal.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Deposit retained ({DEPOSIT_PCT}%)</div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#b91c1c' }}>{currencySymbol}{round2(paxBalanceTotal * (DEPOSIT_PCT / 100)).toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Refund due to client</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{currencySymbol}{round2(paxBalanceTotal * (1 - DEPOSIT_PCT / 100)).toFixed(2)}</div>
+                  </div>
+                </div>
+                <div className="invoice-actions" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, DEPOSIT_PCT, currencySymbol);
+                    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+                    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                  }}>
+                    <Send size={15} /> Email cancellation notice
+                  </button>
+                  <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, DEPOSIT_PCT, currencySymbol);
+                    void clipboardCopy(`${m.subject}\n\n${m.body}`);
+                    showToast('Cancellation notice copied to clipboard', 'success');
+                  }}>
+                    <Copy size={15} /> Copy to clipboard
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Day Notes modal */}
+          {dayNotesDay !== null && (
+            <div className="modal-overlay" onClick={() => setDayNotesDay(null)}>
+              <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}>
+                <div className="modal-header">
+                  <h2>Day {days[dayNotesDay]?.dayNumber || ''} Notes</h2>
+                  <button className="close-btn" onClick={() => setDayNotesDay(null)}><X size={20} /></button>
+                </div>
+                <div style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.9rem' }}>
+                  Internal notes specific to this day. Shown inside the workspace and used on supplier vouchers.
+                </div>
+                <textarea
+                  rows={6}
+                  placeholder="Add notes specific to this day (e.g., Early morning start, Packed lunch required, etc.)"
+                  value={days[dayNotesDay]?.notes || ''}
+                  readOnly={isReadOnly}
+                  onChange={(e) => {
+                    if (isReadOnly) return;
+                    setDays((prev) => prev.map((d, i) => (i === dayNotesDay ? { ...d, notes: e.target.value } : d)));
+                  }}
+                  style={{ width: '100%', minHeight: '150px', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.9rem', fontFamily: 'inherit', fontSize: '0.9rem', resize: 'vertical', outline: 'none' }}
+                />
+                <div className="form-actions" style={{ marginTop: '1rem' }}>
+                  <button type="button" className="secondary-btn" onClick={() => setDayNotesDay(null)}>Done</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Edit service modal */}
+          {editSvc && (
+            <div className="modal-overlay">
+              <div className="modal-content" style={{ maxWidth: '560px' }}>
+                <div className="modal-header">
+                  <h2>Edit Service</h2>
+                  <button className="close-btn" onClick={() => setEditSvc(null)}><X size={20} /></button>
+                </div>
+                <div className="sidebar-field">
+                  <label>Service name</label>
+                  <input
+                    className="sidebar-select"
+                    value={editSvc.name}
+                    onChange={(e) => setEditSvc((p) => ({ ...p, name: e.target.value }))}
+                  />
+                </div>
+                <div className="sidebar-field">
+                  <label>Description</label>
+                  <textarea
+                    className="sidebar-select"
+                    rows={4}
+                    style={{ resize: 'vertical', fontFamily: 'inherit' }}
+                    placeholder={editSvc.defaultDesc ? `Default: ${editSvc.defaultDesc}` : 'No default description'}
+                    value={editSvc.descOverride}
+                    onChange={(e) => setEditSvc((p) => ({ ...p, descOverride: e.target.value }))}
+                  />
+                  {editSvc.defaultDesc && (
+                    <p style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.35rem' }}>
+                      Default description: {editSvc.defaultDesc}
+                    </p>
+                  )}
+                </div>
+                <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '0.2rem' }}>
+                  Leave the description blank to fall back to the library default.
+                </p>
+                <div style={{ marginTop: '1rem' }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+                    Tax applied to this service
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: '0.75rem', alignItems: 'end' }}>
+                    <div>
+                      {taxRates.filter((t) => t.is_active).length > 0 && (
+                        <select
+                          className="sidebar-select"
+                          style={{ width: '100%' }}
+                          value=""
+                          onChange={(e) => {
+                            const t = taxRates.find((x) => x.id === e.target.value);
+                            if (t) setEditSvc((p) => ({ ...p, taxRate: Number(t.rate), taxLabel: t.name || 'Tax' }));
+                          }}
+                        >
+                          <option value="">Apply tax type...</option>
+                          {taxRates.filter((t) => t.is_active).map((t) => (
+                            <option key={t.id} value={t.id}>{t.name} â€” {Number(t.rate)}%</option>
+                          ))}
+                        </select>
+                      )}
+                      {taxRates.filter((t) => t.is_active).length === 0 && (
+                        <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '0.2rem' }}>
+                          No tenant tax types configured. Add them in Settings &rarr; Taxes.
+                        </p>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <input
+                        className="sidebar-select"
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        style={{ width: '100%' }}
+                        value={editSvc.taxRate}
+                        onChange={(e) => setEditSvc((p) => ({ ...p, taxRate: Number(e.target.value) || 0 }))}
+                      />
+                      <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#64748b', whiteSpace: 'nowrap' }}>%</span>
+                    </div>
+                  </div>
+                  <p style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.3rem' }}>
+                    {editSvc.taxLabel || 'VAT'} rate applied on the sell line (markup already included).
+                  </p>
+                </div>
+                <div className="form-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setEditSvc(null)}>Cancel</button>
+                  <button type="button" className="primary-btn" style={{ flex: 1 }} onClick={saveServiceDetails}>Save Changes</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-      ) : (
-        <div style={{
-          background: '#fff',
-          borderRadius: '16px',
-          padding: '3rem',
-          border: '1px solid #cbd5e1',
-          boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)',
-          textAlign: 'center',
-          color: '#64748b'
-        }}>
-          <Map size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
-          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>No itinerary data</h3>
-          <p>Complete the Client &amp; Tour form first, then click "Create Itinerary".</p>
-        </div>
-      )}
+      </div>
     </div>
   );
-}
+};
 
 export default ItineraryBuilder;

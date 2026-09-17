@@ -60,7 +60,7 @@ export const LibraryItems = () => {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
   const [supplierFilter, setSupplierFilter] = useState('All');
-  const [showInlineForm, setShowInlineForm] = useState(true);
+  const [showInlineForm, setShowInlineForm] = useState(false);
 
   // Editing state: when set, the inline form updates these items instead of inserting.
   // Maps form tempId -> existing library_items row id.

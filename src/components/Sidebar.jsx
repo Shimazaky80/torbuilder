@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { useNavigationGuard } from '../context/NavigationGuardContext';
 import { 
   LayoutDashboard, 
   Users, 
@@ -40,6 +41,7 @@ export const Sidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [profile, setProfile] = useState(null);
   const navigate = useNavigate();
+  const { requestNavigate } = useNavigationGuard();
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -85,6 +87,10 @@ export const Sidebar = () => {
             key={item.id}
             to={item.path}
             className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            onClick={(e) => {
+              e.preventDefault();
+              requestNavigate(item.path);
+            }}
           >
             <item.icon className="nav-icon" size={20} style={{ minWidth: '20px' }} />
             <span className="nav-label">{item.label}</span>

@@ -8,9 +8,11 @@ import { Suppliers } from './pages/Suppliers';
 import { Clients } from './pages/Clients';
 import { Itineraries } from './pages/Itineraries';
 import { ItineraryBuilder } from './pages/ItineraryBuilder';
+import { Settings } from './pages/Settings';
 import { LibraryItems } from './pages/LibraryItems';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { ToastProvider } from './context/ToastContext';
+import { NavigationGuardProvider } from './context/NavigationGuardContext';
 import './App.css';
 
 function App() {
@@ -24,28 +26,30 @@ function App() {
             path="/*"
             element={
               <ProtectedRoute>
-                <div className="app-container">
-                  <Sidebar />
-                  <main className="main-content">
-                    <Routes>
-                      <Route path="dashboard" element={<Dashboard />} />
-                      <Route path="" element={<Navigate to="dashboard" replace />} />
-                      <Route path="super-admin" element={<SuperAdmin />} />
-                      <Route path="clients" element={<Clients />} />
-                      <Route path="suppliers" element={<Suppliers />} />
-                      <Route path="services" element={<Navigate to="/library-items" replace />} />
-                      <Route path="library-items" element={<LibraryItems />} />
-                      <Route path="packages" element={<div>Packages (Coming Soon)</div>} />
-                      <Route path="itineraries" element={<Itineraries />} />
-                      <Route path="itineraries/builder" element={<ItineraryBuilder />} />
-                      <Route path="tariffs" element={<div>Tariffs (Coming Soon)</div>} />
-                      <Route path="analytics" element={<div>Analytics (Coming Soon)</div>} />
-                      <Route path="users" element={<div>Users (Coming Soon)</div>} />
-                      <Route path="settings" element={<div>Settings (Coming Soon)</div>} />
-                      <Route path="*" element={<Navigate to="dashboard" replace />} />
-                    </Routes>
-                  </main>
-                </div>
+                <NavigationGuardProvider>
+                  <div className="app-container">
+                    <Sidebar />
+                    <main className="main-content">
+                      <Routes>
+                        <Route path="dashboard" element={<Dashboard />} />
+                        <Route path="" element={<Navigate to="dashboard" replace />} />
+                        <Route path="super-admin" element={<SuperAdmin />} />
+                        <Route path="clients" element={<Clients />} />
+                        <Route path="suppliers" element={<Suppliers />} />
+                        <Route path="services" element={<Navigate to="/library-items" replace />} />
+                        <Route path="library-items" element={<LibraryItems />} />
+                        <Route path="packages" element={<div>Packages (Coming Soon)</div>} />
+                        <Route path="itineraries" element={<Itineraries />} />
+                        <Route path="itineraries/builder" element={<ItineraryBuilder />} />
+                        <Route path="tariffs" element={<div>Tariffs (Coming Soon)</div>} />
+                        <Route path="analytics" element={<div>Analytics (Coming Soon)</div>} />
+                        <Route path="users" element={<div>Users (Coming Soon)</div>} />
+                        <Route path="settings" element={<Settings />} />
+                        <Route path="*" element={<Navigate to="dashboard" replace />} />
+                      </Routes>
+                    </main>
+                  </div>
+                </NavigationGuardProvider>
               </ProtectedRoute>
             }
           />

@@ -2,10 +2,26 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
-import { Map, Building2, User, Calendar, Plus, X, UserPlus, Users, StickyNote, Copy, Edit3 } from 'lucide-react';
-import ClientForm from '../components/ClientForm';
+import { Map, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
+import ClientTourForm from '../components/ClientTourForm';
 
-const emptyTraveller = () => ({ name: '', surname: '', age: '' });
+const STATUS_MODS = {
+  quotation: 'quotation',
+  provisional: 'provisional',
+  confirmed: 'confirmed',
+  in_progress: 'in_progress',
+  cancelled: 'cancelled',
+  completed: 'completed'
+};
+
+const STATUS_LABELS = {
+  quotation: 'Quotation',
+  provisional: 'Provisional Booking',
+  confirmed: 'Confirmed Booking',
+  in_progress: 'In Progress',
+  cancelled: 'Cancelled',
+  completed: 'Completed'
+};
 
 const childrenCount = (travellers = []) => {
   if (!Array.isArray(travellers)) return 0;
@@ -19,63 +35,12 @@ export const Itineraries = () => {
   const navigate = useNavigate();
   const { showToast } = useToast();
 
-  const [clients, setClients] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [itineraries, setItineraries] = useState([]);
   const [loadingItineraries, setLoadingItineraries] = useState(true);
-  const [clientMode, setClientMode] = useState('existing'); // 'existing' | 'new'
 
-  const [form, setForm] = useState({
-    itineraryName: '',
-    clientId: '',
-    travelStart: '',
-    travelEnd: '',
-    numTravellers: 2,
-    agencyRef: ''
-  });
-
-  const [travellers, setTravellers] = useState([emptyTraveller(), emptyTraveller()]);
-  const [showInlineForm, setShowInlineForm] = useState(true);
-
-  const selectedClient = clients.find(c => c.id === form.clientId) || null;
-  const isAgency = selectedClient?.client_type === 'Travel Agency';
-
-  const fetchClients = useCallback(async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        setLoading(false);
-        return;
-      }
-
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('*, company_id')
-        .eq('id', user.id)
-        .single();
-
-      if (!profile?.company_id) {
-        setClients([]);
-        setLoading(false);
-        return;
-      }
-
-      setLoading(true);
-
-      const { data, error } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('company_id', profile.company_id)
-        .order('name', { ascending: true });
-
-      if (error) throw error;
-      setClients(data || []);
-    } catch (err) {
-      showToast(err.message, 'error');
-    } finally {
-      setLoading(false);
-    }
-  }, [showToast]);
+  const [showInlineForm, setShowInlineForm] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
 
   const fetchItineraries = useCallback(async () => {
     try {
@@ -101,7 +66,7 @@ export const Itineraries = () => {
 
       const { data, error } = await supabase
         .from('itineraries')
-        .select('*, clients(name, client_type)')
+        .select('*, clients(name, client_type, markup_percentage, email, phone, country)')
         .eq('company_id', profile.company_id)
         .order('created_at', { ascending: false })
         .limit(50);
@@ -119,71 +84,30 @@ export const Itineraries = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await fetchClients();
       await fetchItineraries();
       if (cancelled) return;
     })();
     return () => { cancelled = true; };
-  }, [fetchClients, fetchItineraries]);
+  }, [fetchItineraries]);
 
-  const resetForm = () => {
-    setForm({
-      itineraryName: '',
-      clientId: '',
-      travelStart: '',
-      travelEnd: '',
-      numTravellers: 2,
-      agencyRef: ''
-    });
-    setTravellers([emptyTraveller(), emptyTraveller()]);
-    setClientMode('existing');
-  };
-
-  const handleNumTravellersChange = (value) => {
-    const count = Math.max(1, parseInt(value, 10) || 1);
-    setForm(prev => ({ ...prev, numTravellers: count }));
-    setTravellers(prev => {
-      const next = [...prev];
-      while (next.length < count) next.push(emptyTraveller());
-      if (next.length > count) next.length = count;
-      return next;
-    });
-  };
-
-  const handleTravellerChange = (index, field, value) => {
-    setTravellers(prev => prev.map((t, i) => (i === index ? { ...t, [field]: value } : t)));
-  };
-
-  const handleCreate = async (e) => {
-    e.preventDefault();
-
-    const name = form.itineraryName.trim();
-    if (!name) {
-      showToast('Itinerary name is required', 'warning');
-      return;
+  const filteredItineraries = itineraries.filter((it) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      const haystack = [
+        it.clients?.name,
+        it.reference_number,
+        it.itinerary_name,
+        it.destination_region,
+        it.destination_country,
+        it.destination_province
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(q)) return false;
     }
+    if (statusFilter && it.status !== statusFilter) return false;
+    return true;
+  });
 
-    if (!form.clientId) {
-      showToast(clientMode === 'new' ? 'Please add the new client to continue' : 'Please select a client', 'warning');
-      return;
-    }
-
-    if (!form.travelStart || !form.travelEnd) {
-      showToast('Travel date range is required', 'warning');
-      return;
-    }
-
-    if (form.travelEnd < form.travelStart) {
-      showToast('End date cannot be before the start date', 'warning');
-      return;
-    }
-
-    const activeTravellers = travellers.slice(0, form.numTravellers);
-    if (activeTravellers.some(t => !t.name.trim() || !t.surname.trim())) {
-      showToast('Please enter a name and surname for every traveller', 'warning');
-      return;
-    }
-
+  const handleCreateItinerary = async (payload) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase
@@ -209,15 +133,15 @@ export const Itineraries = () => {
         .from('itineraries')
         .insert([{
           company_id: profile.company_id,
-          client_id: form.clientId,
+          client_id: payload.clientId,
           reference_number: referenceNumber,
-          itinerary_name: name,
-          travel_start_date: form.travelStart,
-          travel_end_date: form.travelEnd,
-          travellers: activeTravellers,
-          num_adults: activeTravellers.length - childrenCount(activeTravellers),
-          num_children: childrenCount(activeTravellers),
-          agency_reference: isAgency ? form.agencyRef.trim() : null,
+          itinerary_name: payload.itineraryName,
+          travel_start_date: payload.travelStart,
+          travel_end_date: payload.travelEnd,
+          travellers: payload.travellers,
+          num_adults: payload.numAdults,
+          num_children: payload.numChildren,
+          agency_reference: payload.agencyRef,
           status: 'quotation'
         }])
         .select()
@@ -225,7 +149,7 @@ export const Itineraries = () => {
 
       if (error) throw error;
 
-      showToast(`Itinerary "${name}" created!`, 'success');
+      showToast(`Itinerary "${payload.itineraryName}" created!`, 'success');
       fetchItineraries();
       setShowInlineForm(false);
 
@@ -233,14 +157,14 @@ export const Itineraries = () => {
         state: {
           itineraryId: newItinerary.id,
           referenceNumber,
-          itineraryName: name,
-          client: selectedClient,
-          travelStart: form.travelStart,
-          travelEnd: form.travelEnd,
-          travellers: activeTravellers,
-          numAdults: activeTravellers.length - childrenCount(activeTravellers),
-          numChildren: childrenCount(activeTravellers),
-          agencyRef: isAgency ? form.agencyRef.trim() : null
+          itineraryName: payload.itineraryName,
+          client: payload.selectedClient,
+          travelStart: payload.travelStart,
+          travelEnd: payload.travelEnd,
+          travellers: payload.travellers,
+          numAdults: payload.numAdults,
+          numChildren: payload.numChildren,
+          agencyRef: payload.agencyRef
         }
       });
     } catch (err) {
@@ -365,7 +289,7 @@ export const Itineraries = () => {
           style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           onClick={() => setShowInlineForm(!showInlineForm)}
         >
-          <Plus size={18} /> {showInlineForm ? 'Close Form' : 'Add Itinerary'}
+          <Plus size={18} /> {showInlineForm ? 'Close Form' : 'New Itinerary'}
         </button>
       </header>
 
@@ -385,268 +309,12 @@ export const Itineraries = () => {
           </h2>
         </div>
 
-        <form onSubmit={handleCreate}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
-
-            {/* ─── Itinerary Name ─── */}
-            <div style={{ maxWidth: '560px' }}>
-              <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
-                Itinerary Name *
-              </label>
-              <input
-                type="text"
-                className="pricing-select"
-                placeholder="e.g. Beach Paradise Getaway"
-                value={form.itineraryName}
-                onChange={(e) => setForm({ ...form, itineraryName: e.target.value })}
-              />
-            </div>
-
-            {/* ─── Client Selection / Creation ─── */}
-            <div style={{
-              background: '#f8fafc',
-              padding: '1.5rem',
-              borderRadius: '12px',
-              border: '1px solid #e2e8f0'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Users size={20} color="#0d7478" /> Client
-                </h3>
-
-                {clientMode === 'new' ? (
-                  <button
-                    type="button"
-                    onClick={() => setClientMode('existing')}
-                    style={{ color: '#0d7478', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
-                  >
-                    Select Existing
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setClientMode('new')}
-                    style={{ color: '#0d7478', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                  >
-                    <UserPlus size={14} /> Add New Client
-                  </button>
-                )}
-              </div>
-
-              {clientMode === 'existing' && (
-                <div style={{ maxWidth: '600px' }}>
-                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
-                    Select Client *
-                  </label>
-                  {loading ? (
-                    <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Loading clients...</div>
-                  ) : (
-                    <select
-                      className="pricing-select"
-                      value={form.clientId}
-                      onChange={(e) => setForm({ ...form, clientId: e.target.value })}
-                      style={{ margin: 0, fontWeight: 600 }}
-                    >
-                      <option value="">Select client...</option>
-                      {clients.map(c => (
-                        <option key={c.id} value={c.id}>
-                          {c.name} ({c.client_type === 'Travel Agency' ? 'Travel Agency' : 'Direct'})
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  {clients.length === 0 && !loading && (
-                    <p style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.5rem' }}>
-                      No clients yet — click "Add New Client" above to create one inline.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {clientMode === 'new' && (
-                <ClientForm
-                  onCancel={() => setClientMode('existing')}
-                  onCreated={(client) => {
-                    setForm(prev => ({ ...prev, clientId: client.id }));
-                    setClientMode('existing');
-                    fetchClients();
-                  }}
-                />
-              )}
-            </div>
-
-            {/* ─── Travel Date Range ─── */}
-            <div style={{
-              background: '#f8fafc',
-              padding: '1.5rem',
-              borderRadius: '12px',
-              border: '1px solid #e2e8f0'
-            }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: '0 0 1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Calendar size={20} color="#0d7478" /> Travel Dates
-              </h3>
-              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                <div style={{ flex: '1', minWidth: '220px' }}>
-                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
-                    From *
-                  </label>
-                  <input
-                    type="date"
-                    className="pricing-select"
-                    value={form.travelStart}
-                    onChange={(e) => setForm({ ...form, travelStart: e.target.value })}
-                  />
-                </div>
-                <div style={{ flex: '1', minWidth: '220px' }}>
-                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
-                    To *
-                  </label>
-                  <input
-                    type="date"
-                    className="pricing-select"
-                    min={form.travelStart || undefined}
-                    value={form.travelEnd}
-                    onChange={(e) => setForm({ ...form, travelEnd: e.target.value })}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* ─── Travellers ─── */}
-            <div style={{
-              background: '#f8fafc',
-              padding: '1.5rem',
-              borderRadius: '12px',
-              border: '1px solid #e2e8f0'
-            }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: '0 0 1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <User size={20} color="#0d7478" /> Travellers
-              </h3>
-
-              <div style={{ maxWidth: '300px', marginBottom: '1.25rem' }}>
-                <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
-                  Number of Travellers *
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="50"
-                  className="pricing-select"
-                  value={form.numTravellers}
-                  onChange={(e) => handleNumTravellersChange(e.target.value)}
-                />
-              </div>
-
-              {/* Agency reference section — shown only for Travel Agency clients */}
-              {isAgency && (
-                <div style={{
-                  background: '#eff6ff',
-                  border: '1px solid #bfdbfe',
-                  borderRadius: '10px',
-                  padding: '1rem 1.25rem',
-                  marginBottom: '1.25rem'
-                }}>
-                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e40af', display: 'block', marginBottom: '0.35rem' }}>
-                    Reference Number / Name
-                  </label>
-                  <input
-                    type="text"
-                    className="pricing-select"
-                    placeholder="e.g. Booking ref #A-8821"
-                    value={form.agencyRef}
-                    onChange={(e) => setForm({ ...form, agencyRef: e.target.value })}
-                  />
-                  <p style={{ fontSize: '0.75rem', color: '#3b82f6', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                    <StickyNote size={13} /> Reference given by the travel agency for this booking, if it exists.
-                  </p>
-                </div>
-              )}
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                {travellers.slice(0, form.numTravellers).map((t, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '2.5rem 1fr 1fr 5.5rem',
-                      gap: '0.75rem',
-                      alignItems: 'center',
-                      background: '#fff',
-                      border: '1px solid #e2e8f0',
-                      borderRadius: '10px',
-                      padding: '0.75rem'
-                    }}
-                  >
-                    <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#94a3b8', textAlign: 'center' }}>
-                      {idx + 1}
-                    </div>
-                    <div>
-                      <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
-                        Name *
-                      </label>
-                      <input
-                        type="text"
-                        className="pricing-select"
-                        placeholder="First name"
-                        style={{ padding: '0.5rem 0.65rem', fontSize: '0.85rem' }}
-                        value={t.name}
-                        onChange={(e) => handleTravellerChange(idx, 'name', e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
-                        Surname *
-                      </label>
-                      <input
-                        type="text"
-                        className="pricing-select"
-                        placeholder="Surname"
-                        style={{ padding: '0.5rem 0.65rem', fontSize: '0.85rem' }}
-                        value={t.surname}
-                        onChange={(e) => handleTravellerChange(idx, 'surname', e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
-                        Age
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="120"
-                        className="pricing-select"
-                        placeholder="e.g. 30"
-                        style={{ padding: '0.5rem 0.65rem', fontSize: '0.85rem', textAlign: 'center' }}
-                        value={t.age}
-                        onChange={(e) => handleTravellerChange(idx, 'age', e.target.value)}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <p style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.75rem' }}>
-                Ages help us identify children for correct child pricing — under 18 counts as a child.
-              </p>
-            </div>
-
-            {/* ─── Actions ─── */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '0.5rem', paddingTop: '1.25rem', borderTop: '1px solid #e2e8f0' }}>
-              <button
-                type="button"
-                className="secondary-btn"
-                style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
-                onClick={resetForm}
-              >
-                Cancel
-              </button>
-              <button type="submit" className="primary-btn" style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
-                <Plus size={18} /> Create Itinerary
-              </button>
-            </div>
-
-          </div>
-        </form>
+        <ClientTourForm
+          submitLabel="Create Itinerary"
+          submitIcon={<Plus size={18} />}
+          onCancel={() => setShowInlineForm(false)}
+          onSubmit={handleCreateItinerary}
+        />
       </div>
       )}
 
@@ -656,6 +324,31 @@ export const Itineraries = () => {
           <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Map size={20} color="#0d7478" /> Recent Itineraries
           </h2>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flex: 1, justifyContent: 'flex-end' }}>
+            <div className="search-box" style={{ flex: 1, width: 'auto', maxWidth: '380px' }}>
+              <Search size={16} />
+              <input
+                type="text"
+                placeholder="Search itineraries by client, reference or name..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+            <select
+              className="pricing-select"
+              style={{ width: 'auto', minWidth: '150px', padding: '0.55rem 0.75rem', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#334155', background: '#f8fafc' }}
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="">All statuses</option>
+              <option value="quotation">Quotation</option>
+              <option value="provisional">Provisional Booking</option>
+              <option value="confirmed">Confirmed Booking</option>
+              <option value="in_progress">In Progress</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="completed">Completed</option>
+            </select>
+          </div>
         </div>
 
         <table className="admin-table">
@@ -684,8 +377,18 @@ export const Itineraries = () => {
                   <p>Create your first itinerary to start building tailored tours.</p>
                 </td>
               </tr>
-            ) : itineraries.map((it) => (
-              <tr key={it.id}>
+            ) : filteredItineraries.length === 0 ? (
+              <tr>
+                <td colSpan="8" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
+                  <Map size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
+                  <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>No itineraries match</h3>
+                  <p>Try adjusting your search or filter.</p>
+                </td>
+              </tr>
+            ) : filteredItineraries.map((it) => {
+              const isCompleted = it.status === 'completed';
+              return (
+              <tr key={it.id} onClick={() => handleEdit(it)} style={{ cursor: 'pointer' }} title={isCompleted ? 'Open itinerary (read-only)' : 'Open itinerary'}>
                 <td>
                   <div className="company-cell">
                     <span className="company-name">{it.clients?.name || 'Unknown client'}</span>
@@ -702,8 +405,8 @@ export const Itineraries = () => {
                 </td>
                 <td>
                   <span style={{ fontWeight: 600, color: '#1e293b' }}>{it.itinerary_name}</span>
-                  <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic' }}>
-                    {it.status}
+                  <div style={{ marginTop: '0.25rem' }}>
+                    <span className={`status-badge ${STATUS_MODS[it.status] || ''}`}>{STATUS_LABELS[it.status] || it.status || 'Quotation'}</span>
                   </div>
                 </td>
                 <td style={{ fontSize: '0.9rem', fontWeight: 600 }}>{formatTravellerSummary(it)}</td>
@@ -728,14 +431,15 @@ export const Itineraries = () => {
                   <div className="action-buttons">
                     <button
                       className="action-btn"
-                      onClick={() => handleEdit(it)}
-                      title="Edit Itinerary"
+                      onClick={(e) => { e.stopPropagation(); if (!isCompleted) handleEdit(it); }}
+                      disabled={isCompleted}
+                      title={isCompleted ? 'Completed itineraries cannot be edited' : 'Edit Itinerary'}
                     >
                       <Edit3 size={16} />
                     </button>
                     <button
                       className="action-btn"
-                      onClick={() => handleCopy(it)}
+                      onClick={(e) => { e.stopPropagation(); handleCopy(it); }}
                       title="Copy Itinerary"
                     >
                       <Copy size={16} />
@@ -743,7 +447,8 @@ export const Itineraries = () => {
                   </div>
                 </td>
               </tr>
-            ))}
+            );
+            })}
           </tbody>
         </table>
       </div>
