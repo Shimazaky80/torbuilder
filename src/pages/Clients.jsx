@@ -146,6 +146,7 @@ export const Clients = () => {
     clientType: 'Direct',
     country: '',
     markupPercentage: '',
+    depositPercentage: '',
     address: '',
     notes: ''
   });
@@ -240,6 +241,7 @@ export const Clients = () => {
       clientType: 'Direct',
       country: '',
       markupPercentage: '',
+      depositPercentage: '',
       address: '',
       notes: ''
     });
@@ -260,6 +262,7 @@ export const Clients = () => {
       clientType: client.client_type || 'Direct',
       country: client.country || '',
       markupPercentage: client.markup_percentage != null ? String(client.markup_percentage) : '',
+      depositPercentage: client.deposit_percentage != null ? String(client.deposit_percentage) : '',
       address: client.address || '',
       notes: client.notes || ''
     });
@@ -293,6 +296,12 @@ export const Clients = () => {
       return;
     }
 
+    const deposit = form.depositPercentage === '' ? null : parseFloat(form.depositPercentage);
+    if (deposit !== null && (Number.isNaN(deposit) || deposit < 0 || deposit > 100)) {
+      showToast('Deposit percentage must be between 0 and 100', 'warning');
+      return;
+    }
+
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase
@@ -314,6 +323,7 @@ export const Clients = () => {
         client_type: form.clientType,
         country: form.country,
         markup_percentage: markup,
+        deposit_percentage: deposit,
         address: form.address.trim(),
         notes: form.notes.trim()
       };
@@ -524,6 +534,21 @@ export const Clients = () => {
                       required
                       value={form.markupPercentage}
                       onChange={(e) => setForm({ ...form, markupPercentage: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                      Deposit Percentage (%)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.01"
+                      className="pricing-select"
+                      placeholder="Leave blank for company default"
+                      value={form.depositPercentage}
+                      onChange={(e) => setForm({ ...form, depositPercentage: e.target.value })}
                     />
                   </div>
                 </div>

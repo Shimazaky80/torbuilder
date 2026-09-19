@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
+import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
 import { 
   Package, 
   Building2, 
@@ -110,6 +111,8 @@ export const LibraryItems = () => {
   const { showToast } = useToast();
   const location = useLocation();
   const { currencies } = useCurrencies();
+  const amountSettings = useAmountSettings();
+  const moneyStep = stepForAmounts(amountSettings.allowDecimals);
 
   const categoryOptions = [
     { id: 'Accommodation', label: 'Accommodation', icon: Hotel, color: '#863bff' },
@@ -1219,6 +1222,19 @@ adultRate: 0,
       }
       return item;
     }));
+  };
+
+  /* Money fields only — snaps a typed rate/fee to a whole number on blur when the
+     "Round input amounts" setting is active. Counts (pax, capacity, ages) never
+     go through this. */
+  const snapSeasonMoney = (e, tempId, seasonIndex, field) => {
+    const v = applyInputRounding(e.target.value, amountSettings.inputRounding);
+    if (v !== '' && v !== e.target.value) handleSeasonChange(tempId, seasonIndex, field, v);
+  };
+
+  const snapBandRate = (e, tempId, seasonIndex, bandId, writer) => {
+    const v = applyInputRounding(e.target.value, amountSettings.inputRounding);
+    if (v !== '' && v !== e.target.value) writer(tempId, seasonIndex, bandId, v);
   };
 
   const handleRemoveSeasonRow = (tempId, seasonIdx) => {
@@ -4222,7 +4238,7 @@ adultRate: 0,
                                       style={{ padding: '0.45rem 0.75rem', fontSize: '0.95rem', fontWeight: 700, width: '100%' }}
                                       placeholder="e.g. 1800"
                                       value={season[gst.field] !== undefined ? season[gst.field] : ''}
-                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, gst.field, e.target.value)}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, gst.field, e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, gst.field)}
                                     />
                                   </div>
                                 ))}
@@ -4248,7 +4264,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 850"
                                     value={season.adultRate !== undefined ? season.adultRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
                                 </div>
@@ -4263,7 +4279,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 450"
                                     value={season.childRate !== undefined ? season.childRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'childRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
                                 </div>
@@ -4278,7 +4294,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 500"
                                     value={season.guideRate !== undefined ? season.guideRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'guideRate')}
                                   />
                                 </div>
                                 <div>
@@ -4292,7 +4308,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 500"
                                     value={season.driverRate !== undefined ? season.driverRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'driverRate')}
                                   />
                                 </div>
                               </div>
@@ -4319,7 +4335,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 850"
                                     value={season.adultRate !== undefined ? season.adultRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
                                 </div>
@@ -4344,7 +4360,7 @@ adultRate: 0,
                                           style={{ padding: '0.35rem' }}
                                           placeholder={`Price (${item.currency})`}
                                           value={season.childRates?.[band.id] !== undefined ? season.childRates[band.id] : ''}
-                                          onChange={(e) => handleChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)}
+                                          onChange={(e) => handleChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)} step={moneyStep} onBlur={(e) => snapBandRate(e, item.tempId, seasonIdx, band.id, handleChildRateChange)}
                                         />
                                         <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Per child</span>
                                       </div>
@@ -4373,7 +4389,7 @@ adultRate: 0,
                                         style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                         placeholder="e.g. 1200"
                                         value={season.fastTrackAdultRate !== undefined ? season.fastTrackAdultRate : ''}
-                                        onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'fastTrackAdultRate', e.target.value)}
+                                        onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'fastTrackAdultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'fastTrackAdultRate')}
                                       />
                                       <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
                                     </div>
@@ -4398,7 +4414,7 @@ adultRate: 0,
                                               style={{ padding: '0.35rem' }}
                                               placeholder={`Price (${item.currency})`}
                                               value={season.fastTrackChildRates?.[band.id] !== undefined ? season.fastTrackChildRates[band.id] : ''}
-                                              onChange={(e) => handleFastTrackChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)}
+                                              onChange={(e) => handleFastTrackChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)} step={moneyStep} onBlur={(e) => snapBandRate(e, item.tempId, seasonIdx, band.id, handleFastTrackChildRateChange)}
                                             />
                                             <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Per child</span>
                                           </div>
@@ -4429,7 +4445,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 850"
                                     value={season.adultRate !== undefined ? season.adultRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
                                 </div>
@@ -4444,7 +4460,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 450"
                                     value={season.childRate !== undefined ? season.childRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'childRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
                                 </div>
@@ -4470,7 +4486,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder={item.pricingModel === 'per_vehicle' ? 'e.g. 200000' : 'e.g. 8500'}
                                     value={season.adultRate !== undefined ? season.adultRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
                                     {item.pricingModel === 'per_vehicle' ? 'Charged once for the whole flight' : 'Charged per adult'}
@@ -4487,7 +4503,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 4500"
                                     value={season.childRate !== undefined ? season.childRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'childRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
                                 </div>
@@ -4502,7 +4518,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 900"
                                     value={season.taxesAndSurcharges !== undefined ? season.taxesAndSurcharges : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'taxesAndSurcharges', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'taxesAndSurcharges', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'taxesAndSurcharges')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Fuel surcharge, airport fees, etc.</span>
                                 </div>
@@ -4600,7 +4616,7 @@ adultRate: 0,
                                       style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700 }}
                                       placeholder="e.g. 3000"
                                       value={season.adultRate !== undefined ? season.adultRate : ''}
-                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                     />
                                     <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Vehicle</span>
                                   </div>
@@ -4621,7 +4637,7 @@ adultRate: 0,
                                       style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700 }}
                                       placeholder="e.g. 850"
                                       value={season.adultRate !== undefined ? season.adultRate : ''}
-                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                     />
                                     <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Person</span>
                                   </div>
@@ -4644,7 +4660,7 @@ adultRate: 0,
                                     style={{ padding: '0.35rem' }}
                                     placeholder="Leave blank for no child rate"
                                     value={season.childRate !== undefined ? season.childRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'childRate')}
                                   />
                                 </div>
                                 <div style={{ maxWidth: '200px', flex: '1' }}>
@@ -4679,7 +4695,7 @@ adultRate: 0,
                                   style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700 }}
                                   placeholder={`e.g. 5000`}
                                   value={season.roomRate !== undefined ? season.roomRate : ''}
-                                  onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'roomRate', e.target.value)}
+                                  onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'roomRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'roomRate')}
                                 />
                                 <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ {isTrainCategory(item.category) ? 'Cabin' : 'Room'} / Night</span>
                               </div>
@@ -4703,7 +4719,7 @@ adultRate: 0,
                                       style={{ padding: '0.35rem' }}
                                       placeholder={`Price (${item.currency})`}
                                       value={season.price1Adult}
-                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price1Adult', e.target.value)}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price1Adult', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'price1Adult')}
                                     />
                                     <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>1 Adult Single rate</span>
                                   </div>
@@ -4715,7 +4731,7 @@ adultRate: 0,
                                       style={{ padding: '0.35rem' }}
                                       placeholder={`Price (${item.currency})`}
                                       value={season.price2Adults}
-                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price2Adults', e.target.value)}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price2Adults', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'price2Adults')}
                                     />
                                     <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Per Person Sharing (PPS)</span>
                                   </div>
@@ -4727,7 +4743,7 @@ adultRate: 0,
                                       style={{ padding: '0.35rem' }}
                                       placeholder={`Price (${item.currency})`}
                                       value={season.price3PlusAdults !== undefined ? season.price3PlusAdults : ''}
-                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price3PlusAdults', e.target.value)}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price3PlusAdults', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'price3PlusAdults')}
                                     />
                                     <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Extra adult sharing</span>
                                   </div>
@@ -4752,7 +4768,7 @@ adultRate: 0,
                                           style={{ padding: '0.35rem' }}
                                           placeholder={`Price (${item.currency})`}
                                           value={season.childRates?.[band.id] !== undefined ? season.childRates[band.id] : ''}
-                                          onChange={(e) => handleChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)}
+                                          onChange={(e) => handleChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)} step={moneyStep} onBlur={(e) => snapBandRate(e, item.tempId, seasonIdx, band.id, handleChildRateChange)}
                                         />
                                         <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Sharing with adult/s</span>
                                       </div>
@@ -4796,7 +4812,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 850"
                                     value={season.entranceFeePerson !== undefined ? season.entranceFeePerson : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'entranceFeePerson', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'entranceFeePerson', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'entranceFeePerson')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per visitor</span>
                                 </div>
@@ -4811,7 +4827,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 1200"
                                     value={season.entranceFeeVehicle !== undefined ? season.entranceFeeVehicle : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'entranceFeeVehicle', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'entranceFeeVehicle', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'entranceFeeVehicle')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged once per vehicle</span>
                                 </div>
@@ -4838,7 +4854,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 120"
                                     value={season.levyAdultRate !== undefined ? season.levyAdultRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'levyAdultRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'levyAdultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'levyAdultRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}</span>
                                 </div>
@@ -4853,7 +4869,7 @@ adultRate: 0,
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
                                     placeholder="e.g. 60"
                                     value={season.levyChildRate !== undefined ? season.levyChildRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'levyChildRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'levyChildRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'levyChildRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}</span>
                                 </div>
@@ -4893,7 +4909,7 @@ adultRate: 0,
                                     style={{ padding: '0.35rem' }}
                                     placeholder={`Rate (${item.currency})`}
                                     value={season.guideRate !== undefined ? season.guideRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'guideRate')}
                                   />
                                   <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = fall back to Single rate</span>
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
@@ -4919,7 +4935,7 @@ adultRate: 0,
                                     style={{ padding: '0.35rem' }}
                                     placeholder={`Rate (${item.currency})`}
                                     value={season.driverRate !== undefined ? season.driverRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'driverRate')}
                                   />
                                   <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = fall back to Single rate</span>
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>

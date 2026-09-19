@@ -8,6 +8,7 @@ import { Suppliers } from './pages/Suppliers';
 import { Clients } from './pages/Clients';
 import { Itineraries } from './pages/Itineraries';
 import { ItineraryBuilder } from './pages/ItineraryBuilder';
+import { Invoices } from './pages/Invoices';
 import { Settings } from './pages/Settings';
 import { LibraryItems } from './pages/LibraryItems';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -41,6 +42,7 @@ function App() {
                         <Route path="packages" element={<div>Packages (Coming Soon)</div>} />
                         <Route path="itineraries" element={<Itineraries />} />
                         <Route path="itineraries/builder" element={<ItineraryBuilder />} />
+                        <Route path="invoices" element={<Invoices />} />
                         <Route path="tariffs" element={<div>Tariffs (Coming Soon)</div>} />
                         <Route path="analytics" element={<div>Analytics (Coming Soon)</div>} />
                         <Route path="users" element={<div>Users (Coming Soon)</div>} />

@@ -40,6 +40,18 @@ import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import ClientTourForm from '../components/ClientTourForm';
 import { usePageGuard } from '../context/NavigationGuardContext';
+import {
+  buildLinesFromDays,
+  accountingPayload,
+  effectiveBalance,
+  TYPE_LABEL,
+  LOGO_WIDTHS,
+  invoiceEmail,
+  invoiceDocHtml,
+  invoiceExcelHtml,
+  receiptDocHtml,
+  openPrintWindow
+} from '../lib/invoiceDoc';
 
 /* â”€â”€â”€ Pure helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
@@ -284,7 +296,7 @@ const serviceNotes = (sv, libraryItems) => {
 };
 
 const timeRangeOf = (sv) => {
-  const st = sv.startTime ? sv.startTime.slice(0, 5) : '';
+  const st = sv.startTime ? sv.startTime.slice(0, 5) : (sv.time ? String(sv.time).slice(0, 5) : '');
   const en = sv.endTime ? sv.endTime.slice(0, 5) : '';
   if (st && en) return `${st} – ${en}`;
   return st || en || '';
@@ -294,19 +306,94 @@ const timeRangeOf = (sv) => {
 const svNote = (sv) => (sv.notes !== undefined && sv.notes !== null ? String(sv.notes) : '');
 const svTime = (sv) => `${sv.startTime || ''}${sv.startTime && sv.endTime ? '→' : ''}${sv.endTime || ''}`;
 
+/* ─── Confirmation status codes (service request results) ────────────────────
+   Recorded per service while provisional. Confirmed bookings always reflect OK
+   (the final state), regardless of what was captured on the provisional tab. */
+const CONFIRMATION_OPTIONS = [
+  { value: 'RQ', label: 'RQ', title: 'On Request — requested but not yet confirmed; supplier to check availability' },
+  { value: 'OK', label: 'OK', title: 'Confirmed — booked by the supplier' },
+  { value: 'NA', label: 'NA', title: 'Not Available — unavailable for the requested dates or conditions' },
+  { value: 'WL', label: 'WL', title: 'Waitlist — depends on cancellations or new availability' },
+  { value: 'XX', label: 'XX', title: 'Cancelled — the service has been cancelled' }
+];
+const CONFIRMATION_META = {
+  RQ: { color: '#b45309', bg: '#fffbeb', label: 'RQ · On Request' },
+  OK: { color: '#15803d', bg: '#f0fdf4', label: 'OK · Confirmed' },
+  NA: { color: '#dc2626', bg: '#fef2f2', label: 'NA · Not Available' },
+  WL: { color: '#6d28d9', bg: '#f5f3ff', label: 'WL · Waitlist' },
+  XX: { color: '#475569', bg: '#f1f5f9', label: 'XX · Cancelled' }
+};
+
+/* Per-category confirmation detail lines used on the supplier voucher and the
+   confirmed-stage reconfirmation email. Date is omitted here — the caller
+   already places the (non-editable) service date from the itinerary. */
+const voucherDetailLines = (sv) => {
+  const cat = sv.category || '';
+  const lines = [];
+  lines.push('Confirmation Status: OK');
+  const num = (sv.confirmationNumber || '').trim();
+  if (num) lines.push(`Confirmation Number: ${num}`);
+  if (/transfers?/i.test(cat)) {
+    const flight = (sv.flightNumber || '').trim();
+    if (flight) lines.push(`Flight number: ${flight}`);
+    const time = (sv.time || '').trim();
+    if (time) lines.push(`Time: ${time}`);
+    const veh = (sv.vehicleType || '').trim();
+    if (veh) lines.push(`Vehicle type: ${veh}`);
+    if (sv.capacity !== '' && sv.capacity !== null && sv.capacity !== undefined) lines.push(`Capacity: ${sv.capacity}`);
+  } else if (/accommodation/i.test(cat)) {
+    const room = (sv.roomType || '').trim();
+    if (room) lines.push(`Room type: ${room}`);
+    if (sv.maxOccupancy !== '' && sv.maxOccupancy !== null && sv.maxOccupancy !== undefined) lines.push(`Max occupancy: ${sv.maxOccupancy}`);
+    const meal = (sv.mealPlan || '').trim();
+    if (meal) lines.push(`Meal plan: ${meal}`);
+    const ci = (sv.checkInTime || '').trim();
+    if (ci) lines.push(`Check-in time: ${ci}`);
+    const co = (sv.checkOutTime || '').trim();
+    if (co) lines.push(`Check-out time: ${co}`);
+  } else if (/activities?|tours?|excursions?/i.test(cat)) {
+    const veh = (sv.vehicleType || '').trim();
+    if (veh) lines.push(`Vehicle type: ${veh}`);
+    if (sv.maxOccupancy !== '' && sv.maxOccupancy !== null && sv.maxOccupancy !== undefined) lines.push(`Max occupancy: ${sv.maxOccupancy}`);
+    const st = (sv.startTime || sv.time || '').trim();
+    if (st) lines.push(`Start time: ${st}`);
+    const en = (sv.endTime || '').trim();
+    if (en) lines.push(`End time: ${en}`);
+  } else if (/meals?|dinner|lunch|breakfast/i.test(cat)) {
+    const st = (sv.startTime || sv.time || '').trim();
+    if (st) lines.push(`Start time: ${st}`);
+  } else {
+    const time = (sv.time || '').trim();
+    if (time) lines.push(`Time: ${time}`);
+  }
+  const notes = (sv.notes || '').trim();
+  if (notes) lines.push(`Notes: ${notes}`);
+  return lines;
+};
+
 const servicesBySupplier = (days, libraryItems) => {
   const groups = {};
   const order = [];
+  const supplierOf = (sv) => {
+    const li = (libraryItems || []).find((it) => it.id === sv.itemId);
+    return li?.supplier || sv.supplierObj || null;
+  };
+  const groupKeyOf = (sv) => {
+    const sup = supplierOf(sv);
+    const supId = sup?.id || sv.supplierId || sv.supplier_id;
+    if (supId) return `id:${supId}`;
+    const name = sv.supplierName || sv.supplier_name || sup?.name || '';
+    return name ? `name:${name.trim().toLowerCase()}` : 'unknown';
+  };
   (days || []).forEach((day) => {
     (day.services || []).forEach((sv) => {
-      const key = sv.supplierId || sv.supplier_id || sv.supplier || 'unknown';
+      const key = groupKeyOf(sv);
       if (!groups[key]) {
-        const li = (libraryItems || []).find((it) => it.id === sv.itemId);
-        const sup = li?.supplier || sv.supplierObj || null;
+        const sup = supplierOf(sv);
         groups[key] = {
           key,
           sup,
-          label: sv.supplierName || sv.supplier_name || sup?.name || sv.supplier || 'Unknown supplier',
+          label: sup?.name || sv.supplierName || sv.supplier_name || 'Unknown supplier',
           email: emailOf(sup) || sv.supplierEmail || '',
           svcs: []
         };
@@ -353,6 +440,40 @@ const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount) =>
   };
 };
 
+/* Confirmed-stage reconfirmation — one mailto draft per supplier, carrying the
+   per-category confirmation details (status OK + supplier confirmation data). */
+const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCount) => {
+  const adults = Number(meta.numAdults) || 0;
+  const children = Number(meta.numChildren) || 0;
+  const bodies = group.svcs.map(({ sv, day }) => [
+    `Service: ${repairText(sv.name)}`,
+    day.date ? `Date: ${formatDateLong(day.date)}` : '',
+    ...voucherDetailLines(sv).map((l) => `  ${l}`),
+    `Guests: ${adults || 0} Adult(s)${children ? ` / ${children} Child(ren)` : ''} (${paxCount} total)`
+  ].filter((l) => l !== '').join('\n'));
+  const body = [
+    `Reconfirming the following booked services for our client:`,
+    '',
+    bodies.join('\n\n---\n\n'),
+    '',
+    `Our reference: ${meta.referenceNumber || meta.reference || '—'}`,
+    `Client: ${meta.client?.name || '—'}${meta.client?.nationality ? ` (${meta.client.nationality})` : ''}`,
+    `Agency / Direct: ${meta.agencyRef || meta.agency_reference || '—'}`,
+    `Travel dates: ${meta.travelStart} to ${meta.travelEnd}`,
+    '',
+    `Please advise immediately if any of the above changes.`,
+    '',
+    `Thank you for your cooperation,`,
+    '',
+    `Kind regards,`
+  ].join('\n');
+  return {
+    to: group.email,
+    subject: `Service Confirmation — ${meta.referenceNumber || meta.reference || ''}`,
+    body
+  };
+};
+
 /* Per-item email line group shared by the single-service draft and the
    combined-per-supplier draft so both styles carry the exact same fields in
    the exact same order (Service → Dates → Time → Guests → Special Req).      */
@@ -392,14 +513,20 @@ const serviceItemEmail = (sv, day, amount, meta, currencySymbol, paxCount) => {
   };
 };
 
+/* Filename-safe token for a group label — used when the user downloads a
+   voucher as Word/PDF. Mirrors the CSV/GDocs naming already used elsewhere. */
+const safeNameOf = (label) => {
+  const s = String(label || '').replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  return s || 'voucher';
+};
+
 /* Read-only supplier voucher (emailed individually, cannot be edited). */
 const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
   const dateStr = (day) => (day.date ? formatDateLong(day.date) : '');
   const lines = group.svcs.map(({ sv, day }) => [
     `• ${repairText(sv.name)}`,
     dateStr(day) ? `  Date: ${dateStr(day)}` : '',
-    timeRangeOf(sv) ? `  Time: ${timeRangeOf(sv)}` : '',
-    serviceNotes(sv) ? `  Notes: ${serviceNotes(sv)}` : ''
+    ...voucherDetailLines(sv).map((l) => `  ${l}`)
   ].filter((l) => l !== '').join('\n'));
   return [
     `SERVICE VOUCHER`,
@@ -414,6 +541,84 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
     '',
     `Thank you for your cooperation.`
   ].join('\n');
+};
+
+/* Print-ready PDF (and Word) version of one supplier voucher. Reuses the exact
+   read-only fields that voucherFor emits so the downloaded file is identical
+   to what is shown and emailed — vouchers cannot be edited or diverge. */
+const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) => {
+  const { logo = '', logoSize = 'md' } = opts || {};
+  const esc = htmlEscape;
+  const dateStr = (day) => (day.date ? formatDateLong(day.date) : '');
+  const logoW = LOGO_WIDTHS[logoSize] || LOGO_WIDTHS.md;
+  const entries = group.svcs.map(({ sv, day }) => {
+    const rows = [
+      ['Service', repairText(sv.name)],
+      ['Date', dateStr(day)],
+      ['Day', day.label ? `Day ${day.label}` : `Day ${day.dayNumber || ''}`],
+      ...voucherDetailLines(sv).map((l) => {
+        const idx = l.indexOf(':');
+        return idx > 0 ? [l.slice(0, idx).trim(), l.slice(idx + 1).trim()] : ['', l];
+      })
+    ].filter(([k, v]) => v !== '');
+    const box = rows.map(([k, v]) =>
+      k ? `<tr><td class="k">${esc(k)}</td><td class="v">${esc(v)}</td></tr>` : `<tr><td colspan="2" class="v multi">${esc(v)}</td></tr>`
+    ).join('');
+    return `<div class="block">
+      <table class="detail">
+        <tr><td class="k">Status</td><td class="v ok">CONFIRMED — OK</td></tr>
+        ${box}
+      </table>
+    </div>`;
+  }).join('\n');
+  const trav = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
+  const clientLine = meta.client?.name ? esc(meta.client.name) : '—';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Voucher — ${esc(group.label)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; color: #1e293b; margin: 0; padding: 24px; font-size: 13px; }
+  .doc { max-width: 820px; margin: 0 auto; border: 1px solid #cbd5e1; border-top: 6px solid #0d7478; border-radius: 10px; overflow: hidden; background: #fff; }
+  .hd { background: #f0fdfa; padding: 18px 22px; border-bottom: 2px solid #99f6e4; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .hd .lg { flex: 0 0 auto; }
+  .hd .lg img { display: block; max-width: ${logoW}px; height: auto; }
+  .hd .tt h1 { font-size: 20px; margin: 0 0 2px; color: #0d7478; letter-spacing: 1px; }
+  .hd .tt .sub { font-size: 11px; color: #0f766e; text-transform: uppercase; letter-spacing: 1.5px; }
+  .meta { padding: 12px 22px; border-bottom: 1px solid #e2e8f0; background: #fbfdfd; font-size: 12px; }
+  .meta table { width: 100%; border-collapse: collapse; }
+  .meta td { padding: 5px 8px; }
+  .meta td.h { color: #64748b; width: 130px; font-weight: 600; }
+  .block { padding: 12px 22px; border-bottom: 1px dashed #cbd5e1; }
+  .block:last-child { border-bottom: none; }
+  table.detail { width: 100%; border-collapse: collapse; }
+  table.detail td { padding: 5px 8px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+  table.detail td.k { color: #64748b; width: 170px; font-weight: 600; white-space: nowrap; }
+  table.detail td.v { color: #1e293b; }
+  table.detail td.multi { width: 100%; white-space: pre-wrap; }
+  td.ok { color: #15803d; font-weight: 800; }
+  .ft { padding: 12px 22px; font-size: 12px; color: #475569; background: #f8fafc; }
+  @media print { body { padding: 0; } .doc { border: none; border-radius: 0; } }
+</style></head><body>
+  <div class="doc">
+    <div class="hd">
+      <div class="lg">${logo ? `<img src="${esc(logo)}" alt="Company logo">` : ''}</div>
+      <div class="tt" style="text-align:right">
+        <div class="sub">Supplier</div>
+        <h1>Service Voucher</h1>
+        <div style="color:#0f766e;font-size:12px;font-weight:700">${esc(group.label)}</div>
+      </div>
+    </div>
+    <div class="meta">
+      <table>
+        <tr><td class="h">Itinerary</td><td>${esc(meta.itineraryName || '—')}</td><td class="h">Reference</td><td>${esc(meta.referenceNumber || meta.reference || '—')}</td></tr>
+        <tr><td class="h">Client</td><td>${clientLine}</td><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td></tr>
+        <tr><td class="h">Travellers</td><td colspan="3">${esc(trav)}</td></tr>
+      </table>
+    </div>
+    ${entries}
+    <div class="ft">This voucher is issued from the <strong>Confirmed Booking</strong> status and is read-only. It reflects the
+      persisted itinerary exactly as recorded. Thank you for your cooperation.</div>
+  </div>
+</body></html>`;
 };
 
 /* Copy text to the clipboard with a legacy textarea fallback. */
@@ -450,60 +655,6 @@ const invoiceHeaderLines = (meta) => [
   `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
   `Dates: ${meta.travelStart} to ${meta.travelEnd}`
 ];
-
-const depositInvoiceFor = (meta, totalInclTax, vat, currencySymbol) => {
-  const total = Number(totalInclTax) || 0;
-  const vatAmt = Number(vat) || 0;
-  const subtotal = round2(total - vatAmt);
-  const deposit = round2(total * (DEPOSIT_PCT / 100));
-  const balance = round2(total - deposit);
-  const body = [
-    'DEPOSIT INVOICE / DEPOSIT REQUEST',
-    '',
-    ...invoiceHeaderLines(meta),
-    '',
-    `Subtotal (Excl. VAT): ${currencySymbol}${subtotal.toFixed(2)}`,
-    `VAT: ${currencySymbol}${vatAmt.toFixed(2)}`,
-    `TOTAL DUE (INCL. VAT): ${currencySymbol}${total.toFixed(2)}`,
-    `Deposit required (${DEPOSIT_PCT}%): ${currencySymbol}${deposit.toFixed(2)}`,
-    `Balance due after deposit: ${currencySymbol}${balance.toFixed(2)}`,
-    '',
-    `Terms & conditions: the deposit secures this booking. This itinerary stays`,
-    `provisional until the deposit is received; the remaining balance is due net`,
-    `14 days before travel.`,
-    '',
-    'Thank you for your business.'
-  ].join('\n');
-  return {
-    to: meta.client?.email || meta.client?.contact_email || '',
-    subject: `Deposit Invoice / Deposit Request — ${meta.referenceNumber || meta.reference || meta.itineraryName || ''}`,
-    body
-  };
-};
-
-const finalInvoiceFor = (meta, totalInclTax, vat, currencySymbol) => {
-  const total = Number(totalInclTax) || 0;
-  const vatAmt = Number(vat) || 0;
-  const subtotal = round2(total - vatAmt);
-  const body = [
-    'FINAL INVOICE',
-    '',
-    ...invoiceHeaderLines(meta),
-    '',
-    `Subtotal (Excl. VAT): ${currencySymbol}${subtotal.toFixed(2)}`,
-    `VAT: ${currencySymbol}${vatAmt.toFixed(2)}`,
-    `TOTAL DUE (INCL. VAT): ${currencySymbol}${total.toFixed(2)}`,
-    '',
-    `Payment terms: the balance is due net 14 days before travel.`,
-    '',
-    'Thank you for your business.'
-  ].join('\n');
-  return {
-    to: meta.client?.email || meta.client?.contact_email || '',
-    subject: `Final Invoice — ${meta.referenceNumber || meta.reference || meta.itineraryName || ''}`,
-    body
-  };
-};
 
 /* Daily service brief for one day — operational handover for guides/suppliers. */
 const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
@@ -641,6 +792,13 @@ export const ItineraryBuilder = () => {
   const [libraryItems, setLibraryItems] = useState([]);
   const [loadingItems, setLoadingItems] = useState(true);
   const [taxRates, setTaxRates] = useState([]);
+  const [companyDepositPct, setCompanyDepositPct] = useState(DEPOSIT_PCT);
+  const [billing, setBilling] = useState(null);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [itineraryInvoices, setItineraryInvoices] = useState([]);
+  const [itineraryReceipts, setItineraryReceipts] = useState([]);
+  const [issuingInvoice, setIssuingInvoice] = useState(false);
+  const [emailFormat, setEmailFormat] = useState('pdf');
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [currencyCode, setCurrencyCode] = useState('ZAR');
@@ -649,7 +807,6 @@ export const ItineraryBuilder = () => {
   const [days, setDays] = useState([]);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
   const [activeTab, setActiveTab] = useState('itinerary');
-  const [paymentReceived, setPaymentReceived] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
@@ -666,9 +823,12 @@ export const ItineraryBuilder = () => {
   const [dayNotesDay, setDayNotesDay] = useState(null);
   const [bootedState, setBootedState] = useState(false);
   const [lastSavedKey, setLastSavedKey] = useState(null);
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [bulkConfirmGroups, setBulkConfirmGroups] = useState([]);
 
   const idSeq = useRef(0);
   const booted = useRef(false);
+  const lastItineraryIdRef = useRef(data?.itineraryId || null);
   const nextId = useCallback(() => {
     idSeq.current += 1;
     return `t${idSeq.current}`;
@@ -695,6 +855,13 @@ export const ItineraryBuilder = () => {
     || taxRates.find((t) => t.is_active) || null;
   const defaultTaxRate = Number(defaultTax?.rate ?? 15);
   const defaultTaxLabel = defaultTax?.name || 'VAT';
+
+  /* Deposit policy: per-client override, else tenant default from Settings. */
+  const depositPct = useMemo(() => {
+    const fromClient = meta.client?.deposit_percentage;
+    if (fromClient !== null && fromClient !== undefined && fromClient !== '') return Number(fromClient);
+    return Number(companyDepositPct) || DEPOSIT_PCT;
+  }, [meta.client, companyDepositPct]);
 
   /* Financial totals used by the stage-aware invoices / reconciliation. */
   const paxBalanceTotal = useMemo(() => {
@@ -731,6 +898,42 @@ export const ItineraryBuilder = () => {
     });
     return round2(c);
   }, [days, paxCount]);
+
+  /* ── Issued-invoice state for this itinerary + currency ──────────────────
+     A deposit invoice is raised while provisional; a final invoice once the
+     booking is confirmed. Only one live invoice per (type, currency) exists. */
+  const invoiceTypeForStage = isProvisional ? 'deposit' : 'final';
+  const invoicesInCurrency = useMemo(
+    () => itineraryInvoices.filter((inv) => (inv.currency_code || '').toUpperCase() === currencyCode.toUpperCase()),
+    [itineraryInvoices, currencyCode]
+  );
+  const depositInvoice = useMemo(
+    () => invoicesInCurrency.find((inv) => inv.invoice_type === 'deposit' && inv.status !== 'void') || null,
+    [invoicesInCurrency]
+  );
+  const finalInvoice = useMemo(
+    () => invoicesInCurrency.find((inv) => inv.invoice_type === 'final' && inv.status !== 'void') || null,
+    [invoicesInCurrency]
+  );
+  const activeInvoice = invoiceTypeForStage === 'final' ? finalInvoice : depositInvoice;
+  const paidDepositTotal = useMemo(
+    () => round2(invoicesInCurrency
+      .filter((inv) => inv.invoice_type === 'deposit' && inv.status === 'paid')
+      .reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0)),
+    [invoicesInCurrency]
+  );
+  const depositRequested = round2(paxBalanceTotal * (depositPct / 100));
+  const balanceAfterDeposit = round2(paxBalanceTotal - depositRequested);
+  const depositPaid = depositInvoice?.status === 'paid' || paidDepositTotal > 0;
+  const finalPaid = finalInvoice?.status === 'paid';
+  const depositBalanceRemaining = depositPaid ? round2(paxBalanceTotal - paidDepositTotal) : balanceAfterDeposit;
+  const finalOutstanding = finalInvoice
+    ? round2(effectiveBalance(finalInvoice))
+    : round2(paxBalanceTotal - paidDepositTotal);
+  const currencyReceipts = useMemo(
+    () => itineraryReceipts.filter((r) => (r.currency_code || '').toUpperCase() === currencyCode.toUpperCase()),
+    [itineraryReceipts, currencyCode]
+  );
 
   /* ── Stage-based document unlocks ──────────────────────────────────────
      Each lifecycle stage only shows the tabs the CSV lifecycle defines:
@@ -829,6 +1032,21 @@ export const ItineraryBuilder = () => {
         .select('*')
         .eq('company_id', cid);
       setTaxRates(taxData || []);
+      const { data: billingData } = await supabase
+        .from('company_billing_settings')
+        .select('*')
+        .eq('company_id', cid)
+        .maybeSingle();
+      setBilling(billingData || null);
+      if (billingData?.default_deposit_percentage !== null && billingData?.default_deposit_percentage !== undefined) {
+        setCompanyDepositPct(Number(billingData.default_deposit_percentage));
+      }
+      const { data: bankData } = await supabase
+        .from('company_bank_accounts')
+        .select('*')
+        .eq('company_id', cid)
+        .order('is_default', { ascending: false });
+      setBankAccounts(bankData || []);
     } catch {
       showToast('Failed to load library items', 'error');
     } finally {
@@ -863,7 +1081,7 @@ export const ItineraryBuilder = () => {
         if (it.client_id && !client?.markup_percentage) {
           const { data: c } = await supabase
             .from('clients')
-            .select('id, name, client_type, email, phone, country, markup_percentage')
+            .select('id, name, client_type, email, phone, country, markup_percentage, deposit_percentage')
             .eq('id', it.client_id)
             .single();
           if (c) client = c;
@@ -912,7 +1130,22 @@ export const ItineraryBuilder = () => {
               quantity: Number(ii.quantity) || 1,
               descOverride: ii.description_override || '',
               taxRate: numOr(ii.tax_rate, 15),
-              taxLabel: ii.tax_label || 'VAT'
+              taxLabel: ii.tax_label || 'VAT',
+              time: ii.service_time || '',
+              confirmationStatus: ii.confirmation_status || 'RQ',
+              confirmationNumber: ii.confirmation_number || '',
+              flightNumber: ii.flight_number || '',
+              flightTime: ii.flight_time || '',
+              vehicleType: ii.vehicle_type || '',
+              capacity: ii.capacity !== '' && ii.capacity !== null && ii.capacity !== undefined ? Number(ii.capacity) : '',
+              roomType: ii.room_type || '',
+              maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
+              mealPlan: ii.meal_plan || '',
+              checkInTime: ii.check_in_time || '',
+              checkOutTime: ii.check_out_time || '',
+              startTime: ii.start_time || '',
+              endTime: ii.end_time || '',
+              notes: ii.notes || ''
             };
           })
         }));
@@ -937,6 +1170,54 @@ export const ItineraryBuilder = () => {
     };
     boot();
   }, [data, fetchLibraryItems, loadExistingDays, initDaysFromRange]);
+
+  /* Load this itinerary's issued invoices so the builder can reflect real
+     deposit/final state (issued, paid, outstanding) without a round-trip to
+     the Invoices module. */
+  const loadItineraryInvoices = useCallback(async () => {
+    const iid = meta.itineraryId || lastItineraryIdRef.current;
+    if (!companyId || !iid) { setItineraryInvoices([]); setItineraryReceipts([]); return; }
+    const { data } = await supabase
+      .from('invoices')
+      .select('*')
+      .eq('itinerary_id', iid)
+      .order('created_at', { ascending: false });
+    const rows = data || [];
+    setItineraryInvoices(rows);
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) { setItineraryReceipts([]); return; }
+    const { data: receipts } = await supabase
+      .from('invoice_receipts')
+      .select('*')
+      .in('invoice_id', ids)
+      .order('created_at', { ascending: false });
+    setItineraryReceipts(receipts || []);
+  }, [companyId, meta.itineraryId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const iid = meta.itineraryId || lastItineraryIdRef.current;
+      if (!companyId || !iid) { if (!cancelled) { setItineraryInvoices([]); setItineraryReceipts([]); } return; }
+      const { data } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('itinerary_id', iid)
+        .order('created_at', { ascending: false });
+      const rows = data || [];
+      if (cancelled) return;
+      setItineraryInvoices(rows);
+      const ids = rows.map((r) => r.id);
+      if (ids.length === 0) { setItineraryReceipts([]); return; }
+      const { data: receipts } = await supabase
+        .from('invoice_receipts')
+        .select('*')
+        .in('invoice_id', ids)
+        .order('created_at', { ascending: false });
+      if (!cancelled) setItineraryReceipts(receipts || []);
+    })();
+    return () => { cancelled = true; };
+  }, [companyId, meta.itineraryId]);
 
   /* â”€â”€ Derived lists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
@@ -1092,6 +1373,18 @@ export const ItineraryBuilder = () => {
     const basis = basisOfItem(item, currencyCode);
     const buyPP = round2(contractPaxRate(item, currencyCode, paxCount));
     const markup = Number(markupPct) || 0;
+    const cat = item.category || '';
+    const tourCat = /transfers?|tours?|activities?|excursions?/i.test(cat) || cat === 'Flights / Charter';
+    const accomCat = /accommodation/i.test(cat);
+    /* Library items keep the vehicle in middle_category (transfers / tours) and
+       the pax capacity in max_occupancy; meal plans live on the per-season
+       item_rates rows with an accommodation default of "Bed & Breakfast". */
+    const libMaxOcc = item.maxOccupancy ?? item.max_occupancy;
+    const numOrBlank = (v) => {
+      if (v === '' || v === null || v === undefined) return '';
+      const n = Number(v);
+      return Number.isFinite(n) ? n : '';
+    };
     const svc = {
       key: nextId(),
       itemId: item.id,
@@ -1107,7 +1400,22 @@ export const ItineraryBuilder = () => {
       quantity: 1,
       descOverride: '',
       taxRate: defaultTaxRate,
-      taxLabel: defaultTaxLabel
+      taxLabel: defaultTaxLabel,
+      time: '',
+      confirmationStatus: 'RQ',
+      confirmationNumber: '',
+      flightNumber: item.flightNumber || item.flight_number || '',
+      flightTime: item.flightTime || item.flight_time || '',
+      vehicleType: item.vehicleType || item.vehicle_type || (tourCat ? item.sub_category : ''),
+      capacity: numOrBlank(item.capacity ?? libMaxOcc),
+      roomType: item.roomType || item.room_type || '',
+      maxOccupancy: numOrBlank(libMaxOcc),
+      mealPlan: item.mealPlan || item.meal_plan || (item.item_rates || []).find((r) => r.meal_plan)?.meal_plan || (accomCat ? 'Bed & Breakfast' : ''),
+      checkInTime: item.checkInTime || item.check_in_time || '',
+      checkOutTime: item.checkOutTime || item.check_out_time || '',
+      startTime: item.startTime || item.start_time || '',
+      endTime: item.endTime || item.end_time || '',
+      notes: ''
     };
     setDays((prev) => prev.map((d, i) => (
       i === dayIndex ? { ...d, services: [...d.services, svc] } : d
@@ -1115,6 +1423,38 @@ export const ItineraryBuilder = () => {
     const dayLabel = days[dayIndex] ? `Day ${days[dayIndex].dayNumber}` : 'the selected day';
     showToast(`${via === 'double-click' ? 'Added' : 'Dropped'} "${item.name}" into ${dayLabel}`, 'success');
   }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast]);
+
+  /* Patch one or more fields of a single service item (used by the Service
+     Request / Travel Documents tabs for time, confirmation status, numbers,
+     category details and service-specific notes). */
+  const updateService = useCallback((dayKey, svKey, patch) => {
+    if (completedRef.current) return;
+    setDays((prev) => prev.map((d) => (
+      d.key === dayKey
+        ? { ...d, services: d.services.map((s) => (s.key === svKey ? { ...s, ...patch } : s)) }
+        : d
+    )));
+  }, []);
+
+  /* A service is only ready once its Provisional booking fields are captured:
+     time, confirmation number and flight number on every service; vehicle type
+     on transfers; check-in / check-out on accommodation. Mirrors the per-service
+     OK guard in the Service Request tab. */
+  const serviceReady = (sv) => {
+    const cat = sv.category || '';
+    if (!(sv.time && sv.confirmationNumber && sv.flightNumber)) return false;
+    if (/transfers?/i.test(cat) && !sv.vehicleType) return false;
+    if (/accommodation/i.test(cat) && !(sv.checkInTime && sv.checkOutTime)) return false;
+    return true;
+  };
+
+  /* The itinerary stays "Provisional Booking" until every service is confirmed
+     (OK) with all required fields — you cannot lock it as Confirmed early. */
+  const canConfirmBooking = useCallback(() => {
+    const all = (days || []).flatMap((d) => d.services || []);
+    if (!all.length) return false;
+    return all.every((sv) => (sv.confirmationStatus || 'RQ') === 'OK' && serviceReady(sv));
+  }, [days]);
 
   const handleItemDragStart = useCallback((e, item) => {
     e.dataTransfer.effectAllowed = 'copy';
@@ -1309,7 +1649,22 @@ export const ItineraryBuilder = () => {
             quantity: Number(ii.quantity) || 1,
             descOverride: ii.description_override || '',
             taxRate: numOr(ii.tax_rate, 15),
-            taxLabel: ii.tax_label || 'VAT'
+            taxLabel: ii.tax_label || 'VAT',
+            time: ii.service_time || '',
+              confirmationStatus: ii.confirmation_status || 'RQ',
+              confirmationNumber: ii.confirmation_number || '',
+              flightNumber: ii.flight_number || '',
+              flightTime: ii.flight_time || '',
+              vehicleType: ii.vehicle_type || '',
+              capacity: ii.capacity !== null && ii.capacity !== undefined ? Number(ii.capacity) : '',
+              roomType: ii.room_type || '',
+            maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
+            mealPlan: ii.meal_plan || '',
+            checkInTime: ii.check_in_time || '',
+            checkOutTime: ii.check_out_time || '',
+            startTime: ii.start_time || '',
+            endTime: ii.end_time || '',
+            notes: ii.notes || ''
           };
         })
       }));
@@ -1438,6 +1793,8 @@ export const ItineraryBuilder = () => {
         table{border-collapse:collapse;width:100%;margin-top:16px}
         th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}
         th{background:#eee} .grand{font-weight:700} td.num{text-align:right}</style></head><body>
+        ${billing?.logo_data_url ? `<img src="${billing.logo_data_url}" alt="Company logo" style="display:block;max-width:${LOGO_WIDTHS[billing.logo_size] || LOGO_WIDTHS.md}px;height:auto;margin:0 0 8px">` : ''}
+        ${billing?.legal_name ? `<p class="muted"><b>${esc(billing.legal_name)}</b></p>` : ''}
         <h1>${esc(meta.itineraryName)}</h1>
         <p class="muted">Reference: ${esc(meta.referenceNumber || '—')}  ·  ${esc(statusLabelOf(meta.status))}</p>
         <p class="muted">Client: ${esc(meta.client?.name || '—')}  ·  ${paxCount} traveller(s)</p>
@@ -1454,7 +1811,7 @@ export const ItineraryBuilder = () => {
       setTimeout(() => w.print(), 350);
       showToast('Itinerary PDF opened in a new window', 'success');
     }
-  }, [meta, paxCount, currencySymbol, defaultTaxLabel, defaultTaxRate, buildRows, downloadBlob, showToast]);
+  }, [meta, paxCount, currencySymbol, defaultTaxLabel, defaultTaxRate, buildRows, downloadBlob, showToast, billing]);
 
   const handleSave = useCallback(async () => {
     if (!companyId) {
@@ -1504,6 +1861,7 @@ export const ItineraryBuilder = () => {
           .eq('id', id);
         if (upErr) throw upErr;
       }
+      lastItineraryIdRef.current = id;
 
       const { error: delErr } = await supabase
         .from('itinerary_days')
@@ -1545,6 +1903,21 @@ export const ItineraryBuilder = () => {
           total_sell: round2((s.sellPP || 0) * paxCount),
           tax_rate: numOr(s.taxRate, 15),
           tax_label: s.taxLabel || 'VAT',
+          service_time: s.time || null,
+          confirmation_status: s.confirmationStatus || 'RQ',
+          confirmation_number: s.confirmationNumber || null,
+          flight_number: s.flightNumber || null,
+          flight_time: s.flightTime || null,
+          vehicle_type: s.vehicleType || null,
+          capacity: s.capacity !== '' && s.capacity !== null && s.capacity !== undefined ? Number(s.capacity) : null,
+          room_type: s.roomType || null,
+          max_occupancy: s.maxOccupancy !== '' && s.maxOccupancy !== null && s.maxOccupancy !== undefined ? Number(s.maxOccupancy) : null,
+          meal_plan: s.mealPlan || null,
+          check_in_time: s.checkInTime || null,
+          check_out_time: s.checkOutTime || null,
+          start_time: s.startTime || null,
+          end_time: s.endTime || null,
+          notes: s.notes || null,
           is_included: true,
           sort_order: si
         }));
@@ -1576,6 +1949,239 @@ export const ItineraryBuilder = () => {
      handleSave's return value (true=proceed, false=stay) to decide whether the
      navigation may complete. */
   usePageGuard('itinerary-builder', 'this itinerary', dirty, handleSave);
+
+  /* ── Issue the stage invoice (deposit while provisional, final once
+     confirmed) from inside the builder. Persists the itinerary first so the
+     invoice snapshot always matches what is stored, then writes the invoice
+     header + immutable line items and records the accounting export. */
+  const handleIssueInvoiceHere = useCallback(async ({ silent = false } = {}) => {
+    if (!companyId) { showToast('Company not found', 'error'); return null; }
+    if (completedRef.current) return null;
+    const type = isProvisional ? 'deposit' : 'final';
+    const label = type === 'deposit' ? 'Deposit' : 'Final';
+    const existing = itineraryInvoices.find((inv) => inv.invoice_type === type
+      && inv.status !== 'void'
+      && (inv.currency_code || '').toUpperCase() === currencyCode.toUpperCase());
+    if (existing) {
+      if (!silent) showToast(`${label} invoice already issued (${existing.invoice_number})`, 'warning');
+      return existing;
+    }
+    setIssuingInvoice(true);
+    try {
+      const ok = await handleSave();
+      if (!ok) return null;
+      const iid = lastItineraryIdRef.current || meta.itineraryId;
+      if (!iid) throw new Error('Save the itinerary before issuing an invoice');
+      const agg = buildLinesFromDays(days, paxCount, currencyCode);
+      if (!agg.lines.length) { showToast('Add day-by-day services before issuing an invoice', 'warning'); return null; }
+
+      const isFinal = type === 'final';
+      let creditedAmount = 0;
+      let creditedInvoiceId = null;
+      let creditedInvoiceNumber = '';
+      if (isFinal) {
+        const { data: depositRows } = await supabase
+          .from('invoices')
+          .select('id, invoice_number, deposit_amount, total_incl, status')
+          .eq('itinerary_id', iid)
+          .eq('currency_code', currencyCode)
+          .eq('invoice_type', 'deposit')
+          .neq('status', 'void')
+          .order('created_at', { ascending: false });
+        const paid = (depositRows || []).filter((r) => r.status === 'paid');
+        creditedAmount = round2(paid.reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0));
+        if (paid[0]) {
+          creditedInvoiceId = paid[0].id;
+          creditedInvoiceNumber = paid[0].invoice_number;
+        }
+      }
+      const depositAmount = isFinal ? creditedAmount : round2(agg.totalIncl * (depositPct / 100));
+      const balance = round2(agg.totalIncl - creditedAmount);
+
+      const { data: number, error: numErr } = await supabase.rpc('get_next_invoice_reference', { p_company_id: companyId });
+      if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate invoice number');
+
+      const bank = bankAccounts
+        .filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === currencyCode.toUpperCase())
+        .sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0))[0] || null;
+      const bankDetails = bank ? {
+        bank_name: bank.bank_name,
+        account_holder_name: bank.account_holder_name,
+        account_number: bank.account_number,
+        branch_code: bank.branch_code,
+        swift_code: bank.swift_code
+      } : {};
+      const client = meta.client || {};
+      const header = {
+        company_id: companyId,
+        itinerary_id: iid,
+        client_id: client.id || null,
+        invoice_number: number,
+        invoice_type: type,
+        status: isFinal ? 'validated' : 'proforma',
+        currency_code: currencyCode,
+        subtotal_excl: agg.subtotalExcl,
+        tax_total: agg.taxTotal,
+        total_incl: agg.totalIncl,
+        tax_label: agg.taxEntries[0]?.label || 'VAT',
+        tax_rate: agg.taxEntries[0]?.rate ?? defaultTaxRate,
+        deposit_percentage: depositPct,
+        deposit_amount: depositAmount,
+        balance_due: balance,
+        credited_invoice_id: creditedInvoiceId,
+        credited_invoice_number: creditedInvoiceNumber,
+        credited_amount: creditedAmount,
+        issued_date: new Date().toISOString().slice(0, 10),
+        due_date: null,
+        bill_to_name: client.name || '',
+        bill_to_email: client.email || '',
+        bill_to_address: client.address || '',
+        supplier_name: billing?.legal_name || '',
+        supplier_tax_number: billing?.tax_number || '',
+        supplier_address: billing?.billing_address || '',
+        bank_details: bankDetails,
+        notes: null
+      };
+
+      const accounting = accountingPayload(header, agg.lines);
+      const { data: created, error: invErr } = await supabase
+        .from('invoices')
+        .insert([{ ...header, accounting_export: accounting }])
+        .select('*')
+        .single();
+      if (invErr) throw invErr;
+
+      const lineRows = agg.lines.map((l) => ({ ...l, invoice_id: created.id, company_id: companyId }));
+      const { error: lineErr } = await supabase.from('invoice_line_items').insert(lineRows);
+      if (lineErr) {
+        await supabase.from('invoices').delete().eq('id', created.id);
+        throw lineErr;
+      }
+
+      await loadItineraryInvoices();
+      if (!silent) showToast(`${label} invoice ${number} issued`, 'success');
+      return created;
+    } catch (err) {
+      const msg = /duplicate key|unique/i.test(err.message || '')
+        ? `A ${type} invoice already exists for ${currencyCode}`
+        : (err.message || 'Failed to issue invoice');
+      showToast(msg, 'error');
+      return null;
+    } finally {
+      setIssuingInvoice(false);
+    }
+  }, [companyId, isProvisional, itineraryInvoices, currencyCode, handleSave, meta.itineraryId, meta.client, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, loadItineraryInvoices, showToast]);
+
+  /* ── Raise the payment receipt for the stage invoice and mark it paid. */
+  const confirmPayment = useCallback(async () => {
+    const inv = activeInvoice || await handleIssueInvoiceHere({ silent: true });
+    if (!inv) return;
+    setIssuingInvoice(true);
+    try {
+      const { data: number, error: numErr } = await supabase.rpc('get_next_receipt_reference', { p_company_id: companyId });
+      if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate receipt number');
+
+      const amount = inv.invoice_type === 'deposit'
+        ? round2(Number(inv.deposit_amount) || 0)
+        : round2(Number(inv.balance_due) || 0);
+      const balanceRemaining = inv.invoice_type === 'deposit' ? round2(Number(inv.balance_due) || 0) : 0;
+      const receivedDate = new Date().toISOString().slice(0, 10);
+      const accounting = {
+        schema: 'torbuilder.receipt/v1',
+        provider_agnostic: true,
+        receipt_number: number,
+        invoice_number: inv.invoice_number,
+        invoice_type: inv.invoice_type,
+        status: 'paid',
+        date: receivedDate,
+        currency: inv.currency_code,
+        customer: { name: inv.bill_to_name, email: inv.bill_to_email },
+        amount,
+        balance_remaining: balanceRemaining,
+        method: 'EFT'
+      };
+      const row = {
+        company_id: companyId,
+        invoice_id: inv.id,
+        receipt_number: number,
+        invoice_number: inv.invoice_number,
+        invoice_type: inv.invoice_type,
+        currency_code: inv.currency_code,
+        amount,
+        balance_remaining: balanceRemaining,
+        received_date: receivedDate,
+        payment_method: 'EFT',
+        payment_reference: inv.payment_reference || '',
+        bill_to_name: inv.bill_to_name || '',
+        bill_to_email: inv.bill_to_email || '',
+        supplier_name: inv.supplier_name || '',
+        supplier_tax_number: inv.supplier_tax_number || '',
+        supplier_address: inv.supplier_address || '',
+        bank_details: inv.bank_details || {},
+        accounting_export: accounting,
+        notes: null
+      };
+      const { error } = await supabase.from('invoice_receipts').insert([row]);
+      if (error) throw error;
+
+      const paidUpdate = { status: 'paid', paid_at: new Date().toISOString() };
+      if (inv.invoice_type === 'final') paidUpdate.balance_due = 0;
+      const { error: paidErr } = await supabase
+        .from('invoices')
+        .update(paidUpdate)
+        .eq('id', inv.id);
+      if (paidErr) throw paidErr;
+
+      await loadItineraryInvoices();
+      showToast(`Receipt ${number} issued — payment confirmed`, 'success');
+    } catch (err) {
+      showToast(err.message || 'Failed to confirm payment', 'error');
+    } finally {
+      setIssuingInvoice(false);
+    }
+  }, [activeInvoice, handleIssueInvoiceHere, companyId, loadItineraryInvoices, showToast]);
+
+  /* ── Email the issued invoice. Produces the chosen format as a downloadable
+     / shareable attachment and opens the client's email with a covering note.
+     (Browser mailto cannot attach files directly, so the file is shared via the
+     Web Share API when available, otherwise downloaded ready to attach.) */
+  const emailInvoiceToClient = useCallback(async () => {
+    const inv = activeInvoice || await handleIssueInvoiceHere({ silent: true });
+    if (!inv) return;
+    const agg = buildLinesFromDays(days, paxCount, currencyCode);
+    const m = invoiceEmail(inv, agg.lines);
+    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+
+    let attached = false;
+    if (emailFormat === 'word' || emailFormat === 'excel') {
+      const isExcel = emailFormat === 'excel';
+      const content = isExcel ? invoiceExcelHtml(inv, agg.lines, currencySymbol) : invoiceDocHtml(inv, agg.lines, currencySymbol, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' });
+      const filename = `${inv.invoice_number}.${isExcel ? 'xls' : 'doc'}`;
+      const mime = isExcel ? 'application/vnd.ms-excel' : 'application/msword';
+      try {
+        const file = new File([content], filename, { type: mime });
+        if (navigator.canShare?.({ files: [file] })) {
+          await navigator.share({ files: [file], title: m.subject, text: m.body });
+          attached = true;
+        }
+      } catch { /* share cancelled — fall through to download */ }
+      if (!attached) {
+        downloadBlob(content, filename, mime);
+        showToast('Invoice file downloaded — attach it to the email', 'success');
+      }
+    } else {
+      const w = openPrintWindow(invoiceDocHtml(inv, agg.lines, currencySymbol, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), 300);
+      if (!w) showToast('Please allow pop-ups to prepare the PDF', 'warning');
+      else showToast('Choose "Save as PDF", then attach it to the email', 'success');
+    }
+    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+  }, [activeInvoice, handleIssueInvoiceHere, days, paxCount, currencyCode, currencySymbol, emailFormat, downloadBlob, showToast, billing]);
+
+  const viewReceipt = useCallback((r) => {
+    if (!r) return;
+    const w = openPrintWindow(receiptDocHtml(r, svcSymbol(r.currency_code), { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), 300);
+    if (!w) showToast('Please allow pop-ups to view the receipt', 'warning');
+  }, [svcSymbol, showToast, billing]);
 
   /* â”€â”€ Edit itinerary details (Client & Tour) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
@@ -1700,6 +2306,168 @@ export const ItineraryBuilder = () => {
       </div>
     );
   }
+
+  /* Single source of truth for a per-service card. Rendered identically in BOTH
+     the "Provisional Service Request" tab (editable) and the "Travel Documents"
+     tab (forced read-only, supplier OK badge, printable). Contract / library
+     fields are ALWAYS locked regardless of tab so the signed contract can never
+     be overridden by hand-typed data. */
+  const renderServiceCard = (sv, day, { editable, tab }) => {
+    const cat = sv.category || '';
+    const isTransfer = /transfers?/i.test(cat);
+    const isAccom = /accommodation/i.test(cat);
+    const isActivity = /activities?|tours?|excursions?/i.test(cat);
+    const isMeal = /meals?|dinner|lunch|breakfast/i.test(cat);
+    const canEdit = editable && !isReadOnly;
+    /* Fields sourced from the contract / library item — never editable. */
+    const contractLocked = isTransfer ? ['vehicleType', 'capacity'] : isAccom ? ['maxOccupancy', 'mealPlan'] : ['vehicleType', 'maxOccupancy'];
+    const ro = (field) => !canEdit || contractLocked.includes(field);
+    const update = (patch) => updateService(day.key, sv.key, patch);
+    const showStatusButtons = tab === 'service-request' && canEdit;
+    const ok = (sv.confirmationStatus || 'RQ') === 'OK';
+    return (
+      <div key={sv.key} style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.7rem 0.85rem', marginBottom: '0.6rem', background: '#fff' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.55rem' }}>
+          <strong style={{ fontSize: '0.88rem', color: '#1a202c' }}>{repairText(sv.name)}</strong>
+          {tab === 'travel-documents' ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.72rem', fontWeight: 800, color: ok ? '#15803d' : '#b45309', background: ok ? '#f0fdf4' : '#fffbeb', padding: '0.15rem 0.5rem', borderRadius: '999px' }}>
+              <CheckCircle2 size={12} /> {ok ? 'OK · Confirmed' : 'OK · ' + (sv.confirmationStatus || 'RQ')}
+            </span>
+          ) : null}
+        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem' }}>
+        <div className="sidebar-field">
+          <label>Date of service</label>
+            <input className="sidebar-select" value={day.date ? formatDateShort(day.date) : '—'} readOnly style={{ background: '#f8fafc', color: '#64748b' }} />
+          </div>
+          {!isAccom && (
+            <div className="sidebar-field">
+              <label>Time</label>
+              <input className="sidebar-select" type="time" value={sv.time || ''} readOnly={ro('time')} onChange={(e) => update({ time: e.target.value })} />
+            </div>
+          )}
+          <div className="sidebar-field">
+            <label>Confirmation number</label>
+            <input className="sidebar-select" placeholder="From supplier (optional)" value={sv.confirmationNumber || ''} readOnly={ro('confirmationNumber')} onChange={(e) => update({ confirmationNumber: e.target.value })} />
+          </div>
+          {isTransfer && (
+            <>
+              <div className="sidebar-field">
+                <label>Flight number</label>
+                <input className="sidebar-select" placeholder="e.g. SA204" value={sv.flightNumber || ''} readOnly={ro('flightNumber')} onChange={(e) => update({ flightNumber: e.target.value })} />
+              </div>
+              <div className="sidebar-field">
+                <label>Flight Time</label>
+                <input className="sidebar-select" type="time" value={sv.flightTime || ''} readOnly={ro('flightTime')} onChange={(e) => update({ flightTime: e.target.value })} />
+              </div>
+              <div className="sidebar-field">
+                <label>Vehicle type</label>
+                <input className="sidebar-select" placeholder="e.g. Mercedes Vito 8-seater" value={sv.vehicleType || ''} readOnly={true} title="From contract/library — locked" />
+              </div>
+              <div className="sidebar-field">
+                <label>Capacity</label>
+                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.capacity === '' ? '' : sv.capacity} readOnly={true} title="From contract/library — locked" />
+              </div>
+            </>
+          )}
+          {isAccom && (
+            <>
+              <div className="sidebar-field">
+                <label>Room type</label>
+                <input className="sidebar-select" placeholder="e.g. Twin sharing" value={sv.roomType || ''} readOnly={ro('roomType')} onChange={(e) => update({ roomType: e.target.value })} />
+              </div>
+              <div className="sidebar-field">
+                <label>Max occupancy</label>
+                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.maxOccupancy === '' ? '' : sv.maxOccupancy} readOnly={true} title="From contract/library — locked" />
+              </div>
+              <div className="sidebar-field">
+                <label>Meal plan</label>
+                <input className="sidebar-select" placeholder="e.g. Half board" value={sv.mealPlan || ''} readOnly={true} title="From contract/library — locked" />
+              </div>
+              <div className="sidebar-field">
+                <label>Check-in time</label>
+                <input className="sidebar-select" type="time" value={sv.checkInTime || ''} readOnly={ro('checkInTime')} onChange={(e) => update({ checkInTime: e.target.value })} />
+              </div>
+              <div className="sidebar-field">
+                <label>Check-out time</label>
+                <input className="sidebar-select" type="time" value={sv.checkOutTime || ''} readOnly={ro('checkOutTime')} onChange={(e) => update({ checkOutTime: e.target.value })} />
+              </div>
+            </>
+          )}
+          {(isActivity || isMeal) && (
+            <>
+              <div className="sidebar-field">
+                <label>Start time</label>
+                <input className="sidebar-select" type="time" value={sv.startTime || ''} readOnly={ro('startTime')} onChange={(e) => update({ startTime: e.target.value })} />
+              </div>
+              {isActivity && (
+                <div className="sidebar-field">
+                  <label>End time</label>
+                  <input className="sidebar-select" type="time" value={sv.endTime || ''} readOnly={ro('endTime')} onChange={(e) => update({ endTime: e.target.value })} />
+                </div>
+              )}
+            </>
+          )}
+          {isActivity && (
+            <>
+              <div className="sidebar-field">
+                <label>Vehicle type</label>
+                <input className="sidebar-select" placeholder="e.g. Safari Landcruiser" value={sv.vehicleType || ''} readOnly={true} title="From contract/library — locked" />
+              </div>
+              <div className="sidebar-field">
+                <label>Max occupancy</label>
+                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.maxOccupancy === '' ? '' : sv.maxOccupancy} readOnly={true} title="From contract/library — locked" />
+              </div>
+            </>
+          )}
+        </div>
+        {showStatusButtons && (
+          <div className="sidebar-field" style={{ marginTop: '0.5rem' }}>
+            <label>Confirmation status</label>
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+              {CONFIRMATION_OPTIONS.map((opt) => {
+                const active = (sv.confirmationStatus || 'RQ') === opt.value;
+                const m2 = CONFIRMATION_META[opt.value];
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    title={opt.title}
+                    disabled={!canEdit}
+                    onClick={() => {
+  const missing = !(sv.time && sv.confirmationNumber && sv.flightNumber) ||
+    (isTransfer && !sv.vehicleType) || (isAccom && !(sv.checkInTime && sv.checkOutTime));
+  if (opt.value === 'OK' && missing) { showToast('Fill all Provisional Booking fields before marking Confirmed', 'warning'); return; }
+  update({ confirmationStatus: opt.value });
+}}
+                    style={{
+                      border: active ? `1.5px solid ${m2.color}` : '1px solid #e2e8f0',
+                      background: active ? m2.bg : '#fff',
+                      color: active ? m2.color : '#64748b',
+                      fontWeight: active ? 800 : 600,
+                      borderRadius: '999px',
+                      padding: '0.28rem 0.8rem',
+                      fontSize: '0.78rem',
+                      cursor: canEdit ? 'pointer' : 'not-allowed',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.3rem'
+                    }}
+                  >
+                    <Check size={11} style={{ opacity: active ? 1 : 0 }} /> {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <div className="sidebar-field" style={{ marginTop: '0.5rem' }}>
+          <label>Notes</label>
+          <textarea className="sidebar-select" rows={2} placeholder="Service-specific notes..." value={sv.notes || ''} readOnly={!canEdit} onChange={(e) => update({ notes: e.target.value })} style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="super-admin-page" style={{ paddingBottom: '1rem' }}>
@@ -1891,6 +2659,17 @@ export const ItineraryBuilder = () => {
                             className="menu-item"
                             style={{ fontWeight: meta.status === s.value ? 700 : 600, background: meta.status === s.value ? '#f0fdfa' : 'transparent' }}
                             onClick={() => {
+                              if (s.value === 'confirmed' && !canConfirmBooking()) {
+                                const count = (days || []).reduce((n, d) => n + (d.services || []).length, 0);
+                                showToast(
+                                  count
+                                    ? 'All services must be marked OK (Time, Confirmation no. & Flight no. required) before confirming this booking'
+                                    : 'Add at least one service to this itinerary before confirming the booking',
+                                  'warning'
+                                );
+                                setStatusMenuOpen(false);
+                                return;
+                              }
                               setMeta((prev) => ({ ...prev, status: s.value }));
                               setStatusMenuOpen(false);
                             }}
@@ -2455,24 +3234,26 @@ export const ItineraryBuilder = () => {
           )}
 
           {/* ─── Service Request (provisional) ───────────────────────────────────────
-     One combined email per supplier + per-service individual emails, all as
-     prefilled mailto: drafts to the supplier's address. Body is derived from
-     persisted data only; it cannot be hand-edited. render of the "Send"
-     button is guarded on the group having at least one email.                    */}
+     Booking enquiries for every supplier. Each service carries a confirmation
+     status (RQ/OK/NA/WL/XX) recorded here as select buttons — these are the
+     provisional enquiry results. Confirmed bookings later always reflect OK.
+     Drafts are prefilled mailto: bodies derived from persisted data only.   */}
           {tab === 'service-request' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
                 Provisional Service Request
               </h3>
-              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '720px' }}>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '760px' }}>
                 Booking enquiries for every supplier on this tour, composed as prefilled
-                <strong> mailto:</strong> drafts sent through your default email client. You can send
-                <strong> one combined request per supplier</strong> or <strong>one email per service</strong>.
-                The body is strictly derived from the itinerary — it cannot be edited.
+                <strong> mailto:</strong> drafts. Record each service's enquiry result using the
+                <strong> status buttons</strong> — RQ (On Request), OK (Confirmed), NA (Not Available),
+                WL (Waitlist), XX (Cancelled) — plus its <strong>time</strong>, <strong>confirmation
+                number</strong> and <strong>notes</strong>. These results drive the Confirmed stage
+                (which always reflects OK). Save the itinerary to persist them.
               </p>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1.25rem' }}>
-                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
+                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} onClick={() => {
                   const perm = servicesBySupplier(days, libraryItems).filter((g) => emailOf(g.sup));
                   if (!perm.length) { showToast('No supplier email on file', 'warning'); return; }
                   const first = perm[0];
@@ -2498,20 +3279,9 @@ export const ItineraryBuilder = () => {
                     <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
                   </div>
                   <div style={{ padding: '0.85rem 1rem' }}>
-                    <ul style={{ margin: 0, paddingLeft: '1.1rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-                      {grp.svcs.map(({ sv, day }) => (
-                        <li key={sv.key} style={{ fontSize: '0.85rem', color: '#334155' }}>
-                          <strong>{repairText(sv.name)}</strong>
-                          {day.date ? <span style={{ color: '#64748b' }}> — {formatDateLong(day.date)}</span> : null}
-                          {timeRangeOf(sv) ? <span style={{ color: '#64748b' }}> ({timeRangeOf(sv)})</span> : null}
-                          {serviceNotes(sv, libraryItems) ? (
-                            <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '0.15rem' }}>{serviceNotes(sv, libraryItems)}</div>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ul>
+{grp.svcs.map(({ sv, day }) => renderServiceCard(sv, day, { editable: !isReadOnly, tab: 'service-request' }))}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
-                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => {
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} disabled={!emailOf(grp.sup)} onClick={() => {
                         const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount);
                         window.open(mailTo(m.to, m.subject, m.body), '_blank');
                       }}>
@@ -2524,49 +3294,104 @@ export const ItineraryBuilder = () => {
             </div>
           )}
 
-          {/* ─── Travel Documents (confirmed) ──────────────────────────────────── */}
+          {/* ─── Travel Documents (confirmed / in progress) ───────────────────────────
+     Supplier reconfirmations. Every service is grouped under its supplier; each
+     supplier gets its own compose button. The bulk button always asks the user
+     first (listing the groups and mailto count) before opening the drafts.
+     Per-service Time, confirmation data and category details are recorded here
+     (saved with the itinerary) and appear on the supplier vouchers.          */}
           {tab === 'travel-docs' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
                 Travel Documents
               </h3>
-              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '720px' }}>
-                Ready-to-send <strong>service confirmations</strong> for each supplier. These follow up the
-                earlier provisional service request with the same service details. Like all outbound mail, they
-                are prefilled <strong>mailto:</strong> drafts — one per supplier — opened through your default
-                email client. Read-only; derived from persisted data.
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '760px' }}>
+                Reconfirm every <strong>booked</strong> service with its supplier. Each supplier has its own
+                compose button; <strong>Compose all</strong> groups every service/library item under its
+                supplier and asks you first before opening one draft per group. Record each service's
+                <strong> time</strong>, <strong>confirmation number</strong> and category-specific details
+                here — they are saved and printed on the supplier vouchers. Confirmed status always reflects
+                <strong> OK</strong>.
               </p>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1.25rem' }}>
+                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} onClick={() => {
+                  const perm = servicesBySupplier(days, libraryItems).filter((g) => emailOf(g.sup));
+                  if (!perm.length) { showToast('No supplier email on file', 'warning'); return; }
+                  setBulkConfirmGroups(perm);
+                  setBulkConfirmOpen(true);
+                }}>
+                  <Mail size={15} /> Compose all reconfirmations
+                </button>
+                <span style={{ alignSelf: 'center', fontSize: '0.78rem', color: '#94a3b8' }}>
+                  Opens one mailto draft per supplier group — you are asked to confirm first.
+                </span>
+              </div>
 
               {servicesBySupplier(days, libraryItems).map((grp) => (
                 <div key={grp.key} className="supplier-request-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden' }}>
                   <div className="supplier-request-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', padding: '0.85rem 1rem', background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
                       <strong style={{ fontSize: '0.92rem', color: '#1a202c' }}>{grp.label}</strong>
-                      <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Follow-up confirmation of secured services</span>
+                      <span style={{ fontSize: '0.78rem', color: `${emailOf(grp.sup) ? '#16a34a' : '#dc2626'}` }}>
+                        {emailOf(grp.sup) ? `✉ ${emailOf(grp.sup)}` : 'No email on file — add one in Suppliers'}
+                      </span>
                     </div>
                     <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
                   </div>
                   <div style={{ padding: '0.85rem 1rem' }}>
-                    <ul style={{ margin: 0, paddingLeft: '1.1rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-                      {grp.svcs.map(({ sv, day }) => (
-                        <li key={sv.key} style={{ fontSize: '0.85rem', color: '#334155' }}>
-                          <strong>{repairText(sv.name)}</strong>
-                          {day.date ? <span style={{ color: '#64748b' }}> — {formatDateLong(day.date)}</span> : null}
-                          {timeRangeOf(sv) ? <span style={{ color: '#64748b' }}> ({timeRangeOf(sv)})</span> : null}
-                        </li>
-                      ))}
-                    </ul>
+                    {grp.svcs.map(({ sv, day }) => renderServiceCard(sv, day, { editable: false, tab: 'travel-documents' }))}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
-                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => {
-                        const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount);
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} disabled={!emailOf(grp.sup)} onClick={() => {
+                        const m = supplierConfirmationEmail(grp, days, meta, currencySymbol, paxCount);
                         window.open(mailTo(m.to, m.subject, m.body), '_blank');
                       }}>
-                        <FileText size={14} /> Compose travel-doc draft
+                        <FileText size={14} /> Compose reconfirmation to {grp.label}
                       </button>
                     </div>
                   </div>
                 </div>
               ))}
+
+              {bulkConfirmOpen && (
+                <div className="modal-overlay" onClick={() => setBulkConfirmOpen(false)}>
+                  <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}>
+                    <div className="modal-header">
+                      <h2>Compose all reconfirmations</h2>
+                      <button className="close-btn" onClick={() => setBulkConfirmOpen(false)}><X size={20} /></button>
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: '#334155', marginBottom: '0.9rem' }}>
+                      This will open <strong>{bulkConfirmGroups.length} mailto draft{bulkConfirmGroups.length === 1 ? '' : 's'}</strong>
+                      , one per supplier group:
+                    </div>
+                    <ul style={{ margin: '0 0 1rem 0', paddingLeft: '1.2rem', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                      {bulkConfirmGroups.map((g) => (
+                        <li key={g.key} style={{ fontSize: '0.84rem', color: '#475569' }}>
+                          <strong>{g.label}</strong>
+                          <span style={{ color: '#94a3b8' }}> — {g.svcs.length} service{g.svcs.length === 1 ? '' : 's'} · {g.email}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="form-actions">
+                      <button type="button" className="secondary-btn" onClick={() => setBulkConfirmOpen(false)}>Cancel</button>
+                      <button
+                        type="button"
+                        className="primary-btn"
+                        onClick={() => {
+                          bulkConfirmGroups.forEach((g) => {
+                            const m = supplierConfirmationEmail(g, days, meta, currencySymbol, paxCount);
+                            window.open(mailTo(m.to, m.subject, m.body), '_blank');
+                          });
+                          setBulkConfirmOpen(false);
+                          showToast(`${bulkConfirmGroups.length} draft${bulkConfirmGroups.length === 1 ? '' : 's'} opened in your email client`, 'success');
+                        }}
+                      >
+                        <Mail size={15} /> Open {bulkConfirmGroups.length} draft{bulkConfirmGroups.length === 1 ? '' : 's'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2584,9 +3409,8 @@ export const ItineraryBuilder = () => {
                 </p>
               ) : (
                 <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.6rem', maxWidth: '720px' }}>
-                  Final client invoice. Marking the payment as received is what unlocks the
-                  <strong> Confirmed</strong> status — until the receipt is confirmed on
-                  your side, the itinerary stays <strong>provisional</strong>.
+                  Final client invoice, net of any deposit already received. Confirm the payment here to raise
+                  the receipt and clear the outstanding balance to <strong>R0.00</strong>.
                 </p>
               )}
 
@@ -2611,70 +3435,142 @@ export const ItineraryBuilder = () => {
                   </div>
                   <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
-                      Deposit due ({DEPOSIT_PCT}%): <strong>{currencySymbol}{round2(paxBalanceTotal * (DEPOSIT_PCT / 100)).toFixed(2)}</strong>
+                      Deposit requested ({depositPct}%): <strong>{currencySymbol}{depositRequested.toFixed(2)}</strong>
                     </span>
                     <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
-                      Balance after deposit: <strong>{currencySymbol}{round2(paxBalanceTotal * (1 - DEPOSIT_PCT / 100)).toFixed(2)}</strong>
+                      {depositPaid ? 'Balance remaining:' : 'Balance remaining after deposit:'} <strong>{currencySymbol}{depositBalanceRemaining.toFixed(2)}</strong>
                     </span>
+                    {depositPaid && (
+                      <span style={{ fontSize: '0.82rem', color: '#15803d', fontWeight: 800 }}>
+                        Deposit received: {currencySymbol}{paidDepositTotal.toFixed(2)}
+                      </span>
+                    )}
+                    {currencyReceipts.length > 0 && (
+                      <div style={{ flexBasis: '100%', borderTop: '1px solid #bfdbfe', paddingTop: '0.5rem', marginTop: '0.2rem' }}>
+                        <div style={{ fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.25rem' }}>Payments received</div>
+                        {currencyReceipts.map((r) => (
+                          <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.82rem', color: '#334155', padding: '0.14rem 0' }}>
+                            <span style={{ fontWeight: 600 }}>
+                              {TYPE_LABEL[r.invoice_type] || r.invoice_type} — received {r.received_date || '—'}
+                            </span>
+                            <span style={{ fontWeight: 700 }}>
+                              <button
+                                type="button"
+                                onClick={() => viewReceipt(r)}
+                                title="View / print receipt"
+                                style={{ background: 'none', border: 'none', padding: 0, color: '#0d7478', fontWeight: 800, cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
+                              >
+                                {r.receipt_number}
+                              </button>
+                              {'  '}{fmtMoney(r.amount, currencySymbol)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
                 <div className="invoice-total" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.15rem' }}>
                   <div style={{ fontSize: '0.8rem', color: '#16a34a', fontWeight: 700, marginBottom: '0.25rem' }}>Outstanding balance</div>
                   <div style={{ fontSize: '1.6rem', fontWeight: 900, color: '#15803d' }}>
-                    {currencySymbol}{paxBalanceTotal.toFixed(2)}
+                    {currencySymbol}{finalOutstanding.toFixed(2)}
+                  </div>
+                  <div style={{ display: 'grid', gap: '0.3rem', marginTop: '0.6rem' }}>
+                    <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
+                      Total invoice amount: <strong>{currencySymbol}{paxBalanceTotal.toFixed(2)}</strong>
+                    </span>
+                    {currencyReceipts.length > 0 && (
+                      <div style={{ borderTop: '1px solid #bbf7d0', paddingTop: '0.5rem', marginTop: '0.3rem' }}>
+                        <div style={{ fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.25rem' }}>Payments received</div>
+                        {currencyReceipts.map((r) => (
+                          <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.82rem', color: '#334155', padding: '0.14rem 0' }}>
+                            <span style={{ fontWeight: 600 }}>
+                              {TYPE_LABEL[r.invoice_type] || r.invoice_type} — received {r.received_date || '—'}
+                            </span>
+                            <span style={{ fontWeight: 700 }}>
+                              <button
+                                type="button"
+                                onClick={() => viewReceipt(r)}
+                                title="View / print receipt"
+                                style={{ background: 'none', border: 'none', padding: 0, color: '#0d7478', fontWeight: 800, cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
+                              >
+                                {r.receipt_number}
+                              </button>
+                              {'  '}{fmtMoney(r.amount, currencySymbol)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {finalPaid && (
+                      <span style={{ fontSize: '0.82rem', color: '#15803d', fontWeight: 800 }}>
+                        Paid in full — account settled
+                      </span>
+                    )}
                   </div>
                 </div>
               )}
 
-              {!isProvisional && (
-                <div className="payment-receipt-box" style={{ border: '1.5px dashed #cbd5e1', borderRadius: '14px', padding: '1rem 1.25rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
-                    <Receipt size={18} style={{ color: '#475569' }} />
-                    <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Payment receipt</strong>
-                  </div>
-                  <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
-                    Confirm that the client's payment has been received. This is the gate that lets you mark this
-                    itinerary as <strong>Confirmed</strong>.
-                  </p>
-                  <label className="check-row" style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', cursor: 'pointer', fontSize: '0.9rem', color: '#334155', userSelect: 'none' }}>
-                    <input
-                      type="checkbox"
-                      checked={paymentReceived}
-                      onChange={(e) => {
-                        setPaymentReceived(e.target.checked);
-                        if (e.target.checked) {
-                          showToast('Payment receipt confirmed — status can now be set to Confirmed', 'success');
-                        } else if (meta.status === 'confirmed' || meta.status === 'in_progress') {
-                          showToast('Receipt unconfirmed — itinerary reverts to provisional', 'warning');
-                          setMeta((prev) => ({ ...prev, status: 'provisional' }));
-                        }
-                      }}
-                    />
-                    Payment received &amp; confirmed
-                  </label>
+              <div className="payment-receipt-box" style={{ border: '1.5px dashed #cbd5e1', borderRadius: '14px', padding: '1rem 1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
+                  <Receipt size={18} style={{ color: '#475569' }} />
+                  <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Payment receipt</strong>
                 </div>
-              )}
+                <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
+                  {isProvisional
+                    ? 'Confirm that the client\'s deposit has been received. A receipt is raised and the deposit invoice is marked paid.'
+                    : 'Confirm that the client\'s payment has been received. A receipt is raised, the invoice is marked paid and the outstanding balance clears to R0.00.'}
+                </p>
+                {activeInvoice && activeInvoice.status === 'paid' ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#15803d', fontWeight: 700, fontSize: '0.9rem' }}>
+                    <CheckCircle2 size={16} />
+                    {isProvisional
+                      ? `Deposit received${depositBalanceRemaining > 0 ? ` — outstanding balance ${currencySymbol}${depositBalanceRemaining.toFixed(2)}` : ''}`
+                      : 'Payment received & confirmed — outstanding balance R0.00'}
+                  </div>
+                ) : activeInvoice ? (
+                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice} onClick={confirmPayment}>
+                    <CheckCircle2 size={15} /> {isProvisional ? 'Confirm deposit received' : 'Payment received & confirmed'}
+                  </button>
+                ) : (
+                  <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: 0 }}>
+                    Issue the {isProvisional ? 'deposit' : 'final'} invoice below first — the receipt is raised automatically when you confirm payment.
+                  </p>
+                )}
+              </div>
 
               <div className="invoice-actions" style={{ marginTop: '1.2rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                  const m = isProvisional
-                    ? depositInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol)
-                    : finalInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol);
-                  if (!m.to) { showToast('No client email on file', 'warning'); return; }
-                  window.open(mailTo(m.to, m.subject, m.body), '_blank');
-                }}>
-                  <Send size={15} /> {isProvisional ? 'Email deposit request to client' : 'Email final invoice to client'}
+                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice || !!activeInvoice} onClick={() => handleIssueInvoiceHere()}>
+                  <FileText size={15} /> {activeInvoice ? `${isProvisional ? 'Deposit' : 'Final'} invoice issued` : 'Issue Invoice Here'}
                 </button>
-                <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                  const m = isProvisional
-                    ? depositInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol)
-                    : finalInvoiceFor(meta, paxBalanceTotal, paxBalanceVAT, currencySymbol);
-                  void clipboardCopy(`${m.subject}\n\n${m.body}`);
-                  showToast(isProvisional ? 'Deposit request copied to clipboard' : 'Invoice draft copied to clipboard', 'success');
-                }}>
-                  <Copy size={15} /> Copy to clipboard
+                <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => navigate('/invoices')}>
+                  <Receipt size={15} /> Issue Invoice in Invoice module
                 </button>
+              </div>
+
+              <div style={{ marginTop: '1.2rem', paddingTop: '1.1rem', borderTop: '1px solid #e2e8f0' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.4rem' }}>Email format</label>
+                <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <select
+                    className="input-field"
+                    style={{ maxWidth: '170px' }}
+                    value={emailFormat}
+                    onChange={(e) => setEmailFormat(e.target.value)}
+                  >
+                    <option value="pdf">PDF</option>
+                    <option value="word">Word</option>
+                    <option value="excel">Excel</option>
+                  </select>
+                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice} onClick={emailInvoiceToClient}>
+                    <Send size={15} /> {isProvisional ? 'Email deposit request to client' : 'Email final invoice to client'}
+                  </button>
+                </div>
+                <p style={{ fontSize: '0.76rem', color: '#94a3b8', margin: '0.45rem 0 0 0' }}>
+                  {emailFormat === 'pdf'
+                    ? 'The PDF opens for you to save, then attach it to the email that follows.'
+                    : `The ${emailFormat} file downloads (or is shared on supported devices), ready to attach to the email that follows.`}
+                </p>
               </div>
             </div>
           )}
@@ -2687,30 +3583,36 @@ export const ItineraryBuilder = () => {
               </h3>
               <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.15rem', maxWidth: '720px' }}>
                 One <strong>read-only service voucher</strong> per supplier, per email. Vouchers cannot be
-                edited — they strictly mirror the persisted itinerary (travellers, dates, times, notes and
-                supplier reference). The client only ever sees the voucher; suppliers receive theirs
-                individually via your default email client.
+                edited — they strictly mirror the persisted itinerary (travellers, dates, times, notes,
+                supplier reference and the per-service confirmation details you recorded). Confirmed status
+                is always <strong>OK</strong>. Suppliers receive theirs individually via your default email client.
               </p>
 
               {servicesBySupplier(days, libraryItems).map((grp) => {
                 const m = voucherFor(grp, days, meta, currencySymbol, paxCount);
                 return (
-                  <div key={grp.key} className="voucher-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden', background: '#fffefb', borderLeft: '4px solid #d4b106' }}>
-                    <div style={{ padding: '0.9rem 1rem', background: '#fffbeb', borderBottom: '1px solid #fdeab0' }}>
+                  <div key={grp.key} className="voucher-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden', background: '#ffffff', borderLeft: '4px solid #0d7478' }}>
+                    <div style={{ padding: '0.9rem 1rem', background: '#f0fdfa', borderBottom: '1px solid #99f6e4' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                        <Ticket size={16} style={{ color: '#b45309' }} />
-                        <strong style={{ fontSize: '0.95rem', color: '#78350f' }}>{grp.label}</strong>
+                        <Ticket size={16} style={{ color: '#0d7478' }} />
+                        <strong style={{ fontSize: '0.95rem', color: '#134e4a' }}>{grp.label}</strong>
                       </div>
-                      <div style={{ fontSize: '0.8rem', color: '#b45309', marginTop: '0.3rem' }}>
+                      <div style={{ fontSize: '0.8rem', color: '#0d7478', marginTop: '0.3rem' }}>
                         {emailOf(grp.sup) ? `Sent to: ${emailOf(grp.sup)}` : 'No supplier email on file'}
                       </div>
                     </div>
                     <div style={{ padding: '0.9rem 1rem' }}>
                       <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: '0.82rem', color: '#475569', lineHeight: 1.6 }}>{m}</pre>
                     </div>
-                    <div style={{ padding: '0 1rem 0.9rem', display: 'flex', justifyContent: 'flex-end' }}>
+                    <div style={{ padding: '0 1rem 0.9rem', display: 'flex', justifyContent: 'flex-end', gap: '0.4rem', flexWrap: 'wrap' }}>
                       <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => window.open(mailTo(emailOf(grp.sup), `Voucher — ${grp.label}`, m), '_blank')}>
-                        <Mail size={14} /> Email voucher to this supplier
+                        <Mail size={14} /> Email voucher to supplier
+                      </button>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => openPrintWindow(voucherDocHtml(grp, days, meta, currencySymbol, paxCount, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), 300)}>
+                        <Printer size={14} /> PDF / Print
+                      </button>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => downloadBlob(voucherDocHtml(grp, days, meta, currencySymbol, paxCount, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), `${safeNameOf(grp.label)}-voucher.doc`, 'application/msword')}>
+                        <Download size={14} /> Word
                       </button>
                     </div>
                   </div>
@@ -2854,7 +3756,7 @@ export const ItineraryBuilder = () => {
                   <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Cancellation notice &amp; refund statement</strong>
                 </div>
                 <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
-                  Retains the deposit ({DEPOSIT_PCT}%) and details the refund due back to the client.
+                  Retains the deposit ({depositPct}%) and details the refund due back to the client.
                 </p>
                 <div
                   className="invoice-total"
@@ -2865,24 +3767,24 @@ export const ItineraryBuilder = () => {
                     <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c' }}>{currencySymbol}{paxBalanceTotal.toFixed(2)}</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Deposit retained ({DEPOSIT_PCT}%)</div>
-                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#b91c1c' }}>{currencySymbol}{round2(paxBalanceTotal * (DEPOSIT_PCT / 100)).toFixed(2)}</div>
+                    <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Deposit retained ({depositPct}%)</div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#b91c1c' }}>{currencySymbol}{round2(paxBalanceTotal * (depositPct / 100)).toFixed(2)}</div>
                   </div>
                   <div>
                     <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Refund due to client</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{currencySymbol}{round2(paxBalanceTotal * (1 - DEPOSIT_PCT / 100)).toFixed(2)}</div>
+                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{currencySymbol}{round2(paxBalanceTotal * (1 - depositPct / 100)).toFixed(2)}</div>
                   </div>
                 </div>
                 <div className="invoice-actions" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                   <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, DEPOSIT_PCT, currencySymbol);
+                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, depositPct, currencySymbol);
                     if (!m.to) { showToast('No client email on file', 'warning'); return; }
                     window.open(mailTo(m.to, m.subject, m.body), '_blank');
                   }}>
                     <Send size={15} /> Email cancellation notice
                   </button>
                   <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, DEPOSIT_PCT, currencySymbol);
+                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, depositPct, currencySymbol);
                     void clipboardCopy(`${m.subject}\n\n${m.body}`);
                     showToast('Cancellation notice copied to clipboard', 'success');
                   }}>

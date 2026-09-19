@@ -1,0 +1,1270 @@
+﻿import { useState, useEffect, useCallback, useMemo } from 'react';
+import { supabase } from '../lib/supabase';
+import { useToast } from '../context/ToastContext';
+import { useCurrencies } from '../hooks/useCurrencies';
+import {
+  round2,
+  fmtMoney,
+  effectiveBalance,
+  TYPE_LABEL,
+  STATUS_META,
+  LOGO_WIDTHS,
+  mailTo,
+  clipboardCopy,
+  downloadBlob,
+  openPrintWindow,
+  buildCurrencyLines,
+  accountingPayload,
+  invoiceEmail,
+  receiptEmail,
+  creditNotePayload,
+  creditNoteEmail,
+  invoiceDocHtml,
+  receiptDocHtml,
+  creditNoteDocHtml,
+  invoiceExcelHtml
+} from '../lib/invoiceDoc';
+import {
+  Receipt,
+  Plus,
+  X,
+  Check,
+  Printer,
+  Send,
+  Copy,
+  Ban,
+  CheckCircle2,
+  Download,
+  Search,
+  Landmark,
+  FileText,
+  RefreshCw,
+  FileCheck2,
+  FileSpreadsheet
+} from 'lucide-react';
+
+export const Invoices = () => {
+  const { showToast } = useToast();
+  const { currencies } = useCurrencies();
+  const [companyId, setCompanyId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [invoices, setInvoices] = useState([]);
+  const [billing, setBilling] = useState(null);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [search, setSearch] = useState('');
+
+  const [viewing, setViewing] = useState(null);
+  const [viewLines, setViewLines] = useState([]);
+  const [viewReceipts, setViewReceipts] = useState([]);
+  const [viewCreditNotes, setViewCreditNotes] = useState([]);
+  const [receiptPromptFor, setReceiptPromptFor] = useState(null);
+  const [receiptForm, setReceiptForm] = useState({ payment_method: 'EFT', payment_reference: '', received_date: '' });
+  const [issuingReceipt, setIssuingReceipt] = useState(false);
+
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState(1);
+  const [itineraries, setItineraries] = useState([]);
+  const [itinerariesLoading, setItinerariesLoading] = useState(false);
+  const [selectedItinerary, setSelectedItinerary] = useState(null);
+  const [selectedCurrency, setSelectedCurrency] = useState('');
+  const [selectedBankId, setSelectedBankId] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [issuing, setIssuing] = useState(false);
+
+  const symOf = useCallback((code) => {
+    const c = currencies.find((x) => (x.code || '').toUpperCase() === (code || '').toUpperCase());
+    return c?.symbol || code || '';
+  }, [currencies]);
+
+  const fetchCompanyId = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
+    const { data: profile } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
+    return profile?.company_id || null;
+  }, []);
+
+  const fetchInvoices = useCallback(async (cid) => {
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('*, itineraries(reference_number, itinerary_name), clients(name)')
+      .eq('company_id', cid)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    setInvoices(data || []);
+  }, []);
+
+  const fetchBilling = useCallback(async (cid) => {
+    const { data, error } = await supabase.from('company_billing_settings').select('*').eq('company_id', cid).maybeSingle();
+    if (error) throw error;
+    setBilling(data || null);
+  }, []);
+
+  const fetchBanks = useCallback(async (cid) => {
+    const { data, error } = await supabase.from('company_bank_accounts').select('*').eq('company_id', cid).order('is_default', { ascending: false });
+    if (error) throw error;
+    setBankAccounts(data || []);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cid = await fetchCompanyId();
+        if (cancelled) return;
+        setCompanyId(cid);
+        if (cid) await Promise.all([fetchInvoices(cid), fetchBilling(cid), fetchBanks(cid)]);
+      } catch (err) {
+        if (!cancelled) showToast(err.message || 'Failed to load invoices', 'error');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [fetchCompanyId, fetchInvoices, fetchBilling, fetchBanks, showToast]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return invoices.filter((inv) => {
+      if (statusFilter !== 'all' && inv.status !== statusFilter) return false;
+      if (typeFilter !== 'all' && inv.invoice_type !== typeFilter) return false;
+      if (q) {
+        const hay = `${inv.invoice_number} ${inv.bill_to_name} ${inv.itineraries?.reference_number || ''} ${inv.itineraries?.itinerary_name || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [invoices, statusFilter, typeFilter, search]);
+
+  /* â”€â”€ Wizard: load qualified itineraries (provisional â†’ deposit, confirmed â†’ final) */
+  const openWizard = async () => {
+    setWizardOpen(true);
+    setWizardStep(1);
+    setSelectedItinerary(null);
+    setSelectedCurrency('');
+    setSelectedBankId('');
+    setDueDate('');
+    setItinerariesLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('itineraries')
+        .select('id, reference_number, itinerary_name, status, travel_start_date, travel_end_date, currency_code, updated_at, clients(name)')
+        .eq('company_id', companyId)
+        .in('status', ['provisional', 'confirmed'])
+        .order('updated_at', { ascending: false });
+      if (error) throw error;
+      setItineraries(data || []);
+    } catch (err) {
+      showToast(err.message || 'Failed to load itineraries', 'error');
+    } finally {
+      setItinerariesLoading(false);
+    }
+  };
+
+  const loadItinerary = async (id) => {
+    try {
+      const { data, error } = await supabase
+        .from('itineraries')
+        .select('*, clients(name, email, address, deposit_percentage), itinerary_days(day_number, day_date, itinerary_day_items(item_name, description_override, category, supplier_name, currency_code, pax, total_sell, tax_rate, tax_label, is_included, sort_order))')
+        .eq('id', id)
+        .single();
+      if (error) throw error;
+      setSelectedItinerary(data);
+      setWizardStep(2);
+    } catch (err) {
+      showToast(err.message || 'Failed to load itinerary services', 'error');
+    }
+  };
+
+  /* Payments actually received, per currency, for this itinerary. A deposit
+     invoice only ever counts its deposit_amount (the full total_incl is not
+     paid), and a paid final counts the balance it billed. */
+  const paidByCurrency = useMemo(() => {
+    const map = new Map();
+    invoices.forEach((inv) => {
+      if (inv.itinerary_id !== selectedItinerary?.id || inv.status !== 'paid') return;
+      const code = (inv.currency_code || '').toUpperCase();
+      if (!map.has(code)) map.set(code, { deposit: 0, final: 0 });
+      const rec = map.get(code);
+      if (inv.invoice_type === 'final') rec.final += round2(Number(inv.total_incl) - (Number(inv.credited_amount) || 0));
+      else rec.deposit += Number(inv.deposit_amount) || Number(inv.total_incl) || 0;
+    });
+    return map;
+  }, [invoices, selectedItinerary]);
+
+  /* A currency can be invoiced whenever it still has an outstanding balance.
+     Once the deposit is paid the next invoice is the final one (it credits the
+     deposit); while nothing is paid yet it is the deposit request. */
+  const currencyGroups = useMemo(() => {
+    if (!selectedItinerary) return [];
+    const paxCount = (Number(selectedItinerary.num_adults) || 0) + (Number(selectedItinerary.num_children) || 0) || 1;
+    const codes = new Set();
+    (selectedItinerary.itinerary_days || []).forEach((d) => {
+      (d.itinerary_day_items || []).forEach((it) => {
+        if (it.is_included === false) return;
+        codes.add((it.currency_code || selectedItinerary.currency_code || 'ZAR').toUpperCase());
+      });
+    });
+    return [...codes].sort().map((code) => {
+      const agg = buildCurrencyLines(selectedItinerary, code, paxCount);
+      const paid = paidByCurrency.get(code) || { deposit: 0, final: 0 };
+      const paidTotal = round2(paid.deposit + paid.final);
+      const outstanding = round2(agg.totalIncl - paidTotal);
+      const hasPaidDeposit = paid.deposit > 0;
+      const liveDeposit = invoices.some((inv) => inv.itinerary_id === selectedItinerary.id
+        && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'deposit' && inv.status !== 'void');
+      const liveFinal = invoices.some((inv) => inv.itinerary_id === selectedItinerary.id
+        && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'final' && inv.status !== 'void');
+      let issueType = null;
+      let blockReason = '';
+      if (outstanding <= 0.009) {
+        blockReason = 'Paid in full';
+      } else if (selectedItinerary.status === 'confirmed' || hasPaidDeposit) {
+        issueType = 'final';
+        if (liveFinal) { issueType = null; blockReason = 'Final invoice issued'; }
+      } else {
+        issueType = 'deposit';
+        if (liveDeposit) { issueType = null; blockReason = 'Deposit invoice issued'; }
+      }
+      return { code, ...agg, paidTotal, outstanding, hasPaidDeposit, issueType, invoiced: !issueType, blockReason };
+    });
+  }, [selectedItinerary, invoices, paidByCurrency]);
+
+  const selectedGroup = useMemo(
+    () => currencyGroups.find((g) => g.code === selectedCurrency) || null,
+    [currencyGroups, selectedCurrency]
+  );
+
+  const depositPct = useMemo(() => {
+    const fromClient = selectedItinerary?.clients?.deposit_percentage;
+    if (fromClient !== null && fromClient !== undefined && fromClient !== '') return Number(fromClient);
+    if (billing?.default_deposit_percentage !== null && billing?.default_deposit_percentage !== undefined) return Number(billing.default_deposit_percentage);
+    return 30;
+  }, [selectedItinerary, billing]);
+
+  const depositCreditPreview = useMemo(() => {
+    if (!selectedItinerary || !selectedCurrency) return { amount: 0, number: '' };
+    const rows = invoices.filter((inv) => inv.itinerary_id === selectedItinerary.id
+      && (inv.currency_code || '').toUpperCase() === selectedCurrency.toUpperCase()
+      && inv.invoice_type === 'deposit' && inv.status === 'paid');
+    const amount = round2(rows.reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0));
+    return { amount, number: rows[0]?.invoice_number || '' };
+  }, [invoices, selectedItinerary, selectedCurrency]);
+
+  const availableBanks = useMemo(
+    () => bankAccounts.filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === (selectedCurrency || '').toUpperCase()),
+    [bankAccounts, selectedCurrency]
+  );
+
+  const chosenBank = useMemo(
+    () => availableBanks.find((b) => b.id === selectedBankId) || availableBanks.find((b) => b.is_default) || availableBanks[0] || null,
+    [availableBanks, selectedBankId]
+  );
+
+  const handleIssue = async () => {
+    if (!selectedGroup) return;
+    if (!selectedGroup.issueType) {
+      showToast(selectedGroup.blockReason || `${TYPE_LABEL.deposit} already exists for ${selectedGroup.code}`, 'warning');
+      return;
+    }
+    setIssuing(true);
+    try {
+      const gross = selectedGroup.totalIncl;
+      const pct = depositPct;
+      const isFinal = selectedGroup.issueType === 'final';
+
+      let creditedAmount = 0;
+      let creditedInvoiceId = null;
+      let creditedInvoiceNumber = '';
+      let depositAmount = 0;
+
+      if (isFinal) {
+        const { data: depositRows } = await supabase
+          .from('invoices')
+          .select('id, invoice_number, deposit_amount, total_incl, status')
+          .eq('itinerary_id', selectedItinerary.id)
+          .eq('currency_code', selectedGroup.code)
+          .eq('invoice_type', 'deposit')
+          .neq('status', 'void')
+          .order('created_at', { ascending: false });
+        const paid = (depositRows || []).filter((r) => r.status === 'paid');
+        creditedAmount = round2(paid.reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0));
+        if (paid[0]) {
+          creditedInvoiceId = paid[0].id;
+          creditedInvoiceNumber = paid[0].invoice_number;
+        }
+        depositAmount = creditedAmount;
+      } else {
+        depositAmount = round2(gross * (pct / 100));
+      }
+      const balance = round2(gross - creditedAmount);
+
+      const { data: number, error: numErr } = await supabase.rpc('get_next_invoice_reference', { p_company_id: companyId });
+      if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate invoice number');
+
+      const client = selectedItinerary.clients || {};
+      const bankDetails = chosenBank ? {
+        bank_name: chosenBank.bank_name,
+        account_holder_name: chosenBank.account_holder_name,
+        account_number: chosenBank.account_number,
+        branch_code: chosenBank.branch_code,
+        swift_code: chosenBank.swift_code
+      } : {};
+
+      const header = {
+        company_id: companyId,
+        itinerary_id: selectedItinerary.id,
+        client_id: selectedItinerary.client_id || null,
+        invoice_number: number,
+        invoice_type: selectedGroup.issueType,
+        status: isFinal ? 'validated' : 'proforma',
+        currency_code: selectedGroup.code,
+        subtotal_excl: selectedGroup.subtotalExcl,
+        tax_total: selectedGroup.taxTotal,
+        total_incl: gross,
+        tax_label: selectedGroup.taxEntries[0]?.label || 'VAT',
+        tax_rate: selectedGroup.taxEntries[0]?.rate ?? 15,
+        deposit_percentage: pct,
+        deposit_amount: depositAmount,
+        balance_due: balance,
+        credited_invoice_id: creditedInvoiceId,
+        credited_invoice_number: creditedInvoiceNumber,
+        credited_amount: creditedAmount,
+        issued_date: new Date().toISOString().slice(0, 10),
+        due_date: dueDate || null,
+        bill_to_name: client.name || '',
+        bill_to_email: client.email || '',
+        bill_to_address: client.address || '',
+        supplier_name: billing?.legal_name || '',
+        supplier_tax_number: billing?.tax_number || '',
+        supplier_address: billing?.billing_address || '',
+        bank_details: bankDetails,
+        notes: null
+      };
+
+      const accounting = accountingPayload({ ...header, bank_details: bankDetails }, selectedGroup.lines);
+      const { data: created, error: invErr } = await supabase
+        .from('invoices')
+        .insert([{ ...header, accounting_export: accounting }])
+        .select('id')
+        .single();
+      if (invErr) throw invErr;
+
+      const lineRows = selectedGroup.lines.map((l) => ({ ...l, invoice_id: created.id, company_id: companyId }));
+      const { error: lineErr } = await supabase.from('invoice_line_items').insert(lineRows);
+      if (lineErr) {
+        await supabase.from('invoices').delete().eq('id', created.id);
+        throw lineErr;
+      }
+
+      await fetchInvoices(companyId);
+      setWizardOpen(false);
+      showToast(`${TYPE_LABEL[selectedGroup.issueType]} ${number} issued`, 'success');
+    } catch (err) {
+      const msg = /duplicate key|unique/i.test(err.message || '')
+        ? `A ${selectedGroup.issueType} invoice already exists for ${selectedGroup.code}`
+        : (err.message || 'Failed to issue invoice');
+      showToast(msg, 'error');
+    } finally {
+      setIssuing(false);
+    }
+  };
+
+  /* Load stored line items; if the immutable snapshot is missing, rebuild the
+     exact service lines from the persisted itinerary so they always display. */
+  const loadInvoiceLines = useCallback(async (inv) => {
+    const { data, error } = await supabase
+      .from('invoice_line_items')
+      .select('*')
+      .eq('invoice_id', inv.id)
+      .order('day_number', { ascending: true })
+      .order('sort_order', { ascending: true });
+    if (error) throw error;
+    if (data && data.length) return data;
+    if (!inv.itinerary_id) return [];
+    const { data: itin, error: itinErr } = await supabase
+      .from('itineraries')
+      .select('*, itinerary_days(day_number, day_date, itinerary_day_items(item_name, description_override, category, supplier_name, currency_code, pax, total_sell, tax_rate, tax_label, is_included, sort_order))')
+      .eq('id', inv.itinerary_id)
+      .maybeSingle();
+    if (itinErr || !itin) return [];
+    const paxCount = (Number(itin.num_adults) || 0) + (Number(itin.num_children) || 0) || 1;
+    const agg = buildCurrencyLines(itin, (inv.currency_code || '').toUpperCase(), paxCount);
+    return agg.lines.map((l, i) => ({ ...l, id: `rebuilt-${i}`, invoice_id: inv.id }));
+  }, []);
+
+  const openView = async (inv) => {
+    setViewing(inv);
+    setViewLines([]);
+    setViewReceipts([]);
+    setViewCreditNotes([]);
+    try {
+      setViewLines(await loadInvoiceLines(inv));
+    } catch (err) {
+      showToast(err.message || 'Failed to load invoice lines', 'error');
+    }
+    try {
+      const { data, error } = await supabase
+        .from('invoice_receipts')
+        .select('*')
+        .eq('invoice_id', inv.id)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      setViewReceipts(data || []);
+    } catch {
+      setViewReceipts([]);
+    }
+    try {
+      const { data, error } = await supabase
+        .from('credit_notes')
+        .select('*')
+        .eq('invoice_id', inv.id)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      setViewCreditNotes(data || []);
+    } catch {
+      setViewCreditNotes([]);
+    }
+  };
+
+  const reloadViewing = async (id) => {
+    const { data } = await supabase.from('invoices').select('*').eq('id', id).maybeSingle();
+    if (data) setViewing(data);
+    const { data: receiptData } = await supabase
+      .from('invoice_receipts')
+      .select('*')
+      .eq('invoice_id', id)
+      .order('created_at', { ascending: false });
+    setViewReceipts(receiptData || []);
+    const { data: creditData } = await supabase
+      .from('credit_notes')
+      .select('*')
+      .eq('invoice_id', id)
+      .order('created_at', { ascending: false });
+    setViewCreditNotes(creditData || []);
+    return data;
+  };
+
+  const markPaid = async (inv) => {
+    try {
+      const { error } = await supabase
+        .from('invoices')
+        .update({ status: 'paid', paid_at: new Date().toISOString() })
+        .eq('id', inv.id);
+      if (error) throw error;
+      await fetchInvoices(companyId);
+      setViewing((v) => (v && v.id === inv.id ? { ...v, status: 'paid' } : v));
+      showToast(`${inv.invoice_number} marked as paid`, 'success');
+    } catch (err) {
+      showToast(err.message || 'Failed to update invoice', 'error');
+    }
+  };
+
+  const receiptDefaults = (inv) => {
+    const amount = inv.invoice_type === 'deposit'
+      ? round2(Number(inv.deposit_amount) || 0)
+      : round2(Number(inv.balance_due) || 0);
+    const balanceRemaining = inv.invoice_type === 'deposit'
+      ? round2(Number(inv.balance_due) || 0)
+      : 0;
+    return { amount, balanceRemaining };
+  };
+
+  const openReceiptPrompt = (inv) => {
+    setReceiptPromptFor(inv);
+    setReceiptForm({
+      payment_method: 'EFT',
+      payment_reference: inv.payment_reference || '',
+      received_date: new Date().toISOString().slice(0, 10)
+    });
+  };
+
+  const submitReceipt = async () => {
+    const inv = receiptPromptFor;
+    if (!inv) return;
+    setIssuingReceipt(true);
+    try {
+      const { data: number, error: numErr } = await supabase.rpc('get_next_receipt_reference', { p_company_id: companyId });
+      if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate receipt number');
+
+      const { amount, balanceRemaining } = receiptDefaults(inv);
+      const receivedDate = receiptForm.received_date || new Date().toISOString().slice(0, 10);
+      const row = {
+        company_id: companyId,
+        invoice_id: inv.id,
+        receipt_number: number,
+        invoice_number: inv.invoice_number,
+        invoice_type: inv.invoice_type,
+        currency_code: inv.currency_code,
+        amount,
+        balance_remaining: balanceRemaining,
+        received_date: receivedDate,
+        payment_method: receiptForm.payment_method || '',
+        payment_reference: receiptForm.payment_reference || '',
+        bill_to_name: inv.bill_to_name || '',
+        bill_to_email: inv.bill_to_email || '',
+        supplier_name: inv.supplier_name || '',
+        supplier_tax_number: inv.supplier_tax_number || '',
+        supplier_address: inv.supplier_address || '',
+        bank_details: inv.bank_details || {},
+        notes: null
+      };
+      const accounting = {
+        schema: 'torbuilder.receipt/v1',
+        provider_agnostic: true,
+        receipt_number: number,
+        invoice_number: inv.invoice_number,
+        invoice_type: inv.invoice_type,
+        status: 'paid',
+        date: receivedDate,
+        currency: inv.currency_code,
+        customer: { name: row.bill_to_name, email: row.bill_to_email },
+        amount,
+        balance_remaining: balanceRemaining,
+        method: row.payment_method,
+        reference: row.payment_reference
+      };
+
+      const { data: created, error } = await supabase
+        .from('invoice_receipts')
+        .insert([{ ...row, accounting_export: accounting }])
+        .select('*')
+        .single();
+      if (error) throw error;
+
+      const paidUpdate = { status: 'paid', paid_at: new Date().toISOString(), payment_reference: row.payment_reference };
+      if (inv.invoice_type === 'final') paidUpdate.balance_due = 0;
+      const { error: paidErr } = await supabase
+        .from('invoices')
+        .update(paidUpdate)
+        .eq('id', inv.id);
+      if (paidErr) throw paidErr;
+
+      await fetchInvoices(companyId);
+      await reloadViewing(inv.id);
+      setReceiptPromptFor(null);
+      showToast(`Receipt ${number} issued`, 'success');
+      if (created) setTimeout(() => printReceipt(created), 250);
+    } catch (err) {
+      showToast(err.message || 'Failed to issue receipt', 'error');
+    } finally {
+      setIssuingReceipt(false);
+    }
+  };
+
+  const exportReceiptJson = (r) => {
+    const payload = r.accounting_export && Object.keys(r.accounting_export).length ? r.accounting_export : { schema: 'torbuilder.receipt/v1', ...r };
+    downloadBlob(JSON.stringify(payload, null, 2), `${r.receipt_number}.json`, 'application/json');
+  };
+
+  const printReceipt = (r) => {
+    const w = openPrintWindow(receiptDocHtml(r, symOf(r.currency_code), branding), 250);
+    if (!w) showToast('Please allow pop-ups to print the receipt', 'warning');
+  };
+
+  const exportReceiptWord = (r) => {
+    downloadBlob(receiptDocHtml(r, symOf(r.currency_code), branding), `${r.receipt_number}.doc`, 'application/msword');
+    showToast('Receipt exported as Word', 'success');
+  };
+
+  const emitReceiptEmail = (r) => {
+    const m = receiptEmail(r);
+    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+  };
+
+  const copyReceipt = (r) => {
+    const m = receiptEmail(r);
+    void clipboardCopy(`${m.subject}\n\n${m.body}`);
+    showToast('Receipt copied to clipboard', 'success');
+  };
+
+  const exportCreditNoteJson = (cn) => {
+    const payload = cn.accounting_export && Object.keys(cn.accounting_export).length ? cn.accounting_export : creditNotePayload(cn, []);
+    downloadBlob(JSON.stringify(payload, null, 2), `${cn.credit_note_number}.json`, 'application/json');
+  };
+
+  const printCreditNote = (cn) => {
+    const w = openPrintWindow(creditNoteDocHtml(cn, symOf(cn.currency_code), branding), 250);
+    if (!w) showToast('Please allow pop-ups to print the credit note', 'warning');
+  };
+
+  const exportCreditNoteWord = (cn) => {
+    downloadBlob(creditNoteDocHtml(cn, symOf(cn.currency_code), branding), `${cn.credit_note_number}.doc`, 'application/msword');
+    showToast('Credit note exported as Word', 'success');
+  };
+
+  const emitCreditNoteEmail = (cn) => {
+    const m = creditNoteEmail(cn);
+    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+  };
+
+  const copyCreditNote = (cn) => {
+    const m = creditNoteEmail(cn);
+    void clipboardCopy(`${m.subject}\n\n${m.body}`);
+    showToast('Credit note copied to clipboard', 'success');
+  };
+
+  /* Voiding ALWAYS raises a matching credit note so the client account balances
+     and the itinerary/currency slot is freed for a replacement invoice. */
+  const voidInvoice = async (inv, lines) => {
+    const reason = window.prompt(`Void invoice ${inv.invoice_number}? A credit note will be raised automatically. Reason:`, inv.void_reason || '');
+    if (!reason || !reason.trim()) return;
+    const trimmed = reason.trim();
+    try {
+      const { data: existing } = await supabase
+        .from('credit_notes')
+        .select('*')
+        .eq('invoice_id', inv.id)
+        .maybeSingle();
+
+      let note = existing;
+      if (!note) {
+        const { data: cnNumber, error: cnErr } = await supabase.rpc('get_next_credit_note_reference', { p_company_id: companyId });
+        if (cnErr || !cnNumber) throw new Error(cnErr?.message || 'Could not allocate credit note number');
+
+        const { error: voidErr } = await supabase
+          .from('invoices')
+          .update({ status: 'void', void_reason: trimmed })
+          .eq('id', inv.id);
+        if (voidErr) throw voidErr;
+
+        const cnRow = {
+          company_id: companyId,
+          invoice_id: inv.id,
+          invoice_number: inv.invoice_number,
+          invoice_type: inv.invoice_type,
+          credit_note_number: cnNumber,
+          status: 'issued',
+          currency_code: inv.currency_code,
+          subtotal_excl: inv.subtotal_excl,
+          tax_total: inv.tax_total,
+          total_incl: inv.total_incl,
+          tax_label: inv.tax_label,
+          tax_rate: inv.tax_rate,
+          reason: trimmed,
+          issued_date: new Date().toISOString().slice(0, 10),
+          bill_to_name: inv.bill_to_name,
+          bill_to_email: inv.bill_to_email,
+          bill_to_address: inv.bill_to_address,
+          supplier_name: inv.supplier_name,
+          supplier_tax_number: inv.supplier_tax_number,
+          supplier_address: inv.supplier_address
+        };
+        const { data: createdCn, error: cnInsertErr } = await supabase
+          .from('credit_notes')
+          .insert([{ ...cnRow, accounting_export: creditNotePayload(cnRow, lines || []) }])
+          .select('*')
+          .single();
+        if (cnInsertErr) {
+          // Never leave an invoice voided without its credit note.
+          await supabase.from('invoices').update({ status: inv.status, void_reason: null }).eq('id', inv.id);
+          throw cnInsertErr;
+        }
+        note = createdCn;
+        await supabase
+          .from('invoices')
+          .update({ credit_note_id: createdCn.id, credit_note_number: createdCn.credit_note_number })
+          .eq('id', inv.id);
+      }
+
+      await fetchInvoices(companyId);
+      await reloadViewing(inv.id);
+      showToast(`${inv.invoice_number} voided and credited (${note.credit_note_number})`, 'success');
+    } catch (err) {
+      showToast(err.message || 'Failed to void invoice', 'error');
+    }
+  };
+
+  const exportJson = (inv, lines) => {
+    const payload = inv.accounting_export && Object.keys(inv.accounting_export).length
+      ? inv.accounting_export
+      : accountingPayload(inv, lines);
+    downloadBlob(JSON.stringify(payload, null, 2), `${inv.invoice_number}.json`, 'application/json');
+  };
+
+  const exportExcel = (inv, lines) => {
+    downloadBlob(invoiceExcelHtml(inv, lines, symOf(inv.currency_code)), `${inv.invoice_number}.xls`, 'application/vnd.ms-excel');
+    showToast('Invoice exported as Excel', 'success');
+  };
+
+  const printInvoice = (inv, lines) => {
+    const w = openPrintWindow(invoiceDocHtml(inv, lines, symOf(inv.currency_code), branding));
+    if (!w) showToast('Please allow pop-ups to print the invoice', 'warning');
+  };
+
+  const exportInvoiceWord = (inv, lines) => {
+    downloadBlob(invoiceDocHtml(inv, lines, symOf(inv.currency_code), branding), `${inv.invoice_number}.doc`, 'application/msword');
+    showToast('Invoice exported as Word', 'success');
+  };
+
+  const emitEmail = (inv, lines) => {
+    const m = invoiceEmail(inv, lines);
+    if (!m.to) { showToast('No client email on file', 'warning'); return; }
+    window.open(mailTo(m.to, m.subject, m.body), '_blank');
+  };
+
+  const copyInvoice = (inv, lines) => {
+    const m = invoiceEmail(inv, lines);
+    void clipboardCopy(`${m.subject}\n\n${m.body}`);
+    showToast('Invoice copied to clipboard', 'success');
+  };
+
+  const badge = (status) => {
+    const meta = STATUS_META[status] || STATUS_META.validated;
+    return (
+      <span style={{ background: meta.bg, color: meta.color, padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
+        {meta.label}
+      </span>
+    );
+  };
+
+  const fieldStyle = { width: '100%', padding: '0.6rem 0.75rem', fontSize: '0.9rem' };
+  const branding = { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' };
+
+  return (
+    <div className="page-container">
+      <div className="page-header">
+        <div>
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.5rem', margin: 0 }}>
+            <Receipt size={22} color="#0d7478" /> Invoices
+          </h1>
+          <p style={{ color: '#64748b', margin: '0.35rem 0 0', fontSize: '0.9rem' }}>
+            Issue one invoice per itinerary currency. Services are always taken from the itinerary and can never be edited here.
+          </p>
+        </div>
+        <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openWizard}>
+          <Plus size={16} /> New Invoice
+        </button>
+      </div>
+
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
+          <div style={{ position: 'relative', flex: '1 1 240px' }}>
+            <Search size={15} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+            <input className="sidebar-select" style={{ width: '100%', padding: '0.55rem 0.75rem 0.55rem 2rem', fontSize: '0.9rem' }} placeholder="Search number, client or itineraryâ€¦" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
+          <select className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="all">All types</option>
+            <option value="deposit">Deposit</option>
+            <option value="final">Final</option>
+          </select>
+          <select className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <option value="all">All statuses</option>
+            <option value="proforma">Proforma</option>
+            <option value="validated">Validated</option>
+            <option value="paid">Paid</option>
+            <option value="void">Void</option>
+          </select>
+          <button type="button" className="icon-btn outline" title="Refresh" onClick={() => companyId && fetchInvoices(companyId)}>
+            <RefreshCw size={15} />
+          </button>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading invoicesâ€¦</div>
+        ) : filtered.length === 0 ? (
+          <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>
+            No invoices yet. Click <b>New Invoice</b> to issue one from a provisional or confirmed itinerary.
+          </div>
+        ) : (
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Invoice #</th>
+                <th>Type</th>
+                <th>Itinerary</th>
+                <th>Client</th>
+                <th>Currency</th>
+                <th style={{ textAlign: 'right' }}>Total (Incl Tax)</th>
+                <th>Status</th>
+                <th>Issued</th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((inv) => (
+                <tr key={inv.id}>
+                  <td style={{ fontWeight: 700 }}>{inv.invoice_number}</td>
+                  <td>{TYPE_LABEL[inv.invoice_type] || inv.invoice_type}</td>
+                  <td>{inv.itineraries?.reference_number || 'â€”'}<div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{inv.itineraries?.itinerary_name || ''}</div></td>
+                  <td>{inv.bill_to_name || 'â€”'}</td>
+                  <td style={{ fontWeight: 700, color: '#0d7478' }}>{inv.currency_code}</td>
+                  <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtMoney(inv.total_incl, inv.currency_code)}</td>
+                  <td>{badge(inv.status)}</td>
+                  <td>{inv.issued_date}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <button type="button" className="secondary-btn" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} onClick={() => openView(inv)}>Open</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* View invoice */}
+      {viewing && (
+        <div className="modal-overlay">
+          <div className="modal-content tall" style={{ maxWidth: '880px', width: '94%' }}>
+            <div className="modal-header">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                {viewing.status === 'proforma' ? 'Proforma â€” ' : ''}{TYPE_LABEL[viewing.invoice_type] || 'Invoice'} {viewing.invoice_number}
+                {badge(viewing.status)}
+              </h2>
+              <button className="close-btn" onClick={() => setViewing(null)}><X size={20} /></button>
+            </div>
+
+            <div className="modal-body">
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+                <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => printInvoice(viewing, viewLines)}>
+                  <Printer size={15} /> Print / PDF
+                </button>
+                <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => exportInvoiceWord(viewing, viewLines)}>
+                  <FileText size={15} /> Word
+                </button>
+                <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => exportExcel(viewing, viewLines)}>
+                  <FileSpreadsheet size={15} /> Excel
+                </button>
+                <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => exportJson(viewing, viewLines)}>
+                  <Download size={15} /> JSON
+                </button>
+                <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => emitEmail(viewing, viewLines)}>
+                  <Send size={15} /> Email
+                </button>
+                <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => copyInvoice(viewing, viewLines)}>
+                  <Copy size={15} /> Copy
+                </button>
+                {(viewing.status === 'proforma' || viewing.status === 'validated') && (
+                  <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => markPaid(viewing)}>
+                    <CheckCircle2 size={15} /> Confirm Payment Received
+                  </button>
+                )}
+                {viewing.status === 'paid' && (
+                  <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }} onClick={() => openReceiptPrompt(viewing)}>
+                    <FileCheck2 size={15} /> Issue Receipt
+                  </button>
+                )}
+                {viewing.status !== 'void' && (
+                  <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: '#b91c1c' }} onClick={() => voidInvoice(viewing, viewLines)}>
+                    <Ban size={15} /> Void
+                  </button>
+                )}
+              </div>
+
+              {viewing.status === 'proforma' && (
+                <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '10px', padding: '0.7rem 1rem', marginBottom: '1rem', fontSize: '0.88rem', fontWeight: 600 }}>
+                  This is a <b>proforma</b> deposit request. It secures the booking but is not yet a tax invoice â€” confirm payment received, then issue a receipt.
+                </div>
+              )}
+
+              <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1.1rem 1.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
+                  <div>
+                    {billing?.logo_data_url && <img src={billing.logo_data_url} alt="Company logo" style={{ display: 'block', maxWidth: `${LOGO_WIDTHS[billing.logo_size] || LOGO_WIDTHS.md}px`, maxHeight: '72px', objectFit: 'contain', marginBottom: '6px' }} />}
+                    <div style={{ fontWeight: 800, fontSize: '1.05rem' }}>{viewing.supplier_name || 'Your Company'}</div>
+                    {viewing.supplier_tax_number && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>VAT / Tax No: {viewing.supplier_tax_number}</div>}
+                    {viewing.supplier_address && <div style={{ fontSize: '0.85rem', color: '#64748b', whiteSpace: 'pre-line' }}>{viewing.supplier_address}</div>}
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div>{badge(viewing.status)}</div>
+                    <div style={{ fontSize: '0.85rem', color: '#64748b', marginTop: '0.35rem' }}>Issued: {viewing.issued_date}</div>
+                    {viewing.due_date && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Due: {viewing.due_date}</div>}
+                    {viewing.paid_at && <div style={{ fontSize: '0.85rem', color: '#047857' }}>Paid: {String(viewing.paid_at).slice(0, 10)}</div>}
+                  </div>
+                </div>
+                <div style={{ marginTop: '0.85rem' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Bill To</div>
+                  <div style={{ fontWeight: 700 }}>{viewing.bill_to_name || 'â€”'}</div>
+                  {viewing.bill_to_email && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>{viewing.bill_to_email}</div>}
+                  {viewing.bill_to_address && <div style={{ fontSize: '0.85rem', color: '#64748b', whiteSpace: 'pre-line' }}>{viewing.bill_to_address}</div>}
+                </div>
+
+                <table className="admin-table" style={{ marginTop: '1rem' }}>
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Description</th>
+                      <th style={{ textAlign: 'right' }}>Qty</th>
+                      <th style={{ textAlign: 'right' }}>Unit</th>
+                      <th style={{ textAlign: 'right' }}>Subtotal (Excl VAT)</th>
+                      <th style={{ textAlign: 'right' }}>VAT</th>
+                      <th style={{ textAlign: 'right' }}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {viewLines.map((l) => (
+                      <tr key={l.id}>
+                        <td>{l.day_number}</td>
+                        <td>{l.item_name}{l.supplier_name ? <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{l.supplier_name}</div> : null}</td>
+                        <td style={{ textAlign: 'right' }}>{l.quantity}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtMoney(l.unit_price, symOf(viewing.currency_code))}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtMoney(l.subtotal_excl, symOf(viewing.currency_code))}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtMoney(l.tax_amount, symOf(viewing.currency_code))}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtMoney(l.line_total, symOf(viewing.currency_code))}</td>
+                      </tr>
+                    ))}
+                    <tr style={{ background: '#f8fafc' }}>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700 }}>Subtotal (Excl VAT)</td>
+                      <td style={{ textAlign: 'right', fontWeight: 800 }}>{fmtMoney(viewing.subtotal_excl, symOf(viewing.currency_code))}</td>
+                    </tr>
+                    <tr style={{ background: '#f8fafc' }}>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700 }}>{viewing.tax_label} ({Number(viewing.tax_rate)}%)</td>
+                      <td style={{ textAlign: 'right', fontWeight: 800 }}>{fmtMoney(viewing.tax_total, symOf(viewing.currency_code))}</td>
+                    </tr>
+                    <tr style={{ background: '#f0fdfa' }}>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 900 }}>{viewing.currency_code} TOTAL DUE (INCL TAX {viewing.tax_label})</td>
+                      <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(viewing.total_incl, symOf(viewing.currency_code))}</td>
+                    </tr>
+                    {viewing.invoice_type === 'final' && Number(viewing.credited_amount) > 0 && (
+                      <tr style={{ background: '#ecfdf5' }}>
+                        <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700, color: '#047857' }}>
+                          Less deposit received{viewing.credited_invoice_number ? ` (${viewing.credited_invoice_number})` : ''}
+                        </td>
+                        <td style={{ textAlign: 'right', fontWeight: 800, color: '#047857' }}>-{fmtMoney(viewing.credited_amount, symOf(viewing.currency_code))}</td>
+                      </tr>
+                    )}
+                    <tr style={{ background: '#eff6ff' }}>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 900 }}>
+                        {viewing.invoice_type === 'final' ? 'BALANCE TO BE PAID' : 'BALANCE REMAINING AFTER DEPOSIT'}
+                        {viewing.invoice_type === 'final' && viewing.status === 'paid' ? ' (settled)' : ''}
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div style={{ marginTop: '0.85rem', display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+                  {viewing.invoice_type === 'deposit' ? (
+                    <>
+                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Deposit requested ({Number(viewing.deposit_percentage)}%)</div><div style={{ fontWeight: 800 }}>{fmtMoney(viewing.deposit_amount, symOf(viewing.currency_code))}</div></div>
+                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Balance remaining after deposit</div><div style={{ fontWeight: 800 }}>{fmtMoney(viewing.balance_due, symOf(viewing.currency_code))}</div></div>
+                    </>
+                  ) : (
+                    <>
+                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Less deposit received{viewing.credited_invoice_number ? ` (${viewing.credited_invoice_number})` : ''}</div><div style={{ fontWeight: 800, color: '#047857' }}>{fmtMoney(viewing.credited_amount, symOf(viewing.currency_code))}</div></div>
+                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Balance to be paid</div><div style={{ fontWeight: 800 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</div></div>
+                    </>
+                  )}
+                </div>
+
+                <div style={{ marginTop: '0.85rem' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <Landmark size={13} /> Banking Details
+                  </div>
+                  {Object.entries(viewing.bank_details || {}).filter(([, v]) => v).length ? (
+                    <div style={{ fontSize: '0.9rem' }}>
+                      {Object.entries(viewing.bank_details).filter(([, v]) => v).map(([k, v]) => (
+                        <div key={k}><span style={{ color: '#64748b' }}>{k.replace(/_/g, ' ')}:</span> {v}</div>
+                      ))}
+                    </div>
+                  ) : <div style={{ fontSize: '0.9rem', color: '#94a3b8' }}>No bank account set for {viewing.currency_code}. Add one in Settings â†’ Bank Accounts.</div>}
+                </div>
+
+                {viewing.status === 'void' && (
+                  <div style={{ marginTop: '0.85rem', color: '#b91c1c', fontWeight: 700 }}>
+                    VOIDED{viewing.void_reason ? ` â€” ${viewing.void_reason}` : ''}
+                  </div>
+                )}
+              </div>
+
+              {viewReceipts.length > 0 && (
+                <div style={{ marginTop: '1.25rem' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, marginBottom: '0.5rem' }}>
+                    Receipts issued
+                  </div>
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Receipt #</th>
+                        <th>Date</th>
+                        <th style={{ textAlign: 'right' }}>Amount</th>
+                        <th style={{ textAlign: 'right' }}>Balance</th>
+                        <th style={{ textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewReceipts.map((r) => (
+                        <tr key={r.id}>
+                          <td style={{ fontWeight: 700 }}>{r.receipt_number}</td>
+                          <td>{r.received_date}</td>
+                          <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtMoney(r.amount, symOf(r.currency_code))}</td>
+                          <td style={{ textAlign: 'right' }}>{fmtMoney(r.balance_remaining, symOf(r.currency_code))}</td>
+                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => printReceipt(r)}>Print</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => exportReceiptWord(r)}>Word</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => emitReceiptEmail(r)}>Email</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => copyReceipt(r)}>Copy</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem' }} onClick={() => exportReceiptJson(r)}>JSON</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {viewCreditNotes.length > 0 && (
+                <div style={{ marginTop: '1.25rem' }}>
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700, marginBottom: '0.5rem' }}>
+                    Credit notes
+                  </div>
+                  <table className="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Credit Note #</th>
+                        <th>Date</th>
+                        <th>Reason</th>
+                        <th style={{ textAlign: 'right' }}>Amount Credited</th>
+                        <th style={{ textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewCreditNotes.map((cn) => (
+                        <tr key={cn.id}>
+                          <td style={{ fontWeight: 700 }}>{cn.credit_note_number}</td>
+                          <td>{cn.issued_date}</td>
+                          <td style={{ color: '#64748b' }}>{cn.reason || 'â€”'}</td>
+                          <td style={{ textAlign: 'right', fontWeight: 700, color: '#047857' }}>{fmtMoney(cn.total_incl, symOf(cn.currency_code))}</td>
+                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => printCreditNote(cn)}>Print</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => exportCreditNoteWord(cn)}>Word</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => emitCreditNoteEmail(cn)}>Email</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => copyCreditNote(cn)}>Copy</button>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem' }} onClick={() => exportCreditNoteJson(cn)}>JSON</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0.6rem 0 0' }}>
+                    This voided invoice is fully reversed by the credit note{viewCreditNotes.length > 1 ? 's' : ''} above, so the client account nets to zero and a replacement invoice can be issued.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Receipt prompt */}
+      {receiptPromptFor && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '480px', width: '94%' }}>
+            <div className="modal-header">
+              <h2>Issue Receipt</h2>
+              <button className="close-btn" onClick={() => setReceiptPromptFor(null)}><X size={20} /></button>
+            </div>
+            <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: 0 }}>
+              Recording payment for <b>{receiptPromptFor.invoice_number}</b>. A receipt number will be allocated and the invoice marked paid.
+            </p>
+            <div style={{ display: 'grid', gap: '0.85rem' }}>
+              <div className="sidebar-field">
+                <label>Date Received</label>
+                <input className="sidebar-select" style={fieldStyle} type="date" value={receiptForm.received_date} onChange={(e) => setReceiptForm({ ...receiptForm, received_date: e.target.value })} />
+              </div>
+              <div className="sidebar-field">
+                <label>Payment Method</label>
+                <select className="sidebar-select" style={fieldStyle} value={receiptForm.payment_method} onChange={(e) => setReceiptForm({ ...receiptForm, payment_method: e.target.value })}>
+                  <option value="EFT">EFT / Bank transfer</option>
+                  <option value="Card">Card</option>
+                  <option value="Cash">Cash</option>
+                  <option value="Online">Online</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div className="sidebar-field">
+                <label>Payment Reference</label>
+                <input className="sidebar-select" style={fieldStyle} placeholder="Bank reference / transaction ID" value={receiptForm.payment_reference} onChange={(e) => setReceiptForm({ ...receiptForm, payment_reference: e.target.value })} />
+              </div>
+              <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.9rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Amount received</span>
+                  <b>{fmtMoney(receiptDefaults(receiptPromptFor).amount, symOf(receiptPromptFor.currency_code))}</b>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Balance remaining</span>
+                  <b>{fmtMoney(receiptDefaults(receiptPromptFor).balanceRemaining, symOf(receiptPromptFor.currency_code))}</b>
+                </div>
+              </div>
+            </div>
+            <div className="form-actions">
+              <button type="button" className="secondary-btn" onClick={() => setReceiptPromptFor(null)}>Cancel</button>
+              <button type="button" className="primary-btn" style={{ flex: 1 }} disabled={issuingReceipt} onClick={submitReceipt}>
+                {issuingReceipt ? 'Issuingâ€¦' : 'Issue Receipt'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New invoice wizard */}
+      {wizardOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content tall" style={{ maxWidth: '820px', width: '94%' }}>
+            <div className="modal-header">
+              <h2>New Invoice â€” Step {wizardStep} of 3</h2>
+              <button className="close-btn" onClick={() => setWizardOpen(false)}><X size={20} /></button>
+            </div>
+
+            <div className="modal-body">
+            {wizardStep === 1 && (
+              <div>
+                <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+                  Select a <b>provisional</b> itinerary to raise a deposit invoice, or a <b>confirmed</b> itinerary for the final invoice.
+                </p>
+                {itinerariesLoading ? (
+                  <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading itinerariesâ€¦</div>
+                ) : itineraries.length === 0 ? (
+                  <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>No provisional or confirmed itineraries available.</div>
+                ) : (
+                  <table className="admin-table">
+                    <thead>
+                      <tr><th>Reference</th><th>Name</th><th>Client</th><th>Status</th><th style={{ textAlign: 'right' }}>Action</th></tr>
+                    </thead>
+                    <tbody>
+                      {itineraries.map((it) => (
+                        <tr key={it.id}>
+                          <td style={{ fontWeight: 700 }}>{it.reference_number || 'â€”'}</td>
+                          <td>{it.itinerary_name}</td>
+                          <td>{it.clients?.name || 'â€”'}</td>
+                          <td style={{ textTransform: 'capitalize' }}>{it.status.replace('_', ' ')}</td>
+                          <td style={{ textAlign: 'right' }}>
+                            <button type="button" className="secondary-btn" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} onClick={() => loadItinerary(it.id)}>Select</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+
+            {wizardStep === 2 && selectedItinerary && (
+              <div>
+                <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+                  <b>{selectedItinerary.reference_number}</b> Â· {selectedItinerary.itinerary_name} Â· status <b style={{ textTransform: 'capitalize' }}>{selectedItinerary.status}</b>.
+                  Pick the currency to invoice. Each currency is invoiced separately; once the deposit is paid the next invoice clears the remaining balance.
+                </p>
+                <table className="admin-table">
+                  <thead>
+                    <tr><th>Currency</th><th style={{ textAlign: 'right' }}>Subtotal (Excl VAT)</th><th style={{ textAlign: 'right' }}>VAT</th><th style={{ textAlign: 'right' }}>Total (Incl Tax)</th><th style={{ textAlign: 'right' }}>Action</th></tr>
+                  </thead>
+                  <tbody>
+                    {currencyGroups.map((g) => (
+                      <tr key={g.code}>
+                        <td style={{ fontWeight: 700, color: '#0d7478' }}>{g.code}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtMoney(g.subtotalExcl, g.code)}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtMoney(g.taxTotal, g.code)}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtMoney(g.totalIncl, g.code)}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          {g.invoiced ? (
+                            <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{g.blockReason || 'Already invoiced'}</span>
+                          ) : (
+                            <button type="button" className="secondary-btn" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} onClick={() => { setSelectedCurrency(g.code); setSelectedBankId(''); setWizardStep(3); }}>Select</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {currencyGroups.length === 0 && (
+                      <tr><td colSpan="5" style={{ textAlign: 'center', color: '#94a3b8', padding: '1.5rem 0' }}>This itinerary has no billable services.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+                <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-start' }}>
+                  <button type="button" className="secondary-btn" onClick={() => setWizardStep(1)}>Back</button>
+                </div>
+              </div>
+            )}
+
+            {wizardStep === 3 && selectedGroup && (
+              <div>
+                <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+                  {selectedGroup.issueType === 'deposit' ? 'Proforma Deposit Invoice' : TYPE_LABEL[selectedGroup.issueType]} for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. Review the breakdown and confirm.
+                </p>
+
+                <table className="admin-table">
+                  <thead>
+                    <tr><th>Day</th><th>Service</th><th style={{ textAlign: 'right' }}>Qty</th><th style={{ textAlign: 'right' }}>Total (Incl Tax)</th></tr>
+                  </thead>
+                  <tbody>
+                    {selectedGroup.lines.map((l, i) => (
+                      <tr key={i}>
+                        <td>{l.day_number}</td>
+                        <td>{l.item_name}</td>
+                        <td style={{ textAlign: 'right' }}>{l.quantity}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtMoney(l.line_total, selectedGroup.code)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <div style={{ marginTop: '0.75rem', background: '#f8fafc', borderRadius: '10px', padding: '0.85rem 1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Subtotal (Excl VAT)</span><b>{fmtMoney(selectedGroup.subtotalExcl, symOf(selectedGroup.code))}</b></div>
+                  {selectedGroup.taxEntries.map((te) => (
+                    <div key={te.label} style={{ display: 'flex', justifyContent: 'space-between' }}><span>{te.label} ({Number(te.rate)}%)</span><b>{fmtMoney(te.amount, symOf(selectedGroup.code))}</b></div>
+                  ))}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #e2e8f0', marginTop: '0.4rem', paddingTop: '0.4rem', fontWeight: 900 }}>
+                    <span>{selectedGroup.code} TOTAL DUE (INCL TAX {selectedGroup.taxEntries[0]?.label || 'VAT'})</span>
+                    <span>{fmtMoney(selectedGroup.totalIncl, symOf(selectedGroup.code))}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.4rem', color: '#64748b' }}>
+                    {selectedGroup.issueType === 'deposit' ? (
+                      <><span>Deposit requested ({depositPct}%)</span><b>{fmtMoney(round2(selectedGroup.totalIncl * depositPct / 100), symOf(selectedGroup.code))}</b></>
+                    ) : (
+                      <>
+                        <span>Less deposit received{depositCreditPreview.number ? ` (${depositCreditPreview.number})` : ''}</span>
+                        <b style={{ color: '#047857' }}>-{fmtMoney(depositCreditPreview.amount, symOf(selectedGroup.code))}</b>
+                      </>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.35rem', fontWeight: 700 }}>
+                    {selectedGroup.issueType === 'deposit' ? (
+                      <><span>Balance remaining after deposit</span><b>{fmtMoney(round2(selectedGroup.totalIncl * (1 - depositPct / 100)), symOf(selectedGroup.code))}</b></>
+                    ) : (
+                      <><span>Balance to be paid</span><b>{fmtMoney(selectedGroup.outstanding, symOf(selectedGroup.code))}</b></>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+                  <div className="sidebar-field">
+                    <label>Bank Account ({selectedGroup.code})</label>
+                    <select className="sidebar-select" style={fieldStyle} value={chosenBank?.id || ''} onChange={(e) => setSelectedBankId(e.target.value)}>
+                      {availableBanks.length === 0 && <option value="">No {selectedGroup.code} account â€” add one in Settings</option>}
+                      {availableBanks.map((b) => (
+                        <option key={b.id} value={b.id}>{b.label || b.bank_name || b.currency_code}{b.is_default ? ' (default)' : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="sidebar-field">
+                    <label>Due Date</label>
+                    <input className="sidebar-select" style={fieldStyle} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+                  </div>
+                </div>
+
+                <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.75rem', display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                  <FileText size={13} /> {selectedGroup.issueType === 'deposit'
+                    ? 'A proforma deposit request is numbered and locked once issued. Confirm payment received, then issue a receipt.'
+                    : 'Once validated, the final invoice is numbered and locked. It cannot be edited â€” only voided.'}
+                </p>
+
+                <div className="form-actions" style={{ marginTop: '0.5rem' }}>
+                  <button type="button" className="secondary-btn" onClick={() => setWizardStep(2)}>Back</button>
+                  <button type="button" className="primary-btn" style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem' }} disabled={issuing} onClick={handleIssue}>
+                    <Check size={16} /> {issuing ? 'Issuingâ€¦' : (selectedGroup.issueType === 'deposit' ? 'Issue Proforma' : 'Validate Final Invoice')}
+                  </button>
+                </div>
+              </div>
+            )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Invoices;

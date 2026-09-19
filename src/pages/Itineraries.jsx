@@ -66,7 +66,7 @@ export const Itineraries = () => {
 
       const { data, error } = await supabase
         .from('itineraries')
-        .select('*, clients(name, client_type, markup_percentage, email, phone, country)')
+        .select('*, clients(name, client_type, markup_percentage, deposit_percentage, email, phone, country)')
         .eq('company_id', profile.company_id)
         .order('created_at', { ascending: false })
         .limit(50);
