@@ -1,10 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
-import { UserPlus, Users, Calendar, User, StickyNote } from 'lucide-react';
+import { UserPlus, Users, Calendar, User, StickyNote, Compass, UserCheck } from 'lucide-react';
 import ClientForm from './ClientForm';
 
-const emptyTraveller = () => ({ name: '', surname: '', age: '' });
+const emptyTraveller = () => ({
+  name: '',
+  surname: '',
+  age: '',
+  nationality: '',
+  passportNumber: '',
+  emergencyContact: '',
+  dietaryRequirements: '',
+  insurancePolicy: '',
+  notes: ''
+});
 
 const childrenCount = (travellers = []) => {
   if (!Array.isArray(travellers)) return 0;
@@ -20,11 +30,22 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
   const initialTravellers = (Array.isArray(initial?.travellers) && initial.travellers.length > 0
     ? initial.travellers
     : [emptyTraveller(), emptyTraveller()])
-    .map((t) => ({ name: t?.name || '', surname: t?.surname || '', age: t?.age ?? '' }));
+    .map((t) => ({
+      name: t?.name || '',
+      surname: t?.surname || '',
+      age: t?.age ?? '',
+      nationality: t?.nationality || '',
+      passportNumber: t?.passportNumber || '',
+      emergencyContact: t?.emergencyContact || '',
+      dietaryRequirements: t?.dietaryRequirements || '',
+      insurancePolicy: t?.insurancePolicy || '',
+      notes: t?.notes || ''
+    }));
 
   const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [clientMode, setClientMode] = useState('existing');
+  const [pendingSubmit, setPendingSubmit] = useState(null);
 
   const [form, setForm] = useState({
     itineraryName: initial?.itineraryName || '',
@@ -32,13 +53,28 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
     travelStart: initial?.travelStart || '',
     travelEnd: initial?.travelEnd || '',
     numTravellers: Math.max(1, initialTravellers.length),
-    agencyRef: initial?.agencyRef || ''
+    agencyRef: initial?.agencyRef || '',
+    tourType: initial?.tourType || '',
+    consultantName: initial?.consultantName || ''
   });
 
   const [travellers, setTravellers] = useState(initialTravellers);
 
   const selectedClient = clients.find((c) => c.id === form.clientId) || null;
   const isAgency = selectedClient?.client_type === 'Travel Agency';
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (!form.consultantName) {
+        const username = await getLoggedInUserName();
+        if (active && username) {
+          setForm((prev) => ({ ...prev, consultantName: prev.consultantName || username }));
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, []);
 
   const fetchClients = useCallback(async () => {
     try {
@@ -126,7 +162,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       return;
     }
 
-    await onSubmit({
+    const payload = {
       clientId: form.clientId,
       selectedClient,
       itineraryName: name,
@@ -135,27 +171,79 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       travellers: activeTravellers,
       numAdults: activeTravellers.length - childrenCount(activeTravellers),
       numChildren: childrenCount(activeTravellers),
-      agencyRef: isAgency ? form.agencyRef.trim() : null
-    });
+      agencyRef: isAgency ? form.agencyRef.trim() : null,
+      tourType: form.tourType,
+      consultantName: form.consultantName.trim()
+    };
+
+    const originalTravellers = Array.isArray(initial?.travellers) ? initial.travellers : [];
+    const travellersChanged = JSON.stringify(originalTravellers.map((t) => ({
+      name: t?.name || '',
+      surname: t?.surname || '',
+      age: t?.age ?? '',
+      nationality: t?.nationality || '',
+      passportNumber: t?.passportNumber || '',
+      emergencyContact: t?.emergencyContact || '',
+      dietaryRequirements: t?.dietaryRequirements || '',
+      insurancePolicy: t?.insurancePolicy || '',
+      notes: t?.notes || ''
+    }))) !== JSON.stringify(activeTravellers);
+
+    if (initial?.clientId && travellersChanged && form.clientId === initial.clientId) {
+      setPendingSubmit(payload);
+      return;
+    }
+
+    await onSubmit(payload);
   };
 
   return (
+    <>
     <form onSubmit={handleSubmit}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
 
-        {/* ─── Itinerary Name ─── */}
-        <div style={{ maxWidth: '560px' }}>
-          <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
-            Itinerary Name *
-          </label>
-          <input
-            type="text"
-            className="pricing-select"
-            placeholder="e.g. Beach Paradise Getaway"
-            value={form.itineraryName}
-            onChange={(e) => setForm({ ...form, itineraryName: e.target.value })}
-          />
+        {/* ─── Itinerary Header Info ─── */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+              Itinerary Name *
+            </label>
+            <input
+              type="text"
+              className="pricing-select"
+              placeholder="e.g. Beach Paradise Getaway"
+              value={form.itineraryName}
+              onChange={(e) => setForm({ ...form, itineraryName: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+              Tour Type
+            </label>
+            <select
+              className="pricing-select"
+              value={form.tourType}
+              onChange={(e) => setForm({ ...form, tourType: e.target.value })}
+            >
+              <option value="">Select tour type...</option>
+              <option value="FIT">FIT</option>
+              <option value="Series Departure">Series Departure</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+              Consultant / Tour Designer
+            </label>
+            <input
+              type="text"
+              className="pricing-select"
+              placeholder="Logged-in user name"
+              value={form.consultantName}
+              onChange={(e) => setForm({ ...form, consultantName: e.target.value })}
+            />
+          </div>
         </div>
+
 
         {/* ─── Client Selection / Creation ─── */}
         <div style={{
@@ -321,16 +409,16 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
               <div
                 key={idx}
                 style={{
-                  display: 'grid',
-                  gridTemplateColumns: '2.5rem 1fr 1fr 5.5rem',
-                  gap: '0.75rem',
-                  alignItems: 'center',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.85rem',
                   background: '#fff',
                   border: '1px solid #e2e8f0',
                   borderRadius: '10px',
                   padding: '0.75rem'
                 }}
               >
+                <div style={{ display: 'grid', gridTemplateColumns: '2.5rem 1fr 1fr 5.5rem', gap: '0.75rem', alignItems: 'center' }}>
                 <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#94a3b8', textAlign: 'center' }}>
                   {idx + 1}
                 </div>
@@ -375,6 +463,87 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
                     onChange={(e) => handleTravellerChange(idx, 'age', e.target.value)}
                   />
                 </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.6rem', marginTop: '0.4rem' }}>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
+                      Nationality
+                    </label>
+                    <input
+                      type="text"
+                      className="pricing-select"
+                      placeholder="e.g. British"
+                      style={{ padding: '0.5rem 0.65rem', fontSize: '0.8rem' }}
+                      value={t.nationality}
+                      onChange={(e) => handleTravellerChange(idx, 'nationality', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
+                      Passport number
+                    </label>
+                    <input
+                      type="text"
+                      className="pricing-select"
+                      placeholder="e.g. 531908714"
+                      style={{ padding: '0.5rem 0.65rem', fontSize: '0.8rem' }}
+                      value={t.passportNumber}
+                      onChange={(e) => handleTravellerChange(idx, 'passportNumber', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
+                      Emergency contact
+                    </label>
+                    <input
+                      type="text"
+                      className="pricing-select"
+                      placeholder="Number for emergencies"
+                      style={{ padding: '0.5rem 0.65rem', fontSize: '0.8rem' }}
+                      value={t.emergencyContact}
+                      onChange={(e) => handleTravellerChange(idx, 'emergencyContact', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
+                      Dietary requirements
+                    </label>
+                    <input
+                      type="text"
+                      className="pricing-select"
+                      placeholder="e.g. Vegetarian, nut allergy"
+                      style={{ padding: '0.5rem 0.65rem', fontSize: '0.8rem' }}
+                      value={t.dietaryRequirements}
+                      onChange={(e) => handleTravellerChange(idx, 'dietaryRequirements', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
+                      Insurance policy no.
+                    </label>
+                    <input
+                      type="text"
+                      className="pricing-select"
+                      placeholder="e.g. POL-88213"
+                      style={{ padding: '0.5rem 0.65rem', fontSize: '0.8rem' }}
+                      value={t.insurancePolicy}
+                      onChange={(e) => handleTravellerChange(idx, 'insurancePolicy', e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block' }}>
+                    Notes
+                  </label>
+                  <textarea
+                    className="pricing-select"
+                    rows="2"
+                    placeholder="Important info that must be known — special occasions, celebrations, anniversaries, accessibility needs, anything the team must remember."
+                    style={{ padding: '0.5rem 0.65rem', fontSize: '0.8rem', resize: 'vertical', width: '100%' }}
+                    value={t.notes}
+                    onChange={(e) => handleTravellerChange(idx, 'notes', e.target.value)}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -401,6 +570,46 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
 
       </div>
     </form>
+    {pendingSubmit && (
+      <div
+        role="dialog"
+        aria-modal="true"
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 1200,
+          background: 'rgba(15, 23, 42, 0.45)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '1rem'
+        }}
+      >
+        <div style={{ width: '100%', maxWidth: '500px', background: '#fff', borderRadius: '14px', padding: '1.5rem', boxShadow: '0 20px 50px rgba(15, 23, 42, 0.25)' }}>
+          <h3 style={{ margin: '0 0 0.5rem', color: '#0f172a' }}>Traveller details updated</h3>
+          <p style={{ margin: '0 0 1.25rem', color: '#475569', lineHeight: 1.5 }}>
+            Should these travellers remain assigned to <strong>{selectedClient?.name || 'the current client'}</strong>, or should they be assigned to a different client?
+          </p>
+          <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+            <button type="button" className="secondary-btn" onClick={() => {
+              setForm((prev) => ({ ...prev, clientId: '' }));
+              setClientMode('existing');
+              setPendingSubmit(null);
+            }}>
+              Choose a different client
+            </button>
+            <button type="button" className="primary-btn" onClick={() => {
+              const payload = pendingSubmit;
+              setPendingSubmit(null);
+              onSubmit(payload);
+            }}>
+              Keep current client
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 

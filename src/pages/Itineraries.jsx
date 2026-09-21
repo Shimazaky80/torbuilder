@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { Map, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
 import ClientTourForm from '../components/ClientTourForm';
@@ -129,6 +129,9 @@ export const Itineraries = () => {
         return;
       }
 
+      const defaultConsultant = await getLoggedInUserName();
+      const consultantName = payload.consultantName || defaultConsultant || null;
+
       const { data: newItinerary, error } = await supabase
         .from('itineraries')
         .insert([{
@@ -142,6 +145,8 @@ export const Itineraries = () => {
           num_adults: payload.numAdults,
           num_children: payload.numChildren,
           agency_reference: payload.agencyRef,
+          itinerary_tour_type: payload.tourType || null,
+          consultant_name: consultantName,
           status: 'quotation'
         }])
         .select()
@@ -164,7 +169,9 @@ export const Itineraries = () => {
           travellers: payload.travellers,
           numAdults: payload.numAdults,
           numChildren: payload.numChildren,
-          agencyRef: payload.agencyRef
+          agencyRef: payload.agencyRef,
+          tourType: payload.tourType || '',
+          consultantName: consultantName || ''
         }
       });
     } catch (err) {
@@ -185,7 +192,9 @@ export const Itineraries = () => {
         travellers: trav,
         numAdults: trav.length - childrenCount(trav),
         numChildren: childrenCount(trav),
-        agencyRef: itinerary.agency_reference || null
+        agencyRef: itinerary.agency_reference || null,
+        tourType: itinerary.itinerary_tour_type || '',
+        consultantName: itinerary.consultant_name || ''
       }
     });
   };
@@ -214,11 +223,17 @@ export const Itineraries = () => {
         return;
       }
 
+      const defaultConsultant = await getLoggedInUserName();
+      const consultantName = itinerary.consultant_name || defaultConsultant || null;
+
       const { data: copy, error } = await supabase
         .from('itineraries')
         .insert([{
           company_id: profile.company_id,
-          client_id: itinerary.client_id,
+          // A copied itinerary is a new client assignment. The builder must
+          // require an explicit client selection instead of silently reusing
+          // the source itinerary's client.
+          client_id: null,
           reference_number: referenceNumber,
           itinerary_name: `${itinerary.itinerary_name} (Copy)`,
           travel_start_date: itinerary.travel_start_date,
@@ -227,6 +242,8 @@ export const Itineraries = () => {
           num_adults: trav.length - childrenCount(trav),
           num_children: childrenCount(trav),
           agency_reference: itinerary.agency_reference || null,
+          itinerary_tour_type: itinerary.itinerary_tour_type || null,
+          consultant_name: consultantName,
           status: 'quotation'
         }])
         .select()
@@ -240,19 +257,22 @@ export const Itineraries = () => {
           itineraryId: copy.id,
           referenceNumber,
           itineraryName: copy.itinerary_name,
-          client: itinerary.clients || null,
+          client: null,
           travelStart: copy.travel_start_date,
           travelEnd: copy.travel_end_date,
           travellers: trav,
           numAdults: trav.length - childrenCount(trav),
           numChildren: childrenCount(trav),
-          agencyRef: copy.agency_reference || null
+          agencyRef: copy.agency_reference || null,
+          tourType: copy.itinerary_tour_type || '',
+          consultantName: consultantName || ''
         }
       });
     } catch (err) {
       showToast(err.message, 'error');
     }
   };
+
 
   const formatTravellerSummary = (itinerary) => {
     const trav = Array.isArray(itinerary.travellers) ? itinerary.travellers : [];

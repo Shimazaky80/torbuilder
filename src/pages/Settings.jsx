@@ -213,6 +213,7 @@ export const Settings = () => {
 
   const [billing, setBilling] = useState({
     legal_name: '',
+    operating_country: 'South Africa',
     tax_number: '',
     billing_address: '',
     default_deposit_percentage: '30',
@@ -261,6 +262,7 @@ export const Settings = () => {
     if (data) {
       setBilling({
         legal_name: data.legal_name || '',
+        operating_country: data.operating_country || 'South Africa',
         tax_number: data.tax_number || '',
         billing_address: data.billing_address || '',
         default_deposit_percentage: String(data.default_deposit_percentage ?? 30),
@@ -475,6 +477,7 @@ export const Settings = () => {
       legal_name: billing.legal_name.trim(),
       tax_number: billing.tax_number.trim(),
       billing_address: billing.billing_address.trim(),
+      operating_country: billing.operating_country || 'South Africa',
       default_deposit_percentage: pct,
       invoice_prefix: (billing.invoice_prefix.trim() || 'INV').toUpperCase(),
       logo_data_url: billing.logo_data_url || '',
@@ -694,6 +697,13 @@ export const Settings = () => {
           <div className="sidebar-field">
             <label>VAT / Tax Number</label>
             <input className="sidebar-select" style={fieldStyle} value={billing.tax_number} onChange={(e) => setBilling({ ...billing, tax_number: e.target.value })} placeholder="e.g. 4123456789" />
+          </div>
+          <div className="sidebar-field">
+            <label>Operating Country *</label>
+            <SearchableCountryInput value={billing.operating_country} onChange={(value) => setBilling({ ...billing, operating_country: value })} />
+            <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              South African VAT is applied only when both this country and the supplier country are South Africa.
+            </p>
           </div>
           <div className="sidebar-field">
             <label>Invoice Prefix</label>

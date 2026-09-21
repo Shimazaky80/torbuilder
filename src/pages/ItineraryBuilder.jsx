@@ -1,10 +1,11 @@
-﻿import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Map as MapIcon,
   ArrowLeft,
   Search,
   Copy,
+  Download,
   FileDown,
   Save,
   Send,
@@ -35,11 +36,13 @@ import {
   Ticket,
   Lock
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import ClientTourForm from '../components/ClientTourForm';
 import { usePageGuard } from '../context/NavigationGuardContext';
+import RoomAllocationModal from '../components/RoomAllocationModal';
+import { validateRoomAllocation } from '../lib/roomAllocationHelper';
 import {
   buildLinesFromDays,
   accountingPayload,
@@ -520,7 +523,22 @@ const safeNameOf = (label) => {
   return s || 'voucher';
 };
 
-/* Read-only supplier voucher (emailed individually, cannot be edited). */
+/* Per-traveller detail lines (nationality, passport, emergency contact, dietary,
+   insurance, notes) so important client info travels into vouchers + documents. */
+const travellerDetailLines = (travellers) => {
+  return (Array.isArray(travellers) ? travellers : []).map((tr) => {
+    const who = `${tr.name} ${tr.surname || ''}`.trim() || 'Traveller';
+    const bits = [
+      tr.nationality ? `Nationality: ${tr.nationality}` : '',
+      tr.passportNumber ? `Passport: ${tr.passportNumber}` : '',
+      tr.emergencyContact ? `Emergency contact: ${tr.emergencyContact}` : '',
+      tr.dietaryRequirements ? `Dietary: ${tr.dietaryRequirements}` : '',
+      tr.insurancePolicy ? `Insurance policy: ${tr.insurancePolicy}` : '',
+      tr.notes ? `Notes: ${tr.notes}` : ''
+    ].filter(Boolean).join('  ·  ');
+    return bits ? `• ${who} — ${bits}` : '';
+  }).filter(Boolean);
+};
 const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
   const dateStr = (day) => (day.date ? formatDateLong(day.date) : '');
   const lines = group.svcs.map(({ sv, day }) => [
@@ -535,6 +553,7 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
     `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
     `Client: ${meta.client?.name || '—'}`,
     `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
+    ...travellerDetailLines(meta.travellers),
     `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
     '',
     lines.join('\n\n'),
@@ -612,6 +631,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
         <tr><td class="h">Itinerary</td><td>${esc(meta.itineraryName || '—')}</td><td class="h">Reference</td><td>${esc(meta.referenceNumber || meta.reference || '—')}</td></tr>
         <tr><td class="h">Client</td><td>${clientLine}</td><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td></tr>
         <tr><td class="h">Travellers</td><td colspan="3">${esc(trav)}</td></tr>
+        ${travellerDetailLines(meta.travellers).map((d) => `<tr><td class="h">Traveller details</td><td colspan="3">${esc(d)}</td></tr>`).join('')}
       </table>
     </div>
     ${entries}
@@ -653,6 +673,7 @@ const invoiceHeaderLines = (meta) => [
   `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
   `Client: ${meta.client?.name || '—'}`,
   `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
+  ...travellerDetailLines(meta.travellers),
   `Dates: ${meta.travelStart} to ${meta.travelEnd}`
 ];
 
@@ -674,6 +695,7 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
     day.date ? `Date: ${formatDateLong(day.date)}` : '',
     `Itinerary: ${meta.itineraryName} (${meta.referenceNumber || meta.reference || '—'})`,
     `Travellers: ${guests}`,
+    ...travellerDetailLines(meta.travellers),
     `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
     '',
     ...lines,
@@ -710,16 +732,28 @@ const feedbackRequestEmail = (meta) => {
 };
 
 /* Expense reconciliation statement (completed stage): income vs supplier cost. */
-const reconciliationStatementFor = (meta, income, cost, currencySymbol) => {
-  const net = round2((Number(income) || 0) - (Number(cost) || 0));
+const reconciliationStatementFor = (meta, pricingGroups, fallbackIncome, fallbackCost, currencySymbol = 'R') => {
+  const groups = (pricingGroups || []).length > 0 ? pricingGroups : [{
+    code: 'ZAR',
+    symbol: currencySymbol,
+    totalSell: Number(fallbackIncome) || 0,
+    totalBuy: Number(fallbackCost) || 0
+  }];
+  const sections = groups.map((grp) => {
+    const net = round2((grp.totalSell || 0) - (grp.totalBuy || 0));
+    return [
+      `Currency: ${grp.code} (${grp.symbol})`,
+      `Total invoiced to client (incl. tax): ${grp.symbol}${(grp.totalSell || 0).toFixed(2)}`,
+      `Total supplier costs (buy): ${grp.symbol}${(grp.totalBuy || 0).toFixed(2)}`,
+      `Net result: ${grp.symbol}${net.toFixed(2)}`
+    ].join('\n');
+  });
   const body = [
     'EXPENSE RECONCILIATION STATEMENT',
     '',
     ...invoiceHeaderLines(meta),
     '',
-    `Total invoiced to client (incl. tax): ${currencySymbol}${(Number(income) || 0).toFixed(2)}`,
-    `Total supplier costs (buy): ${currencySymbol}${(Number(cost) || 0).toFixed(2)}`,
-    `Net result: ${currencySymbol}${net.toFixed(2)}`,
+    sections.join('\n\n'),
     '',
     'Closing & reporting document — generated on completion.'
   ].join('\n');
@@ -731,11 +765,28 @@ const reconciliationStatementFor = (meta, income, cost, currencySymbol) => {
 };
 
 /* Cancellation notice + refund statement (cancelled stage — docs revoked). */
-const cancellationNoticeEmail = (meta, totalInclTax, vat, depositPct, currencySymbol) => {
-  const total = Number(totalInclTax) || 0;
-  const vatAmt = Number(vat) || 0;
-  const subtotal = round2(total - vatAmt);
-  const deposit = round2(total * ((Number(depositPct) || DEPOSIT_PCT) / 100));
+const cancellationNoticeEmail = (meta, pricingGroups, depositPct = DEPOSIT_PCT, fallbackTotal = 0, fallbackVat = 0, currencySymbol = 'R') => {
+  const groups = (pricingGroups || []).length > 0 ? pricingGroups : [{
+    code: 'ZAR',
+    symbol: currencySymbol,
+    totalSell: Number(fallbackTotal) || 0,
+    totalTax: Number(fallbackVat) || 0
+  }];
+  const sections = groups.map((grp) => {
+    const total = grp.totalSell || 0;
+    const vatAmt = grp.totalTax || 0;
+    const subtotal = round2(total - vatAmt);
+    const deposit = round2(total * ((Number(depositPct) || DEPOSIT_PCT) / 100));
+    const refund = round2(total - deposit);
+    return [
+      `Currency: ${grp.code} (${grp.symbol})`,
+      `Subtotal (Excl. VAT): ${grp.symbol}${subtotal.toFixed(2)}`,
+      `VAT: ${grp.symbol}${vatAmt.toFixed(2)}`,
+      `TOTAL DUE (INCL. VAT): ${grp.symbol}${total.toFixed(2)}`,
+      `Deposit retained (${Number(depositPct) || DEPOSIT_PCT}%): ${grp.symbol}${deposit.toFixed(2)}`,
+      `Refund due to client: ${grp.symbol}${refund.toFixed(2)}`
+    ].join('\n');
+  });
   const body = [
     'CANCELLATION NOTICE',
     '',
@@ -745,11 +796,8 @@ const cancellationNoticeEmail = (meta, totalInclTax, vat, depositPct, currencySy
     `Cancellation date: ${new Date().toISOString().slice(0, 10)}`,
     '',
     `REFUND STATEMENT`,
-    `Subtotal (Excl. VAT): ${currencySymbol}${subtotal.toFixed(2)}`,
-    `VAT: ${currencySymbol}${vatAmt.toFixed(2)}`,
-    `TOTAL DUE (INCL. VAT): ${currencySymbol}${total.toFixed(2)}`,
-    `Deposit retained (${Number(depositPct) || DEPOSIT_PCT}%): ${currencySymbol}${deposit.toFixed(2)}`,
-    `Refund due to client: ${currencySymbol}${round2(total - deposit).toFixed(2)}`,
+    '',
+    sections.join('\n\n'),
     '',
     'All previously issued vouchers, travel documents and invoices are now void.',
     '',
@@ -785,7 +833,9 @@ export const ItineraryBuilder = () => {
     numChildren: data?.numChildren || 0,
     agencyRef: data?.agencyRef || null,
     status: data?.status || 'quotation',
-    notes: ''
+    notes: '',
+    tourType: data?.tourType || '',
+    consultantName: data?.consultantName || ''
   });
 
   const [companyId, setCompanyId] = useState(null);
@@ -825,6 +875,19 @@ export const ItineraryBuilder = () => {
   const [lastSavedKey, setLastSavedKey] = useState(null);
   const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
   const [bulkConfirmGroups, setBulkConfirmGroups] = useState([]);
+  const [roomModalState, setRoomModalState] = useState({
+    isOpen: false,
+    dayIndex: null,
+    serviceKey: null,
+    item: null,
+    service: null
+  });
+  const [placementDraft, setPlacementDraft] = useState(null);
+  const [placementRepeat, setPlacementRepeat] = useState(false);
+  const [placementRepeatCount, setPlacementRepeatCount] = useState(2);
+  const [placementCopyDays, setPlacementCopyDays] = useState([]);
+  const [roomApplyPrompt, setRoomApplyPrompt] = useState(null);
+  const [vehicleDraft, setVehicleDraft] = useState(null);
 
   const idSeq = useRef(0);
   const booted = useRef(false);
@@ -851,6 +914,16 @@ export const ItineraryBuilder = () => {
   useEffect(() => {
     completedRef.current = isReadOnly;
   }, [isReadOnly]);
+  const normaliseCountry = (value) => String(value || '').trim().toLowerCase();
+  const tenantCountry = normaliseCountry(billing?.operating_country || 'South Africa');
+  const isSouthAfricanTaxContext = tenantCountry === 'south africa';
+  const supplierCountryForItem = (item) => normaliseCountry(
+    item?.supplier?.country
+    || item?.supplier_country
+    || item?.country
+  );
+  const taxAppliesToItem = (item) => !isSouthAfricanTaxContext
+    || supplierCountryForItem(item) === 'south africa';
   const defaultTax = taxRates.find((t) => t.is_active && t.is_default)
     || taxRates.find((t) => t.is_active) || null;
   const defaultTaxRate = Number(defaultTax?.rate ?? 15);
@@ -1007,7 +1080,7 @@ export const ItineraryBuilder = () => {
       }
       const { data: suppliers } = await supabase
         .from('suppliers')
-        .select('id, name, email')
+        .select('id, name, email, country, province_state, city, city_location')
         .eq('company_id', cid);
       const rateMap = {};
       (ratesData || []).forEach((r) => {
@@ -1097,7 +1170,9 @@ export const ItineraryBuilder = () => {
           notes: it.notes || '',
           numAdults: it.num_adults ?? prev.numAdults,
           numChildren: it.num_children ?? prev.numChildren,
-          agencyRef: it.agency_reference || prev.agencyRef
+          agencyRef: it.agency_reference || prev.agencyRef,
+          tourType: it.itinerary_tour_type || prev.tourType || '',
+          consultantName: it.consultant_name || prev.consultantName || ''
         }));
       }
       const { data: dayRows } = await supabase
@@ -1112,6 +1187,9 @@ export const ItineraryBuilder = () => {
           date: toISODate(rd.day_date) || addDaysToDate(meta.travelStart, di),
           notes: rd.notes || '',
           services: (rd.itinerary_day_items || []).map((ii) => {
+            const libraryItem = (libraryItems || []).find((item) => item.id === ii.item_id);
+            const taxAllowed = !isSouthAfricanTaxContext
+              || supplierCountryForItem(libraryItem) === 'south africa';
             const buyPP = Number(ii.unit_cost) || 0;
             const mRaw = Number(ii.markup_percentage);
             const m = Number.isFinite(mRaw) ? mRaw : (Number(meta.client?.markup_percentage) || 0);
@@ -1129,8 +1207,8 @@ export const ItineraryBuilder = () => {
               pax: Number(ii.pax) || ((Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0)),
               quantity: Number(ii.quantity) || 1,
               descOverride: ii.description_override || '',
-              taxRate: numOr(ii.tax_rate, 15),
-              taxLabel: ii.tax_label || 'VAT',
+              taxRate: taxAllowed ? numOr(ii.tax_rate, 15) : 0,
+              taxLabel: taxAllowed ? (ii.tax_label || 'VAT') : 'No VAT',
               time: ii.service_time || '',
               confirmationStatus: ii.confirmation_status || 'RQ',
               confirmationNumber: ii.confirmation_number || '',
@@ -1140,6 +1218,8 @@ export const ItineraryBuilder = () => {
               capacity: ii.capacity !== '' && ii.capacity !== null && ii.capacity !== undefined ? Number(ii.capacity) : '',
               roomType: ii.room_type || '',
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
+              roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
+              repeatGroupId: ii.repeat_group_id || null,
               mealPlan: ii.meal_plan || '',
               checkInTime: ii.check_in_time || '',
               checkOutTime: ii.check_out_time || '',
@@ -1156,7 +1236,24 @@ export const ItineraryBuilder = () => {
     } catch {
       return false;
     }
-  }, [data, meta.travelStart, meta.numAdults, meta.numChildren, meta.client, nextId]);
+  }, [data, meta.travelStart, meta.numAdults, meta.numChildren, meta.client, nextId, libraryItems, isSouthAfricanTaxContext, supplierCountryForItem]);
+
+  /* Auto-populate consultant name from the logged-in user's profile on first
+     load. If the itinerary already has a consultant stored, loadExistingDays wins. */
+  useEffect(() => {
+    const fetchConsultant = async () => {
+      try {
+        const username = await getLoggedInUserName();
+        if (username) {
+          setMeta((prev) => ({
+            ...prev,
+            consultantName: prev.consultantName || username
+          }));
+        }
+      } catch { /* noop */ }
+    };
+    fetchConsultant();
+  }, []);
 
   useEffect(() => {
     const boot = async () => {
@@ -1368,7 +1465,7 @@ export const ItineraryBuilder = () => {
     };
   }, [paxCount, defaultTaxRate]);
 
-  const addService = useCallback((dayIndex, item, via) => {
+  const createService = useCallback((dayIndex, item, via, options = {}) => {
     if (completedRef.current) return;
     const basis = basisOfItem(item, currencyCode);
     const buyPP = round2(contractPaxRate(item, currencyCode, paxCount));
@@ -1380,6 +1477,7 @@ export const ItineraryBuilder = () => {
        the pax capacity in max_occupancy; meal plans live on the per-season
        item_rates rows with an accommodation default of "Bed & Breakfast". */
     const libMaxOcc = item.maxOccupancy ?? item.max_occupancy;
+    const taxApplies = taxAppliesToItem(item);
     const numOrBlank = (v) => {
       if (v === '' || v === null || v === undefined) return '';
       const n = Number(v);
@@ -1399,8 +1497,8 @@ export const ItineraryBuilder = () => {
       pax: paxCount,
       quantity: 1,
       descOverride: '',
-      taxRate: defaultTaxRate,
-      taxLabel: defaultTaxLabel,
+      taxRate: taxApplies ? defaultTaxRate : 0,
+      taxLabel: taxApplies ? defaultTaxLabel : 'No VAT',
       time: '',
       confirmationStatus: 'RQ',
       confirmationNumber: '',
@@ -1415,14 +1513,220 @@ export const ItineraryBuilder = () => {
       checkOutTime: item.checkOutTime || item.check_out_time || '',
       startTime: item.startTime || item.start_time || '',
       endTime: item.endTime || item.end_time || '',
-      notes: ''
+      notes: '',
+      item_rates: item.item_rates || [],
+      repeatGroupId: options.repeatGroupId || null
     };
+
     setDays((prev) => prev.map((d, i) => (
       i === dayIndex ? { ...d, services: [...d.services, svc] } : d
     )));
     const dayLabel = days[dayIndex] ? `Day ${days[dayIndex].dayNumber}` : 'the selected day';
     showToast(`${via === 'double-click' ? 'Added' : 'Dropped'} "${item.name}" into ${dayLabel}`, 'success');
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast]);
+
+    if (accomCat && !options.suppressRoomModal) {
+      setRoomModalState({
+        isOpen: true,
+        dayIndex,
+        serviceKey: svc.key,
+        item,
+        service: svc
+      });
+    }
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesToItem]);
+
+  const openPlacementPrompt = useCallback((dayIndex, item, via) => {
+    setPlacementDraft({ dayIndex, item, via });
+    setPlacementRepeat(false);
+    setPlacementRepeatCount(Math.min(2, Math.max(1, days.length - dayIndex)));
+    setPlacementCopyDays([]);
+  }, [days.length]);
+
+  const isVehicleServiceItem = useCallback((item) => {
+    const category = item?.category || '';
+    if (/accommodation/i.test(category)) return false;
+    return /transfers?|activities?|tours?|excursions?|flights?\s*\/?\s*charter/i.test(category)
+      && Number(item?.capacity ?? item?.max_occupancy ?? item?.maxOccupancy) > 0;
+  }, []);
+
+  const vehicleOptionsFor = useCallback((item) => {
+    const category = item?.category || '';
+    const sourceCapacity = Number(item?.capacity ?? item?.max_occupancy ?? item?.maxOccupancy) || 0;
+    const normaliseContext = (value) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const supplierId = item?.supplier_id || item?.supplier?.id || null;
+    const destination = normaliseContext(
+      item?.location
+      || item?.destination
+      || item?.destination_region
+      || item?.supplier?.city_location
+      || item?.supplier?.city
+      || item?.supplier?.province_state
+    );
+    const scopedItems = libraryItems.filter((candidate) => {
+      if (candidate.category !== category) return false;
+      if (Number(candidate.capacity ?? candidate.max_occupancy ?? candidate.maxOccupancy) <= 0) return false;
+      const sameSupplier = supplierId && (candidate.supplier_id || candidate.supplier?.id) === supplierId;
+      const candidateDestination = normaliseContext(
+        candidate.location
+        || candidate.destination
+        || candidate.destination_region
+        || candidate.supplier?.city_location
+        || candidate.supplier?.city
+        || candidate.supplier?.province_state
+      );
+      const sameDestination = destination && candidateDestination && destination === candidateDestination;
+      return sameSupplier || sameDestination;
+    });
+    const options = scopedItems.length ? scopedItems : [item];
+    return options
+      .filter((candidate) => Number(candidate.capacity ?? candidate.max_occupancy ?? candidate.maxOccupancy) >= paxCount)
+      .sort((a, b) => (
+        Number(a.capacity ?? a.max_occupancy ?? a.maxOccupancy)
+        - Number(b.capacity ?? b.max_occupancy ?? b.maxOccupancy)
+      ))
+      .filter((candidate, index, all) => all.findIndex((entry) => entry.id === candidate.id) === index)
+      .concat(sourceCapacity >= paxCount && !options.some((candidate) => candidate.id === item.id) ? [item] : []);
+  }, [libraryItems, paxCount]);
+
+  const openVehiclePrompt = useCallback((dayIndex, item, via) => {
+    setVehicleDraft({ dayIndex, item, via, options: vehicleOptionsFor(item) });
+  }, [vehicleOptionsFor]);
+
+  const addService = useCallback((dayIndex, item, via) => {
+    if (completedRef.current) return;
+    if (via === 'drop' || via === 'double-click') {
+      if (isVehicleServiceItem(item)) openVehiclePrompt(dayIndex, item, via);
+      else openPlacementPrompt(dayIndex, item, via);
+      return;
+    }
+    createService(dayIndex, item, via);
+  }, [createService, isVehicleServiceItem, openPlacementPrompt, openVehiclePrompt]);
+
+  const selectVehicleOption = useCallback((item) => {
+    if (!vehicleDraft) return;
+    const { dayIndex, via } = vehicleDraft;
+    setVehicleDraft(null);
+    openPlacementPrompt(dayIndex, item, via);
+  }, [vehicleDraft, openPlacementPrompt]);
+
+  const confirmPlacement = useCallback(() => {
+    if (!placementDraft) return;
+    const baseDay = placementDraft.dayIndex;
+    const repeatCount = placementRepeat ? Math.max(1, Math.min(days.length - baseDay, Number(placementRepeatCount) || 1)) : 1;
+    const repeatDays = Array.from({ length: repeatCount }, (_, index) => baseDay + index);
+    const selectedDays = [...new Set([...repeatDays, ...placementCopyDays.map(Number)])]
+      .filter((index) => index >= 0 && index < days.length)
+      .sort((a, b) => a - b);
+    const repeatGroupId = selectedDays.length > 1 ? nextId() : null;
+    selectedDays.forEach((dayIndex, index) => {
+      createService(dayIndex, placementDraft.item, index === 0 ? placementDraft.via : 'copy', {
+        repeatGroupId,
+        suppressRoomModal: index !== 0
+      });
+    });
+    setPlacementDraft(null);
+    setPlacementCopyDays([]);
+  }, [placementDraft, placementRepeat, placementRepeatCount, placementCopyDays, days.length, nextId, createService]);
+
+  const openRoomAllocationModal = useCallback((dayIndex, sv) => {
+    const libraryItem = libraryItems.find((it) => it.id === sv.itemId) || {};
+    const libItem = {
+      ...libraryItem,
+      id: sv.itemId,
+      name: libraryItem.name || sv.name,
+      category: libraryItem.category || sv.category,
+      maxOccupancy: sv.maxOccupancy || libraryItem.maxOccupancy || libraryItem.max_occupancy,
+      roomType: sv.roomType || libraryItem.roomType || libraryItem.room_type,
+      roomAllocations: sv.roomAllocations || [],
+      item_rates: libraryItem.item_rates || sv.item_rates || []
+    };
+    setRoomModalState({
+      isOpen: true,
+      dayIndex,
+      serviceKey: sv.key,
+      item: libItem,
+      service: sv
+    });
+  }, [libraryItems]);
+
+  const validateAllRoomAllocations = useCallback(() => {
+    for (let i = 0; i < (days || []).length; i++) {
+      const day = days[i];
+      const services = day.services || [];
+      for (let j = 0; j < services.length; j++) {
+        const sv = services[j];
+        const check = validateRoomAllocation(sv, meta.travellers || []);
+        if (!check.isValid) {
+          return {
+            isValid: false,
+            dayNumber: day.dayNumber,
+            serviceName: sv.name,
+            reason: check.reason,
+            serviceKey: sv.key,
+            dayIndex: i,
+            service: sv
+          };
+        }
+      }
+    }
+    return { isValid: true };
+  }, [days, meta.travellers]);
+
+  const handleSaveRoomAllocation = useCallback(({ roomAllocations, calculatedBuy, calculatedSell, numRooms }) => {
+    if (!roomModalState.serviceKey || roomModalState.dayIndex === null) return;
+    const dayIdx = roomModalState.dayIndex;
+    const svKey = roomModalState.serviceKey;
+    const currentPax = Math.max(1, paxCount);
+    const newBuyPP = round2(calculatedBuy / currentPax);
+    const newSellPP = round2(calculatedSell / currentPax);
+
+    setDays((prev) => prev.map((d, i) => (
+      i === dayIdx
+        ? {
+            ...d,
+            services: d.services.map((s) => (
+              s.key === svKey
+                ? {
+                    ...s,
+                    roomAllocations,
+                    buyPP: newBuyPP,
+                    sellPP: newSellPP,
+                    numRooms
+                  }
+                : s
+            ))
+          }
+        : d
+    )));
+    const sourceService = days[dayIdx]?.services?.find((service) => service.key === svKey);
+    const related = sourceService?.repeatGroupId
+      ? days.flatMap((day, index) => (day.services || [])
+        .filter((service) => service.repeatGroupId === sourceService.repeatGroupId && !(index === dayIdx && service.key === svKey))
+        .map((service) => ({ dayIndex: index, service })))
+      : [];
+    if (related.length) {
+      setRoomApplyPrompt({ roomAllocations, calculatedBuy, calculatedSell, numRooms, related });
+    } else {
+      showToast('Room allocation & rates updated', 'success');
+    }
+  }, [roomModalState, paxCount, days, showToast]);
+
+  const applyRoomAllocationToRelated = useCallback((applyToAll) => {
+    if (!roomApplyPrompt) return;
+    if (applyToAll) {
+      const currentPax = Math.max(1, paxCount);
+      const buyPP = round2(roomApplyPrompt.calculatedBuy / currentPax);
+      const sellPP = round2(roomApplyPrompt.calculatedSell / currentPax);
+      setDays((prev) => prev.map((day) => ({
+        ...day,
+        services: day.services.map((service) => roomApplyPrompt.related.some((entry) => entry.service.key === service.key)
+          ? { ...service, roomAllocations: roomApplyPrompt.roomAllocations, buyPP, sellPP, numRooms: roomApplyPrompt.numRooms }
+          : service)
+      })));
+    }
+    setRoomApplyPrompt(null);
+    showToast(applyToAll ? 'Room allocation applied to all repeated days' : 'Room allocation saved for this day only', 'success');
+  }, [roomApplyPrompt, paxCount, showToast]);
 
   /* Patch one or more fields of a single service item (used by the Service
      Request / Travel Documents tabs for time, confirmation status, numbers,
@@ -1441,11 +1745,11 @@ export const ItineraryBuilder = () => {
      on transfers; check-in / check-out on accommodation. Mirrors the per-service
      OK guard in the Service Request tab. */
   const serviceReady = (sv) => {
-    const cat = sv.category || '';
-    if (!(sv.time && sv.confirmationNumber && sv.flightNumber)) return false;
-    if (/transfers?/i.test(cat) && !sv.vehicleType) return false;
-    if (/accommodation/i.test(cat) && !(sv.checkInTime && sv.checkOutTime)) return false;
-    return true;
+const cat = sv.category || '';
+if (!sv.confirmationNumber) return false; /* confirmation number: rendered on every category */
+if (/transfers?/i.test(cat)) return !!(sv.time && sv.flightNumber && sv.vehicleType);
+if (/accommodation/i.test(cat)) return !!(sv.checkInTime && sv.checkOutTime);
+return !!sv.time; /* activities / meals / other */
   };
 
   /* The itinerary stays "Provisional Booking" until every service is confirmed
@@ -1659,6 +1963,8 @@ export const ItineraryBuilder = () => {
               capacity: ii.capacity !== null && ii.capacity !== undefined ? Number(ii.capacity) : '',
               roomType: ii.room_type || '',
             maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
+            roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
+            repeatGroupId: ii.repeat_group_id || null,
             mealPlan: ii.meal_plan || '',
             checkInTime: ii.check_in_time || '',
             checkOutTime: ii.check_out_time || '',
@@ -1726,67 +2032,103 @@ export const ItineraryBuilder = () => {
 
   const handleExport = useCallback((format) => {
     setExportOpen(false);
+    const allocCheck = validateAllRoomAllocations();
+    if (!allocCheck.isValid) {
+      showToast(`Room Allocation Error (Day ${allocCheck.dayNumber}): ${allocCheck.reason}`, 'error');
+      openRoomAllocationModal(allocCheck.dayIndex, allocCheck.service);
+      return;
+    }
     const ref = meta.referenceNumber || meta.itineraryName || 'itinerary';
     const safeName = String(ref).replace(/[^\w-]+/g, '_');
     if (format === 'link') {
       showToast('Digital itinerary link sharing is coming soon', 'info');
       return;
     }
+
+    const groups = pricingGroups.length > 0 ? pricingGroups : [{
+      code: currencyCode,
+      symbol: currencySymbol,
+      name: '',
+      days: [],
+      totalSell: 0,
+      totalTax: 0,
+      totalExcl: 0,
+      totalInclTax: 0
+    }];
+
+    const esc = htmlEscape;
+    const taxLabel = defaultTaxLabel || 'VAT';
+
     if (format === 'excel') {
-      const header = ['Day', 'Date', 'Services', 'Subtotal (Excl. VAT)', 'VAT', 'Total (Incl. VAT)'];
       const lines = [
-        header.map(csvEscape).join(','),
         `"Itinerary: ${csvEscape(meta.itineraryName)}"`,
         `"Reference: ${csvEscape(meta.referenceNumber || '')}"`,
         `"Client: ${csvEscape(meta.client?.name || '')}"`,
         `"Dates: ${csvEscape(meta.travelStart)} to ${csvEscape(meta.travelEnd)}"`,
         ''
       ];
-      const { rows, grandTax, grandSell, grandTotal } = buildRows();
-      const subtotalExcl = round2(grandSell - grandTax);
-      rows.forEach((r) => {
-        lines.push([r.day, r.date, r.svcCount, round2(r.sell - r.tax), r.tax, r.total].map(csvEscape).join(','));
+
+      groups.forEach((grp, idx) => {
+        if (idx > 0) lines.push('');
+        lines.push(`"Currency: ${csvEscape(grp.code)} (${csvEscape(grp.symbol)})${grp.name ? ` - ${csvEscape(grp.name)}` : ''}"`);
+        lines.push(['Day', 'Date', 'Services', 'Subtotal (Excl. VAT)', 'VAT', 'Total (Incl. VAT)'].map(csvEscape).join(','));
+        (grp.days || []).forEach((r) => {
+          const subExcl = round2((r.sell || 0) - (r.tax || 0));
+          lines.push([`Day ${r.day}`, r.date || '—', r.count || 0, subExcl, round2(r.tax || 0), round2(r.sell || 0)].map(csvEscape).join(','));
+        });
+        lines.push(['Subtotal (Excl. VAT)', '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
+        lines.push([`VAT (${taxLabel} ${defaultTaxRate}%)`, '', '', '', '', grp.totalTax].map(csvEscape).join(','));
+        lines.push([`TOTAL DUE (${grp.code} INCL. VAT)`, '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
       });
-      lines.push(['Subtotal (Excl. VAT)', '', '', '', '', subtotalExcl].map(csvEscape).join(','));
-      lines.push(['VAT', '', '', '', '', grandTax].map(csvEscape).join(','));
-      lines.push(['TOTAL DUE (INCL. VAT)', '', '', '', '', grandTotal].map(csvEscape).join(','));
+
       downloadBlob(lines.join('\n'), `${safeName}.csv`, 'text/csv;charset=utf-8');
       showToast('Itinerary exported as Excel (CSV)', 'success');
       return;
     }
-    const esc = htmlEscape;
+
     if (format === 'word') {
-      const { rows, grandTax, grandSell, grandTotal } = buildRows();
-      const subtotalExcl = round2(grandSell - grandTax);
-      const escape = htmlEscape;
-      const taxLabel = defaultTaxLabel || 'VAT';
-      const taxLine = `<b>VAT (${escape(taxLabel)} ${defaultTaxRate}%)</b>`;
-  const body = `
-    <h1>${escape(meta.itineraryName)}</h1>
-    <p><b>Reference:</b> ${escape(meta.referenceNumber || '—')} &nbsp;·&nbsp; <b>Status:</b> ${escape(statusLabelOf(meta.status))}</p>
-    <p><b>Client:</b> ${escape(meta.client?.name || '—')} &nbsp;·&nbsp; <b>Travellers:</b> ${paxCount}</p>
-    <p><b>Dates:</b> ${escape(meta.travelStart)} &rarr; ${escape(meta.travelEnd)}</p>
-        <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
-          <tr><th>Day</th><th>Date</th><th>#</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
-          ${rows.map((r) => `<tr><td>Day ${escape(r.day)}</td><td>${escape(r.date)}</td><td>${r.svcCount}</td><td>${fmtMoney(round2(r.sell - r.tax), currencySymbol)}</td><td>${fmtMoney(r.tax, currencySymbol)}</td><td>${fmtMoney(r.total, currencySymbol)}</td></tr>`).join('')}
-          <tr><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td><b>${fmtMoney(subtotalExcl, currencySymbol)}</b></td></tr>
-          <tr><td colspan="5" align="right">${taxLine}</td><td><b>${fmtMoney(grandTax, currencySymbol)}</b></td></tr>
-          <tr><td colspan="5" align="right"><b>TOTAL DUE (INCL. VAT)</b></td><td><b>${fmtMoney(grandTotal, currencySymbol)}</b></td></tr>
+      const sectionsHtml = groups.map((grp) => `
+        <h2 style="color:#0d7478;margin-top:20px;margin-bottom:8px;">Pricing Breakdown — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
+        <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;">
+          <tr><th>Day</th><th>Date</th><th># Services</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
+          ${(grp.days || []).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${r.count || 0}</td><td>${fmtMoney(round2((r.sell || 0) - (r.tax || 0)), grp.symbol)}</td><td>${fmtMoney(r.tax || 0, grp.symbol)}</td><td>${fmtMoney(r.sell || 0, grp.symbol)}</td></tr>`).join('')}
+          <tr><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td><b>${fmtMoney(grp.totalExcl, grp.symbol)}</b></td></tr>
+          <tr><td colspan="5" align="right">VAT (${esc(taxLabel)} ${defaultTaxRate}%)</td><td><b>${fmtMoney(grp.totalTax, grp.symbol)}</b></td></tr>
+          <tr><td colspan="5" align="right"><b>TOTAL DUE (${esc(grp.code)} INCL. VAT)</b></td><td><b>${fmtMoney(grp.totalInclTax, grp.symbol)}</b></td></tr>
         </table>
-        <p><i>Generated by torbuilder</i></p>`;
+      `).join('');
+
+      const body = `
+        <h1>${esc(meta.itineraryName)}</h1>
+        <p><b>Reference:</b> ${esc(meta.referenceNumber || '—')} &nbsp;·&nbsp; <b>Status:</b> ${esc(statusLabelOf(meta.status))}</p>
+        <p><b>Client:</b> ${esc(meta.client?.name || '—')} &nbsp;·&nbsp; <b>Travellers:</b> ${paxCount}</p>
+        <p><b>Dates:</b> ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
+        ${sectionsHtml}
+        <p style="margin-top:24px;"><i>Generated by torbuilder</i></p>`;
+
       downloadBlob(`<html><head><meta charset="utf-8"></head><body>${body}</body></html>`, `${safeName}.doc`, 'application/msword');
       showToast('Itinerary exported as Word', 'success');
       return;
     }
+
     if (format === 'pdf') {
-      const { rows, grandTax, grandSell, grandTotal } = buildRows();
-      const subtotalExcl = round2(grandSell - grandTax);
       const w = window.open('', '_blank', 'width=900,height=700');
       if (!w) {
         showToast('Please allow pop-ups to export the PDF', 'warning');
         return;
       }
-      const taxLabel = defaultTaxLabel || 'VAT';
+
+      const sectionsHtml = groups.map((grp) => `
+        <h2 style="color:#0d7478;font-size:16px;margin:24px 0 8px;border-bottom:2px solid #0d7478;padding-bottom:4px;">Pricing Breakdown — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
+        <table>
+          <tr><th>Day</th><th>Date</th><th>Services</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
+          ${(grp.days || []).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${r.count || 0}</td><td class="num">${fmtMoney(round2((r.sell || 0) - (r.tax || 0)), grp.symbol)}</td><td class="num">${fmtMoney(r.tax || 0, grp.symbol)}</td><td class="num">${fmtMoney(r.sell || 0, grp.symbol)}</td></tr>`).join('')}
+          <tr class="grand"><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td class="num">${fmtMoney(grp.totalExcl, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="5" align="right">VAT (${esc(taxLabel)} ${defaultTaxRate}%)</td><td class="num">${fmtMoney(grp.totalTax, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="5" align="right">TOTAL DUE (${esc(grp.code)} INCL. VAT)</td><td class="num">${fmtMoney(grp.totalInclTax, grp.symbol)}</td></tr>
+        </table>
+      `).join('');
+
       w.document.write(`<!doctype html><html><head><title>${esc(meta.itineraryName)}</title><style>
         body{font-family:Arial,sans-serif;margin:32px;color:#111}
         h1{margin:0 0 6px} .muted{color:#666;font-size:13px;margin:2px 0}
@@ -1799,29 +2141,34 @@ export const ItineraryBuilder = () => {
         <p class="muted">Reference: ${esc(meta.referenceNumber || '—')}  ·  ${esc(statusLabelOf(meta.status))}</p>
         <p class="muted">Client: ${esc(meta.client?.name || '—')}  ·  ${paxCount} traveller(s)</p>
         <p class="muted">Dates: ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
-        <table><tr><th>Day</th><th>Date</th><th>Services</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
-        ${rows.map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date)}</td><td>${r.svcCount}</td><td class="num">${fmtMoney(round2(r.sell - r.tax), currencySymbol)}</td><td class="num">${fmtMoney(r.tax, currencySymbol)}</td><td class="num">${fmtMoney(r.total, currencySymbol)}</td></tr>`).join('')}
-        <tr class="grand"><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td class="num">${fmtMoney(subtotalExcl, currencySymbol)}</td></tr>
-        <tr class="grand"><td colspan="5" align="right">VAT (${esc(taxLabel)} ${defaultTaxRate}%)</td><td class="num">${fmtMoney(grandTax, currencySymbol)}</td></tr>
-        <tr class="grand"><td colspan="5" align="right">TOTAL DUE (INCL. VAT)</td><td class="num">${fmtMoney(grandTotal, currencySymbol)}</td></tr></table>
-        <p class="muted"><i>Generated by torbuilder</i></p>
+        ${sectionsHtml}
+        <p class="muted" style="margin-top:24px;"><i>Generated by torbuilder</i></p>
         </body></html>`);
       w.document.close();
       w.focus();
       setTimeout(() => w.print(), 350);
       showToast('Itinerary PDF opened in a new window', 'success');
     }
-  }, [meta, paxCount, currencySymbol, defaultTaxLabel, defaultTaxRate, buildRows, downloadBlob, showToast, billing]);
+  }, [meta, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing]);
 
   const handleSave = useCallback(async () => {
     if (!companyId) {
       showToast('Company not found', 'error');
       return false;
     }
+    const allocCheck = validateAllRoomAllocations();
+    if (!allocCheck.isValid) {
+      showToast(`Room Allocation Guardrail (Day ${allocCheck.dayNumber}): ${allocCheck.reason}`, 'error');
+      openRoomAllocationModal(allocCheck.dayIndex, allocCheck.service);
+      setSaving(false);
+      return false;
+    }
     setSaving(true);
     try {
       const finalStart = toISODate(meta.travelStart);
       const finalEnd = toISODate(meta.travelEnd) || finalStart;
+      const fallbackConsultant = await getLoggedInUserName();
+      const finalConsultant = meta.consultantName || fallbackConsultant || null;
       const headerPayload = {
         itinerary_name: meta.itineraryName,
         travel_start_date: finalStart || null,
@@ -1831,7 +2178,9 @@ export const ItineraryBuilder = () => {
         travellers: meta.travellers || [],
         agency_reference: meta.agencyRef || null,
         notes: meta.notes || null,
-        status: meta.status || 'quotation'
+        status: meta.status || 'quotation',
+        itinerary_tour_type: meta.tourType || null,
+        consultant_name: finalConsultant
       };
       let id = meta.itineraryId;
       let persistedMeta = meta;
@@ -1912,6 +2261,8 @@ export const ItineraryBuilder = () => {
           capacity: s.capacity !== '' && s.capacity !== null && s.capacity !== undefined ? Number(s.capacity) : null,
           room_type: s.roomType || null,
           max_occupancy: s.maxOccupancy !== '' && s.maxOccupancy !== null && s.maxOccupancy !== undefined ? Number(s.maxOccupancy) : null,
+          room_allocations: Array.isArray(s.roomAllocations) ? s.roomAllocations : [],
+          repeat_group_id: s.repeatGroupId || null,
           meal_plan: s.mealPlan || null,
           check_in_time: s.checkInTime || null,
           check_out_time: s.checkOutTime || null,
@@ -2203,7 +2554,9 @@ export const ItineraryBuilder = () => {
           travellers: payload.travellers,
           num_adults: payload.numAdults,
           num_children: payload.numChildren,
-          agency_reference: payload.agencyRef
+          agency_reference: payload.agencyRef,
+          itinerary_tour_type: payload.tourType || null,
+          consultant_name: payload.consultantName || meta.consultantName || null
         })
         .eq('id', meta.itineraryId);
       if (error) throw error;
@@ -2218,7 +2571,9 @@ export const ItineraryBuilder = () => {
         travellers: payload.travellers,
         numAdults: payload.numAdults,
         numChildren: payload.numChildren,
-        agencyRef: payload.agencyRef
+        agencyRef: payload.agencyRef,
+        tourType: payload.tourType || meta.tourType,
+        consultantName: payload.consultantName || meta.consultantName
       };
       const nextDays = days.map((d, i) => ({
         ...d,
@@ -2267,7 +2622,17 @@ export const ItineraryBuilder = () => {
         ...d,
         services: d.services.map((s) =>
           s.key === editSvc.key
-            ? { ...s, name, descOverride: editSvc.descOverride.trim(), taxRate: numOr(editSvc.taxRate, defaultTaxRate), taxLabel: editSvc.taxLabel || defaultTaxLabel }
+            ? (() => {
+              const item = s.itemId ? libraryItems.find((candidate) => candidate.id === s.itemId) : null;
+              const taxAllowed = taxAppliesToItem(item);
+              return {
+                ...s,
+                name,
+                descOverride: editSvc.descOverride.trim(),
+                taxRate: taxAllowed ? numOr(editSvc.taxRate, defaultTaxRate) : 0,
+                taxLabel: taxAllowed ? (editSvc.taxLabel || defaultTaxLabel) : 'No VAT'
+              };
+            })()
             : s
         )
       };
@@ -2275,7 +2640,7 @@ export const ItineraryBuilder = () => {
     setSaved(false);
     setEditSvc(null);
     showToast('Service updated', 'success');
-  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast]);
+  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, libraryItems, taxAppliesToItem]);
 
   /* â”€â”€ Render: no data guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
@@ -2435,8 +2800,9 @@ export const ItineraryBuilder = () => {
                     title={opt.title}
                     disabled={!canEdit}
                     onClick={() => {
-  const missing = !(sv.time && sv.confirmationNumber && sv.flightNumber) ||
-    (isTransfer && !sv.vehicleType) || (isAccom && !(sv.checkInTime && sv.checkOutTime));
+const missing = !sv.confirmationNumber ||
+(isTransfer ? !(sv.time && sv.flightNumber && sv.vehicleType) :
+(isAccom ? !(sv.checkInTime && sv.checkOutTime) : !sv.time));
   if (opt.value === 'OK' && missing) { showToast('Fill all Provisional Booking fields before marking Confirmed', 'warning'); return; }
   update({ confirmationStatus: opt.value });
 }}
@@ -2602,7 +2968,7 @@ export const ItineraryBuilder = () => {
                     draggable={!isReadOnly}
                     onDragStart={(e) => { if (isReadOnly) return; handleItemDragStart(e, item); }}
                     onDoubleClick={() => { if (isReadOnly) return; addService(selectedDayIndex, item, 'double-click'); }}
-                    title={isReadOnly ? 'Locked itinerary is read-only' : 'Drag or double-click to add to the selected day'}
+                    title={isReadOnly ? 'Locked itinerary is read-only' : 'Drag or double-click to choose placement'}
                   >
                     <div className="draggable-item-top">
                       <span className="draggable-item-name">{item.name}</span>
@@ -2921,6 +3287,58 @@ export const ItineraryBuilder = () => {
                                 {basisLabelOf(sv.basis)}
                               </span>
                             </div>
+                            {/accommodation/i.test(sv.category || '') && (
+                              <div style={{ marginTop: '0.35rem' }}>
+                                {(() => {
+                                  const roomCheck = validateRoomAllocation(sv, meta.travellers || []);
+                                  const numRooms = sv.roomAllocations?.length || 0;
+                                  if (roomCheck.isValid && numRooms > 0) {
+                                    return (
+                                      <button
+                                        type="button"
+                                        onClick={() => openRoomAllocationModal(selectedDayIndex, sv)}
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '0.35rem',
+                                          padding: '0.25rem 0.65rem',
+                                          borderRadius: '6px',
+                                          fontSize: '0.75rem',
+                                          fontWeight: 600,
+                                          background: '#dcfce7',
+                                          color: '#15803d',
+                                          border: '1px solid #86efac',
+                                          cursor: 'pointer'
+                                        }}
+                                      >
+                                        ✓ {numRooms} Room(s) Allocated ({meta.travellers?.length || 0} Pax)
+                                      </button>
+                                    );
+                                  }
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={() => openRoomAllocationModal(selectedDayIndex, sv)}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '0.35rem',
+                                        padding: '0.25rem 0.65rem',
+                                        borderRadius: '6px',
+                                        fontSize: '0.75rem',
+                                        fontWeight: 700,
+                                        background: '#fee2e2',
+                                        color: '#b91c1c',
+                                        border: '1px solid #fca5a5',
+                                        cursor: 'pointer'
+                                      }}
+                                    >
+                                      ⚠️ Room Allocation Required
+                                    </button>
+                                  );
+                                })()}
+                              </div>
+                            )}
                           </div>
                           <div className="svc-cell">
                             <input
@@ -3222,7 +3640,9 @@ export const ItineraryBuilder = () => {
                     travelStart: meta.travelStart,
                     travelEnd: meta.travelEnd,
                     travellers: Array.isArray(meta.travellers) ? meta.travellers : [],
-                    agencyRef: meta.agencyRef || ''
+                    agencyRef: meta.agencyRef || '',
+                    tourType: meta.tourType || '',
+                    consultantName: meta.consultantName || ''
                   }}
                   submitLabel="Save Itinerary"
                   submitIcon={<Check size={18} />}
@@ -3399,7 +3819,7 @@ export const ItineraryBuilder = () => {
           {tab === 'invoices' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
-                {isProvisional ? 'Deposit Request' : 'Final Invoice'}
+                Invoice
               </h3>
               {isProvisional ? (
                 <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.6rem', maxWidth: '720px' }}>
@@ -3535,14 +3955,14 @@ export const ItineraryBuilder = () => {
                   </button>
                 ) : (
                   <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: 0 }}>
-                    Issue the {isProvisional ? 'deposit' : 'final'} invoice below first — the receipt is raised automatically when you confirm payment.
+            3287|        Issue the invoice below first — the receipt is raised automatically when you confirm payment.
                   </p>
                 )}
               </div>
 
               <div className="invoice-actions" style={{ marginTop: '1.2rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                 <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice || !!activeInvoice} onClick={() => handleIssueInvoiceHere()}>
-                  <FileText size={15} /> {activeInvoice ? `${isProvisional ? 'Deposit' : 'Final'} invoice issued` : 'Issue Invoice Here'}
+                  <FileText size={15} />                   {activeInvoice ? (isProvisional ? 'Invoice issued' : 'Invoice issued') : 'Issue Invoice Here'}
                 </button>
                 <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => navigate('/invoices')}>
                   <Receipt size={15} /> Issue Invoice in Invoice module
@@ -3563,7 +3983,7 @@ export const ItineraryBuilder = () => {
                     <option value="excel">Excel</option>
                   </select>
                   <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice} onClick={emailInvoiceToClient}>
-                    <Send size={15} /> {isProvisional ? 'Email deposit request to client' : 'Email final invoice to client'}
+                    <Send size={15} /> {isProvisional ? 'Email deposit request to client' : 'Email invoice to client'}
                   </button>
                 </div>
                 <p style={{ fontSize: '0.76rem', color: '#94a3b8', margin: '0.45rem 0 0 0' }}>
@@ -3704,30 +4124,37 @@ export const ItineraryBuilder = () => {
                   <CheckCircle2 size={18} style={{ color: '#16a34a' }} />
                   <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Expense reconciliation</strong>
                 </div>
-                <div className="invoice-total" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.85rem 1.1rem', margin: '0.6rem 0 0.85rem', display: 'flex', gap: '1.75rem', flexWrap: 'wrap' }}>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Income (invoiced, incl. tax)</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{currencySymbol}{paxBalanceTotal.toFixed(2)}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#dc2626', fontWeight: 700 }}>Supplier cost (buy)</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#b91c1c' }}>{currencySymbol}{itineraryCostTotal.toFixed(2)}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 700 }}>Net result</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: round2(paxBalanceTotal - itineraryCostTotal) >= 0 ? '#15803d' : '#b91c1c' }}>{currencySymbol}{round2(paxBalanceTotal - itineraryCostTotal).toFixed(2)}</div>
-                  </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', margin: '0.6rem 0 0.85rem' }}>
+                  {(pricingGroups.length > 0 ? pricingGroups : [{ code: currencyCode, symbol: currencySymbol, totalSell: paxBalanceTotal, totalBuy: itineraryCostTotal }]).map((grp) => {
+                    const net = round2(grp.totalSell - grp.totalBuy);
+                    return (
+                      <div key={grp.code} className="invoice-total" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.85rem 1.1rem', display: 'flex', gap: '1.75rem', flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Income ({grp.code}, incl. tax)</div>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{grp.symbol}{grp.totalSell.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', color: '#dc2626', fontWeight: 700 }}>Supplier cost ({grp.code}, buy)</div>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#b91c1c' }}>{grp.symbol}{grp.totalBuy.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 700 }}>Net result ({grp.code})</div>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: net >= 0 ? '#15803d' : '#b91c1c' }}>{grp.symbol}{net.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
                 <div className="invoice-actions" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                   <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                    const m = reconciliationStatementFor(meta, paxBalanceTotal, itineraryCostTotal, currencySymbol);
+                    const m = reconciliationStatementFor(meta, pricingGroups, paxBalanceTotal, itineraryCostTotal, currencySymbol);
                     if (!m.to) { showToast('No client email on file', 'warning'); return; }
                     window.open(mailTo(m.to, m.subject, m.body), '_blank');
                   }}>
                     <Send size={15} /> Email reconciliation statement
                   </button>
                   <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                    const m = reconciliationStatementFor(meta, paxBalanceTotal, itineraryCostTotal, currencySymbol);
+                    const m = reconciliationStatementFor(meta, pricingGroups, paxBalanceTotal, itineraryCostTotal, currencySymbol);
                     void clipboardCopy(`${m.subject}\n\n${m.body}`);
                     showToast('Reconciliation statement copied to clipboard', 'success');
                   }}>
@@ -3758,33 +4185,42 @@ export const ItineraryBuilder = () => {
                 <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
                   Retains the deposit ({depositPct}%) and details the refund due back to the client.
                 </p>
-                <div
-                  className="invoice-total"
-                  style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '12px', padding: '0.85rem 1.1rem', margin: '0.6rem 0 0.85rem', display: 'flex', gap: '1.75rem', flexWrap: 'wrap' }}
-                >
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Total itinerary price</div>
-                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c' }}>{currencySymbol}{paxBalanceTotal.toFixed(2)}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Deposit retained ({depositPct}%)</div>
-                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#b91c1c' }}>{currencySymbol}{round2(paxBalanceTotal * (depositPct / 100)).toFixed(2)}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Refund due to client</div>
-                    <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{currencySymbol}{round2(paxBalanceTotal * (1 - depositPct / 100)).toFixed(2)}</div>
-                  </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', margin: '0.6rem 0 0.85rem' }}>
+                  {(pricingGroups.length > 0 ? pricingGroups : [{ code: currencyCode, symbol: currencySymbol, totalSell: paxBalanceTotal, totalTax: paxBalanceVAT }]).map((grp) => {
+                    const deposit = round2(grp.totalSell * (depositPct / 100));
+                    const refund = round2(grp.totalSell - deposit);
+                    return (
+                      <div
+                        key={grp.code}
+                        className="invoice-total"
+                        style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '12px', padding: '0.85rem 1.1rem', display: 'flex', gap: '1.75rem', flexWrap: 'wrap' }}
+                      >
+                        <div>
+                          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Total price ({grp.code})</div>
+                          <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c' }}>{grp.symbol}{grp.totalSell.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 700 }}>Deposit retained ({depositPct}%)</div>
+                          <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#b91c1c' }}>{grp.symbol}{deposit.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 700 }}>Refund due ({grp.code})</div>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#15803d' }}>{grp.symbol}{refund.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
                 <div className="invoice-actions" style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                   <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, depositPct, currencySymbol);
+                    const m = cancellationNoticeEmail(meta, pricingGroups, depositPct, paxBalanceTotal, paxBalanceVAT, currencySymbol);
                     if (!m.to) { showToast('No client email on file', 'warning'); return; }
                     window.open(mailTo(m.to, m.subject, m.body), '_blank');
                   }}>
                     <Send size={15} /> Email cancellation notice
                   </button>
                   <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                    const m = cancellationNoticeEmail(meta, paxBalanceTotal, paxBalanceVAT, depositPct, currencySymbol);
+                    const m = cancellationNoticeEmail(meta, pricingGroups, depositPct, paxBalanceTotal, paxBalanceVAT, currencySymbol);
                     void clipboardCopy(`${m.subject}\n\n${m.body}`);
                     showToast('Cancellation notice copied to clipboard', 'success');
                   }}>
@@ -3912,6 +4348,153 @@ export const ItineraryBuilder = () => {
               </div>
             </div>
           )}
+
+          {vehicleDraft && (
+            <div className="modal-overlay service-placement-overlay" onClick={() => setVehicleDraft(null)}>
+              <div className="modal-content service-placement-modal vehicle-selection-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <div>
+                    <div className="allocation-eyebrow">Vehicle capacity</div>
+                    <h2>Select a vehicle size</h2>
+                    <p className="placement-subtitle">
+                      This service needs capacity for {paxCount} traveller{paxCount === 1 ? '' : 's'}. Select the contracted vehicle before continuing.
+                    </p>
+                  </div>
+                  <button className="close-btn" onClick={() => setVehicleDraft(null)} aria-label="Close"><X size={20} /></button>
+                </div>
+                <div className="placement-option-card">
+                  <strong>{vehicleDraft.item.name}</strong>
+                  <span className="placement-help">Only vehicle sizes with enough capacity are available. No vehicle is assigned automatically.</span>
+                  <span className="placement-help">
+                    Options are restricted to this supplier or the same destination.
+                    {vehicleDraft.item.supplier?.name ? ` Supplier: ${vehicleDraft.item.supplier.name}.` : ''}
+                    {(vehicleDraft.item.location || vehicleDraft.item.supplier?.city_location || vehicleDraft.item.supplier?.city)
+                      ? ` Destination: ${vehicleDraft.item.location || vehicleDraft.item.supplier?.city_location || vehicleDraft.item.supplier?.city}.`
+                      : ''}
+                  </span>
+                </div>
+                {vehicleDraft.options.length > 0 ? (
+                  <div className="vehicle-option-grid">
+                    {vehicleDraft.options.map((option) => {
+                      const capacity = Number(option.capacity ?? option.max_occupancy ?? option.maxOccupancy);
+                      return (
+                        <button
+                          type="button"
+                          className="vehicle-option-card"
+                          key={option.id}
+                          onClick={() => selectVehicleOption(option)}
+                        >
+                          <span className="vehicle-option-name">{option.sub_category || option.name}</span>
+                          <span className="vehicle-option-detail">{option.name}</span>
+                          <span className="vehicle-option-capacity">Up to {capacity} traveller{capacity === 1 ? '' : 's'}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="placement-option-card room-apply-summary">
+                    <strong>No suitable vehicle size is available.</strong>
+                    <span>Add a vehicle library item with capacity for all travellers, then try again.</span>
+                  </div>
+                )}
+                <div className="form-actions placement-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setVehicleDraft(null)}>Cancel</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {placementDraft && (
+            <div className="modal-overlay service-placement-overlay" onClick={() => setPlacementDraft(null)}>
+              <div className="modal-content service-placement-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <div>
+                    <div className="allocation-eyebrow">Service placement</div>
+                    <h2>{placementDraft.item.name}</h2>
+                    <p className="placement-subtitle">Choose where this service should appear in the itinerary.</p>
+                  </div>
+                  <button className="close-btn" onClick={() => setPlacementDraft(null)} aria-label="Close"><X size={20} /></button>
+                </div>
+
+                <div className="placement-option-card">
+                  <label className="placement-check-row">
+                    <input type="checkbox" checked={placementRepeat} onChange={(e) => setPlacementRepeat(e.target.checked)} />
+                    <span>
+                      <strong>Repeat on consecutive days</strong>
+                      <small>Place this service on the selected day and the following days.</small>
+                    </span>
+                  </label>
+                  {placementRepeat && (
+                    <div className="placement-inline-field">
+                      <label htmlFor="placement-repeat-count">Number of days</label>
+                      <select id="placement-repeat-count" className="sidebar-select" value={placementRepeatCount} onChange={(e) => setPlacementRepeatCount(Number(e.target.value))}>
+                        {Array.from({ length: Math.max(1, days.length - placementDraft.dayIndex) }, (_, index) => (
+                          <option key={index + 1} value={index + 1}>{index + 1} day{index === 0 ? '' : 's'}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                <div className="placement-option-card">
+                  <div className="placement-section-title">Copy to specific days <span>Optional</span></div>
+                  <p className="placement-help">Select any additional days where this service should also appear.</p>
+                  <div className="placement-day-grid">
+                    {days.map((day, index) => (
+                      <label className={`placement-day-option ${index === placementDraft.dayIndex ? 'current' : ''}`} key={day.key}>
+                        <input
+                          type="checkbox"
+                          disabled={index === placementDraft.dayIndex}
+                          checked={index === placementDraft.dayIndex || placementCopyDays.includes(index)}
+                          onChange={(e) => setPlacementCopyDays((prev) => e.target.checked ? [...new Set([...prev, index])] : prev.filter((dayIndex) => dayIndex !== index))}
+                        />
+                        <span>Day {day.dayNumber}</span>
+                        <small>{formatDateLong(day.date) || 'No date'}</small>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="form-actions placement-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setPlacementDraft(null)}>Cancel</button>
+                  <button type="button" className="primary-btn" onClick={confirmPlacement}>Add service</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {roomApplyPrompt && (
+            <div className="modal-overlay service-placement-overlay">
+              <div className="modal-content service-placement-modal room-apply-modal">
+                <div className="modal-header">
+                  <div>
+                    <div className="allocation-eyebrow">Room allocation saved</div>
+                    <h2>Apply this allocation to repeated days?</h2>
+                    <p className="placement-subtitle">This service repeats on {roomApplyPrompt.related.length} other day{roomApplyPrompt.related.length === 1 ? '' : 's'}.</p>
+                  </div>
+                </div>
+                <div className="placement-option-card room-apply-summary">
+                  <strong>Use the same traveller-to-room arrangement and contracted rates on every repeated occurrence?</strong>
+                  <span>Choose “This day only” if another day needs a different room arrangement.</span>
+                </div>
+                <div className="form-actions placement-actions">
+                  <button type="button" className="secondary-btn" onClick={() => applyRoomAllocationToRelated(false)}>This day only</button>
+                  <button type="button" className="primary-btn" onClick={() => applyRoomAllocationToRelated(true)}>Apply to all repeated days</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Room Allocation Modal */}
+          <RoomAllocationModal
+            isOpen={roomModalState.isOpen}
+            onClose={() => setRoomModalState({ isOpen: false, dayIndex: null, serviceKey: null, item: null, service: null })}
+            onSave={handleSaveRoomAllocation}
+            item={roomModalState.item}
+            itineraryTravellers={meta.travellers || []}
+            currencyCode={currencyCode}
+            markupPct={markupPct}
+          />
         </div>
       </div>
     </div>

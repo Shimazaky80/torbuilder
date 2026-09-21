@@ -1,0 +1,577 @@
+.room-allocation-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.56);
+  backdrop-filter: blur(4px);
+}
+
+.room-allocation-modal-shell {
+  width: min(960px, 100%);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #dbe5ec;
+  border-radius: 18px;
+  background: #fff;
+  color: #1e293b;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+}
+
+.room-allocation-modal-shell > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.2rem 1.45rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.room-allocation-modal-shell > div:first-child > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.room-allocation-modal-shell > div:first-child > div:first-child > div:first-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 11px;
+  background: #e6f5f4;
+  color: #0d7478;
+}
+
+.room-allocation-modal-shell h2 {
+  margin: 0;
+  color: #1a202c;
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.room-allocation-modal-shell h3 {
+  margin: 0;
+}
+
+.room-allocation-modal-shell p {
+  margin: 0.25rem 0 0;
+}
+
+.room-allocation-modal-shell > div:first-child > div:first-child > div:last-child > div {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.room-allocation-modal-shell > div:first-child > div:first-child > div:last-child > div > span {
+  padding: 0.25rem 0.55rem;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0d7478;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.room-allocation-modal-shell > div:first-child > div:first-child > div:last-child > p {
+  color: #64748b;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.room-allocation-modal-shell > div:first-child > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.room-allocation-modal-shell > div:first-child > button:hover {
+  background: #f8fafc;
+  color: #334155;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) {
+  flex: 1 1 auto;
+  padding: 1.25rem 1.45rem;
+  overflow-y: auto;
+  background: #fff;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid #dbe5ec;
+  border-radius: 11px;
+  background: #f8fafc;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child > div:first-child > div {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child strong {
+  color: #1e293b;
+  font-weight: 800;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child > div:first-child > div:nth-child(2) {
+  width: 1px;
+  height: 1.2rem;
+  background: #cbd5e1;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child > div:last-child {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.room-allocation-modal-shell button,
+.room-allocation-modal-shell select {
+  font: inherit;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.48rem 0.7rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 750;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:first-child > div:last-child button:last-child {
+  border-color: #0d7478;
+  background: #0d7478;
+  color: #fff;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.9fr) minmax(0, 1.6fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:first-child {
+  min-width: 0;
+  padding: 0.9rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child {
+  min-width: 0;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid #e2e8f0;
+  color: #475569;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.65rem;
+  color: #475569;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:first-child span {
+  color: #64748b;
+  font-size: 0.76rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child > div {
+  padding: 0.8rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.room-allocation-modal-shell select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.42rem 0.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.76rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:first-child select {
+  margin-top: 0.8rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child > div > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child > div > div:first-child span {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0d7478;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child > div > div:nth-child(3) {
+  margin-top: 0.45rem;
+  color: #64748b;
+  font-size: 0.72rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(3) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #99f6e4;
+  border-radius: 12px;
+  background: #f0fdfa;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(3) > div:last-child {
+  color: #0d7478;
+  font-size: 1.3rem;
+  font-weight: 850;
+  text-align: right;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(4),
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(5) {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-top: 0.85rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 0.76rem;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(5) {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.room-allocation-modal-shell > div:last-child {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.7rem;
+  padding: 0.95rem 1.45rem;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.room-allocation-modal-shell > div:last-child button {
+  padding: 0.58rem 0.9rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.room-allocation-modal-shell > div:last-child button:last-child {
+  border-color: #0d7478;
+  background: #0d7478;
+  color: #fff;
+}
+
+.room-allocation-modal-shell > div:last-child button:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+@media (max-width: 700px) {
+  .room-allocation-modal-overlay {
+    align-items: flex-start;
+    padding: 0.5rem;
+  }
+
+  .room-allocation-modal-shell {
+    max-height: 96vh;
+  }
+
+  .room-allocation-modal-shell > div:first-child,
+  .room-allocation-modal-shell > div:nth-child(2),
+  .room-allocation-modal-shell > div:last-child {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .room-allocation-modal-shell > div:nth-child(2) > div:first-child,
+  .room-allocation-modal-shell > div:nth-child(2) > div:nth-child(3) {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.service-placement-overlay {
+  z-index: 1250;
+}
+
+.service-placement-modal {
+  max-width: 560px;
+}
+
+.placement-subtitle {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.placement-option-card {
+  margin-bottom: 0.85rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #dbe5ec;
+  border-radius: 11px;
+  background: #f8fafc;
+}
+
+.placement-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  cursor: pointer;
+}
+
+.placement-check-row input,
+.placement-day-option input {
+  accent-color: #0d7478;
+  margin-top: 0.15rem;
+}
+
+.placement-check-row strong,
+.placement-check-row small {
+  display: block;
+}
+
+.placement-check-row strong {
+  color: #334155;
+  font-size: 0.85rem;
+}
+
+.placement-check-row small,
+.placement-help,
+.placement-day-option small {
+  color: #64748b;
+  font-size: 0.76rem;
+}
+
+.placement-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.8rem 0 0 1.5rem;
+}
+
+.placement-inline-field label {
+  color: #475569;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.placement-inline-field select {
+  width: 150px;
+}
+
+.placement-section-title {
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.placement-section-title span {
+  margin-left: 0.35rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.placement-help {
+  margin: 0.25rem 0 0.7rem;
+}
+
+.placement-day-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.placement-day-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.45rem;
+  padding: 0.55rem;
+  border: 1px solid #dbe5ec;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.placement-day-option.current {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.placement-day-option span {
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.placement-day-option small {
+  grid-column: 2;
+  margin-top: 0.1rem;
+}
+
+.placement-actions {
+  justify-content: flex-end;
+}
+
+.vehicle-selection-modal {
+  max-width: 680px;
+}
+
+.vehicle-option-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.75rem;
+  margin: 0.9rem 0;
+}
+
+.vehicle-option-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.28rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.7rem;
+  background: #fff;
+  color: #1e293b;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.vehicle-option-card:hover,
+.vehicle-option-card:focus-visible {
+  border-color: #0f766e;
+  box-shadow: 0 4px 14px rgba(15, 118, 110, 0.14);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.vehicle-option-name {
+  color: #0f766e;
+  font-weight: 800;
+}
+
+.vehicle-option-detail {
+  color: #475569;
+  font-size: 0.78rem;
+}
+
+.vehicle-option-capacity {
+  color: #334155;
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin-top: 0.25rem;
+  margin-top: 1rem;
+}
+
+.room-apply-summary strong,
+.room-apply-summary span {
+  display: block;
+}
+
+.room-apply-summary strong {
+  color: #334155;
+  font-size: 0.85rem;
+}
+
+.room-apply-summary span {
+  margin-top: 0.35rem;
+  color: #64748b;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 560px) {
+  .placement-day-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

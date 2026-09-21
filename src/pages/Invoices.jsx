@@ -213,19 +213,21 @@ export const Invoices = () => {
       const outstanding = round2(agg.totalIncl - paidTotal);
       const hasPaidDeposit = paid.deposit > 0;
       const liveDeposit = invoices.some((inv) => inv.itinerary_id === selectedItinerary.id
-        && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'deposit' && inv.status !== 'void');
-      const liveFinal = invoices.some((inv) => inv.itinerary_id === selectedItinerary.id
-        && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'final' && inv.status !== 'void');
+        && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'deposit' && inv.status !== 'void' && inv.status !== 'paid');
+
+      /* An itinerary may carry several live invoices while the travellers are
+         still travelling. Issuing stops only when there is no money still
+         outstanding, or when the most recent invoice for this currency is an
+         untouched deposit proforma (so we never stack a new one on top of a
+         request that has not been paid yet). */
       let issueType = null;
       let blockReason = '';
       if (outstanding <= 0.009) {
         blockReason = 'Paid in full';
-      } else if (selectedItinerary.status === 'confirmed' || hasPaidDeposit) {
-        issueType = 'final';
-        if (liveFinal) { issueType = null; blockReason = 'Final invoice issued'; }
+      } else if (liveDeposit) {
+        blockReason = 'Deposit invoice issued';
       } else {
         issueType = 'deposit';
-        if (liveDeposit) { issueType = null; blockReason = 'Deposit invoice issued'; }
       }
       return { code, ...agg, paidTotal, outstanding, hasPaidDeposit, issueType, invoiced: !issueType, blockReason };
     });
@@ -1112,9 +1114,9 @@ export const Invoices = () => {
             <div className="modal-body">
             {wizardStep === 1 && (
               <div>
-                <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
-                  Select a <b>provisional</b> itinerary to raise a deposit invoice, or a <b>confirmed</b> itinerary for the final invoice.
-                </p>
+            <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
+              Pick a provisional or confirmed itinerary to raise a proforma invoice for. Every invoice starts as a proforma; it becomes a numbered, locked invoice the moment payment is confirmed and a receipt is issued.
+            </p>
                 {itinerariesLoading ? (
                   <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading itinerariesâ€¦</div>
                 ) : itineraries.length === 0 ? (
@@ -1247,8 +1249,8 @@ export const Invoices = () => {
 
                 <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.75rem', display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
                   <FileText size={13} /> {selectedGroup.issueType === 'deposit'
-                    ? 'A proforma deposit request is numbered and locked once issued. Confirm payment received, then issue a receipt.'
-                    : 'Once validated, the final invoice is numbered and locked. It cannot be edited â€” only voided.'}
+                    ? 'This proforma is numbered and locked once payment is confirmed and a receipt is issued. Further money received on the same itinerary is captured automatically.'
+                    : 'Once validated, the invoice is numbered and locked. It cannot be edited — only voided.'}
                 </p>
 
                 <div className="form-actions" style={{ marginTop: '0.5rem' }}>

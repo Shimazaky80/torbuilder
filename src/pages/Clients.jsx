@@ -147,6 +147,7 @@ export const Clients = () => {
     country: '',
     markupPercentage: '',
     depositPercentage: '',
+    isCredit: false,
     address: '',
     notes: ''
   });
@@ -263,6 +264,7 @@ export const Clients = () => {
       country: client.country || '',
       markupPercentage: client.markup_percentage != null ? String(client.markup_percentage) : '',
       depositPercentage: client.deposit_percentage != null ? String(client.deposit_percentage) : '',
+      isCredit: !!client.is_credit,
       address: client.address || '',
       notes: client.notes || ''
     });
@@ -321,12 +323,13 @@ export const Clients = () => {
         email,
         phone: form.phone.trim(),
         client_type: form.clientType,
-        country: form.country,
-        markup_percentage: markup,
-        deposit_percentage: deposit,
-        address: form.address.trim(),
-        notes: form.notes.trim()
-      };
+      country: form.country,
+      markup_percentage: markup,
+      deposit_percentage: deposit,
+      is_credit: !!form.isCredit,
+      address: form.address.trim(),
+      notes: form.notes.trim()
+    };
 
       if (editingClient) {
         const { error } = await supabase
@@ -540,7 +543,7 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Deposit Percentage (%)
                     </label>
-                    <input
+                    <input 
                       type="number"
                       min="0"
                       max="100"
@@ -550,6 +553,17 @@ export const Clients = () => {
                       value={form.depositPercentage}
                       onChange={(e) => setForm({ ...form, depositPercentage: e.target.value })}
                     />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', paddingTop: '0.9rem' }}>
+                    <input 
+                      id="client-is-credit"
+                      type="checkbox"
+                      checked={!!form.isCredit}
+                      onChange={(e) => setForm({ ...form, isCredit: e.target.checked })}
+                    />
+                    <label htmlFor="client-is-credit" style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', cursor: 'pointer' }}>
+                      Credit / On-account
+                    </label>
                   </div>
                 </div>
               </div>

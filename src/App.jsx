@@ -11,6 +11,7 @@ import { ItineraryBuilder } from './pages/ItineraryBuilder';
 import { Invoices } from './pages/Invoices';
 import { Settings } from './pages/Settings';
 import { LibraryItems } from './pages/LibraryItems';
+import { Analytics } from './pages/Analytics';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { ToastProvider } from './context/ToastContext';
 import { NavigationGuardProvider } from './context/NavigationGuardContext';
@@ -44,7 +45,7 @@ function App() {
                         <Route path="itineraries/builder" element={<ItineraryBuilder />} />
                         <Route path="invoices" element={<Invoices />} />
                         <Route path="tariffs" element={<div>Tariffs (Coming Soon)</div>} />
-                        <Route path="analytics" element={<div>Analytics (Coming Soon)</div>} />
+                        <Route path="analytics" element={<Analytics />} />
                         <Route path="users" element={<div>Users (Coming Soon)</div>} />
                         <Route path="settings" element={<Settings />} />
                         <Route path="*" element={<Navigate to="dashboard" replace />} />
