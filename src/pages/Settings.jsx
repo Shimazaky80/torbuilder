@@ -18,7 +18,8 @@ import {
   FileText,
   Image as ImageIcon,
   Upload,
-  LayoutTemplate
+  LayoutTemplate,
+  Rows3
 } from 'lucide-react';
 
 const emptyBank = () => ({
@@ -196,6 +197,7 @@ const emptyForm = () => ({
   rate: '15',
   appliesTo: 'all',
   country: 'South Africa',
+  revenueAgency: '',
   isDefault: false,
   isActive: true
 });
@@ -221,6 +223,7 @@ export const Settings = () => {
     allow_decimal_amounts: true,
     input_rounding_mode: 'none',
     output_rounding_mode: 'none',
+    list_row_limit: 2,
     logo_data_url: '',
     logo_size: 'md'
   });
@@ -270,6 +273,7 @@ export const Settings = () => {
         allow_decimal_amounts: data.allow_decimal_amounts !== false,
         input_rounding_mode: ['none', 'up', 'down'].includes(data.input_rounding_mode) ? data.input_rounding_mode : 'none',
         output_rounding_mode: ['none', 'up', 'down'].includes(data.output_rounding_mode) ? data.output_rounding_mode : 'none',
+        list_row_limit: Number.isFinite(Number(data.list_row_limit)) && Number(data.list_row_limit) > 0 ? Number(data.list_row_limit) : 2,
         logo_data_url: data.logo_data_url || '',
         logo_size: ['sm', 'md', 'lg'].includes(data.logo_size) ? data.logo_size : 'md'
       });
@@ -318,6 +322,7 @@ export const Settings = () => {
       rate: String(t.rate ?? 15),
       appliesTo: t.applies_to || 'all',
       country: t.country || 'South Africa',
+      revenueAgency: t.revenue_agency || '',
       isDefault: !!t.is_default,
       isActive: !!t.is_active
     });
@@ -349,6 +354,7 @@ export const Settings = () => {
         rate,
         applies_to: form.appliesTo || 'all',
         country: form.country || 'South Africa',
+        revenue_agency: (form.revenueAgency || '').trim() || null,
         is_active: form.isActive
       };
 
@@ -536,6 +542,17 @@ export const Settings = () => {
     if (ok) showToast('Amount preferences saved', 'success');
   };
 
+  const handleSaveListSettings = async () => {
+    const n = Math.floor(Number(billing.list_row_limit));
+    const ok = await saveBillingFields({
+      list_row_limit: Number.isFinite(n) && n > 0 ? n : 2
+    });
+    if (ok) {
+      setBilling({ ...billing, list_row_limit: Number.isFinite(n) && n > 0 ? n : 2 });
+      showToast('List rows preference saved', 'success');
+    }
+  };
+
   const openAddBank = () => {
     setEditingBankId(null);
     setBankForm(emptyBank());
@@ -702,7 +719,9 @@ export const Settings = () => {
             <label>Operating Country *</label>
             <SearchableCountryInput value={billing.operating_country} onChange={(value) => setBilling({ ...billing, operating_country: value })} />
             <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.74rem', lineHeight: 1.4 }}>
-              South African VAT is applied only when both this country and the supplier country are South Africa.
+              {String(billing.operating_country || '').trim().toLowerCase() === 'south africa'
+                ? 'South African VAT is applied only to ZAR-priced services. Any other currency is always taxed at 0 / No Tax.'
+                : 'Tenants outside South Africa apply their own configured tax type and percentage to every service, regardless of currency.'}
             </p>
           </div>
           <div className="sidebar-field">
@@ -820,6 +839,41 @@ export const Settings = () => {
         </div>
       </div>
 
+      {/* List view preferences */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Rows3 size={18} color="#0d7478" /> List View Preferences
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            How many rows each list module (Clients, Suppliers, Library Items, Itineraries, Invoices) displays by default. Settings and Dashboard always show everything.
+          </p>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+          <div className="sidebar-field">
+            <label>Rows to display per list</label>
+            <input
+              type="number"
+              min="1"
+              className="sidebar-select"
+              style={fieldStyle}
+              value={billing.list_row_limit}
+              onChange={(e) => setBilling({ ...billing, list_row_limit: e.target.value })}
+            />
+            {Number(billing.list_row_limit) > 2 && (
+              <p style={{ margin: '0.35rem 0 0', color: '#b45309', fontSize: '0.78rem', lineHeight: 1.4 }}>
+                Showing more than 2 rows can slow down page load times on slower networks.
+              </p>
+            )}
+          </div>
+        </div>
+        <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving} onClick={handleSaveListSettings}>
+            <Check size={16} /> {saving ? 'Saving...' : 'Save List Preferences'}
+          </button>
+        </div>
+      </div>
+
       {/* Document templates (coming soon) */}
       <div className="admin-card" style={{ marginTop: '1.5rem', opacity: 0.85 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
@@ -931,7 +985,8 @@ export const Settings = () => {
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
               Tax applied on top of each service&apos;s sell price (markup already included in sell).
-              The default is 15% VAT — set your region&apos;s own tax types here.
+              For South African tenants this tax is currency-bound to ZAR — services in any other currency are always 0 / No Tax.
+              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. The default is 15% VAT — set your region&apos;s own tax types here.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAdd}>
@@ -953,6 +1008,7 @@ export const Settings = () => {
                 <th>Code</th>
                 <th>Rate</th>
                 <th>Country</th>
+                <th>Revenue Service</th>
                 <th>Applies To</th>
                 <th>Default</th>
                 <th>Active</th>
@@ -966,6 +1022,7 @@ export const Settings = () => {
                   <td>{t.code}</td>
                   <td style={{ fontWeight: 700, color: '#0d7478' }}>{Number(t.rate)}%</td>
                   <td>{t.country || 'South Africa'}</td>
+                  <td>{t.revenue_agency || (t.country === 'South Africa' ? 'SARS' : '—')}</td>
                   <td style={{ textTransform: 'capitalize' }}>{t.applies_to || 'all'}</td>
                   <td>
                     {t.is_default ? (
@@ -1037,6 +1094,13 @@ export const Settings = () => {
                 <div className="sidebar-field">
                   <label>Country</label>
                   <SearchableCountryInput value={form.country} onChange={(val) => setForm({ ...form, country: val })} />
+                </div>
+                <div className="sidebar-field">
+                  <label>Revenue Service Agency</label>
+                  <input className="sidebar-select" style={fieldStyle} value={form.revenueAgency} onChange={(e) => setForm({ ...form, revenueAgency: e.target.value })} placeholder="e.g. SARS, HMRC, IRS, Tax Authority" />
+                  <small style={{ display: 'block', marginTop: '0.3rem', color: '#94a3b8', fontSize: '0.75rem' }}>
+                    Used on non-ZAR documents for the heading &ldquo;Net Tax to [Agency]&rdquo;. ZAR documents always show SARS.
+                  </small>
                 </div>
                 <div className="sidebar-field">
                   <label>Applies To</label>

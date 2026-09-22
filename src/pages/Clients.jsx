@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
+import { useListRowLimit } from '../hooks/useListRowLimit';
 import { 
   Users, 
   Search, 
@@ -131,8 +132,12 @@ export const Clients = () => {
   const [countries, setCountries] = useState([]);
   const [salesTotals, setSalesTotals] = useState({});
   const [loading, setLoading] = useState(true);
+  const [fetchingClients, setFetchingClients] = useState(false);
+  const [totalClients, setTotalClients] = useState(null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('All'); // All | Direct | Travel Agency
+  const searchTimeoutRef = useRef(null);
+  const { limit: pageSize } = useListRowLimit();
 
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [editingClient, setEditingClient] = useState(null);
@@ -169,11 +174,12 @@ export const Clients = () => {
     }
   }, []);
 
-  const fetchClients = useCallback(async () => {
+  const fetchClients = useCallback(async ({ offset = 0, append = false } = {}) => {
+    setFetchingClients(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
-        setLoading(false);
+        setFetchingClients(false);
         return;
       }
 
@@ -185,26 +191,41 @@ export const Clients = () => {
 
       if (!profile?.company_id) {
         setClients([]);
-        setLoading(false);
+        setTotalClients(0);
+        setFetchingClients(false);
         return;
       }
 
-      setLoading(true);
-
-      const { data, error } = await supabase
+      const esc = (t) => t.replace(/[\\%_]/g, (m) => '\\' + m);
+      const term = (search || '').replace(/[,()]/g, ' ').trim();
+      let clientQuery = supabase
         .from('clients')
-        .select('*')
-        .eq('company_id', profile.company_id)
-        .order('created_at', { ascending: false });
+        .select('*', { count: 'exact' })
+        .eq('company_id', profile.company_id);
+
+      if (term) {
+        const t = esc(term);
+        clientQuery = clientQuery.or(`name.ilike.%${t}%,email.ilike.%${t}%,phone.ilike.%${t}%`);
+      }
+
+      const { data, count, error } = await clientQuery
+        .order('created_at', { ascending: false })
+        .range(offset, offset + pageSize - 1);
 
       if (error) throw error;
-      setClients(data || []);
+      setClients((prev) => {
+        if (!append) return data || [];
+        const merged = new Map([...prev.map(c => [c.id, c]), ...(data || []).map(c => [c.id, c])]);
+        return Array.from(merged.values());
+      });
+      setTotalClients(count ?? (data || []).length);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
       setLoading(false);
+      setFetchingClients(false);
     }
-  }, [showToast]);
+  }, [search, showToast, pageSize]);
 
   const fetchSalesTotals = useCallback(async () => {
     try {
@@ -226,12 +247,19 @@ export const Clients = () => {
   let cancelled = false;
   (async () => {
     await fetchCountries();
-    await fetchClients();
     await fetchSalesTotals();
     if (cancelled) return;
   })();
   return () => { cancelled = true; };
-}, [fetchCountries, fetchClients, fetchSalesTotals]);
+}, [fetchCountries, fetchSalesTotals]);
+
+  useEffect(() => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => fetchClients(), 350);
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    };
+  }, [search, fetchClients]);
 
   const switchToNewProfile = () => {
     setEditingClient(null);
@@ -365,6 +393,7 @@ export const Clients = () => {
 
       if (error) throw error;
       setClients(prev => prev.filter(c => c.id !== clientId));
+      setTotalClients(prev => (prev == null ? prev : Math.max(0, prev - 1)));
       showToast('Client deleted', 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -372,15 +401,8 @@ export const Clients = () => {
   };
 
   const filteredClients = clients.filter(c => {
-    const q = search.toLowerCase();
-    const matchesSearch = 
-      c.name.toLowerCase().includes(q) ||
-      (c.email && c.email.toLowerCase().includes(q)) ||
-      (c.phone && c.phone.toLowerCase().includes(q));
-
     const matchesType = typeFilter === 'All' || c.client_type === typeFilter;
-
-    return matchesSearch && matchesType;
+    return matchesType;
   });
 
   const directCount = clients.filter(c => c.client_type === 'Direct').length;
@@ -416,7 +438,7 @@ export const Clients = () => {
         <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
           <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.9rem 1.25rem', boxShadow: '0 2px 4px rgba(0,0,0,0.04)' }}>
             <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Clients</span>
-            <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#1e293b' }}>{clients.length}</div>
+            <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#1e293b' }}>{totalClients ?? clients.length}</div>
           </div>
           <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.9rem 1.25rem', boxShadow: '0 2px 4px rgba(0,0,0,0.04)' }}>
             <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Direct Clients</span>
@@ -671,9 +693,9 @@ export const Clients = () => {
             </tr>
           </thead>
           <tbody>
-            {loading ? (
+            {loading || fetchingClients ? (
               <tr><td colSpan="7" className="text-center" style={{ padding: '3rem' }}>Loading clients...</td></tr>
-            ) : clients.length === 0 ? (
+            ) : clients.length === 0 && search.trim() === '' ? (
               <tr>
                 <td colSpan="7" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
                   <Users size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
@@ -792,6 +814,18 @@ export const Clients = () => {
             ))}
           </tbody>
         </table>
+        {clients.length > 0 && totalClients != null && totalClients > clients.length && (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '1rem' }}>
+            <button
+              className="secondary-btn"
+              style={{ padding: '0.6rem 1.5rem' }}
+              onClick={() => fetchClients({ offset: clients.length, append: true })}
+              disabled={fetchingClients}
+            >
+              {fetchingClients ? 'Loading...' : `Load more (${clients.length} of ${totalClients} clients)`}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

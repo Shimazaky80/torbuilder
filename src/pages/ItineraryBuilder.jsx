@@ -34,7 +34,8 @@ import {
   Mail,
   Plane,
   Ticket,
-  Lock
+  Lock,
+  Users
 } from 'lucide-react';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -53,7 +54,12 @@ import {
   invoiceDocHtml,
   invoiceExcelHtml,
   receiptDocHtml,
-  openPrintWindow
+  openPrintWindow,
+  isZar,
+  taxWordOf,
+  taxWordUpper,
+  taxAgencyOf,
+  taxDisplayLabel
 } from '../lib/invoiceDoc';
 
 /* â”€â”€â”€ Pure helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -221,6 +227,11 @@ const visibleInCurrency = (item, code) => {
   return codeU === 'ZAR';
 };
 
+const DEFAULT_CATEGORY_CHIPS = [
+  'Accommodation', 'Transfers', 'Activities / Tours', 'Flights / Charter',
+  'Meals', 'Guide', 'Trains', 'Tickets', 'Extras', 'Car Rental'
+];
+
 const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
 
 const htmlEscape = (v) =>
@@ -291,6 +302,28 @@ const repairText = (txt) => {
   let out = String(txt);
   for (const [r, rep] of TR) out = String(out).replace(r, rep);
   return out;
+};
+
+/* Merge raw library_items + item_rates + car_rental_rates + suppliers rows into
+   the enriched shape the builder expects (uses only the rows that were fetched,
+   so boot + sidebar search stay small and on-demand). */
+const buildMergedItems = (items, ratesData, carRates, suppliersData) => {
+  const rateMap = {};
+  (ratesData || []).forEach((r) => {
+    if (!rateMap[r.item_id]) rateMap[r.item_id] = [];
+    rateMap[r.item_id].push(r);
+  });
+  const supMap = {};
+  (suppliersData || []).forEach((s) => { supMap[s.id] = s; });
+  return (items || []).map((it) => ({
+    ...it,
+    name: repairText(it.name),
+    description: repairText(it.description),
+    category: it.category === 'Guide / Driver' ? 'Guide' : it.category,
+    item_rates: rateMap[it.id] || [],
+    car_rental_rates: (carRates || []).filter((r) => r.item_id === it.id),
+    supplier: supMap[it.supplier_id] || null
+  }));
 };
 
 const serviceNotes = (sv, libraryItems) => {
@@ -524,7 +557,9 @@ const safeNameOf = (label) => {
 };
 
 /* Per-traveller detail lines (nationality, passport, emergency contact, dietary,
-   insurance, notes) so important client info travels into vouchers + documents. */
+   insurance) so important client info travels into vouchers + documents. Notes are
+   intentionally NOT inline here — they are compounded at the bottom of the voucher
+   in a single Notes box, each labelled with the traveller it belongs to. */
 const travellerDetailLines = (travellers) => {
   return (Array.isArray(travellers) ? travellers : []).map((tr) => {
     const who = `${tr.name} ${tr.surname || ''}`.trim() || 'Traveller';
@@ -533,10 +568,19 @@ const travellerDetailLines = (travellers) => {
       tr.passportNumber ? `Passport: ${tr.passportNumber}` : '',
       tr.emergencyContact ? `Emergency contact: ${tr.emergencyContact}` : '',
       tr.dietaryRequirements ? `Dietary: ${tr.dietaryRequirements}` : '',
-      tr.insurancePolicy ? `Insurance policy: ${tr.insurancePolicy}` : '',
-      tr.notes ? `Notes: ${tr.notes}` : ''
+      tr.insurancePolicy ? `Insurance policy: ${tr.insurancePolicy}` : ''
     ].filter(Boolean).join('  ·  ');
     return bits ? `• ${who} — ${bits}` : '';
+  }).filter(Boolean);
+};
+
+/* One line per traveller who has a note, labelled with their name. All available
+   notes are stacked together in the voucher Notes box across every voucher. */
+const travellerNoteLines = (travellers) => {
+  return (Array.isArray(travellers) ? travellers : []).map((tr) => {
+    const who = `${tr.name} ${tr.surname || ''}`.trim() || 'Traveller';
+    const note = (tr.notes || '').trim();
+    return note ? `${who}: ${note}` : '';
   }).filter(Boolean);
 };
 const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
@@ -557,6 +601,9 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
     `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
     '',
     lines.join('\n\n'),
+    ...(travellerNoteLines(meta.travellers).length
+      ? ['', 'Notes:', ...travellerNoteLines(meta.travellers).map((l) => `• ${l}`)]
+      : []),
     '',
     `Thank you for your cooperation.`
   ].join('\n');
@@ -592,6 +639,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
   }).join('\n');
   const trav = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
   const clientLine = meta.client?.name ? esc(meta.client.name) : '—';
+  const notes = travellerNoteLines(meta.travellers);
   return `<!doctype html><html><head><meta charset="utf-8"><title>Voucher — ${esc(group.label)}</title>
 <style>
   * { box-sizing: border-box; }
@@ -632,6 +680,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
         <tr><td class="h">Client</td><td>${clientLine}</td><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td></tr>
         <tr><td class="h">Travellers</td><td colspan="3">${esc(trav)}</td></tr>
         ${travellerDetailLines(meta.travellers).map((d) => `<tr><td class="h">Traveller details</td><td colspan="3">${esc(d)}</td></tr>`).join('')}
+        ${notes.map((n) => `<tr><td class="h">Note</td><td colspan="3">${esc(n)}</td></tr>`).join('')}
       </table>
     </div>
     ${entries}
@@ -780,9 +829,9 @@ const cancellationNoticeEmail = (meta, pricingGroups, depositPct = DEPOSIT_PCT, 
     const refund = round2(total - deposit);
     return [
       `Currency: ${grp.code} (${grp.symbol})`,
-      `Subtotal (Excl. VAT): ${grp.symbol}${subtotal.toFixed(2)}`,
-      `VAT: ${grp.symbol}${vatAmt.toFixed(2)}`,
-      `TOTAL DUE (INCL. VAT): ${grp.symbol}${total.toFixed(2)}`,
+      `Subtotal (Excl. ${taxWordOf(grp.code)}): ${grp.symbol}${subtotal.toFixed(2)}`,
+      `${taxWordUpper(grp.code)}: ${grp.symbol}${vatAmt.toFixed(2)}`,
+      `TOTAL DUE (INCL. ${taxWordUpper(grp.code)}): ${grp.symbol}${total.toFixed(2)}`,
       `Deposit retained (${Number(depositPct) || DEPOSIT_PCT}%): ${grp.symbol}${deposit.toFixed(2)}`,
       `Refund due to client: ${grp.symbol}${refund.toFixed(2)}`
     ].join('\n');
@@ -840,7 +889,6 @@ export const ItineraryBuilder = () => {
 
   const [companyId, setCompanyId] = useState(null);
   const [libraryItems, setLibraryItems] = useState([]);
-  const [loadingItems, setLoadingItems] = useState(true);
   const [taxRates, setTaxRates] = useState([]);
   const [companyDepositPct, setCompanyDepositPct] = useState(DEPOSIT_PCT);
   const [billing, setBilling] = useState(null);
@@ -851,6 +899,10 @@ export const ItineraryBuilder = () => {
   const [emailFormat, setEmailFormat] = useState('pdf');
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
+  const [pickerItems, setPickerItems] = useState([]);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [categoryChips, setCategoryChips] = useState([]);
+  const pickerSearchRef = useRef(null);
   const [currencyCode, setCurrencyCode] = useState('ZAR');
   const [currencyOpen, setCurrencyOpen] = useState(false);
   const [currencySearch, setCurrencySearch] = useState('');
@@ -915,19 +967,23 @@ export const ItineraryBuilder = () => {
     completedRef.current = isReadOnly;
   }, [isReadOnly]);
   const normaliseCountry = (value) => String(value || '').trim().toLowerCase();
-  const tenantCountry = normaliseCountry(billing?.operating_country || 'South Africa');
-  const isSouthAfricanTaxContext = tenantCountry === 'south africa';
-  const supplierCountryForItem = (item) => normaliseCountry(
-    item?.supplier?.country
-    || item?.supplier_country
-    || item?.country
+  const isSouthAfricanTenant = useMemo(
+    () => normaliseCountry(billing?.operating_country || 'South Africa') === 'south africa',
+    [billing]
   );
-  const taxAppliesToItem = (item) => !isSouthAfricanTaxContext
-    || supplierCountryForItem(item) === 'south africa';
+  /* Tax rule: South African tenants apply VAT only to ZAR-priced services —
+     any other currency is always 0 / No VAT. Tenants outside South Africa
+     apply their own configured tax (type + percentage from Settings) to every
+     service, regardless of currency. */
+  const taxAppliesForCurrency = useCallback((ccy) => {
+    if (!isSouthAfricanTenant) return true;
+    return normaliseCountry(ccy || 'ZAR') === 'zar';
+  }, [isSouthAfricanTenant]);
   const defaultTax = taxRates.find((t) => t.is_active && t.is_default)
     || taxRates.find((t) => t.is_active) || null;
   const defaultTaxRate = Number(defaultTax?.rate ?? 15);
   const defaultTaxLabel = defaultTax?.name || 'VAT';
+  const defaultRevenueAgency = defaultTax?.revenue_agency || '';
 
   /* Deposit policy: per-client override, else tenant default from Settings. */
   const depositPct = useMemo(() => {
@@ -1052,80 +1108,146 @@ export const ItineraryBuilder = () => {
     return profile?.company_id || null;
   }, []);
 
-  const fetchLibraryItems = useCallback(async () => {
-    setLoadingItems(true);
+  const loadCompanyMeta = useCallback(async (cid) => {
+    setCompanyId(cid);
+    if (!cid) return;
     try {
-      const cid = await fetchCompanyId();
-      if (!cid) return;
+      const [taxRes, billingRes, bankRes] = await Promise.all([
+        supabase.from('tax_rates').select('*').eq('company_id', cid),
+        supabase.from('company_billing_settings').select('*').eq('company_id', cid).maybeSingle(),
+        supabase.from('company_bank_accounts').select('*').eq('company_id', cid).order('is_default', { ascending: false })
+      ]);
+      setTaxRates(taxRes.data || []);
+      setBilling(billingRes.data || null);
+      if (billingRes.data?.default_deposit_percentage !== null && billingRes.data?.default_deposit_percentage !== undefined) {
+        setCompanyDepositPct(Number(billingRes.data.default_deposit_percentage));
+      }
+      setBankAccounts(bankRes.data || []);
+    } catch {
+      // non-fatal; tax/billing defaults apply
+    }
+    // Category chips are optional — the table may not exist yet; fall back to built-ins.
+    try {
+      const { data: catsRes } = await supabase
+        .from('library_categories')
+        .select('name')
+        .order('sort_order', { ascending: true });
+      const catNames = (catsRes || []).map((c) => c.name).filter(Boolean);
+      if (catNames.length) setCategoryChips(catNames);
+    } catch {
+      // keep DEFAULT_CATEGORY_CHIPS
+    }
+  }, []);
+
+  const fetchItineraryItemIds = useCallback(async (iid) => {
+    const { data } = await supabase
+      .from('itinerary_day_items')
+      .select('item_id')
+      .eq('itinerary_id', iid);
+    return [...new Set((data || []).map((r) => r.item_id).filter(Boolean))];
+  }, []);
+
+  const loadLibraryItemsByIds = useCallback(async (cid, ids) => {
+    if (!cid || !ids || ids.length === 0) {
+      setLibraryItems([]);
+      return;
+    }
+    try {
       const { data: items } = await supabase
         .from('library_items')
         .select('*')
-        .eq('company_id', cid)
-        .order('created_at', { ascending: false });
-      const ids = (items || []).map((i) => i.id);
-      const { data: ratesData } = ids.length
-        ? await supabase.from('item_rates').select('*').in('item_id', ids)
+        .in('id', ids);
+      const itemIds = (items || []).map((i) => i.id);
+      const { data: ratesData } = itemIds.length
+        ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
         : { data: [] };
       let carRates = [];
-      if (ids.length) {
+      if (itemIds.length) {
         try {
           const { data } = await supabase
             .from('car_rental_rates')
             .select('*')
-            .in('item_id', ids);
+            .in('item_id', itemIds);
           carRates = data || [];
         } catch {
           carRates = [];
         }
       }
-      const { data: suppliers } = await supabase
-        .from('suppliers')
-        .select('id, name, email, country, province_state, city, city_location')
-        .eq('company_id', cid);
-      const rateMap = {};
-      (ratesData || []).forEach((r) => {
-        if (!rateMap[r.item_id]) rateMap[r.item_id] = [];
-        rateMap[r.item_id].push(r);
-      });
-      const supMap = {};
-      (suppliers || []).forEach((s) => { supMap[s.id] = s; });
-      const merged = (items || []).map((it) => ({
-        ...it,
-        name: repairText(it.name),
-        description: repairText(it.description),
-        category: it.category === 'Guide / Driver' ? 'Guide' : it.category,
-        item_rates: rateMap[it.id] || [],
-        car_rental_rates: carRates.filter((r) => r.item_id === it.id),
-        supplier: supMap[it.supplier_id] || null
-      }));
-      setLibraryItems(merged);
-      setCompanyId(cid);
-      const { data: taxData } = await supabase
-        .from('tax_rates')
-        .select('*')
-        .eq('company_id', cid);
-      setTaxRates(taxData || []);
-      const { data: billingData } = await supabase
-        .from('company_billing_settings')
-        .select('*')
-        .eq('company_id', cid)
-        .maybeSingle();
-      setBilling(billingData || null);
-      if (billingData?.default_deposit_percentage !== null && billingData?.default_deposit_percentage !== undefined) {
-        setCompanyDepositPct(Number(billingData.default_deposit_percentage));
-      }
-      const { data: bankData } = await supabase
-        .from('company_bank_accounts')
-        .select('*')
-        .eq('company_id', cid)
-        .order('is_default', { ascending: false });
-      setBankAccounts(bankData || []);
+      const supIds = [...new Set((items || []).map((i) => i.supplier_id).filter(Boolean))];
+      const { data: suppliersData } = supIds.length
+        ? await supabase.from('suppliers').select('id, name, email, country, province_state, city, city_location').in('id', supIds)
+        : { data: [] };
+      setLibraryItems(buildMergedItems(items || [], ratesData || [], carRates, suppliersData || []));
     } catch {
-      showToast('Failed to load library items', 'error');
-    } finally {
-      setLoadingItems(false);
+      showToast('Failed to load saved library items', 'error');
     }
-  }, [fetchCompanyId, showToast]);
+  }, [showToast]);
+
+  // Sidebar picker: on-demand server-side search. Bounded to a page of results
+  // so the biggest cost (all rates for a whole company catalogue) never runs.
+  const fetchPickerItems = useCallback(async () => {
+    const term = searchTerm.trim();
+    const hasFilter = categoryFilter !== '' || term.length > 0;
+    if (!hasFilter || !companyId) {
+      setPickerItems([]);
+      setPickerLoading(false);
+      return;
+    }
+    setPickerLoading(true);
+    try {
+      const safeTerm = term.replace(/[,()]/g, ' ').trim();
+      const esc = (s) => s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+      let q = supabase
+        .from('library_items')
+        .select('*')
+        .eq('company_id', companyId)
+        .order('name', { ascending: true })
+        .limit(30);
+      if (categoryFilter !== '') q = q.eq('category', categoryFilter);
+      if (safeTerm) q = q.or(`name.ilike.%${esc(safeTerm)}%,description.ilike.%${esc(safeTerm)}%`);
+      const { data: items } = await q;
+      const itemIds = (items || []).map((i) => i.id);
+      const { data: ratesData } = itemIds.length
+        ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
+        : { data: [] };
+      let carRates = [];
+      if (itemIds.length) {
+        try {
+          const { data } = await supabase
+            .from('car_rental_rates')
+            .select('*')
+            .in('item_id', itemIds);
+          carRates = data || [];
+        } catch {
+          carRates = [];
+        }
+      }
+      const supIds = [...new Set((items || []).map((i) => i.supplier_id).filter(Boolean))];
+      const { data: suppliersData } = supIds.length
+        ? await supabase.from('suppliers').select('id, name, email, country, province_state, city, city_location').in('id', supIds)
+        : { data: [] };
+      const merged = buildMergedItems(items || [], ratesData || [], carRates, suppliersData || []);
+      setPickerItems(merged);
+      // Keep looked-up items resolvable for drag/drop, room modal and tax checks.
+      setLibraryItems((prev) => {
+        const m = new Map(prev.map((i) => [i.id, i]));
+        merged.forEach((i) => m.set(i.id, i));
+        return Array.from(m.values());
+      });
+    } catch {
+      showToast('Failed to search library items', 'error');
+    } finally {
+      setPickerLoading(false);
+    }
+  }, [companyId, searchTerm, categoryFilter, showToast]);
+
+  useEffect(() => {
+    if (pickerSearchRef.current) clearTimeout(pickerSearchRef.current);
+    pickerSearchRef.current = setTimeout(() => fetchPickerItems(), 350);
+    return () => {
+      if (pickerSearchRef.current) clearTimeout(pickerSearchRef.current);
+    };
+  }, [searchTerm, categoryFilter, fetchPickerItems]);
 
   const initDaysFromRange = useCallback(() => {
     const count = daysInRange(meta.travelStart, meta.travelEnd);
@@ -1187,19 +1309,18 @@ export const ItineraryBuilder = () => {
           date: toISODate(rd.day_date) || addDaysToDate(meta.travelStart, di),
           notes: rd.notes || '',
           services: (rd.itinerary_day_items || []).map((ii) => {
-            const libraryItem = (libraryItems || []).find((item) => item.id === ii.item_id);
-            const taxAllowed = !isSouthAfricanTaxContext
-              || supplierCountryForItem(libraryItem) === 'south africa';
             const buyPP = Number(ii.unit_cost) || 0;
             const mRaw = Number(ii.markup_percentage);
             const m = Number.isFinite(mRaw) ? mRaw : (Number(meta.client?.markup_percentage) || 0);
+            const ccy = ii.currency_code || 'ZAR';
+            const taxed = taxAppliesForCurrency(ccy);
             return {
               key: nextId(),
               itemId: ii.item_id || null,
               name: ii.item_name || '',
               category: ii.category || '',
               supplierName: ii.supplier_name || '',
-              currencyCode: ii.currency_code || 'ZAR',
+              currencyCode: ccy,
               basis: ii.rate_basis || 'per_person',
               buyPP,
               markup: m,
@@ -1207,8 +1328,8 @@ export const ItineraryBuilder = () => {
               pax: Number(ii.pax) || ((Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0)),
               quantity: Number(ii.quantity) || 1,
               descOverride: ii.description_override || '',
-              taxRate: taxAllowed ? numOr(ii.tax_rate, 15) : 0,
-              taxLabel: taxAllowed ? (ii.tax_label || 'VAT') : 'No VAT',
+              taxRate: taxed ? (Number(ii.tax_rate) > 0 ? numOr(ii.tax_rate, defaultTaxRate) : defaultTaxRate) : 0,
+              taxLabel: taxed ? (Number(ii.tax_rate) > 0 ? (ii.tax_label || defaultTaxLabel) : defaultTaxLabel) : 'No VAT',
               time: ii.service_time || '',
               confirmationStatus: ii.confirmation_status || 'RQ',
               confirmationNumber: ii.confirmation_number || '',
@@ -1236,7 +1357,7 @@ export const ItineraryBuilder = () => {
     } catch {
       return false;
     }
-  }, [data, meta.travelStart, meta.numAdults, meta.numChildren, meta.client, nextId, libraryItems, isSouthAfricanTaxContext, supplierCountryForItem]);
+  }, [data, meta.travelStart, meta.numAdults, meta.numChildren, meta.client, nextId, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency]);
 
   /* Auto-populate consultant name from the logged-in user's profile on first
      load. If the itinerary already has a consultant stored, loadExistingDays wins. */
@@ -1259,14 +1380,19 @@ export const ItineraryBuilder = () => {
     const boot = async () => {
       if (booted.current) return;
       booted.current = true;
-      await fetchLibraryItems();
-      const hasId = !!(data && data.itineraryId);
-      const foundSaved = hasId ? await loadExistingDays() : false;
+      const cid = await fetchCompanyId();
+      await loadCompanyMeta(cid);
+      let foundSaved = false;
+      if (cid && data?.itineraryId) {
+        const savedItemIds = await fetchItineraryItemIds(data.itineraryId);
+        await loadLibraryItemsByIds(cid, savedItemIds);
+        foundSaved = await loadExistingDays();
+      }
       if (!foundSaved) initDaysFromRange();
       setBootedState(true);
     };
     boot();
-  }, [data, fetchLibraryItems, loadExistingDays, initDaysFromRange]);
+  }, [data, fetchCompanyId, loadCompanyMeta, fetchItineraryItemIds, loadLibraryItemsByIds, loadExistingDays, initDaysFromRange]);
 
   /* Load this itinerary's issued invoices so the builder can reflect real
      deposit/final state (issued, paid, outstanding) without a round-trip to
@@ -1319,12 +1445,12 @@ export const ItineraryBuilder = () => {
   /* â”€â”€ Derived lists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
   const categoryOptions = useMemo(() => {
-    const set = new Set();
+    const set = new Set(categoryChips.length ? categoryChips : DEFAULT_CATEGORY_CHIPS);
     libraryItems.forEach((it) => {
       if (it.category) set.add(it.category);
     });
     return Array.from(set).sort();
-  }, [libraryItems]);
+  }, [categoryChips, libraryItems]);
 
   const filteredCurrencies = useMemo(() => {
     const term = currencySearch.trim().toLowerCase();
@@ -1345,20 +1471,9 @@ export const ItineraryBuilder = () => {
     return sym || code || 'ZAR';
   }, [symbolByCode]);
 
-  const filteredItems = useMemo(() => {
-    const term = searchTerm.trim().toLowerCase();
-    const hasAnyFilter = categoryFilter !== '' || term.length > 0;
-    if (!hasAnyFilter) return [];
-    return libraryItems.filter((it) => {
-      if (categoryFilter !== '' && it.category !== categoryFilter) return false;
-      if (!visibleInCurrency(it, currencyCode)) return false;
-      if (term) {
-        const hay = `${it.name} ${it.category} ${it.supplier?.name || ''}`.toLowerCase();
-        if (!hay.includes(term)) return false;
-      }
-      return true;
-    });
-  }, [libraryItems, categoryFilter, currencyCode, searchTerm]);
+  const pickerItemsToShow = useMemo(() =>
+    pickerItems.filter((it) => visibleInCurrency(it, currencyCode)),
+  [pickerItems, currencyCode]);
 
   const pricingGroups = useMemo(() => {
     const order = [];
@@ -1477,7 +1592,7 @@ export const ItineraryBuilder = () => {
        the pax capacity in max_occupancy; meal plans live on the per-season
        item_rates rows with an accommodation default of "Bed & Breakfast". */
     const libMaxOcc = item.maxOccupancy ?? item.max_occupancy;
-    const taxApplies = taxAppliesToItem(item);
+    const taxApplies = taxAppliesForCurrency(currencyCode);
     const numOrBlank = (v) => {
       if (v === '' || v === null || v === undefined) return '';
       const n = Number(v);
@@ -1533,7 +1648,7 @@ export const ItineraryBuilder = () => {
         service: svc
       });
     }
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesToItem]);
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency]);
 
   const openPlacementPrompt = useCallback((dayIndex, item, via) => {
     setPlacementDraft({ dayIndex, item, via });
@@ -1938,13 +2053,15 @@ return !!sv.time; /* activities / meals / other */
           const buyPP = Number(ii.unit_cost) || 0;
           const mRaw = Number(ii.markup_percentage);
           const m = Number.isFinite(mRaw) ? mRaw : (Number(markupPct) || 0);
+          const ccy = ii.currency_code || currencyCode;
+          const taxed = taxAppliesForCurrency(ccy);
           return {
             key: nextId(),
             itemId: ii.item_id || null,
             name: ii.item_name || '',
             category: ii.category || '',
             supplierName: ii.supplier_name || '',
-            currencyCode: ii.currency_code || currencyCode,
+            currencyCode: ccy,
             buyPP,
             markup: m,
             basis: ii.rate_basis || 'per_person',
@@ -1952,8 +2069,8 @@ return !!sv.time; /* activities / meals / other */
             pax: Number(ii.pax) || paxCount,
             quantity: Number(ii.quantity) || 1,
             descOverride: ii.description_override || '',
-            taxRate: numOr(ii.tax_rate, 15),
-            taxLabel: ii.tax_label || 'VAT',
+            taxRate: taxed ? (Number(ii.tax_rate) > 0 ? numOr(ii.tax_rate, defaultTaxRate) : defaultTaxRate) : 0,
+            taxLabel: taxed ? (Number(ii.tax_rate) > 0 ? (ii.tax_label || defaultTaxLabel) : defaultTaxLabel) : 'No VAT',
             time: ii.service_time || '',
               confirmationStatus: ii.confirmation_status || 'RQ',
               confirmationNumber: ii.confirmation_number || '',
@@ -1987,7 +2104,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast]);
+  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency]);
 
   const handleCopy = useCallback(() => {
     if (!meta.itineraryId) {
@@ -2058,6 +2175,7 @@ return !!sv.time; /* activities / meals / other */
 
     const esc = htmlEscape;
     const taxLabel = defaultTaxLabel || 'VAT';
+    const taxRateOf = (ccy) => (taxAppliesForCurrency(ccy) ? defaultTaxRate : 0);
 
     if (format === 'excel') {
       const lines = [
@@ -2071,14 +2189,14 @@ return !!sv.time; /* activities / meals / other */
       groups.forEach((grp, idx) => {
         if (idx > 0) lines.push('');
         lines.push(`"Currency: ${csvEscape(grp.code)} (${csvEscape(grp.symbol)})${grp.name ? ` - ${csvEscape(grp.name)}` : ''}"`);
-        lines.push(['Day', 'Date', 'Services', 'Subtotal (Excl. VAT)', 'VAT', 'Total (Incl. VAT)'].map(csvEscape).join(','));
+        lines.push(['Day', 'Date', 'Services', `Subtotal (Excl. ${taxWordOf(grp.code)})`, taxWordUpper(grp.code), `Total (Incl. ${taxWordUpper(grp.code)})`].map(csvEscape).join(','));
         (grp.days || []).forEach((r) => {
           const subExcl = round2((r.sell || 0) - (r.tax || 0));
           lines.push([`Day ${r.day}`, r.date || '—', r.count || 0, subExcl, round2(r.tax || 0), round2(r.sell || 0)].map(csvEscape).join(','));
         });
-        lines.push(['Subtotal (Excl. VAT)', '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
-        lines.push([`VAT (${taxLabel} ${defaultTaxRate}%)`, '', '', '', '', grp.totalTax].map(csvEscape).join(','));
-        lines.push([`TOTAL DUE (${grp.code} INCL. VAT)`, '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
+        lines.push([`Subtotal (Excl. ${taxWordOf(grp.code)})`, '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
+        lines.push([`${taxWordUpper(grp.code)} (${taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code))} ${taxRateOf(grp.code)}%)`, '', '', '', '', grp.totalTax].map(csvEscape).join(','));
+        lines.push([`TOTAL DUE (${grp.code} INCL. ${taxWordUpper(grp.code)})`, '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
       });
 
       downloadBlob(lines.join('\n'), `${safeName}.csv`, 'text/csv;charset=utf-8');
@@ -2090,11 +2208,11 @@ return !!sv.time; /* activities / meals / other */
       const sectionsHtml = groups.map((grp) => `
         <h2 style="color:#0d7478;margin-top:20px;margin-bottom:8px;">Pricing Breakdown — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;">
-          <tr><th>Day</th><th>Date</th><th># Services</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
+          <tr><th>Day</th><th>Date</th><th># Services</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
           ${(grp.days || []).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${r.count || 0}</td><td>${fmtMoney(round2((r.sell || 0) - (r.tax || 0)), grp.symbol)}</td><td>${fmtMoney(r.tax || 0, grp.symbol)}</td><td>${fmtMoney(r.sell || 0, grp.symbol)}</td></tr>`).join('')}
-          <tr><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td><b>${fmtMoney(grp.totalExcl, grp.symbol)}</b></td></tr>
-          <tr><td colspan="5" align="right">VAT (${esc(taxLabel)} ${defaultTaxRate}%)</td><td><b>${fmtMoney(grp.totalTax, grp.symbol)}</b></td></tr>
-          <tr><td colspan="5" align="right"><b>TOTAL DUE (${esc(grp.code)} INCL. VAT)</b></td><td><b>${fmtMoney(grp.totalInclTax, grp.symbol)}</b></td></tr>
+          <tr><td colspan="5" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td><b>${fmtMoney(grp.totalExcl, grp.symbol)}</b></td></tr>
+          <tr><td colspan="5" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td><b>${fmtMoney(grp.totalTax, grp.symbol)}</b></td></tr>
+          <tr><td colspan="5" align="right"><b>TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</b></td><td><b>${fmtMoney(grp.totalInclTax, grp.symbol)}</b></td></tr>
         </table>
       `).join('');
 
@@ -2121,11 +2239,11 @@ return !!sv.time; /* activities / meals / other */
       const sectionsHtml = groups.map((grp) => `
         <h2 style="color:#0d7478;font-size:16px;margin:24px 0 8px;border-bottom:2px solid #0d7478;padding-bottom:4px;">Pricing Breakdown — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
         <table>
-          <tr><th>Day</th><th>Date</th><th>Services</th><th>Subtotal (Excl. VAT)</th><th>VAT</th><th>Total (Incl. VAT)</th></tr>
+          <tr><th>Day</th><th>Date</th><th>Services</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
           ${(grp.days || []).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${r.count || 0}</td><td class="num">${fmtMoney(round2((r.sell || 0) - (r.tax || 0)), grp.symbol)}</td><td class="num">${fmtMoney(r.tax || 0, grp.symbol)}</td><td class="num">${fmtMoney(r.sell || 0, grp.symbol)}</td></tr>`).join('')}
-          <tr class="grand"><td colspan="5" align="right">Subtotal (Excl. VAT)</td><td class="num">${fmtMoney(grp.totalExcl, grp.symbol)}</td></tr>
-          <tr class="grand"><td colspan="5" align="right">VAT (${esc(taxLabel)} ${defaultTaxRate}%)</td><td class="num">${fmtMoney(grp.totalTax, grp.symbol)}</td></tr>
-          <tr class="grand"><td colspan="5" align="right">TOTAL DUE (${esc(grp.code)} INCL. VAT)</td><td class="num">${fmtMoney(grp.totalInclTax, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="5" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td class="num">${fmtMoney(grp.totalExcl, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="5" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td class="num">${fmtMoney(grp.totalTax, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="5" align="right">TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</td><td class="num">${fmtMoney(grp.totalInclTax, grp.symbol)}</td></tr>
         </table>
       `).join('');
 
@@ -2623,8 +2741,7 @@ return !!sv.time; /* activities / meals / other */
         services: d.services.map((s) =>
           s.key === editSvc.key
             ? (() => {
-              const item = s.itemId ? libraryItems.find((candidate) => candidate.id === s.itemId) : null;
-              const taxAllowed = taxAppliesToItem(item);
+              const taxAllowed = taxAppliesForCurrency(s.currencyCode);
               return {
                 ...s,
                 name,
@@ -2640,7 +2757,7 @@ return !!sv.time; /* activities / meals / other */
     setSaved(false);
     setEditSvc(null);
     showToast('Service updated', 'success');
-  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, libraryItems, taxAppliesToItem]);
+  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency]);
 
   /* â”€â”€ Render: no data guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
@@ -2943,9 +3060,9 @@ const missing = !sv.confirmationNumber ||
           </div>
 
           <div className="builder-items-list">
-            {loadingItems ? (
-              <div className="builder-items-empty">Loading library items...</div>
-            ) : filteredItems.length === 0 ? (
+            {pickerLoading ? (
+              <div className="builder-items-empty">Searching library items...</div>
+            ) : pickerItemsToShow.length === 0 ? (
               <div className="builder-items-empty">
                 <Package size={36} style={{ opacity: 0.5 }} />
                 <div style={{ fontWeight: 700, color: '#64748b' }}>
@@ -2953,12 +3070,12 @@ const missing = !sv.confirmationNumber ||
                 </div>
                 <div style={{ fontSize: '0.8rem' }}>
                   {categoryFilter === '' && !searchTerm.trim()
-                    ? 'Select a category above (or search) to browse your library items.'
+                    ? 'Select a category above (or search) to load matching library items on demand.'
                     : 'Try a different search, category, or currency.'}
                 </div>
               </div>
             ) : (
-              filteredItems.map((item) => {
+              pickerItemsToShow.map((item) => {
                 const basis = basisOfItem(item, currencyCode);
                 const price = contractPaxRate(item, currencyCode, paxCount);
                 return (
@@ -3004,6 +3121,9 @@ const missing = !sv.confirmationNumber ||
                 </span>
                 <span className="builder-info-piece">
                   <User size={14} /> <strong>{meta.client?.name || 'No client'}</strong>
+                </span>
+                <span className="builder-info-piece">
+                  <Users size={14} /> <strong>{paxCount > 0 ? `${paxCount} traveller${paxCount === 1 ? '' : 's'}` : 'No travellers'}</strong>
                 </span>
                 <div className="menu-popover status-popover">
                   <button
@@ -3499,9 +3619,9 @@ const missing = !sv.confirmationNumber ||
                           <th>Day</th>
                           <th>Date</th>
                           <th>Services</th>
-                          <th>Buy (VAT-incl)</th>
-                          <th>Sell (VAT-incl)</th>
-                          <th>Output VAT</th>
+                          <th>Buy ({taxWordOf(g.code)}-incl)</th>
+                          <th>Sell ({taxWordOf(g.code)}-incl)</th>
+                          <th>Output {taxWordUpper(g.code)}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3516,28 +3636,28 @@ const missing = !sv.confirmationNumber ||
                           </tr>
                         ))}
                         <tr style={{ background: '#f8fafc' }}>
-                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Subtotal (Excl VAT)</td>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Subtotal (Excl {taxWordOf(g.code)})</td>
                           <td style={{ color: '#0d7478', fontWeight: 800 }}>{fmtMoney(g.totalExcl, g.symbol)}</td>
                         </tr>
                         {g.taxEntries.map((te) => (
                           <tr key={te.label} style={{ background: '#f8fafc' }}>
                             <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>
-                              VAT <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.8rem' }}>({te.label} {Number(te.rate)}%)</span>
+                              {taxWordUpper(g.code)} <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.8rem' }}>({taxDisplayLabel(g.code, te.label, te.rate)} {Number(te.rate)}%)</span>
                             </td>
                             <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(te.amount, g.symbol)}</td>
                           </tr>
                         ))}
                         <tr style={{ background: '#f8fafc' }}>
-                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Input VAT (on Buy, embedded)</td>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Input {taxWordUpper(g.code)} (on Buy, embedded)</td>
                           <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(g.totalTaxIn, g.symbol)}</td>
                         </tr>
                         <tr style={{ background: '#f8fafc' }}>
-                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Net VAT to SARS (Output − Input)</td>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Net {taxWordUpper(g.code)} to {taxAgencyOf(g.code, defaultRevenueAgency)} (Output − Input)</td>
                           <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(g.totalTaxNet, g.symbol)}</td>
                         </tr>
                         <tr style={{ background: '#f0fdfa' }}>
                           <td colSpan="5" style={{ textAlign: 'right', fontWeight: 900, fontSize: '1rem' }}>
-                            {g.code} TOTAL DUE (INCL VAT)
+                            {g.code} TOTAL DUE (INCL {taxWordUpper(g.code)})
                           </td>
                           <td style={{ color: '#0d7478', fontWeight: 900, fontSize: '1rem' }}>
                             {fmtMoney(g.totalInclTax, g.symbol)}
@@ -3549,11 +3669,9 @@ const missing = !sv.confirmationNumber ||
                 ))}
               </div>
               <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '1.25rem' }}>
-                Prices are grouped by currency, as an itinerary can mix currencies. Buy and Sell are both
-                VAT-inclusive: the Sell price is the supplier amount plus markup (VAT included), so the client is
-                charged the Sell total as-is. Subtotal (Excl VAT) plus the VAT rows equal TOTAL DUE (INCL. VAT).
-                Input VAT (embedded in Buy) and Net VAT to SARS (Output minus Input, i.e. tax on the markup) are
-                shown for internal tax records only and are never sent to the client. Each section uses its own currency.
+                {pricingGroups.every((g) => isZar(g.code))
+                  ? `Prices are grouped by currency, as an itinerary can mix currencies. Buy and Sell are both VAT-inclusive: the Sell price is the supplier amount plus markup (VAT included), so the client is charged the Sell total as-is. Subtotal (Excl VAT) plus the VAT rows equal TOTAL DUE (INCL. VAT). Input VAT (embedded in Buy) and Net VAT to SARS (Output minus Input, i.e. tax on the markup) are shown for internal tax records only and are never sent to the client. Each section uses its own currency.`
+                  : 'Prices are grouped by currency, as an itinerary can mix currencies. Buy and Sell are both tax-inclusive: the Sell price is the supplier amount plus markup (tax included), so the client is charged the Sell total as-is. Subtotal (Excl Tax) plus the tax rows equal TOTAL DUE (INCL. TAX). Input Tax (embedded in Buy) and Net Tax (Output minus Input, i.e. tax on the markup) are shown for internal tax records only and are never sent to the client. Each section uses its own currency.'}
               </p>
             </div>
           )}

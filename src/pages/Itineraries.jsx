@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
+import { useListRowLimit } from '../hooks/useListRowLimit';
 import { Map, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
 import ClientTourForm from '../components/ClientTourForm';
 
@@ -37,12 +38,17 @@ export const Itineraries = () => {
 
   const [itineraries, setItineraries] = useState([]);
   const [loadingItineraries, setLoadingItineraries] = useState(true);
+  const [fetchingMore, setFetchingMore] = useState(false);
+  const [totalItineraries, setTotalItineraries] = useState(null);
+  const searchTimeoutRef = useRef(null);
 
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
 
-  const fetchItineraries = useCallback(async () => {
+  const { limit: pageSize } = useListRowLimit();
+
+  const fetchItineraries = useCallback(async ({ offset = 0, append = false } = {}) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
@@ -58,28 +64,46 @@ export const Itineraries = () => {
 
       if (!profile?.company_id) {
         setItineraries([]);
+        setTotalItineraries(0);
         setLoadingItineraries(false);
         return;
       }
 
       setLoadingItineraries(true);
+      if (append) setFetchingMore(true);
 
-      const { data, error } = await supabase
+      let itineraryQuery = supabase
         .from('itineraries')
-        .select('*, clients(name, client_type, markup_percentage, deposit_percentage, email, phone, country)')
-        .eq('company_id', profile.company_id)
+        .select('*, clients(name, client_type, markup_percentage, deposit_percentage, email, phone, country)', { count: 'exact' })
+        .eq('company_id', profile.company_id);
+
+      const q = searchQuery.trim();
+      if (q) {
+        const esc = (t) => t.replace(/[\\%_]/g, (m) => '\\' + m);
+        const term = q.replace(/[,()]/g, ' ').trim();
+        const t = esc(term);
+        itineraryQuery = itineraryQuery.or(`itinerary_name.ilike.%${t}%,reference_number.ilike.%${t}%,destination_region.ilike.%${t}%,destination_country.ilike.%${t}%,destination_province.ilike.%${t}%`);
+      }
+
+      const { data, count, error } = await itineraryQuery
         .order('created_at', { ascending: false })
-        .limit(50);
+        .range(offset, offset + pageSize - 1);
 
       if (error) throw error;
-      setItineraries(data || []);
+      setItineraries((prev) => {
+        if (!append) return data || [];
+        const merged = new Map([...prev.map(i => [i.id, i]), ...(data || []).map(i => [i.id, i])]);
+        return Array.from(merged.values());
+      });
+      setTotalItineraries(count ?? (data || []).length);
     } catch (err) {
       console.error('Failed to load itineraries:', err.message);
       setItineraries([]);
     } finally {
       setLoadingItineraries(false);
+      setFetchingMore(false);
     }
-  }, []);
+  }, [searchQuery, pageSize]);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,19 +114,15 @@ export const Itineraries = () => {
     return () => { cancelled = true; };
   }, [fetchItineraries]);
 
+  useEffect(() => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => fetchItineraries(), 350);
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    };
+  }, [searchQuery, fetchItineraries]);
+
   const filteredItineraries = itineraries.filter((it) => {
-    const q = searchQuery.trim().toLowerCase();
-    if (q) {
-      const haystack = [
-        it.clients?.name,
-        it.reference_number,
-        it.itinerary_name,
-        it.destination_region,
-        it.destination_country,
-        it.destination_province
-      ].filter(Boolean).join(' ').toLowerCase();
-      if (!haystack.includes(q)) return false;
-    }
     if (statusFilter && it.status !== statusFilter) return false;
     return true;
   });
@@ -393,8 +413,14 @@ export const Itineraries = () => {
               <tr>
                 <td colSpan="8" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
                   <Map size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
-                  <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>No itineraries yet</h3>
-                  <p>Create your first itinerary to start building tailored tours.</p>
+                  <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>
+                    {searchQuery.trim() ? 'No itineraries match' : 'No itineraries yet'}
+                  </h3>
+                  <p>
+                    {searchQuery.trim()
+                      ? 'Try a different search term or clear the search box.'
+                      : 'Create your first itinerary to start building tailored tours.'}
+                  </p>
                 </td>
               </tr>
             ) : filteredItineraries.length === 0 ? (
@@ -471,6 +497,17 @@ export const Itineraries = () => {
             })}
           </tbody>
         </table>
+        {!loadingItineraries && !fetchingMore && totalItineraries != null && totalItineraries > itineraries.length && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.25rem' }}>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => fetchItineraries({ offset: itineraries.length, append: true })}
+            >
+              Load more ({itineraries.length} of {totalItineraries} itineraries shown)
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

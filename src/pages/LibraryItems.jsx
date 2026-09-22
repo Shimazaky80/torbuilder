@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
+import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
 import { 
   Package, 
@@ -58,10 +59,14 @@ export const LibraryItems = () => {
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
   const [libraryItemsList, setLibraryItemsList] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchingItems, setFetchingItems] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
   const [supplierFilter, setSupplierFilter] = useState('All');
   const [showInlineForm, setShowInlineForm] = useState(false);
+  const searchTimeoutRef = useRef(null);
+  const { limit: pageSize } = useListRowLimit();
 
   // Editing state: when set, the inline form updates these items instead of inserting.
   // Maps form tempId -> existing library_items row id.
@@ -563,10 +568,6 @@ export const LibraryItems = () => {
   }, []);
 
   useEffect(() => {
-    fetchLibraryItems();
-  }, [categoryFilter, supplierFilter]);
-
-  useEffect(() => {
     if (!lightbox) return;
     const onKeyDown = (e) => {
       if (e.key === 'Escape') setLightbox(null);
@@ -660,7 +661,8 @@ export const LibraryItems = () => {
     }
   };
 
-  const fetchLibraryItems = async () => {
+  const fetchLibraryItems = async ({ offset = 0, append = false } = {}) => {
+    setFetchingItems(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -673,12 +675,17 @@ export const LibraryItems = () => {
 
       if (!profile?.company_id) return;
 
-      // ── Fetch all three tables as plain queries (no PostgREST FK joins)
+      // ── Fetch pages of items as plain queries (no PostgREST FK joins).
       // This avoids "schema cache" errors regardless of FK registration state
+      // and keeps each request small, loading rows on demand via search/filters.
+
+      const trimmed = (search || '').trim();
+      const term = trimmed.replace(/[,()]/g, ' ').trim();
+      const esc = (s) => s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
 
       let itemQuery = supabase
         .from('library_items')
-        .select('*')
+        .select('*', { count: 'exact' })
         .eq('company_id', profile.company_id)
         .order('created_at', { ascending: false });
 
@@ -690,8 +697,21 @@ export const LibraryItems = () => {
           ? itemQuery.in('category', [categoryFilter, legacyCategoryName(categoryFilter)])
           : itemQuery.eq('category', categoryFilter);
       }
+      if (term) {
+        const termLower = term.toLowerCase();
+        const matchingSupplierIds = suppliers
+          .filter((s) => (s.name || '').toLowerCase().includes(termLower))
+          .slice(0, 30)
+          .map((s) => s.id);
+        if (matchingSupplierIds.length > 0) {
+          itemQuery = itemQuery.or(`name.ilike.%${esc(term)}%,description.ilike.%${esc(term)}%,supplier_id.in.(${matchingSupplierIds.join(',')})`);
+        } else {
+          itemQuery = itemQuery.or(`name.ilike.%${esc(term)}%,description.ilike.%${esc(term)}%`);
+        }
+      }
+      itemQuery = itemQuery.range(offset, offset + pageSize - 1);
 
-      const { data: items, error: itemsError } = await itemQuery;
+      const { data: items, count, error: itemsError } = await itemQuery;
       if (itemsError) throw itemsError;
 
       const itemIds = (items || []).map(i => i.id);
@@ -742,11 +762,29 @@ export const LibraryItems = () => {
         supplier: supplierMap[item.supplier_id] || null
       }));
 
-      setLibraryItemsList(merged);
+      if (append) {
+        setLibraryItemsList(prev => {
+          const seen = new Set(prev.map(i => i.id));
+          return [...prev, ...merged.filter(i => !seen.has(i.id))];
+        });
+      } else {
+        setLibraryItemsList(merged);
+      }
+      setTotalCount(count || merged.length);
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
+      setFetchingItems(false);
     }
   };
+
+  useEffect(() => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => fetchLibraryItems({ offset: 0 }), 350);
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    };
+  }, [categoryFilter, supplierFilter, search]);
 
   // Add Another Library Item Card in Batch Form
   const handleAddAnotherItem = () => {
@@ -1745,6 +1783,7 @@ adultRate: 0,
       const { error } = await supabase.from('library_items').delete().eq('id', itemId);
       if (error) throw error;
       setLibraryItemsList(prev => prev.filter(item => item.id !== itemId));
+      setTotalCount(c => Math.max(0, c - 1));
       showToast('Library item deleted', 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -2013,12 +2052,8 @@ adultRate: 0,
     });
   };
 
-  // Filter list
-  const filteredList = libraryItemsList.filter(item => {
-    const matchesSearch = item.name.toLowerCase().includes(search.toLowerCase()) ||
-                          (item.supplier?.name && item.supplier.name.toLowerCase().includes(search.toLowerCase()));
-    return matchesSearch;
-  });
+  // Search + filters are applied server-side; the rendered list is the fetched page.
+  const filteredList = libraryItemsList;
 
   return (
     <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
@@ -5222,7 +5257,7 @@ adultRate: 0,
       <div className="admin-table-container">
         <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid #e2e8f0', background: '#fafafa', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#1e293b', margin: 0 }}>
-            Library Items Directory ({filteredList.length})
+            Library Items Directory ({filteredList.length}{totalCount > filteredList.length ? ` of ${totalCount}` : ''})
           </h3>
         </div>
 
@@ -5240,7 +5275,7 @@ adultRate: 0,
             </tr>
           </thead>
           <tbody>
-            {loading ? (
+            {loading || fetchingItems ? (
               <tr><td colSpan="8" className="text-center" style={{ padding: '3rem' }}>Loading library items...</td></tr>
             ) : filteredList.length === 0 ? (
               <tr>
@@ -5715,6 +5750,19 @@ adultRate: 0,
             })}
           </tbody>
         </table>
+
+        {!loading && !fetchingItems && totalCount > filteredList.length && (
+          <div style={{ padding: '1rem', textAlign: 'center', borderTop: '1px solid #e2e8f0' }}>
+            <button
+              type="button"
+              className="secondary-btn"
+              style={{ flex: '0 0 auto' }}
+              onClick={() => fetchLibraryItems({ offset: filteredList.length, append: true })}
+            >
+              Load more ({filteredList.length} of {totalCount} shown)
+            </button>
+          </div>
+        )}
       </div>
 
       {/* IMAGE GALLERY LIGHTBOX */}

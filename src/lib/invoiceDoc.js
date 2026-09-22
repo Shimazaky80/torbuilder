@@ -6,6 +6,31 @@ export const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 10
 export const vatOfInclusive = (amount, rate) => (Number(amount) || 0) * (Number(rate) || 0) / (100 + (Number(rate) || 0));
 export const numOr = (v, fallback) => (v === null || v === undefined || v === '' ? fallback : Number(v));
 
+/* Currency-aware tax wording. ZAR keeps South African VAT / SARS nomenclature
+   byte-identical; every other currency uses generic "Tax" wording so no output
+   document references VAT or SARS for non-ZAR amounts. */
+export const isZar = (ccy) => String(ccy || 'ZAR').toUpperCase() === 'ZAR';
+export const taxWordOf = (ccy) => (isZar(ccy) ? 'VAT' : 'Tax');
+export const taxWordUpper = (ccy) => (isZar(ccy) ? 'VAT' : 'TAX');
+export const taxNoPrefix = (ccy) => (isZar(ccy) ? 'VAT / Tax No:' : 'Tax No:');
+export const taxAgencyOf = (ccy, revenueAgency) => (isZar(ccy) ? 'SARS' : (revenueAgency || 'Revenue Service'));
+export const taxDisplayLabel = (ccy, label, rate) => {
+  if (Number(rate) === 0) return isZar(ccy) ? 'No VAT' : 'No Tax';
+  return label || (isZar(ccy) ? 'VAT' : 'Tax');
+};
+
+/* `${creditLine}`      → tax row label used inside credit-note documents. */
+const taxRowLabel = (ccy, label, rate) =>
+  `${taxWordUpper(ccy)} (${taxDisplayLabel(ccy, label, rate)} ${Number(rate)}%)`;
+
+/* TOTAL DUE / TOTAL CREDITED grand-total lines on tax documents. */
+const totalDueLabel = (inv) => isZar(inv.currency_code)
+  ? `${inv.currency_code} TOTAL DUE (INCL TAX ${inv.tax_label || 'VAT'})`
+  : `${inv.currency_code} TOTAL DUE (INCL TAX)`;
+const totalCreditedLabel = (cn) => isZar(cn.currency_code)
+  ? `TOTAL CREDITED (INCL TAX ${cn.tax_label || 'VAT'})`
+  : 'TOTAL CREDITED (INCL TAX)';
+
 export const fmtMoney = (n, symbol) => `${symbol || ''}${round2(n).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /* Balance still owed on an invoice. A final invoice that has been paid is
@@ -94,7 +119,7 @@ export const buildCurrencyLines = (itinerary, currencyCode, paxCount) => {
         .filter((it) => (it.currency_code || itinerary.currency_code || 'ZAR').toUpperCase() === currencyCode.toUpperCase())
         .forEach((it) => {
           const rate = numOr(it.tax_rate, 15);
-          const label = it.tax_label || 'VAT';
+          const label = taxDisplayLabel(currencyCode, it.tax_label || '', rate);
           const gross = round2(numOr(it.total_sell, 0));
           const vat = round2(vatOfInclusive(gross, rate));
           const net = round2(gross - vat);
@@ -236,7 +261,7 @@ export const invoiceEmail = (invoice, lines) => {
     `${(isProforma ? 'PROFORMA — ' : '')}${TYPE_LABEL[invoice.invoice_type]?.toUpperCase() || 'INVOICE'} ${invoice.invoice_number}`,
     '',
     invoice.supplier_name || '',
-    invoice.supplier_tax_number ? `VAT / Tax No: ${invoice.supplier_tax_number}` : '',
+    invoice.supplier_tax_number ? `${taxNoPrefix(cur)} ${invoice.supplier_tax_number}` : '',
     invoice.supplier_address || '',
     '',
     `Bill To: ${invoice.bill_to_name || '—'}`,
@@ -245,9 +270,9 @@ export const invoiceEmail = (invoice, lines) => {
     '',
     ...(lines || []).map((l) => `Day ${l.day_number}  ${l.item_name}  x${l.quantity}  ${fmtMoney(l.line_total, cur)}`),
     '',
-    `Subtotal (Excl VAT): ${fmtMoney(invoice.subtotal_excl, cur)}`,
-    `VAT (${invoice.tax_label} ${Number(invoice.tax_rate)}%): ${fmtMoney(invoice.tax_total, cur)}`,
-    `${cur} TOTAL DUE (INCL TAX ${invoice.tax_label}): ${fmtMoney(invoice.total_incl, cur)}`,
+    `Subtotal (Excl ${taxWordOf(cur)}): ${fmtMoney(invoice.subtotal_excl, cur)}`,
+    `${taxRowLabel(cur, invoice.tax_label, invoice.tax_rate)}: ${fmtMoney(invoice.tax_total, cur)}`,
+    `${totalDueLabel(invoice)}: ${fmtMoney(invoice.total_incl, cur)}`,
     '',
     isFinal
       ? `${depositPaidLine}\nBALANCE TO BE PAID: ${fmtMoney(effectiveBalance(invoice), cur)}${invoice.status === 'paid' ? ' (PAID — account settled)' : ''}`
@@ -274,7 +299,7 @@ export const receiptEmail = (receipt) => {
     `PAYMENT RECEIPT ${receipt.receipt_number}`,
     '',
     receipt.supplier_name || '',
-    receipt.supplier_tax_number ? `VAT / Tax No: ${receipt.supplier_tax_number}` : '',
+    receipt.supplier_tax_number ? `${taxNoPrefix(receipt.currency_code)} ${receipt.supplier_tax_number}` : '',
     receipt.supplier_address || '',
     '',
     `Received from: ${receipt.bill_to_name || '—'}`,
@@ -301,7 +326,7 @@ export const creditNoteEmail = (cn) => {
     `CREDIT NOTE ${cn.credit_note_number}`,
     '',
     cn.supplier_name || '',
-    cn.supplier_tax_number ? `VAT / Tax No: ${cn.supplier_tax_number}` : '',
+    cn.supplier_tax_number ? `${taxNoPrefix(cur)} ${cn.supplier_tax_number}` : '',
     cn.supplier_address || '',
     '',
     `Credited to: ${cn.bill_to_name || '—'}`,
@@ -309,9 +334,9 @@ export const creditNoteEmail = (cn) => {
     `Against invoice: ${cn.invoice_number}`,
     cn.reason ? `Reason: ${cn.reason}` : '',
     '',
-    `Subtotal (Excl VAT): ${fmtMoney(cn.subtotal_excl, cur)}`,
-    `VAT (${cn.tax_label} ${Number(cn.tax_rate)}%): ${fmtMoney(cn.tax_total, cur)}`,
-    `TOTAL CREDITED (INCL TAX ${cn.tax_label}): ${fmtMoney(cn.total_incl, cur)}`,
+    `Subtotal (Excl ${taxWordOf(cur)}): ${fmtMoney(cn.subtotal_excl, cur)}`,
+    `${taxRowLabel(cur, cn.tax_label, cn.tax_rate)}: ${fmtMoney(cn.tax_total, cur)}`,
+    `${totalCreditedLabel(cn)}: ${fmtMoney(cn.total_incl, cur)}`,
     '',
     'This credit note reverses the invoice above in full and balances the account.',
     '',
@@ -346,18 +371,18 @@ export const invoiceDocHtml = (inv, lines, sym, opts) => {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(inv.invoice_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
     <h1>${htmlEscape(inv.supplier_name || 'Invoice')}</h1>
-    <p class="muted">${inv.supplier_tax_number ? `VAT / Tax No: ${htmlEscape(inv.supplier_tax_number)}` : ''}</p>
+    <p class="muted">${inv.supplier_tax_number ? `${taxNoPrefix(inv.currency_code)} ${htmlEscape(inv.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(inv.supplier_address || '').replace(/\n/g, '<br>')}</p>
     <hr/>
     <h2>${inv.status === 'proforma' ? 'PROFORMA — ' : ''}${htmlEscape(TYPE_LABEL[inv.invoice_type] || 'Invoice')} ${htmlEscape(inv.invoice_number)}</h2>
     <p class="muted">Issued: ${htmlEscape(inv.issued_date || '—')}${inv.due_date ? ` · Due: ${htmlEscape(inv.due_date)}` : ''} · Currency: ${htmlEscape(inv.currency_code)}${inv.status === 'paid' ? ' · PAID' : ''}</p>
     <div class="box"><b>Bill To</b><br>${htmlEscape(inv.bill_to_name || '—')}<br>${htmlEscape(inv.bill_to_address || '').replace(/\n/g, '<br>')}</div>
     <table>
-      <tr><th>Day</th><th>Description</th><th class="num">Qty</th><th class="num">Unit</th><th class="num">Subtotal (Excl VAT)</th><th class="num">VAT</th><th class="num">Total</th></tr>
+      <tr><th>Day</th><th>Description</th><th class="num">Qty</th><th class="num">Unit</th><th class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</th><th class="num">${taxWordUpper(inv.currency_code)}</th><th class="num">Total</th></tr>
       ${(lines || []).map((l) => `<tr><td>${l.day_number}</td><td>${htmlEscape(l.item_name)}${l.supplier_name ? `<br><span class="muted">${htmlEscape(l.supplier_name)}</span>` : ''}</td><td class="num">${l.quantity}</td><td class="num">${fmtMoney(l.unit_price, sym)}</td><td class="num">${fmtMoney(l.subtotal_excl, sym)}</td><td class="num">${fmtMoney(l.tax_amount, sym)}</td><td class="num">${fmtMoney(l.line_total, sym)}</td></tr>`).join('')}
-      <tr class="grand"><td colspan="6" class="num">Subtotal (Excl VAT)</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
-      <tr class="grand"><td colspan="6" class="num">${htmlEscape(inv.tax_label)} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
-      <tr class="grand"><td colspan="6" class="num">${htmlEscape(inv.currency_code)} TOTAL DUE (INCL TAX ${htmlEscape(inv.tax_label)})</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
+      <tr class="grand"><td colspan="6" class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
+      <tr class="grand"><td colspan="6" class="num">${htmlEscape(taxDisplayLabel(inv.currency_code, inv.tax_label, inv.tax_rate))} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
+      <tr class="grand"><td colspan="6" class="num">${htmlEscape(totalDueLabel(inv))}</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
       ${creditLine}
     </table>
     <div class="box">${dueLine}</div>
@@ -370,7 +395,7 @@ export const invoiceDocHtml = (inv, lines, sym, opts) => {
 export const receiptDocHtml = (r, sym, opts) => `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(r.receipt_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
     <h1>${htmlEscape(r.supplier_name || 'Payment Receipt')}</h1>
-    <p class="muted">${r.supplier_tax_number ? `VAT / Tax No: ${htmlEscape(r.supplier_tax_number)}` : ''}</p>
+    <p class="muted">${r.supplier_tax_number ? `${taxNoPrefix(r.currency_code)} ${htmlEscape(r.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(r.supplier_address || '').replace(/\n/g, '<br>')}</p>
     <hr/>
     <h2>PAYMENT RECEIPT ${htmlEscape(r.receipt_number)}</h2>
@@ -387,7 +412,7 @@ export const receiptDocHtml = (r, sym, opts) => `<!doctype html><html><head><met
 export const creditNoteDocHtml = (cn, sym, opts) => `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(cn.credit_note_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
     <h1>${htmlEscape(cn.supplier_name || 'Credit Note')}</h1>
-    <p class="muted">${cn.supplier_tax_number ? `VAT / Tax No: ${htmlEscape(cn.supplier_tax_number)}` : ''}</p>
+    <p class="muted">${cn.supplier_tax_number ? `${taxNoPrefix(cn.currency_code)} ${htmlEscape(cn.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(cn.supplier_address || '').replace(/\n/g, '<br>')}</p>
     <hr/>
     <h2>CREDIT NOTE ${htmlEscape(cn.credit_note_number)}</h2>
@@ -396,9 +421,9 @@ export const creditNoteDocHtml = (cn, sym, opts) => `<!doctype html><html><head>
     ${cn.reason ? `<p class="muted"><b>Reason:</b> ${htmlEscape(cn.reason)}</p>` : ''}
     <table>
       <tr><th>Description</th><th class="num">Amount</th></tr>
-      <tr><td>Reversal of ${htmlEscape(TYPE_LABEL[cn.invoice_type] || 'Invoice')} ${htmlEscape(cn.invoice_number)} — Subtotal (Excl VAT)</td><td class="num">${fmtMoney(cn.subtotal_excl, sym)}</td></tr>
-      <tr><td>${htmlEscape(cn.tax_label)} (${Number(cn.tax_rate)}%)</td><td class="num">${fmtMoney(cn.tax_total, sym)}</td></tr>
-      <tr class="grand"><td>${htmlEscape(cn.currency_code)} TOTAL CREDITED (INCL TAX ${htmlEscape(cn.tax_label)})</td><td class="num">${fmtMoney(cn.total_incl, sym)}</td></tr>
+      <tr><td>Reversal of ${htmlEscape(TYPE_LABEL[cn.invoice_type] || 'Invoice')} ${htmlEscape(cn.invoice_number)} — Subtotal (Excl ${taxWordOf(cn.currency_code)})</td><td class="num">${fmtMoney(cn.subtotal_excl, sym)}</td></tr>
+      <tr><td>${htmlEscape(taxRowLabel(cn.currency_code, cn.tax_label, cn.tax_rate))}</td><td class="num">${fmtMoney(cn.tax_total, sym)}</td></tr>
+      <tr class="grand"><td>${htmlEscape(totalCreditedLabel(cn))}</td><td class="num">${fmtMoney(cn.total_incl, sym)}</td></tr>
     </table>
     <div class="box"><b>${fmtMoney(cn.total_incl, sym)} credited</b> to ${htmlEscape(cn.bill_to_name || 'the client')}. This credit note reverses the invoice in full and balances the account.</div>
     </body></html>`;
@@ -419,11 +444,11 @@ export const invoiceExcelHtml = (inv, lines, sym) => {
       <tr><td colspan="9">Issued: ${htmlEscape(inv.issued_date || '')}${inv.due_date ? ` · Due: ${htmlEscape(inv.due_date)}` : ''} · Currency: ${htmlEscape(inv.currency_code)}</td></tr>
       <tr><td colspan="9">Bill To: ${htmlEscape(inv.bill_to_name || '')}</td></tr>
       <tr></tr>
-      <tr><th>Day</th><th>Date</th><th>Category</th><th>Description</th><th>Qty</th><th class="num">Unit Price</th><th class="num">Subtotal (Excl VAT)</th><th class="num">VAT</th><th class="num">Total</th></tr>
+      <tr><th>Day</th><th>Date</th><th>Category</th><th>Description</th><th>Qty</th><th class="num">Unit Price</th><th class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</th><th class="num">${taxWordUpper(inv.currency_code)}</th><th class="num">Total</th></tr>
       ${rows}
-      <tr class="grand"><td colspan="8" class="num">Subtotal (Excl VAT)</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
-      <tr class="grand"><td colspan="8" class="num">${htmlEscape(inv.tax_label)} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
-      <tr class="grand"><td colspan="8" class="num">${htmlEscape(inv.currency_code)} TOTAL DUE (INCL TAX ${htmlEscape(inv.tax_label)})</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
+      <tr class="grand"><td colspan="8" class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
+      <tr class="grand"><td colspan="8" class="num">${htmlEscape(taxDisplayLabel(inv.currency_code, inv.tax_label, inv.tax_rate))} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
+      <tr class="grand"><td colspan="8" class="num">${htmlEscape(totalDueLabel(inv))}</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
       ${credit}
       <tr class="grand"><td colspan="8" class="num">${isFinal ? 'BALANCE TO BE PAID' : 'BALANCE REMAINING AFTER DEPOSIT'}</td><td class="num">${fmtMoney(effectiveBalance(inv), sym)}</td></tr>
     </table>

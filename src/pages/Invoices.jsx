@@ -1,7 +1,8 @@
-﻿import { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
+import { useListRowLimit } from '../hooks/useListRowLimit';
 import {
   round2,
   fmtMoney,
@@ -22,7 +23,11 @@ import {
   invoiceDocHtml,
   receiptDocHtml,
   creditNoteDocHtml,
-  invoiceExcelHtml
+  invoiceExcelHtml,
+  isZar,
+  taxWordOf,
+  taxWordUpper,
+  taxDisplayLabel
 } from '../lib/invoiceDoc';
 import {
   Receipt,
@@ -48,12 +53,16 @@ export const Invoices = () => {
   const { currencies } = useCurrencies();
   const [companyId, setCompanyId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [fetchingInvoices, setFetchingInvoices] = useState(false);
   const [invoices, setInvoices] = useState([]);
+  const [totalInvoices, setTotalInvoices] = useState(null);
   const [billing, setBilling] = useState(null);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const searchTimeoutRef = useRef(null);
+  const { limit: pageSize } = useListRowLimit();
 
   const [viewing, setViewing] = useState(null);
   const [viewLines, setViewLines] = useState([]);
@@ -85,15 +94,36 @@ export const Invoices = () => {
     return profile?.company_id || null;
   }, []);
 
-  const fetchInvoices = useCallback(async (cid) => {
-    const { data, error } = await supabase
-      .from('invoices')
-      .select('*, itineraries(reference_number, itinerary_name), clients(name)')
-      .eq('company_id', cid)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    setInvoices(data || []);
-  }, []);
+  const fetchInvoices = useCallback(async (cid, { offset = 0, append = false } = {}) => {
+    setFetchingInvoices(true);
+    try {
+      const esc = (t) => t.replace(/[\\%_]/g, (m) => '\\' + m);
+      const term = (search || '').replace(/[,()]/g, ' ').trim();
+      let invoiceQuery = supabase
+        .from('invoices')
+        .select('*, itineraries(reference_number, itinerary_name), clients(name)', { count: 'exact' })
+        .eq('company_id', cid);
+
+      if (term) {
+        const t = esc(term);
+        invoiceQuery = invoiceQuery.or(`invoice_number.ilike.%${t}%,bill_to_name.ilike.%${t}%`);
+      }
+
+      const { data, count, error } = await invoiceQuery
+        .order('created_at', { ascending: false })
+        .range(offset, offset + pageSize - 1);
+
+      if (error) throw error;
+      setInvoices((prev) => {
+        if (!append) return data || [];
+        const merged = new Map([...prev.map(v => [v.id, v]), ...(data || []).map(v => [v.id, v])]);
+        return Array.from(merged.values());
+      });
+      setTotalInvoices(count ?? (data || []).length);
+    } finally {
+      setFetchingInvoices(false);
+    }
+  }, [search, pageSize]);
 
   const fetchBilling = useCallback(async (cid) => {
     const { data, error } = await supabase.from('company_billing_settings').select('*').eq('company_id', cid).maybeSingle();
@@ -114,7 +144,9 @@ export const Invoices = () => {
         const cid = await fetchCompanyId();
         if (cancelled) return;
         setCompanyId(cid);
-        if (cid) await Promise.all([fetchInvoices(cid), fetchBilling(cid), fetchBanks(cid)]);
+        if (cid) {
+          await Promise.all([fetchInvoices(cid), fetchBilling(cid), fetchBanks(cid)]);
+        }
       } catch (err) {
         if (!cancelled) showToast(err.message || 'Failed to load invoices', 'error');
       } finally {
@@ -122,20 +154,26 @@ export const Invoices = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchCompanyId, fetchInvoices, fetchBilling, fetchBanks, showToast]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchCompanyId, fetchBilling, fetchBanks, showToast]);
+
+  useEffect(() => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => {
+      if (companyId) fetchInvoices(companyId);
+    }, 350);
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    };
+  }, [search, companyId, fetchInvoices]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
     return invoices.filter((inv) => {
       if (statusFilter !== 'all' && inv.status !== statusFilter) return false;
       if (typeFilter !== 'all' && inv.invoice_type !== typeFilter) return false;
-      if (q) {
-        const hay = `${inv.invoice_number} ${inv.bill_to_name} ${inv.itineraries?.reference_number || ''} ${inv.itineraries?.itinerary_name || ''}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
       return true;
     });
-  }, [invoices, statusFilter, typeFilter, search]);
+  }, [invoices, statusFilter, typeFilter]);
 
   /* â”€â”€ Wizard: load qualified itineraries (provisional â†’ deposit, confirmed â†’ final) */
   const openWizard = async () => {
@@ -769,7 +807,7 @@ export const Invoices = () => {
           <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading invoicesâ€¦</div>
         ) : filtered.length === 0 ? (
           <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>
-            No invoices yet. Click <b>New Invoice</b> to issue one from a provisional or confirmed itinerary.
+            {search.trim() ? 'No invoices match your search.' : <>No invoices yet. Click <b>New Invoice</b> to issue one from a provisional or confirmed itinerary.</>}
           </div>
         ) : (
           <table className="admin-table">
@@ -804,6 +842,19 @@ export const Invoices = () => {
               ))}
             </tbody>
           </table>
+        )}
+        {invoices.length > 0 && totalInvoices != null && totalInvoices > invoices.length && (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '1rem' }}>
+            <button
+              type="button"
+              className="secondary-btn"
+              style={{ padding: '0.6rem 1.5rem' }}
+              disabled={fetchingInvoices}
+              onClick={() => companyId && fetchInvoices(companyId, { offset: invoices.length, append: true })}
+            >
+              {fetchingInvoices ? 'Loading…' : `Load more (${invoices.length} of ${totalInvoices} invoices)`}
+            </button>
+          </div>
         )}
       </div>
 
@@ -867,7 +918,7 @@ export const Invoices = () => {
                   <div>
                     {billing?.logo_data_url && <img src={billing.logo_data_url} alt="Company logo" style={{ display: 'block', maxWidth: `${LOGO_WIDTHS[billing.logo_size] || LOGO_WIDTHS.md}px`, maxHeight: '72px', objectFit: 'contain', marginBottom: '6px' }} />}
                     <div style={{ fontWeight: 800, fontSize: '1.05rem' }}>{viewing.supplier_name || 'Your Company'}</div>
-                    {viewing.supplier_tax_number && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>VAT / Tax No: {viewing.supplier_tax_number}</div>}
+                    {viewing.supplier_tax_number && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>{isZar(viewing.currency_code) ? 'VAT / Tax No:' : 'Tax No:'} {viewing.supplier_tax_number}</div>}
                     {viewing.supplier_address && <div style={{ fontSize: '0.85rem', color: '#64748b', whiteSpace: 'pre-line' }}>{viewing.supplier_address}</div>}
                   </div>
                   <div style={{ textAlign: 'right' }}>
@@ -891,8 +942,8 @@ export const Invoices = () => {
                       <th>Description</th>
                       <th style={{ textAlign: 'right' }}>Qty</th>
                       <th style={{ textAlign: 'right' }}>Unit</th>
-                      <th style={{ textAlign: 'right' }}>Subtotal (Excl VAT)</th>
-                      <th style={{ textAlign: 'right' }}>VAT</th>
+                      <th style={{ textAlign: 'right' }}>Subtotal (Excl {taxWordOf(viewing.currency_code)})</th>
+                      <th style={{ textAlign: 'right' }}>{taxWordUpper(viewing.currency_code)}</th>
                       <th style={{ textAlign: 'right' }}>Total</th>
                     </tr>
                   </thead>
@@ -909,15 +960,15 @@ export const Invoices = () => {
                       </tr>
                     ))}
                     <tr style={{ background: '#f8fafc' }}>
-                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700 }}>Subtotal (Excl VAT)</td>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700 }}>Subtotal (Excl {taxWordOf(viewing.currency_code)})</td>
                       <td style={{ textAlign: 'right', fontWeight: 800 }}>{fmtMoney(viewing.subtotal_excl, symOf(viewing.currency_code))}</td>
                     </tr>
                     <tr style={{ background: '#f8fafc' }}>
-                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700 }}>{viewing.tax_label} ({Number(viewing.tax_rate)}%)</td>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700 }}>{isZar(viewing.currency_code) ? `${viewing.tax_label} (${Number(viewing.tax_rate)}%)` : `${taxWordUpper(viewing.currency_code)} (${taxDisplayLabel(viewing.currency_code, viewing.tax_label, viewing.tax_rate)} ${Number(viewing.tax_rate)}%)`}</td>
                       <td style={{ textAlign: 'right', fontWeight: 800 }}>{fmtMoney(viewing.tax_total, symOf(viewing.currency_code))}</td>
                     </tr>
                     <tr style={{ background: '#f0fdfa' }}>
-                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 900 }}>{viewing.currency_code} TOTAL DUE (INCL TAX {viewing.tax_label})</td>
+                      <td colSpan="6" style={{ textAlign: 'right', fontWeight: 900 }}>{viewing.currency_code} TOTAL DUE ({isZar(viewing.currency_code) ? `INCL TAX ${viewing.tax_label}` : 'INCL TAX'})</td>
                       <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(viewing.total_incl, symOf(viewing.currency_code))}</td>
                     </tr>
                     {viewing.invoice_type === 'final' && Number(viewing.credited_amount) > 0 && (
@@ -1152,7 +1203,7 @@ export const Invoices = () => {
                 </p>
                 <table className="admin-table">
                   <thead>
-                    <tr><th>Currency</th><th style={{ textAlign: 'right' }}>Subtotal (Excl VAT)</th><th style={{ textAlign: 'right' }}>VAT</th><th style={{ textAlign: 'right' }}>Total (Incl Tax)</th><th style={{ textAlign: 'right' }}>Action</th></tr>
+                    <tr><th>Currency</th><th style={{ textAlign: 'right' }}>Subtotal (Excl {currencyGroups.some((gg) => !isZar(gg.code)) ? 'Tax' : 'VAT'})</th><th style={{ textAlign: 'right' }}>{currencyGroups.some((gg) => !isZar(gg.code)) ? 'TAX' : 'VAT'}</th><th style={{ textAlign: 'right' }}>Total (Incl Tax)</th><th style={{ textAlign: 'right' }}>Action</th></tr>
                   </thead>
                   <tbody>
                     {currencyGroups.map((g) => (
@@ -1204,12 +1255,12 @@ export const Invoices = () => {
                 </table>
 
                 <div style={{ marginTop: '0.75rem', background: '#f8fafc', borderRadius: '10px', padding: '0.85rem 1rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Subtotal (Excl VAT)</span><b>{fmtMoney(selectedGroup.subtotalExcl, symOf(selectedGroup.code))}</b></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Subtotal (Excl {taxWordOf(selectedGroup.code)})</span><b>{fmtMoney(selectedGroup.subtotalExcl, symOf(selectedGroup.code))}</b></div>
                   {selectedGroup.taxEntries.map((te) => (
-                    <div key={te.label} style={{ display: 'flex', justifyContent: 'space-between' }}><span>{te.label} ({Number(te.rate)}%)</span><b>{fmtMoney(te.amount, symOf(selectedGroup.code))}</b></div>
+                    <div key={te.label} style={{ display: 'flex', justifyContent: 'space-between' }}><span>{taxWordUpper(selectedGroup.code)} ({taxDisplayLabel(selectedGroup.code, te.label, te.rate)} {Number(te.rate)}%)</span><b>{fmtMoney(te.amount, symOf(selectedGroup.code))}</b></div>
                   ))}
                   <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #e2e8f0', marginTop: '0.4rem', paddingTop: '0.4rem', fontWeight: 900 }}>
-                    <span>{selectedGroup.code} TOTAL DUE (INCL TAX {selectedGroup.taxEntries[0]?.label || 'VAT'})</span>
+                    <span>{selectedGroup.code} TOTAL DUE ({isZar(selectedGroup.code) ? `INCL TAX ${selectedGroup.taxEntries[0]?.label || 'VAT'}` : 'INCL TAX'})</span>
                     <span>{fmtMoney(selectedGroup.totalIncl, symOf(selectedGroup.code))}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.4rem', color: '#64748b' }}>

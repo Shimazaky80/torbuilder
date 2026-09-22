@@ -14,6 +14,7 @@ import {
   isAdultTraveller,
   calculateRoomCharges
 } from '../lib/roomAllocationHelper';
+import { taxWordOf } from '../lib/invoiceDoc';
 import './RoomAllocationModal.css';
 
 export default function RoomAllocationModal({
@@ -380,7 +381,7 @@ export default function RoomAllocationModal({
                 {currencyCode} {financialSummary.totalSell.toFixed(2)}
               </div>
               <div className="text-[11px] text-slate-500 font-medium">
-                Excl. VAT: {currencyCode} {financialSummary.totalExcl.toFixed(2)} | Buy: {currencyCode} {financialSummary.totalBuy.toFixed(2)}
+                Excl. {taxWordOf(currencyCode)}: {currencyCode} {financialSummary.totalExcl.toFixed(2)} | Buy: {currencyCode} {financialSummary.totalBuy.toFixed(2)}
               </div>
             </div>
           </div>

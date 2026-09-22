@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
+import { useListRowLimit } from '../hooks/useListRowLimit';
 import { 
   Building2, 
   Search, 
@@ -27,8 +28,13 @@ export const Suppliers = () => {
   const [suppliers, setSuppliers] = useState([]);
   const [userProfile, setUserProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [fetchingSuppliers, setFetchingSuppliers] = useState(false);
+  const [totalSuppliers, setTotalSuppliers] = useState(null);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
+
+  const searchTimeoutRef = useRef(null);
+  const { limit: pageSize } = useListRowLimit();
   
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState(null);
@@ -73,12 +79,8 @@ export const Suppliers = () => {
     'Optional Add-Ons'
   ];
 
-  useEffect(() => {
-    fetchSuppliers();
-  }, []);
-
-  const fetchSuppliers = async () => {
-    setLoading(true);
+  const fetchSuppliers = async ({ offset = 0, append = false } = {}) => {
+    setFetchingSuppliers(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -93,23 +95,49 @@ export const Suppliers = () => {
 
       if (!profile?.company_id) {
         setSuppliers([]);
+        setTotalSuppliers(0);
         return;
       }
 
-      const { data, error } = await supabase
+      const trimmed = (search || '').trim();
+      let supplierQuery = supabase
         .from('suppliers')
-        .select('*')
-        .eq('company_id', profile.company_id)
-        .order('name', { ascending: true });
+        .select('*', { count: 'exact' })
+        .eq('company_id', profile.company_id);
+
+      if (trimmed) {
+        supplierQuery = supplierQuery.or(
+          `name.ilike.%${trimmed}%,contact_person.ilike.%${trimmed}%,city.ilike.%${trimmed}%,city_location.ilike.%${trimmed}%`
+        );
+      }
+
+      const { data, count, error } = await supplierQuery
+        .order('name', { ascending: true })
+        .range(offset, offset + pageSize - 1);
 
       if (error) throw error;
-      setSuppliers(data || []);
+      setSuppliers((prev) => {
+        if (!append) return data || [];
+        const merged = new Map([...prev.map(s => [s.id, s]), ...(data || []).map(s => [s.id, s])]);
+        return Array.from(merged.values());
+      });
+      setTotalSuppliers(count ?? (data || []).length);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
       setLoading(false);
+      setFetchingSuppliers(false);
     }
   };
+
+  useEffect(() => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => fetchSuppliers(), 350);
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, pageSize]);
 
   const handleOpenAddForm = () => {
     setEditingSupplier(null);
@@ -241,15 +269,8 @@ export const Suppliers = () => {
   };
 
   const filteredSuppliers = suppliers.filter(s => {
-    const matchesSearch = 
-      s.name.toLowerCase().includes(search.toLowerCase()) ||
-      (s.city && s.city.toLowerCase().includes(search.toLowerCase())) ||
-      (s.city_location && s.city_location.toLowerCase().includes(search.toLowerCase())) ||
-      (s.contact_person && s.contact_person.toLowerCase().includes(search.toLowerCase()));
-    
     const matchesCategory = categoryFilter === 'All' || s.category === categoryFilter;
-
-    return matchesSearch && matchesCategory;
+    return matchesCategory;
   });
 
   return (
@@ -608,8 +629,12 @@ export const Suppliers = () => {
               <tr>
                 <td colSpan="6" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
                   <Building2 size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
-                  <h3>No Suppliers Found</h3>
-                  <p>Click "Add New Supplier" above to create supplier records.</p>
+                  <h3>{search.trim() ? 'No Suppliers Match' : 'No Suppliers Found'}</h3>
+                  <p>
+                    {search.trim()
+                      ? 'Try a different search term or clear the search box.'
+                      : 'Click "Add New Supplier" above to create supplier records.'}
+                  </p>
                 </td>
               </tr>
             ) : filteredSuppliers.map((supplier) => (
@@ -692,6 +717,17 @@ export const Suppliers = () => {
             ))}
           </tbody>
         </table>
+        {!loading && !fetchingSuppliers && totalSuppliers != null && totalSuppliers > suppliers.length && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.25rem' }}>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => fetchSuppliers({ offset: suppliers.length, append: true })}
+            >
+              Load more ({suppliers.length} of {totalSuppliers} suppliers shown)
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
