@@ -43,7 +43,10 @@ import { useCurrencies } from '../hooks/useCurrencies';
 import ClientTourForm from '../components/ClientTourForm';
 import { usePageGuard } from '../context/NavigationGuardContext';
 import RoomAllocationModal from '../components/RoomAllocationModal';
-import { validateRoomAllocation } from '../lib/roomAllocationHelper';
+import { validateRoomAllocation, isAdultTraveller } from '../lib/roomAllocationHelper';
+import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
+import { accommodationBreakdown } from '../lib/accommodationBreakdown';
+import { LIBRARY_ITEM_LIGHT_FIELDS } from '../lib/libraryItemFields';
 import {
   buildLinesFromDays,
   accountingPayload,
@@ -59,7 +62,8 @@ import {
   taxWordOf,
   taxWordUpper,
   taxAgencyOf,
-  taxDisplayLabel
+  taxDisplayLabel,
+  abbrevMealPlan
 } from '../lib/invoiceDoc';
 
 /* â”€â”€â”€ Pure helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -189,15 +193,18 @@ const tierRateForPax = (rate, pax) => {
 // Accommodation rates are quoted per room occupancy, not per traveller:
 //   1 traveller -> single rate (price_1_adult / single_room_rate)
 //   2 travellers -> per-person sharing rate (price_2_adults / double_twin_rate)
-//   3+ travellers -> per-person rate for 3+ sharing
-// Returns the per-person figure for the current group size, so the line
-// (perPax x pax) reproduces the contracted room cost for the whole group.
+//   3+ travellers -> the first 2 adults share at the sharing rate and each
+//   additional adult adds the extra-adult rate (price_3_plus_adults, falling
+//   back to the sharing rate) — i.e. 2 x sharing + (pax - 2) x extra, divided
+//   by pax for the per-person figure. Contract room cost = perPax x pax.
 const accommodationPaxRate = (rate, pax) => {
   const p = Number(pax) || 0;
   const num = (v) => parseFloat(v) || 0;
   if (p <= 1) return num(rate?.price_1_adult) || num(rate?.single_room_rate) || num(rate?.unit_price) || 0;
   if (p === 2) return num(rate?.price_2_adults) || num(rate?.double_twin_rate) || 0;
-  return num(rate?.price_3_plus_adults) || num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
+  const sharing = num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
+  const extra = num(rate?.price_3_plus_adults) > 0 ? num(rate?.price_3_plus_adults) : sharing;
+  return p > 0 ? (2 * sharing + Math.max(0, p - 2) * extra) / p : 0;
 };
 
 // Per-person buy figure implied by a contract, given the traveller count.
@@ -216,6 +223,61 @@ const contractPaxRate = (item, code, pax) => {
   if (basis === 'per_person_sharing') return accommodationPaxRate(rate, p);
   if (isFlatBasis(basis)) return p > 0 ? raw / p : raw;
   return raw;
+};
+
+/* Date span shown in the per-person pricing breakdown. Starts on the first
+   day the currency appears; ends on the last day — extended by one day (the
+   checkout) when that last day contains an accommodation service, matching
+   how a hotel stay on 12–13 Dec runs to a 14 Dec checkout. */
+const ppDateRange = (grp) => {
+  const used = (grp?.days || []).filter((r) => r.date && (r.services || []).length);
+  if (!used.length) return '—';
+  const first = used[0].date;
+  const lastDay = used[used.length - 1];
+  const staysOver = (lastDay.services || []).some((s) => /accommodation/i.test(s.category || ''));
+  return `${first} - ${staysOver ? addDaysToDate(lastDay.date, 1) : lastDay.date}`;
+};
+
+/* Per-currency "per person" pricing breakdown used when the Presentation
+   preference is "total per person". Delegates the pricing math to the shared
+   perPersonPricing helper so itinerary exports and invoice documents always
+   agree:
+     - Per person sharing: the base an adult pays when sharing accommodation
+       plus all non-accommodation services per person.
+     - Single supplement: single-occupancy rooms re-priced from the single rate
+       instead of the sharing rate (single − sharing) per night. Omitted when
+       every traveller shares.
+     - Per child: children sharing with adults charged at the child rate where
+       one exists (including an explicit 0 = free child) — the sharing base
+       plus the per-child child-rate difference. Omitted when no child travels.
+       Children with no configured child rate pay the adult sharing figure. */
+const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) => {
+  const services = [];
+  (days || []).forEach((d) => {
+    (d.services || []).forEach((sv) => {
+      if ((sv.currencyCode || 'ZAR').toUpperCase() !== String(code).toUpperCase()) return;
+      services.push({
+        category: sv.category,
+        currencyCode: sv.currencyCode,
+        sellPP: Number(sv.sellPP) || 0,
+        taxRate: numOr(sv.taxRate, defaults.defaultTaxRate),
+        itemId: sv.itemId || null,
+        roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
+        markup: Number(sv.markup) || 0
+      });
+    });
+  });
+  const rateBy = (itemId) => {
+    if (!itemId) return null;
+    const item = libraryItems.find((x) => String(x.id) === String(itemId));
+    if (!item) return null;
+    const rate = rateForItem(item, code);
+    return rate ? { ...rate, _ageRanges: item.child_age_ranges || [] } : null;
+  };
+  const list = Array.isArray(travellers) ? travellers : [];
+  const pax = Math.max(list.length, Number(defaults.paxCount) || 0, 1);
+  const paxList = list.length ? list : Array.from({ length: pax }, () => ({ age: 30 }));
+  return computePerPersonRows({ services, travellers: paxList, rateBy, defaultTaxRate: defaults.defaultTaxRate });
 };
 
 const visibleInCurrency = (item, code) => {
@@ -595,6 +657,7 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
     `Supplier: ${group.label}`,
     `Itinerary: ${meta.itineraryName}`,
     `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
+    `Tour Designer: ${meta.consultantName || '—'}`,
     `Client: ${meta.client?.name || '—'}`,
     `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
     ...travellerDetailLines(meta.travellers),
@@ -678,6 +741,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
       <table>
         <tr><td class="h">Itinerary</td><td>${esc(meta.itineraryName || '—')}</td><td class="h">Reference</td><td>${esc(meta.referenceNumber || meta.reference || '—')}</td></tr>
         <tr><td class="h">Client</td><td>${clientLine}</td><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td></tr>
+        <tr><td class="h">Tour Designer</td><td>${esc(meta.consultantName || '—')}</td><td class="h">Dates</td><td>${esc(formatDateLong(meta.travelStart))} → ${esc(formatDateLong(meta.travelEnd))}</td></tr>
         <tr><td class="h">Travellers</td><td colspan="3">${esc(trav)}</td></tr>
         ${travellerDetailLines(meta.travellers).map((d) => `<tr><td class="h">Traveller details</td><td colspan="3">${esc(d)}</td></tr>`).join('')}
         ${notes.map((n) => `<tr><td class="h">Note</td><td colspan="3">${esc(n)}</td></tr>`).join('')}
@@ -720,6 +784,7 @@ const DEPOSIT_PCT = 30;
 const invoiceHeaderLines = (meta) => [
   `Itinerary: ${meta.itineraryName}`,
   `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
+  `Tour Designer: ${meta.consultantName || '—'}`,
   `Client: ${meta.client?.name || '—'}`,
   `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
   ...travellerDetailLines(meta.travellers),
@@ -749,7 +814,7 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
     '',
     ...lines,
     '',
-    'Operational contact: ' + (meta.client?.phone || '—')
+    'Operational contact: ' + (meta.client?.contact_cell || meta.client?.contact_tel || '—')
   ].join('\n');
 };
 
@@ -922,6 +987,8 @@ export const ItineraryBuilder = () => {
   const [availableItineraries, setAvailableItineraries] = useState([]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [editSvc, setEditSvc] = useState(null);
+  const [copyDays, setCopyDays] = useState([]);
+  const [copyAllDays, setCopyAllDays] = useState(false);
   const [dayNotesDay, setDayNotesDay] = useState(null);
   const [bootedState, setBootedState] = useState(false);
   const [lastSavedKey, setLastSavedKey] = useState(null);
@@ -955,6 +1022,7 @@ export const ItineraryBuilder = () => {
   const markupPct = Number(meta.client?.markup_percentage) || 0;
   const currentDay = days[selectedDayIndex] || null;
   const stage = meta.status || 'quotation';
+  const itineraryDocAllowed = stage === 'quotation' || stage === 'provisional';
   const isProvisional = stage === 'provisional';
   const isConfirmed = stage === 'confirmed';
   const isInProgress = stage === 'in_progress';
@@ -981,8 +1049,11 @@ export const ItineraryBuilder = () => {
   }, [isSouthAfricanTenant]);
   const defaultTax = taxRates.find((t) => t.is_active && t.is_default)
     || taxRates.find((t) => t.is_active) || null;
-  const defaultTaxRate = Number(defaultTax?.rate ?? 15);
-  const defaultTaxLabel = defaultTax?.name || 'VAT';
+  /* No active tax rate configured => the tenant charges no tax at all. Falls
+     back to 0 (not a hardcoded 15) so deactivating every tax in Settings
+     removes tax from all calculations and documents. */
+  const defaultTaxRate = Number(defaultTax?.rate ?? 0);
+  const defaultTaxLabel = defaultTax?.name || 'Tax';
   const defaultRevenueAgency = defaultTax?.revenue_agency || '';
 
   /* Deposit policy: per-client override, else tenant default from Settings. */
@@ -1155,7 +1226,7 @@ export const ItineraryBuilder = () => {
     try {
       const { data: items } = await supabase
         .from('library_items')
-        .select('*')
+        .select(LIBRARY_ITEM_LIGHT_FIELDS)
         .in('id', ids);
       const itemIds = (items || []).map((i) => i.id);
       const { data: ratesData } = itemIds.length
@@ -1199,7 +1270,7 @@ export const ItineraryBuilder = () => {
       const esc = (s) => s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
       let q = supabase
         .from('library_items')
-        .select('*')
+        .select(LIBRARY_ITEM_LIGHT_FIELDS)
         .eq('company_id', companyId)
         .order('name', { ascending: true })
         .limit(30);
@@ -1273,10 +1344,10 @@ export const ItineraryBuilder = () => {
         .single();
       if (it) {
         let client = meta.client || null;
-        if (it.client_id && !client?.markup_percentage) {
+        if (it.client_id) {
           const { data: c } = await supabase
             .from('clients')
-            .select('id, name, client_type, email, phone, country, markup_percentage, deposit_percentage')
+            .select('id, name, client_type, email, country, markup_percentage, deposit_percentage, address, logo_data_url, notes, contact_tel, contact_cell, contact_website')
             .eq('id', it.client_id)
             .single();
           if (c) client = c;
@@ -1482,7 +1553,7 @@ export const ItineraryBuilder = () => {
       const byCurr = {};
       (d.services || []).forEach((sv) => {
         const code = sv.currencyCode || 'ZAR';
-        if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {} };
+        if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {}, services: [] };
         const line = (Number(sv.sellPP) || 0) * paxCount;
         const buyLine = (Number(sv.buyPP) || 0) * paxCount;
         const rate = numOr(sv.taxRate, defaultTaxRate);
@@ -1496,6 +1567,21 @@ export const ItineraryBuilder = () => {
         if (!byCurr[code].taxByLabel[label]) byCurr[code].taxByLabel[label] = { amount: 0, rate };
         byCurr[code].taxByLabel[label].amount += taxAmt;
         byCurr[code].count += 1;
+        byCurr[code].services.push({
+          name: sv.name || 'Service',
+          supplierName: sv.supplierName || '',
+          category: sv.category || '',
+          mealPlan: sv.mealPlan || '',
+          itemId: sv.itemId || null,
+          roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
+          markup: Number(sv.markup) || 0,
+          taxRate: numOr(sv.taxRate, defaultTaxRate),
+          qty: paxCount,
+          unit: (Number(sv.sellPP) || 0),
+          subExcl: round2(line - taxAmt),
+          tax: round2(taxAmt),
+          sell: round2(line)
+        });
       });
       Object.keys(byCurr).forEach((code) => {
         if (!map.has(code)) {
@@ -1549,8 +1635,9 @@ export const ItineraryBuilder = () => {
     const last = arr[arr.length - 1];
     if (!last?.date) return;
     setMeta((prev) => {
-      if (!prev.travelEnd || last.date > toISODate(prev.travelEnd)) {
-        return { ...prev, travelEnd: last.date };
+      const end = toISODate(last.date);
+      if (end !== toISODate(prev.travelEnd)) {
+        return { ...prev, travelEnd: end };
       }
       return prev;
     });
@@ -2158,7 +2245,15 @@ return !!sv.time; /* activities / meals / other */
     const ref = meta.referenceNumber || meta.itineraryName || 'itinerary';
     const safeName = String(ref).replace(/[^\w-]+/g, '_');
     if (format === 'link') {
+      if (!['quotation', 'provisional'].includes(meta.status || 'quotation')) {
+        showToast('The client itinerary document is only available for Quotation and Provisional bookings', 'warning');
+        return;
+      }
       showToast('Digital itinerary link sharing is coming soon', 'info');
+      return;
+    }
+    if ((format === 'word' || format === 'pdf') && !['quotation', 'provisional'].includes(meta.status || 'quotation')) {
+      showToast('The client itinerary document is only available for Quotation and Provisional bookings', 'warning');
       return;
     }
 
@@ -2176,27 +2271,314 @@ return !!sv.time; /* activities / meals / other */
     const esc = htmlEscape;
     const taxLabel = defaultTaxLabel || 'VAT';
     const taxRateOf = (ccy) => (taxAppliesForCurrency(ccy) ? defaultTaxRate : 0);
+    const showSupplierBase = billing?.show_supplier_in_description !== false;
+    const showSupplierOf = (sv) => showSupplierBase || /accommodation/i.test(sv.category || '');
+    const showMealPlanBase = billing?.show_meal_plan_on_accommodation !== false;
+    const showMealPlanOf = (sv) => showMealPlanBase && /accommodation/i.test(sv.category || '') && !!(sv.mealPlan || '').trim();
+    const perPerson = billing?.pricing_breakdown_mode === 'per_person';
+    const accomLinesOn = billing?.pricing_breakdown_accommodation === 'rooms';
+    /* Day-by-day rows for a currency group. In the default ("Service per day,
+       detailed") presentation every service stays on its own line; when
+       "Accommodation lines" is set to per-room, each night stop is expanded
+       into one line per occupied room (e.g. 2A / 1A / 2A, 1C) with the Qty
+       column carrying the occupant summary and the rows reconciled to the
+       billed accommodation total. */
+    const dayRowsOf = (grp) => {
+      const rows = [];
+      const travellers = Array.isArray(meta.travellers) ? meta.travellers : [];
+      const fallbackChildren = travellers.filter((t) => !isAdultTraveller(t)).length;
+      const fallbackAdults = Math.max(0, travellers.length - fallbackChildren) || Math.max(0, paxCount - fallbackChildren);
+      (grp.days || []).forEach((r) => {
+        (r.services || []).forEach((sv) => {
+          if (!accomLinesOn || !/accommodation/i.test(sv.category || '')) {
+            rows.push({
+              day: r.day,
+              date: r.date || '—',
+              name: sv.name || 'Service',
+              supplierName: sv.supplierName || '',
+              category: sv.category || '',
+              mealPlan: sv.mealPlan || '',
+              qty: paxCount,
+              qtyTitle: '',
+              qtyText: false,
+              unit: round2(sv.unit),
+              subExcl: sv.subExcl,
+              tax: sv.tax,
+              sell: sv.sell
+            });
+            return;
+          }
+          const line = Number(sv.sell) || 0;
+          const taxRate = numOr(sv.taxRate, defaultTaxRate);
+          const item = sv.itemId ? libraryItems.find((x) => String(x.id) === String(sv.itemId)) : null;
+          const baseRate = item && item.item_rates && item.item_rates.length ? rateForItem(item, grp.code) : null;
+          const rate = baseRate ? { ...baseRate, _ageRanges: item.child_age_ranges || [] } : null;
+          const bd = accommodationBreakdown({
+            mode: 'rooms',
+            lineTotal: line,
+            rooms: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
+            rate,
+            ageRanges: Array.isArray(rate?._ageRanges) ? rate._ageRanges : [],
+            markup: Number(sv.markup) || 0,
+            taxRate,
+            fallbackAdults,
+            fallbackChildren
+          });
+          bd.rows.forEach((brk) => {
+            rows.push({
+              day: r.day,
+              date: r.date || '—',
+              name: sv.name || 'Accommodation',
+              supplierName: sv.supplierName || '',
+              category: sv.category || 'Accommodation',
+              mealPlan: sv.mealPlan || '',
+              qty: brk.qty,
+              qtyTitle: brk.qtyTitle,
+              qtyText: true,
+              unit: brk.unit,
+              subExcl: brk.subExcl,
+              tax: brk.tax,
+              sell: brk.lineTotal
+            });
+          });
+        });
+      });
+      return rows;
+    };
+    const rowDescHtml = (r, escFn) => {
+      const l = { category: r.category, mealPlan: r.mealPlan, supplierName: r.supplierName };
+      const mealTxt = showMealPlanOf(l) ? ` - ${escFn(abbrevMealPlan(r.mealPlan))}` : '';
+      const supplierLine = showSupplierOf(l) && r.supplierName
+        ? (escFn === esc ? `<br><span style="color:#666;font-size:12px;">${escFn(r.supplierName)}</span>` : `<br><span class="muted">${escFn(r.supplierName)}</span>`)
+        : '';
+      return `${escFn(r.name)}${mealTxt}${supplierLine}`;
+    };
+    const rowDesc = (r) => {
+      const l = { category: r.category, mealPlan: r.mealPlan, supplierName: r.supplierName };
+      const mealTxt = showMealPlanOf(l) ? ` - ${abbrevMealPlan(r.mealPlan)}` : '';
+      return showSupplierOf(l) && r.supplierName
+        ? `${r.name}${mealTxt} — ${r.supplierName}`
+        : `${r.name}${mealTxt}`;
+    };
+    const logoAlign = billing?.logo_position === 'center' ? 'margin:0 auto 8px' : (billing?.logo_position === 'right' ? 'margin:0 0 8px auto' : 'margin:0 0 8px');
+    const logoImgTag = billing?.logo_data_url
+      ? `<img src="${billing.logo_data_url}" alt="Company logo" style="display:block;max-width:${LOGO_WIDTHS[billing.logo_size] || LOGO_WIDTHS.md}px;height:auto;${logoAlign}">`
+      : '';
+    const hdrAlign = billing?.billing_address_position === 'center' ? 'text-align:center' : (billing?.billing_address_position === 'right' ? 'text-align:right' : 'text-align:left');
+    const hdrLegal = billing?.legal_name ? `<div style="${hdrAlign}"><b>${esc(billing.legal_name)}</b></div>` : '';
+    const hdrAddress = billing?.billing_address ? `<div style="${hdrAlign};color:#666;font-size:12px;margin-bottom:32px;">${esc(billing.billing_address).replace(/\n/g, '<br>')}</div>` : '';
+    const designer = meta.consultantName ? esc(meta.consultantName) : '—';
+    const travellersList = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean);
+    const travellersHtml = travellersList.length
+      ? `<p style="margin:2px 0;">${travellersList.map((n) => esc(n)).join('<br>')}</p>`
+      : '';
+    const paxWord = paxCount > 0 ? `${paxCount} traveller${paxCount === 1 ? '' : 's'}` : '—';
+
+    /* Client Bill-To block on the itinerary document: optional logo, name,
+       address and the client's contact details (Tel / Cell / Email / Website),
+       mirroring the Bill-To box on invoices, receipts and credit notes. */
+    const clientBlockHtml = (() => {
+      const cl = meta.client || {};
+      const align = billing?.client_billing_address_position === 'center'
+        ? 'text-align:center'
+        : (billing?.client_billing_address_position === 'right' ? 'text-align:right' : 'text-align:left');
+      const logoW = LOGO_WIDTHS[billing?.client_logo_size] || LOGO_WIDTHS.md;
+      const logoPos = billing?.client_logo_position || 'left';
+      const logoAlign = logoPos === 'center' ? 'margin:0 auto 8px' : (logoPos === 'right' ? 'margin:0 0 8px auto' : 'margin:0 0 8px');
+      const logo = cl.logo_data_url
+        ? `<img src="${cl.logo_data_url}" alt="Client logo" style="display:block;max-width:${logoW}px;height:auto;${logoAlign}">`
+        : '';
+      const name = cl.name ? `<div style="font-weight:700;">${esc(cl.name)}</div>` : '';
+      const addr = cl.address ? `<div style="color:#666;font-size:12px;">${esc(cl.address).replace(/\n/g, '<br>')}</div>` : '';
+      const line = (label, value) => (value
+        ? `<div style="color:#666;font-size:12px;">${esc(label)}: ${esc(value)}</div>`
+        : '');
+      const contact = [
+        line('Tel', String(cl.contact_tel || '').trim()),
+        line('Cell', String(cl.contact_cell || '').trim()),
+        line('Email', String(cl.email || cl.contact_email || '').trim()),
+        line('Website', String(cl.contact_website || '').trim())
+      ].join('');
+      return (logo || name || addr || contact)
+        ? `<div style="${align};margin-bottom:20px;">${logo}${name}${addr}${contact}</div>`
+        : '';
+    })();
+
+    /* Day-by-day routing: per-day description plus every service on the day
+       rendered as a bullet. Non-accommodation shows "Service type: Service name".
+       Accommodation shows "Accommodation: Supplier, Meal plan" (abbreviated),
+       which is always shown regardless of the line-item toggle. When a day has
+       more than one accommodation at the same supplier (e.g. two room types),
+       the service name is added so the lines stay distinguishable. */
+    const dayByDayHtml = () => {
+      const list = (days || []).map((d, i) => {
+        const num = d.dayNumber || i + 1;
+        const date = d.date ? formatDateLong(d.date) : '';
+        const desc = (d.notes || '').trim();
+        const services = d.services || [];
+        /* Count how many accommodation entries share each supplier on this day. */
+        const supplierUse = new Map();
+        services.forEach((sv) => {
+          if (!/accommodation/i.test(String(sv.category || ''))) return;
+          const key = String(sv.supplierName || sv.supplier_name || '').trim().toLowerCase();
+          if (!key) return;
+          supplierUse.set(key, (supplierUse.get(key) || 0) + 1);
+        });
+        const itemLines = services.map((sv) => {
+          const name = String(sv.name || '').trim() || 'Service';
+          const category = String(sv.category || '').trim();
+          const supplier = String(sv.supplierName || sv.supplier_name || '').trim();
+          const meal = String(sv.mealPlan || '').trim();
+          if (/accommodation/i.test(category)) {
+            const shared = supplier
+              ? (supplierUse.get(supplier.toLowerCase()) || 0) > 1
+              : false;
+            const head = shared && supplier ? `${supplier}, ${name}` : (supplier || name);
+            return `<strong>Accommodation</strong>: ${esc(head)}${meal ? `, ${esc(abbrevMealPlan(meal))}` : ''}`;
+          }
+          return `<strong>${esc(category || 'Service')}</strong>: ${esc(name)}`;
+        }).filter(Boolean);
+        return `<div style="margin:0 0 14px;">
+          <div style="background:#eee;font-weight:700;color:#0d7478;padding:6px 10px;">Day ${num}${date ? ` &mdash; ${esc(date)}` : ''}</div>
+          ${desc ? `<div style="margin:4px 0;padding:0 2px;">${esc(desc).replace(/\n/g, '<br>')}</div>` : ''}
+          ${itemLines.length ? `<ul style="margin:4px 0;padding:0 2px 0 20px;list-style-type:disc;">${itemLines.map((l) => `<li style="margin:0 0 2px;">${l}</li>`).join('')}</ul>` : ''}
+        </div>`;
+      }).join('');
+      return `<h2 style="color:#0d7478;margin-top:20px;margin-bottom:28px;text-align:center;">Itinerary</h2>${list || '<p>No days added yet.</p>'}`;
+    };
+
+    /* Dynamic Inclusions list, generated from the day items themselves because
+       every itinerary is different.
+         * Accommodation is listed as "Type: Supplier - Meal Plan" (full meal
+           plan wording, not abbreviated).
+         * Every other service is listed as "Type: Service name".
+         * Identical entries are collapsed and prefixed with the total quantity
+           (how many times it was added across the itinerary).
+       The tenant's default Inclusions text (if enabled in Settings) shows above
+       this list. */
+    const dynamicInclusions = (() => {
+      const byKey = new Map();
+      (days || []).forEach((d) => {
+        (d?.services || []).forEach((sv) => {
+          const type = String(sv?.category || '').trim();
+          const name = String(sv?.name || '').trim();
+          const supplier = String(sv?.supplierName || sv?.supplier_name || '').trim();
+          const meal = String(sv?.mealPlan || '').trim();
+          const qty = Math.max(1, Number(sv?.qty) || 1);
+          if (!type && !name) return;
+
+          let label;
+          if (/accommodation/i.test(type) || /accommodation/i.test(name)) {
+            // Accommodation: Supplier - Meal Plan (meal plan shown in full).
+            const head = [type || 'Accommodation', supplier || name].filter(Boolean).join(': ');
+            label = meal ? `${head} - ${meal}` : head;
+          } else {
+            label = type && name ? `${type}: ${name}` : (name || type);
+          }
+
+          const key = label.toLowerCase();
+          if (byKey.has(key)) byKey.get(key).qty += qty;
+          else byKey.set(key, { label, qty });
+        });
+      });
+      return [...byKey.values()];
+    })();
+    const dynamicInclusionsHtml = dynamicInclusions.length
+      ? `<ul style="margin:6px 0 0;padding-left:0;list-style:none;">${dynamicInclusions.map((r) => `<li style="margin:2px 0;">&#10003; ${r.qty > 1 ? `${r.qty} x ` : ''}${esc(r.label)}</li>`).join('')}</ul>`
+      : '';
+
+    /* Whether the tenant's typed default Inclusions text is printed above the
+       generated list (Settings > Itinerary Presentation). It is rendered as a
+       ticked list so it matches the generated content below it. */
+    const includeDefaultInclusions = billing?.itinerary_include_default_inclusions !== false;
+    const defaultInclusionItems = (() => {
+      const raw = includeDefaultInclusions ? String(billing?.itinerary_inclusions || '') : '';
+      return raw
+        .split(/\r?\n/)
+        .map((s) => s.replace(/^\s*[-*•–—]\s*/, '').trim())
+        .filter(Boolean);
+    })();
+    const defaultInclusionsHtml = defaultInclusionItems.length
+      ? `<ul style="margin:0 0 8px;padding-left:0;list-style:none;">${defaultInclusionItems.map((s) => `<li style="margin:2px 0;">&#10003; ${esc(s)}</li>`).join('')}</ul>`
+      : '';
+
+    /* Optional Terms / Inclusions / Exclusions text blocks, each placed after the
+       day-by-day routing, before the pricing breakdown or after it. The
+       Inclusions block always renders (it carries the generated service list),
+       even when the tenant has typed no default wording. */
+    const itineraryBlocks = [
+      { title: 'Terms & Conditions', text: billing?.itinerary_terms || '', position: billing?.itinerary_terms_position || 'under_day_by_day' },
+      { title: 'Inclusions', text: '', position: billing?.itinerary_inclusions_position || 'under_day_by_day', extraHtml: defaultInclusionsHtml + dynamicInclusionsHtml },
+      { title: 'Exclusions', text: billing?.itinerary_exclusions || '', position: billing?.itinerary_exclusions_position || 'under_day_by_day' }
+    ].filter((b) => (b.text || '').trim() || (b.extraHtml || ''));
+    const itineraryBlockHtml = (b) => {
+      const text = (b.text || '').trim() ? `<div style="white-space:pre-line;">${esc(b.text)}</div>` : '';
+      return `<h2 style="color:#0d7478;margin-top:20px;margin-bottom:8px;">${esc(b.title)}</h2>${text}${b.extraHtml || ''}`;
+    };
+    /* Assembles pricing + day-by-day + text blocks in the configured order. */
+    const composeItineraryHtml = (pricingHtml) => {
+      const under = itineraryBlocks.filter((b) => (b.position || 'under_day_by_day') === 'under_day_by_day').map(itineraryBlockHtml).join('');
+      const before = itineraryBlocks.filter((b) => b.position === 'before_pricing').map(itineraryBlockHtml).join('');
+      const after = itineraryBlocks.filter((b) => b.position === 'after_pricing').map(itineraryBlockHtml).join('');
+      const pricingFirst = (billing?.itinerary_pricing_position || 'above') !== 'below';
+      return pricingFirst
+        ? `${before}${pricingHtml}${after}${dayByDayHtml()}${under}`
+        : `${dayByDayHtml()}${under}${before}${pricingHtml}${after}`;
+    };
+
+    const ppData = (() => {
+      const m = new Map();
+      groups.forEach((g) => m.set(g.code, computePerPerson(days, g.code, meta.travellers || [], libraryItems, { defaultTaxRate, paxCount })));
+      return m;
+    })();
+    const ppRows = (g) => {
+      const ppd = ppData.get(g.code);
+      const rows = [
+        ['All', ppDateRange(g), 'Per person sharing', 1, round2(ppd.perPersonSharing.sell), round2(ppd.perPersonSharing.subExcl), round2(ppd.perPersonSharing.tax), round2(ppd.perPersonSharing.sell)]
+      ];
+      if (ppd.hasSingle) rows.push(['', '', 'Single supplement', 1, round2(ppd.singleSupplement.sell), round2(ppd.singleSupplement.subExcl), round2(ppd.singleSupplement.tax), round2(ppd.singleSupplement.sell)]);
+      if (ppd.hasChildren && ppd.perChild) rows.push(['', '', 'Per child', 1, round2(ppd.perChild.sell), round2(ppd.perChild.subExcl), round2(ppd.perChild.tax), round2(ppd.perChild.sell)]);
+      return rows;
+    };
+    const ppRowHtml = (g, r, pdf) => {
+      const num = (v) => fmtMoney(round2(v), g.symbol);
+      const n = pdf ? ' class="num"' : '';
+      return `<tr><td>${esc(r.day)}</td><td>${esc(r.date)}</td><td>${esc(r.label)}</td><td${n}>1</td><td class="num">${num(r.unit)}</td><td${n}>${num(r.subExcl)}</td><td${n}>${num(r.tax)}</td><td${n}><b>${num(r.incl)}</b></td></tr>`;
+    };
+    const ppRowsHtml = (g, pdf) => {
+      const ppd = ppData.get(g.code);
+      const rows = [ppRowHtml(g, { day: 'All', date: ppDateRange(g), label: 'Per person sharing', unit: ppd.perPersonSharing.sell, subExcl: ppd.perPersonSharing.subExcl, tax: ppd.perPersonSharing.tax, incl: ppd.perPersonSharing.sell }, pdf)];
+      if (ppd.hasSingle) rows.push(ppRowHtml(g, { day: '', date: '', label: 'Single supplement', unit: ppd.singleSupplement.sell, subExcl: ppd.singleSupplement.subExcl, tax: ppd.singleSupplement.tax, incl: ppd.singleSupplement.sell }, pdf));
+      if (ppd.hasChildren && ppd.perChild) rows.push(ppRowHtml(g, { day: '', date: '', label: 'Per child', unit: ppd.perChild.sell, subExcl: ppd.perChild.subExcl, tax: ppd.perChild.tax, incl: ppd.perChild.sell }, pdf));
+      return rows.join('');
+    };
 
     if (format === 'excel') {
       const lines = [
         `"Itinerary: ${csvEscape(meta.itineraryName)}"`,
         `"Reference: ${csvEscape(meta.referenceNumber || '')}"`,
+        `"Tour Designer: ${csvEscape(meta.consultantName || '')}"`,
         `"Client: ${csvEscape(meta.client?.name || '')}"`,
         `"Dates: ${csvEscape(meta.travelStart)} to ${csvEscape(meta.travelEnd)}"`,
+        `"Status: ${csvEscape(statusLabelOf(meta.status))}"`,
+        `"Travellers: ${paxWord}"`,
+        ...travellersList.map((n) => csvEscape(n)),
         ''
       ];
 
       groups.forEach((grp, idx) => {
         if (idx > 0) lines.push('');
         lines.push(`"Currency: ${csvEscape(grp.code)} (${csvEscape(grp.symbol)})${grp.name ? ` - ${csvEscape(grp.name)}` : ''}"`);
-        lines.push(['Day', 'Date', 'Services', `Subtotal (Excl. ${taxWordOf(grp.code)})`, taxWordUpper(grp.code), `Total (Incl. ${taxWordUpper(grp.code)})`].map(csvEscape).join(','));
-        (grp.days || []).forEach((r) => {
-          const subExcl = round2((r.sell || 0) - (r.tax || 0));
-          lines.push([`Day ${r.day}`, r.date || '—', r.count || 0, subExcl, round2(r.tax || 0), round2(r.sell || 0)].map(csvEscape).join(','));
-        });
-        lines.push([`Subtotal (Excl. ${taxWordOf(grp.code)})`, '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
-        lines.push([`${taxWordUpper(grp.code)} (${taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code))} ${taxRateOf(grp.code)}%)`, '', '', '', '', grp.totalTax].map(csvEscape).join(','));
-        lines.push([`TOTAL DUE (${grp.code} INCL. ${taxWordUpper(grp.code)})`, '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
+        const header = ['Day', 'Date', 'Description', 'Qty', 'Unit', `Subtotal (Excl. ${taxWordOf(grp.code)})`, taxWordUpper(grp.code), `Total (Incl. ${taxWordUpper(grp.code)})`].map(csvEscape).join(',');
+        lines.push(header);
+        if (perPerson) {
+          ppRows(grp).forEach((r) => lines.push(r.map(csvEscape).join(',')));
+        } else {
+          dayRowsOf(grp).forEach((r) => lines.push([`Day ${r.day}`, r.date, rowDesc(r), r.qty, round2(r.unit), r.subExcl, r.tax, r.sell].map(csvEscape).join(',')));
+        }
+        lines.push([`Subtotal (Excl. ${taxWordOf(grp.code)})`, '', '', '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
+        lines.push([`${taxWordUpper(grp.code)} (${taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code))} ${taxRateOf(grp.code)}%)`, '', '', '', '', '', '', grp.totalTax].map(csvEscape).join(','));
+        lines.push([`TOTAL DUE (${grp.code} INCL. ${taxWordUpper(grp.code)})`, '', '', '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
       });
 
       downloadBlob(lines.join('\n'), `${safeName}.csv`, 'text/csv;charset=utf-8');
@@ -2208,20 +2590,30 @@ return !!sv.time; /* activities / meals / other */
       const sectionsHtml = groups.map((grp) => `
         <h2 style="color:#0d7478;margin-top:20px;margin-bottom:8px;">Pricing Breakdown — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;">
-          <tr><th>Day</th><th>Date</th><th># Services</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
-          ${(grp.days || []).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${r.count || 0}</td><td>${fmtMoney(round2((r.sell || 0) - (r.tax || 0)), grp.symbol)}</td><td>${fmtMoney(r.tax || 0, grp.symbol)}</td><td>${fmtMoney(r.sell || 0, grp.symbol)}</td></tr>`).join('')}
-          <tr><td colspan="5" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td><b>${fmtMoney(grp.totalExcl, grp.symbol)}</b></td></tr>
-          <tr><td colspan="5" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td><b>${fmtMoney(grp.totalTax, grp.symbol)}</b></td></tr>
-          <tr><td colspan="5" align="right"><b>TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</b></td><td><b>${fmtMoney(grp.totalInclTax, grp.symbol)}</b></td></tr>
+          <tr><th>Day</th><th>Date</th><th>Description</th><th>Qty</th><th class="num">Unit</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
+          ${perPerson
+            ? ppRowsHtml(grp, false)
+            : dayRowsOf(grp).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${rowDescHtml(r, esc)}</td><td${r.qtyText ? ` title="${esc(r.qtyTitle)}"` : ''}>${esc(r.qty)}</td><td class="num">${fmtMoney(round2(r.unit), grp.symbol)}</td><td>${fmtMoney(r.subExcl, grp.symbol)}</td><td>${fmtMoney(r.tax, grp.symbol)}</td><td>${fmtMoney(r.sell, grp.symbol)}</td></tr>`).join('')}
+          <tr><td colspan="7" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td><b>${fmtMoney(grp.totalExcl, grp.symbol)}</b></td></tr>
+          <tr><td colspan="7" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td><b>${fmtMoney(grp.totalTax, grp.symbol)}</b></td></tr>
+          <tr><td colspan="7" align="right"><b>TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</b></td><td><b>${fmtMoney(grp.totalInclTax, grp.symbol)}</b></td></tr>
         </table>
       `).join('');
 
       const body = `
+        ${logoImgTag}
+        ${hdrLegal}
+        ${hdrAddress}
         <h1>${esc(meta.itineraryName)}</h1>
-        <p><b>Reference:</b> ${esc(meta.referenceNumber || '—')} &nbsp;·&nbsp; <b>Status:</b> ${esc(statusLabelOf(meta.status))}</p>
-        <p><b>Client:</b> ${esc(meta.client?.name || '—')} &nbsp;·&nbsp; <b>Travellers:</b> ${paxCount}</p>
-        <p><b>Dates:</b> ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
-        ${sectionsHtml}
+        <p style="margin:2px 0;"><b>Reference:</b> ${esc(meta.referenceNumber || '—')}</p>
+        <p style="margin:2px 0;"><b>Tour Designer:</b> ${designer}</p>
+        <p style="margin:2px 0;"><b>Client:</b> ${esc(meta.client?.name || '—')}</p>
+        <p style="margin:2px 0;"><b>Dates:</b> ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
+        <p style="margin:2px 0;"><b>Status:</b> ${esc(statusLabelOf(meta.status))}</p>
+        <p style="margin:2px 0 10px;"><b>Travellers:</b> ${paxWord}</p>
+        ${travellersHtml}
+        ${clientBlockHtml}
+        ${composeItineraryHtml(sectionsHtml)}
         <p style="margin-top:24px;"><i>Generated by torbuilder</i></p>`;
 
       downloadBlob(`<html><head><meta charset="utf-8"></head><body>${body}</body></html>`, `${safeName}.doc`, 'application/msword');
@@ -2239,11 +2631,13 @@ return !!sv.time; /* activities / meals / other */
       const sectionsHtml = groups.map((grp) => `
         <h2 style="color:#0d7478;font-size:16px;margin:24px 0 8px;border-bottom:2px solid #0d7478;padding-bottom:4px;">Pricing Breakdown — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
         <table>
-          <tr><th>Day</th><th>Date</th><th>Services</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
-          ${(grp.days || []).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${r.count || 0}</td><td class="num">${fmtMoney(round2((r.sell || 0) - (r.tax || 0)), grp.symbol)}</td><td class="num">${fmtMoney(r.tax || 0, grp.symbol)}</td><td class="num">${fmtMoney(r.sell || 0, grp.symbol)}</td></tr>`).join('')}
-          <tr class="grand"><td colspan="5" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td class="num">${fmtMoney(grp.totalExcl, grp.symbol)}</td></tr>
-          <tr class="grand"><td colspan="5" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td class="num">${fmtMoney(grp.totalTax, grp.symbol)}</td></tr>
-          <tr class="grand"><td colspan="5" align="right">TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</td><td class="num">${fmtMoney(grp.totalInclTax, grp.symbol)}</td></tr>
+          <tr><th>Day</th><th>Date</th><th>Description</th><th class="num">Qty</th><th class="num">Unit</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
+          ${perPerson
+            ? ppRowsHtml(grp, true)
+            : dayRowsOf(grp).map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${rowDescHtml(r, esc)}</td><td${r.qtyText ? ` title="${esc(r.qtyTitle)}"` : ''}${r.qtyText ? ' style="text-align:left;"' : ' class="num"'}>${esc(r.qty)}</td><td class="num">${fmtMoney(round2(r.unit), grp.symbol)}</td><td class="num">${fmtMoney(r.subExcl, grp.symbol)}</td><td class="num">${fmtMoney(r.tax, grp.symbol)}</td><td class="num">${fmtMoney(r.sell, grp.symbol)}</td></tr>`).join('')}
+          <tr class="grand"><td colspan="7" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td class="num">${fmtMoney(grp.totalExcl, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="7" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td class="num">${fmtMoney(grp.totalTax, grp.symbol)}</td></tr>
+          <tr class="grand"><td colspan="7" align="right">TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</td><td class="num">${fmtMoney(grp.totalInclTax, grp.symbol)}</td></tr>
         </table>
       `).join('');
 
@@ -2253,13 +2647,19 @@ return !!sv.time; /* activities / meals / other */
         table{border-collapse:collapse;width:100%;margin-top:16px}
         th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}
         th{background:#eee} .grand{font-weight:700} td.num{text-align:right}</style></head><body>
-        ${billing?.logo_data_url ? `<img src="${billing.logo_data_url}" alt="Company logo" style="display:block;max-width:${LOGO_WIDTHS[billing.logo_size] || LOGO_WIDTHS.md}px;height:auto;margin:0 0 8px">` : ''}
-        ${billing?.legal_name ? `<p class="muted"><b>${esc(billing.legal_name)}</b></p>` : ''}
+        ${logoImgTag}
+        ${hdrLegal}
+        ${hdrAddress}
         <h1>${esc(meta.itineraryName)}</h1>
-        <p class="muted">Reference: ${esc(meta.referenceNumber || '—')}  ·  ${esc(statusLabelOf(meta.status))}</p>
-        <p class="muted">Client: ${esc(meta.client?.name || '—')}  ·  ${paxCount} traveller(s)</p>
-        <p class="muted">Dates: ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
-        ${sectionsHtml}
+        <p class="muted"><b>Reference:</b> ${esc(meta.referenceNumber || '—')}</p>
+        <p class="muted"><b>Tour Designer:</b> ${designer}</p>
+        <p class="muted"><b>Client:</b> ${esc(meta.client?.name || '—')}</p>
+        <p class="muted"><b>Dates:</b> ${esc(meta.travelStart)} &rarr; ${esc(meta.travelEnd)}</p>
+        <p class="muted"><b>Status:</b> ${esc(statusLabelOf(meta.status))}</p>
+        <p class="muted" style="margin-bottom:10px;"><b>Travellers:</b> ${paxWord}</p>
+        ${travellersHtml}
+        ${clientBlockHtml}
+        ${composeItineraryHtml(sectionsHtml)}
         <p class="muted" style="margin-top:24px;"><i>Generated by torbuilder</i></p>
         </body></html>`);
       w.document.close();
@@ -2267,7 +2667,7 @@ return !!sv.time; /* activities / meals / other */
       setTimeout(() => w.print(), 350);
       showToast('Itinerary PDF opened in a new window', 'success');
     }
-  }, [meta, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing]);
+  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing]);
 
   const handleSave = useCallback(async () => {
     if (!companyId) {
@@ -2443,6 +2843,26 @@ return !!sv.time; /* activities / meals / other */
       if (!iid) throw new Error('Save the itinerary before issuing an invoice');
       const agg = buildLinesFromDays(days, paxCount, currencyCode);
       if (!agg.lines.length) { showToast('Add day-by-day services before issuing an invoice', 'warning'); return null; }
+      /* An invoice must carry payment details, so it can only be issued when an
+         active bank account exists for this currency. Itineraries can still be
+         built in any currency; only invoicing is blocked. */
+      const activeBank = bankAccounts
+        .filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === currencyCode.toUpperCase())
+        .sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0))[0] || null;
+      if (!activeBank) {
+        const anyActive = bankAccounts.some((b) => b.is_active);
+        showToast(anyActive
+          ? `No active bank account for ${currencyCode}. Add or activate one in Settings > Bank Accounts to invoice in this currency.`
+          : 'All bank accounts are deactivated. Add or activate a bank account in Settings to generate invoices.', 'error');
+        return null;
+      }
+      const perPersonBreakdown = breakdownSnapshot(computePerPerson(
+        days,
+        currencyCode,
+        Array.isArray(meta.travellers) ? meta.travellers : [],
+        libraryItems,
+        { defaultTaxRate, paxCount }
+      ));
 
       const isFinal = type === 'final';
       let creditedAmount = 0;
@@ -2470,9 +2890,7 @@ return !!sv.time; /* activities / meals / other */
       const { data: number, error: numErr } = await supabase.rpc('get_next_invoice_reference', { p_company_id: companyId });
       if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate invoice number');
 
-      const bank = bankAccounts
-        .filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === currencyCode.toUpperCase())
-        .sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0))[0] || null;
+      const bank = activeBank;
       const bankDetails = bank ? {
         bank_name: bank.bank_name,
         account_holder_name: bank.account_holder_name,
@@ -2505,11 +2923,16 @@ return !!sv.time; /* activities / meals / other */
         bill_to_name: client.name || '',
         bill_to_email: client.email || '',
         bill_to_address: client.address || '',
+        bill_to_tel: client.contact_tel || '',
+        bill_to_cell: client.contact_cell || '',
+        bill_to_website: client.contact_website || '',
+        bill_to_logo_data_url: client.logo_data_url || '',
         supplier_name: billing?.legal_name || '',
         supplier_tax_number: billing?.tax_number || '',
         supplier_address: billing?.billing_address || '',
         bank_details: bankDetails,
-        notes: null
+        notes: null,
+        per_person_breakdown: perPersonBreakdown
       };
 
       const accounting = accountingPayload(header, agg.lines);
@@ -2539,7 +2962,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setIssuingInvoice(false);
     }
-  }, [companyId, isProvisional, itineraryInvoices, currencyCode, handleSave, meta.itineraryId, meta.client, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, loadItineraryInvoices, showToast]);
+  }, [companyId, isProvisional, itineraryInvoices, currencyCode, handleSave, meta.itineraryId, meta.client, meta.travellers, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, libraryItems, loadItineraryInvoices, showToast]);
 
   /* ── Raise the payment receipt for the stage invoice and mark it paid. */
   const confirmPayment = useCallback(async () => {
@@ -2618,13 +3041,25 @@ return !!sv.time; /* activities / meals / other */
     const inv = activeInvoice || await handleIssueInvoiceHere({ silent: true });
     if (!inv) return;
     const agg = buildLinesFromDays(days, paxCount, currencyCode);
-    const m = invoiceEmail(inv, agg.lines);
+    const docOpts = {
+      logo: billing?.logo_data_url || '',
+      logoSize: billing?.logo_size || 'md',
+      showSupplierInDescription: billing?.show_supplier_in_description !== false,
+      pricingBreakdownMode: billing?.pricing_breakdown_mode || 'daily',
+      showMealPlanOnAccommodation: billing?.show_meal_plan_on_accommodation !== false,
+      logoPosition: ['left', 'center', 'right'].includes(billing?.logo_position) ? billing.logo_position : 'left',
+      billingAddressPosition: ['left', 'center', 'right'].includes(billing?.billing_address_position) ? billing.billing_address_position : 'left',
+      clientLogoSize: ['sm', 'md', 'lg'].includes(billing?.client_logo_size) ? billing.client_logo_size : 'md',
+      clientLogoPosition: ['left', 'center', 'right'].includes(billing?.client_logo_position) ? billing.client_logo_position : 'left',
+      clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left'
+    };
+    const m = invoiceEmail(inv, agg.lines, docOpts);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
 
     let attached = false;
     if (emailFormat === 'word' || emailFormat === 'excel') {
       const isExcel = emailFormat === 'excel';
-      const content = isExcel ? invoiceExcelHtml(inv, agg.lines, currencySymbol) : invoiceDocHtml(inv, agg.lines, currencySymbol, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' });
+      const content = isExcel ? invoiceExcelHtml(inv, agg.lines, currencySymbol, docOpts) : invoiceDocHtml(inv, agg.lines, currencySymbol, docOpts);
       const filename = `${inv.invoice_number}.${isExcel ? 'xls' : 'doc'}`;
       const mime = isExcel ? 'application/vnd.ms-excel' : 'application/msword';
       try {
@@ -2639,7 +3074,7 @@ return !!sv.time; /* activities / meals / other */
         showToast('Invoice file downloaded — attach it to the email', 'success');
       }
     } else {
-      const w = openPrintWindow(invoiceDocHtml(inv, agg.lines, currencySymbol, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), 300);
+      const w = openPrintWindow(invoiceDocHtml(inv, agg.lines, currencySymbol, docOpts), 300);
       if (!w) showToast('Please allow pop-ups to prepare the PDF', 'warning');
       else showToast('Choose "Save as PDF", then attach it to the email', 'success');
     }
@@ -2713,7 +3148,7 @@ return !!sv.time; /* activities / meals / other */
 
   /* â”€â”€ Edit a day service (name + description override) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
-  const openServiceEditor = useCallback((dayIdx, sv) => {
+const openServiceEditor = useCallback((dayIdx, sv) => {
     const li = sv.itemId ? libraryItems.find((x) => x.id === sv.itemId) : null;
     setEditSvc({
       dayIdx,
@@ -2724,6 +3159,8 @@ return !!sv.time; /* activities / meals / other */
       taxRate: numOr(sv.taxRate, 15),
       taxLabel: sv.taxLabel || 'VAT'
     });
+    setCopyDays([]);
+    setCopyAllDays(false);
   }, [libraryItems]);
 
   const saveServiceDetails = useCallback(() => {
@@ -2756,8 +3193,60 @@ return !!sv.time; /* activities / meals / other */
     }));
     setSaved(false);
     setEditSvc(null);
+    setCopyDays([]);
+    setCopyAllDays(false);
     showToast('Service updated', 'success');
   }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency]);
+
+  /* Copy the service currently being edited to all days or specific days.
+     Creates deep clones so each occurrence remains independently editable.
+     Room allocations copy along where present; a repeated accommodation keeps
+     its meal plan, rates and per-day pricing. */
+  const copyServiceToDays = useCallback((targets) => {
+    if (completedRef.current) return;
+    if (!editSvc) return;
+    const sourceDay = days[editSvc.dayIdx];
+    const source = sourceDay?.services?.find((s) => s.key === editSvc.key);
+    if (!source) {
+      showToast('Service not found', 'error');
+      return;
+    }
+    if (!targets.length) {
+      showToast('Select at least one target day', 'warning');
+      return;
+    }
+    const valid = [...new Set(targets.map(Number))]
+      .filter((i) => i >= 0 && i < days.length && i !== editSvc.dayIdx)
+      .sort((a, b) => a - b);
+    if (!valid.length) {
+      showToast('No other day available to copy to', 'warning');
+      setEditSvc(null);
+      return;
+    }
+    let copied = 0;
+    setDays((prev) => prev.map((d, i) => {
+      if (!valid.includes(i)) return d;
+      const family = source.repeatGroupId
+        ? prev[editSvc.dayIdx]?.services?.filter((s) => s.repeatGroupId === source.repeatGroupId)
+        : [source];
+      const targetIds = new Set((d.services || []).map((s) => s.itemId));
+      if (family.some((s) => s.itemId && targetIds.has(s.itemId))) return d;
+      const clone = {
+        ...source,
+        key: nextId(),
+        roomAllocations: Array.isArray(source.roomAllocations) ? JSON.parse(JSON.stringify(source.roomAllocations)) : [],
+        item_rates: Array.isArray(source.item_rates) ? source.item_rates : [],
+        repeatGroupId: source.repeatGroupId || null
+      };
+      copied += 1;
+      return { ...d, services: [...(d.services || []), clone] };
+    }));
+    setSaved(false);
+    setEditSvc(null);
+    setCopyDays([]);
+    setCopyAllDays(false);
+    showToast(`Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`, 'success');
+  }, [days, editSvc, nextId, showToast]);
 
   /* â”€â”€ Render: no data guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
@@ -3190,16 +3679,16 @@ const missing = !sv.confirmationNumber ||
                   <>
                     <div className="menu-overlay" style={{ inset: 0 }} onClick={() => setExportOpen(false)} />
                     <div className="menu-panel" style={{ right: 0, top: 'calc(100% + 4px)' }}>
-                      <button type="button" className="menu-item" onClick={() => handleExport('word')}>
+                      <button type="button" className="menu-item" onClick={() => handleExport('word')} disabled={!itineraryDocAllowed} title={itineraryDocAllowed ? 'Itinerary document (Word)' : 'Only available for Quotation and Provisional bookings'}>
                         <FileText size={15} /> Word
                       </button>
                       <button type="button" className="menu-item" onClick={() => handleExport('excel')}>
                         <FileSpreadsheet size={15} /> Excel
                       </button>
-                      <button type="button" className="menu-item" onClick={() => handleExport('pdf')}>
+                      <button type="button" className="menu-item" onClick={() => handleExport('pdf')} disabled={!itineraryDocAllowed} title={itineraryDocAllowed ? 'Itinerary document (PDF)' : 'Only available for Quotation and Provisional bookings'}>
                         <Printer size={15} /> PDF
                       </button>
-                      <button type="button" className="menu-item" onClick={() => handleExport('link')}>
+                      <button type="button" className="menu-item" onClick={() => handleExport('link')} disabled={!itineraryDocAllowed} title={itineraryDocAllowed ? 'Digital itinerary link' : 'Only available for Quotation and Provisional bookings'}>
                         <Link2 size={15} /> Digital Link
                       </button>
                     </div>
@@ -3576,7 +4065,8 @@ const missing = !sv.confirmationNumber ||
                 <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
                   <div className="company-id">Contact</div>
                   <div style={{ fontWeight: 600, color: '#1a202c' }}>{meta.client?.email || '—'}</div>
-                  <div className="company-id" style={{ marginTop: '0.25rem' }}>{meta.client?.phone || '—'}</div>
+                  {meta.client?.contact_tel && <div className="company-id" style={{ marginTop: '0.25rem' }}>Tel: {meta.client.contact_tel}</div>}
+                  {meta.client?.contact_cell && <div className="company-id" style={{ marginTop: '0.25rem' }}>Cell: {meta.client.contact_cell}</div>}
                 </div>
                 <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1rem 1.25rem' }}>
                   <div className="company-id">Country</div>
@@ -4459,8 +4949,59 @@ const missing = !sv.confirmationNumber ||
                     {editSvc.taxLabel || 'VAT'} rate applied on the sell line (markup already included).
                   </p>
                 </div>
+                <div style={{ marginTop: '1rem', borderTop: '1px solid #e2e8f0', paddingTop: '1rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600, color: '#334155', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={copyAllDays}
+                      onChange={(e) => {
+                        setCopyAllDays(e.target.checked);
+                        if (e.target.checked) setCopyDays([]);
+                      }}
+                      style={{ width: '16px', height: '16px', accentColor: '#0d7478', cursor: 'pointer' }}
+                    />
+                    Copy this service to all days
+                  </label>
+                  <p style={{ margin: '0.25rem 0 0.6rem', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+                    Duplicates this service onto every other day of the itinerary, keeping its rates, meal plan, tax and room allocation.
+                  </p>
+                  {!copyAllDays && (
+                    <div style={{ marginTop: '0.4rem' }}>
+                      <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+                        Copy to specific days <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional)</span>
+                      </label>
+                      <div className="placement-day-grid" style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                        {days.map((day, index) => (
+                          <label className={`placement-day-option ${index === editSvc.dayIdx ? 'current' : ''}`} key={day.key}>
+                            <input
+                              type="checkbox"
+                              disabled={index === editSvc.dayIdx}
+                              checked={index === editSvc.dayIdx || copyDays.includes(index)}
+                              onChange={(e) => setCopyDays((prev) => e.target.checked ? [...new Set([...prev, index])] : prev.filter((i) => i !== index))}
+                            />
+                            <span>Day {day.dayNumber}</span>
+                            <small>{formatDateLong(day.date) || 'No date'}</small>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <div className="form-actions">
                   <button type="button" className="secondary-btn" onClick={() => setEditSvc(null)}>Cancel</button>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    style={{ flex: 1 }}
+                    onClick={() => {
+                      const targets = copyAllDays
+                        ? days.map((_, i) => i).filter((i) => i !== editSvc.dayIdx)
+                        : copyDays;
+                      copyServiceToDays(targets);
+                    }}
+                  >
+                    Copy to Days
+                  </button>
                   <button type="button" className="primary-btn" style={{ flex: 1 }} onClick={saveServiceDetails}>Save Changes</button>
                 </div>
               </div>

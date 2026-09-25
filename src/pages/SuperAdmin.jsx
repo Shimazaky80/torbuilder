@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { 
   Building2, 
@@ -21,10 +21,13 @@ import {
   Clock
 } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useConfirm } from '../hooks/useConfirm';
 
 export const SuperAdmin = () => {
   const [activeTab, setActiveTab] = useState('companies');
   const [companies, setCompanies] = useState([]);
+  const [confirmDialog, confirm] = useConfirm();
   const [invitations, setInvitations] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -146,12 +149,19 @@ export const SuperAdmin = () => {
     }
   };
 
-  const handleDeleteCompany = async (companyId) => {
-    if (!window.confirm('Are you sure? This will delete all company data and users.')) return;
+  const handleDeleteCompany = async (company) => {
+    const ok = await confirm({
+      title: 'Delete company?',
+      message: `"${company.name}" and ALL of its data will be permanently deleted, including users, clients, suppliers, itineraries, invoices and documents.`,
+      detail: 'This cannot be undone.',
+      confirmLabel: 'Delete company',
+      destructive: true
+    });
+    if (!ok) return;
     try {
-      const { error } = await supabase.rpc('admin_delete_company', { target_company_id: companyId });
+      const { error } = await supabase.rpc('admin_delete_company', { target_company_id: company.id });
       if (error) throw error;
-      setCompanies(prev => prev.filter(c => c.id !== companyId));
+      setCompanies(prev => prev.filter(c => c.id !== company.id));
       showToast('Company deleted', 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -367,7 +377,7 @@ export const SuperAdmin = () => {
                       <button className="action-btn" title="Reset Admin Password">
                         <Key size={18} />
                       </button>
-                      <button className="action-btn delete" onClick={() => handleDeleteCompany(company.id)} title="Delete Company">
+                      <button className="action-btn delete" onClick={() => handleDeleteCompany(company)} title="Delete Company">
                         <Trash2 size={18} />
                       </button>
                     </div>
@@ -561,6 +571,8 @@ export const SuperAdmin = () => {
           </div>
         </div>
       )}
+
+      {confirmDialog && <ConfirmDialog {...confirmDialog} />}
     </div>
   );
 };

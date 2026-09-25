@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useConfirm } from '../hooks/useConfirm';
 import { 
   Building2, 
   Search, 
@@ -26,6 +28,7 @@ import {
 
 export const Suppliers = () => {
   const [suppliers, setSuppliers] = useState([]);
+  const [confirmDialog, confirm] = useConfirm();
   const [userProfile, setUserProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [fetchingSuppliers, setFetchingSuppliers] = useState(false);
@@ -252,16 +255,23 @@ export const Suppliers = () => {
     }
   };
 
-  const handleDelete = async (supplierId) => {
-    if (!window.confirm('Are you sure you want to delete this supplier? All associated library items will also be removed.')) return;
+  const handleDelete = async (supplier) => {
+    const ok = await confirm({
+      title: 'Delete supplier?',
+      message: `"${supplier.name}" will be permanently removed.`,
+      detail: 'All library items linked to this supplier will also be deleted. Itineraries already using them keep their saved copy.',
+      confirmLabel: 'Delete supplier',
+      destructive: true
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase
         .from('suppliers')
         .delete()
-        .eq('id', supplierId);
+        .eq('id', supplier.id);
 
       if (error) throw error;
-      setSuppliers(prev => prev.filter(s => s.id !== supplierId));
+      setSuppliers(prev => prev.filter(s => s.id !== supplier.id));
       showToast('Supplier deleted', 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -706,7 +716,7 @@ export const Suppliers = () => {
                     </button>
                     <button 
                       className="action-btn delete" 
-                      onClick={() => handleDelete(supplier.id)} 
+                        onClick={() => handleDelete(supplier)}
                       title="Delete Supplier"
                     >
                       <Trash2 size={16} />
@@ -729,6 +739,8 @@ export const Suppliers = () => {
           </div>
         )}
       </div>
+
+      {confirmDialog && <ConfirmDialog {...confirmDialog} />}
     </div>
   );
 };

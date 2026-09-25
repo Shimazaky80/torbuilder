@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useConfirm } from '../hooks/useConfirm';
 import {
   Settings as SettingsIcon,
   Plus,
@@ -19,7 +21,9 @@ import {
   Image as ImageIcon,
   Upload,
   LayoutTemplate,
-  Rows3
+  Rows3,
+  Eye,
+  AlertTriangle
 } from 'lucide-react';
 
 const emptyBank = () => ({
@@ -157,7 +161,7 @@ function SearchableCountryInput({ value, onChange }) {
           className="sidebar-select"
           style={{ width: '100%', padding: '0.6rem 0.75rem 0.6rem 2rem', fontSize: '0.9rem' }}
           value={open ? query : value}
-          placeholder="Type to search country…"
+          placeholder="Type to search countryâ€¦"
           onFocus={() => { setQuery(''); setOpen(true); }}
           onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
           onKeyDown={(e) => {
@@ -173,7 +177,7 @@ function SearchableCountryInput({ value, onChange }) {
       {open && (
         <div style={{ position: 'absolute', zIndex: 30, top: '100%', left: 0, right: 0, marginTop: '0.25rem', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 10px 25px rgba(0,0,0,0.12)', maxHeight: '220px', overflowY: 'auto' }}>
           {filtered.length === 0 ? (
-            <div style={{ padding: '0.6rem 0.75rem', color: '#94a3b8', fontSize: '0.85rem' }}>No matches — press Enter to use &quot;{query.trim()}&quot;</div>
+            <div style={{ padding: '0.6rem 0.75rem', color: '#94a3b8', fontSize: '0.85rem' }}>No matches â€” press Enter to use &quot;{query.trim()}&quot;</div>
           ) : filtered.map((c) => (
             <button
               type="button"
@@ -225,10 +229,32 @@ export const Settings = () => {
     output_rounding_mode: 'none',
     list_row_limit: 2,
     logo_data_url: '',
-    logo_size: 'md'
+    logo_size: 'md',
+    show_supplier_in_description: true,
+    pricing_breakdown_mode: 'daily',
+    pricing_breakdown_accommodation: 'one',
+    show_meal_plan_on_accommodation: true,
+    logo_position: 'left',
+    billing_address_position: 'left',
+    client_logo_size: 'md',
+    client_logo_position: 'left',
+    client_billing_address_position: 'left',
+    itinerary_pricing_position: 'above',
+    itinerary_terms: '',
+    itinerary_terms_position: 'under_day_by_day',
+    itinerary_inclusions: '',
+    itinerary_inclusions_position: 'under_day_by_day',
+    itinerary_include_default_inclusions: true,
+    itinerary_exclusions: '',
+    itinerary_exclusions_position: 'under_day_by_day',
+    contact_email: '',
+    contact_tel: '',
+    contact_cell: ''
   });
   const [bankAccounts, setBankAccounts] = useState([]);
   const [bankModalOpen, setBankModalOpen] = useState(false);
+  const [confirmDialog, confirm] = useConfirm();
+  const [bankConfirm, setBankConfirm] = useState(null);
   const [editingBankId, setEditingBankId] = useState(null);
   const [bankForm, setBankForm] = useState(emptyBank());
 
@@ -275,7 +301,27 @@ export const Settings = () => {
         output_rounding_mode: ['none', 'up', 'down'].includes(data.output_rounding_mode) ? data.output_rounding_mode : 'none',
         list_row_limit: Number.isFinite(Number(data.list_row_limit)) && Number(data.list_row_limit) > 0 ? Number(data.list_row_limit) : 2,
         logo_data_url: data.logo_data_url || '',
-        logo_size: ['sm', 'md', 'lg'].includes(data.logo_size) ? data.logo_size : 'md'
+        logo_size: ['sm', 'md', 'lg'].includes(data.logo_size) ? data.logo_size : 'md',
+        show_supplier_in_description: data.show_supplier_in_description !== false,
+        pricing_breakdown_mode: ['daily', 'per_person'].includes(data.pricing_breakdown_mode) ? data.pricing_breakdown_mode : 'daily',
+        pricing_breakdown_accommodation: ['one', 'rooms'].includes(data.pricing_breakdown_accommodation) ? data.pricing_breakdown_accommodation : 'one',
+        show_meal_plan_on_accommodation: data.show_meal_plan_on_accommodation !== false,
+        logo_position: ['left', 'center', 'right'].includes(data.logo_position) ? data.logo_position : 'left',
+        billing_address_position: ['left', 'center', 'right'].includes(data.billing_address_position) ? data.billing_address_position : 'left',
+        client_logo_size: ['sm', 'md', 'lg'].includes(data.client_logo_size) ? data.client_logo_size : 'md',
+        client_logo_position: ['left', 'center', 'right'].includes(data.client_logo_position) ? data.client_logo_position : 'left',
+        client_billing_address_position: ['left', 'center', 'right'].includes(data.client_billing_address_position) ? data.client_billing_address_position : 'left',
+        itinerary_pricing_position: ['above', 'below'].includes(data.itinerary_pricing_position) ? data.itinerary_pricing_position : 'above',
+        itinerary_terms: data.itinerary_terms || '',
+        itinerary_terms_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(data.itinerary_terms_position) ? data.itinerary_terms_position : 'under_day_by_day',
+        itinerary_inclusions: data.itinerary_inclusions || '',
+        itinerary_inclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(data.itinerary_inclusions_position) ? data.itinerary_inclusions_position : 'under_day_by_day',
+        itinerary_include_default_inclusions: data.itinerary_include_default_inclusions !== false,
+        itinerary_exclusions: data.itinerary_exclusions || '',
+        itinerary_exclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(data.itinerary_exclusions_position) ? data.itinerary_exclusions_position : 'under_day_by_day',
+        contact_email: data.contact_email || '',
+        contact_tel: data.contact_tel || '',
+        contact_cell: data.contact_cell || ''
       });
     }
   }, []);
@@ -331,7 +377,12 @@ export const Settings = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!companyId) {
+    let cid = companyId;
+    if (!cid) {
+      cid = await fetchCompanyId();
+      if (cid && cid !== companyId) setCompanyId(cid);
+    }
+    if (!cid) {
       showToast('No active company found', 'error');
       return;
     }
@@ -427,7 +478,14 @@ export const Settings = () => {
   };
 
   const handleDelete = async (t) => {
-    if (!window.confirm(`Delete "${t.name}"? Saved itineraries keep their original rate.`)) return;
+    const ok = await confirm({
+      title: 'Delete tax rate?',
+      message: `"${t.name}" will be removed and any itinerary using it will be set to 0%.`,
+      detail: 'Saved invoices and itineraries keep their original rate.',
+      confirmLabel: 'Delete tax rate',
+      destructive: true
+    });
+    if (!ok) return;
     setSaving(true);
     try {
       const { error } = await supabase
@@ -454,7 +512,15 @@ export const Settings = () => {
   const fieldStyle = { width: '100%', padding: '0.6rem 0.75rem', fontSize: '0.9rem' };
 
   const saveBillingFields = async (payload) => {
-    if (!companyId) {
+    /* If the mount effect hasn't resolved companyId yet (or the tenant's
+       profile row is missing a company_id), resolve it lazily so saving a
+       billing profile never fails with "No active company found". */
+    let cid = companyId;
+    if (!cid) {
+      cid = await fetchCompanyId();
+      if (cid && cid !== companyId) setCompanyId(cid);
+    }
+    if (!cid) {
       showToast('No active company found', 'error');
       return false;
     }
@@ -462,7 +528,7 @@ export const Settings = () => {
     try {
       const { error } = await supabase
         .from('company_billing_settings')
-        .upsert({ company_id: companyId, ...payload }, { onConflict: 'company_id' });
+        .upsert({ company_id: cid, ...payload }, { onConflict: 'company_id' });
       if (error) throw error;
       return true;
     } catch (err) {
@@ -474,22 +540,32 @@ export const Settings = () => {
   };
 
   const handleSaveBillingProfile = async () => {
+      const ok = await saveBillingFields({
+        legal_name: billing.legal_name.trim(),
+        operating_country: billing.operating_country || 'South Africa',
+        tax_number: billing.tax_number.trim(),
+        billing_address: billing.billing_address.trim(),
+        logo_data_url: billing.logo_data_url || '',
+        logo_size: ['sm', 'md', 'lg'].includes(billing.logo_size) ? billing.logo_size : 'md',
+        contact_email: billing.contact_email.trim(),
+        contact_tel: billing.contact_tel.trim(),
+        contact_cell: billing.contact_cell.trim()
+      });
+    if (ok) showToast('Company profile saved', 'success');
+  };
+
+  /* Invoice-only defaults: numbering prefix and the default deposit %. */
+  const handleSaveInvoiceDefaults = async () => {
     const pct = Number(billing.default_deposit_percentage);
     if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
       showToast('Default deposit % must be between 0 and 100', 'warning');
       return;
     }
     const ok = await saveBillingFields({
-      legal_name: billing.legal_name.trim(),
-      tax_number: billing.tax_number.trim(),
-      billing_address: billing.billing_address.trim(),
-      operating_country: billing.operating_country || 'South Africa',
-      default_deposit_percentage: pct,
       invoice_prefix: (billing.invoice_prefix.trim() || 'INV').toUpperCase(),
-      logo_data_url: billing.logo_data_url || '',
-      logo_size: ['sm', 'md', 'lg'].includes(billing.logo_size) ? billing.logo_size : 'md'
+      default_deposit_percentage: pct
     });
-    if (ok) showToast('Billing profile saved', 'success');
+    if (ok) showToast('Invoice defaults saved', 'success');
   };
 
   /* Company logo: JPEG / PNG / BMP accepted; resized to at most 512px wide,
@@ -523,7 +599,7 @@ export const Settings = () => {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         setBilling((prev) => ({ ...prev, logo_data_url: canvas.toDataURL('image/png') }));
-        showToast('Logo added — remember to save your changes', 'success');
+        showToast('Logo added â€” remember to save your changes', 'success');
       };
       img.onerror = () => showToast('Could not read that logo image', 'error');
       img.src = reader.result;
@@ -553,6 +629,35 @@ export const Settings = () => {
     }
   };
 
+  const handleSavePresentationSettings = async () => {
+    const ok = await saveBillingFields({
+      show_supplier_in_description: billing.show_supplier_in_description !== false,
+      pricing_breakdown_mode: ['daily', 'per_person'].includes(billing.pricing_breakdown_mode) ? billing.pricing_breakdown_mode : 'daily',
+      pricing_breakdown_accommodation: ['one', 'rooms'].includes(billing.pricing_breakdown_accommodation) ? billing.pricing_breakdown_accommodation : 'one',
+      show_meal_plan_on_accommodation: billing.show_meal_plan_on_accommodation !== false,
+      logo_position: ['left', 'center', 'right'].includes(billing.logo_position) ? billing.logo_position : 'left',
+      billing_address_position: ['left', 'center', 'right'].includes(billing.billing_address_position) ? billing.billing_address_position : 'left',
+      client_logo_size: ['sm', 'md', 'lg'].includes(billing.client_logo_size) ? billing.client_logo_size : 'md',
+      client_logo_position: ['left', 'center', 'right'].includes(billing.client_logo_position) ? billing.client_logo_position : 'left',
+      client_billing_address_position: ['left', 'center', 'right'].includes(billing.client_billing_address_position) ? billing.client_billing_address_position : 'left'
+    });
+    if (ok) showToast('Presentation preferences saved', 'success');
+  };
+
+  const handleSaveItinerarySettings = async () => {
+    const ok = await saveBillingFields({
+      itinerary_pricing_position: ['above', 'below'].includes(billing.itinerary_pricing_position) ? billing.itinerary_pricing_position : 'above',
+      itinerary_terms: billing.itinerary_terms || '',
+      itinerary_terms_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(billing.itinerary_terms_position) ? billing.itinerary_terms_position : 'under_day_by_day',
+      itinerary_inclusions: billing.itinerary_inclusions || '',
+      itinerary_inclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(billing.itinerary_inclusions_position) ? billing.itinerary_inclusions_position : 'under_day_by_day',
+      itinerary_include_default_inclusions: billing.itinerary_include_default_inclusions === true,
+      itinerary_exclusions: billing.itinerary_exclusions || '',
+      itinerary_exclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(billing.itinerary_exclusions_position) ? billing.itinerary_exclusions_position : 'under_day_by_day'
+    });
+    if (ok) showToast('Itinerary presentation saved', 'success');
+  };
+
   const openAddBank = () => {
     setEditingBankId(null);
     setBankForm(emptyBank());
@@ -577,7 +682,12 @@ export const Settings = () => {
 
   const handleBankSubmit = async (e) => {
     e.preventDefault();
-    if (!companyId) {
+    let cid = companyId;
+    if (!cid) {
+      cid = await fetchCompanyId();
+      if (cid && cid !== companyId) setCompanyId(cid);
+    }
+    if (!cid) {
       showToast('No active company found', 'error');
       return;
     }
@@ -658,6 +768,7 @@ export const Settings = () => {
         .eq('id', b.id);
       if (error) throw error;
       await fetchBankAccounts(companyId);
+      showToast(b.is_active ? 'Bank account deactivated' : 'Bank account activated', 'success');
     } catch (err) {
       showToast(err.message || 'Failed to update bank account', 'error');
     } finally {
@@ -665,8 +776,39 @@ export const Settings = () => {
     }
   };
 
+  /* Deactivating removes the account from invoices and blocks invoicing for its
+     currency until another account is active, so it is confirmed first. */
+  const requestToggleBankActive = (b) => {
+    if (!b.is_active) {
+      handleToggleBankActive(b);
+      return;
+    }
+    const activeOthers = bankAccounts.filter((x) => x.id !== b.id && x.is_active
+      && (x.currency_code || '').toUpperCase() === (b.currency_code || '').toUpperCase());
+    setBankConfirm({
+      account: b,
+      /* activeOthers.length > 0 means another active account covers this
+         currency, so invoicing continues; otherwise it is blocked. */
+      message: activeOthers.length
+        ? `It will no longer appear on invoices. Invoices in ${b.currency_code} will use "${activeOthers[0].label || activeOthers[0].currency_code}".`
+        : `This is the last active ${b.currency_code} account, so invoices in ${b.currency_code} can no longer be generated. Itineraries can still be built in any currency.`
+    });
+  };
+
   const handleDeleteBank = async (b) => {
-    if (!window.confirm(`Delete bank account "${b.bank_name || b.label || b.currency_code}"?`)) return;
+    const name = b.bank_name || b.label || b.currency_code;
+    const others = bankAccounts.filter((x) => x.id !== b.id && x.is_active
+      && (x.currency_code || '').toUpperCase() === (b.currency_code || '').toUpperCase());
+    const ok = await confirm({
+      title: 'Delete bank account?',
+      message: `"${name}" (${b.currency_code}) will be permanently removed.`,
+      detail: others.length
+        ? `Invoices in ${b.currency_code} will use "${others[0].label || others[0].currency_code}".`
+        : `This is the last ${b.currency_code} account, so invoices in ${b.currency_code} can no longer be generated.`,
+      confirmLabel: 'Delete bank account',
+      destructive: true
+    });
+    if (!ok) return;
     setSaving(true);
     try {
       const { error } = await supabase
@@ -691,19 +833,19 @@ export const Settings = () => {
             <SettingsIcon size={22} color="#0d7478" /> Settings
           </h1>
           <p style={{ color: '#64748b', margin: '0.35rem 0 0', fontSize: '0.9rem' }}>
-            Tenant configuration — tax rules, defaults and company settings.
+            Tenant configuration â€” tax rules, defaults and company settings.
           </p>
         </div>
       </div>
 
-      {/* Billing & invoicing profile */}
+      {/* Company profile - applies to every document */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
           <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <FileText size={18} color="#0d7478" /> Billing &amp; Invoicing
+            <FileText size={18} color="#0d7478" /> Company Profile
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            These details appear on every invoice. The deposit % is the tenant default; a client can override it on their record.
+            These details identify your company on every travel document you produce &mdash; quotations, provisional bookings, invoices, receipts and credit notes.
           </p>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
@@ -719,20 +861,26 @@ export const Settings = () => {
             <label>Operating Country *</label>
             <SearchableCountryInput value={billing.operating_country} onChange={(value) => setBilling({ ...billing, operating_country: value })} />
             <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.74rem', lineHeight: 1.4 }}>
-              {String(billing.operating_country || '').trim().toLowerCase() === 'south africa'
-                ? 'South African VAT is applied only to ZAR-priced services. Any other currency is always taxed at 0 / No Tax.'
-                : 'Tenants outside South Africa apply their own configured tax type and percentage to every service, regardless of currency.'}
+              Determines the tax wording printed on your documents. Tax percentages and rates are configured in the Tax settings below.
             </p>
           </div>
-          <div className="sidebar-field">
-            <label>Invoice Prefix</label>
-            <input className="sidebar-select" style={fieldStyle} value={billing.invoice_prefix} onChange={(e) => setBilling({ ...billing, invoice_prefix: e.target.value })} placeholder="INV" />
-          </div>
-          <div className="sidebar-field">
-            <label>Default Deposit (%)</label>
-            <input className="sidebar-select" style={fieldStyle} type="number" min="0" max="100" step="0.01" value={billing.default_deposit_percentage} onChange={(e) => setBilling({ ...billing, default_deposit_percentage: e.target.value })} />
-          </div>
         </div>
+
+        {/* Contact details on printed documents */}
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label style={{ display: 'block', fontWeight: 600, fontSize: '0.86rem', marginBottom: '0.45rem' }}>
+            Contact details on printed documents
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.6rem' }}>
+            <input className="sidebar-select" style={fieldStyle} type="email" value={billing.contact_email} onChange={(e) => setBilling({ ...billing, contact_email: e.target.value })} placeholder="Email" />
+            <input className="sidebar-select" style={fieldStyle} value={billing.contact_tel} onChange={(e) => setBilling({ ...billing, contact_tel: e.target.value })} placeholder="Telephone" />
+            <input className="sidebar-select" style={fieldStyle} value={billing.contact_cell} onChange={(e) => setBilling({ ...billing, contact_cell: e.target.value })} placeholder="Cell / Mobile" />
+          </div>
+          <p style={{ margin: '0.35rem 0 0', color: '#94a3b8', fontSize: '0.76rem', lineHeight: 1.45 }}>
+            These appear on your printed documents (invoices, receipts, credit notes, itineraries) in the supplier / Bill-from header, so clients always have a way to reach you without scrolling to a footer.
+          </p>
+        </div>
+
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
           <label>Billing Address</label>
           <textarea className="sidebar-select" style={{ ...fieldStyle, minHeight: '70px', resize: 'vertical' }} value={billing.billing_address} onChange={(e) => setBilling({ ...billing, billing_address: e.target.value })} placeholder="Street, City, Postal code, Country" />
@@ -743,7 +891,7 @@ export const Settings = () => {
               <ImageIcon size={15} color="#0d7478" /> Company Logo
             </strong>
             <p style={{ margin: '0.3rem 0 0', color: '#64748b', fontSize: '0.8rem' }}>
-              Appears on your printed Company documents (invoices, receipts, credit notes, itineraries). JPEG, PNG or BMP — auto-resized to 512px and stored as PNG.
+              Appears on your printed Company documents (invoices, receipts, credit notes, itineraries). JPEG, PNG or BMP â€” auto-resized to 512px and stored as PNG.
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
@@ -772,12 +920,39 @@ export const Settings = () => {
             <input id="company-logo-input" type="file" accept=".jpg,.jpeg,.png,.bmp,image/jpeg,image/png,image/bmp" style={{ display: 'none' }} onChange={(e) => { handleLogoFile(e.target.files?.[0]); e.target.value = ''; }} />
           </div>
           <p style={{ margin: '0.6rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
-            Recommended: export your logo at 300–500px wide (landscape usually works best on a document header). The size above controls how wide it prints — Medium (160px) is the typical industry standard.
+            Recommended: export your logo at 300â€“500px wide (landscape usually works best on a document header). The size above controls how wide it prints â€” Medium (160px) is the typical industry standard.
           </p>
         </div>
         <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving} onClick={handleSaveBillingProfile}>
-            <Check size={16} /> {saving ? 'Saving...' : 'Save Billing Profile'}
+            <Check size={16} /> {saving ? 'Saving...' : 'Save Company Profile'}
+          </button>
+        </div>
+      </div>
+
+      {/* Invoice-only defaults */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <FileText size={18} color="#0d7478" /> Invoice Defaults
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            Used on invoices only. The deposit % is the tenant default; a client can override it on their own record.
+          </p>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+          <div className="sidebar-field">
+            <label>Invoice Prefix</label>
+            <input className="sidebar-select" style={fieldStyle} value={billing.invoice_prefix} onChange={(e) => setBilling({ ...billing, invoice_prefix: e.target.value })} placeholder="INV" />
+          </div>
+          <div className="sidebar-field">
+            <label>Default Deposit (%)</label>
+            <input className="sidebar-select" style={fieldStyle} type="number" min="0" max="100" step="0.01" value={billing.default_deposit_percentage} onChange={(e) => setBilling({ ...billing, default_deposit_percentage: e.target.value })} />
+          </div>
+        </div>
+        <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving} onClick={handleSaveInvoiceDefaults}>
+            <Check size={16} /> {saving ? 'Saving...' : 'Save Invoice Defaults'}
           </button>
         </div>
       </div>
@@ -789,7 +964,7 @@ export const Settings = () => {
             <Percent size={18} color="#0d7478" /> Money Entry Preferences
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            Applies to money / rate fields only — never to counts such as pax, capacity or occupancy.
+            Applies to money / rate fields only â€” never to counts such as pax, capacity or occupancy.
           </p>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
@@ -874,6 +1049,237 @@ export const Settings = () => {
         </div>
       </div>
 
+      {/* Presentation preferences */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Eye size={18} color="#0d7478" /> Presentation
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            How pricing is presented on exported documents and invoices. More presentation options will live under this section.
+          </p>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+          <div className="sidebar-field">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600, color: '#334155', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={billing.show_supplier_in_description}
+                onChange={(e) => setBilling({ ...billing, show_supplier_in_description: e.target.checked })}
+                style={{ width: '16px', height: '16px', accentColor: '#0d7478', cursor: 'pointer' }}
+              />
+              Show supplier under the service description
+            </label>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              When on, each service line also shows its supplier beneath the description. When off, only the service description appears â€” accommodation always shows its supplier so clients can see who quotes the room.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Price breakdown</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_mode} onChange={(e) => setBilling({ ...billing, pricing_breakdown_mode: e.target.value })}>
+              <option value="daily">Service per day (detailed)</option>
+              <option value="per_person">Total per person (summary)</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Daily shows every service across the days. Per person shows the price per person sharing, adds a single supplement when a traveller occupies a single room, and a per-child figure when children travel.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Accommodation lines</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_accommodation} onChange={(e) => setBilling({ ...billing, pricing_breakdown_accommodation: e.target.value })}>
+              <option value="one">One line for all travellers</option>
+              <option value="rooms">One line per room (occupancy split)</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Applies to the daily breakdown. One line shows the whole accommodation with the total per person. Room split puts each occupied room on its own line â€” e.g. one line for 2 travellers, one for 1 traveller, one for 2A, 1C â€” with the number of adults and children in the Qty column. All other services stay on their own lines as usual.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600, color: '#334155', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={billing.show_meal_plan_on_accommodation}
+                onChange={(e) => setBilling({ ...billing, show_meal_plan_on_accommodation: e.target.checked })}
+                style={{ width: '16px', height: '16px', accentColor: '#0d7478', cursor: 'pointer' }}
+              />
+              Show meal plan on accommodation
+            </label>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              When on, accommodation lines show the meal plan as its industry abbreviation (e.g. Standard Room - B&amp;B) on the same line as the service. The client itinerary document always includes the accommodation meal plan regardless of this toggle.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Logo position</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.logo_position} onChange={(e) => setBilling({ ...billing, logo_position: e.target.value })}>
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Horizontal position of the company logo on exported documents.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Billing address position</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.billing_address_position} onChange={(e) => setBilling({ ...billing, billing_address_position: e.target.value })}>
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Horizontal position of the billing address on exported documents.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Client logo size</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.client_logo_size} onChange={(e) => setBilling({ ...billing, client_logo_size: e.target.value })}>
+              <option value="sm">Small</option>
+              <option value="md">Medium</option>
+              <option value="lg">Large</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Display size of the client&apos;s logo (set per client) on exported documents and invoices.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Client logo position</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.client_logo_position} onChange={(e) => setBilling({ ...billing, client_logo_position: e.target.value })}>
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Horizontal position of the client logo inside the Bill To block.
+            </p>
+          </div>
+          <div className="sidebar-field">
+            <label>Client billing address position</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.client_billing_address_position} onChange={(e) => setBilling({ ...billing, client_billing_address_position: e.target.value })}>
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Horizontal position of the client&apos;s Bill To block on exported documents and invoices.
+            </p>
+          </div>
+        </div>
+        <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving} onClick={handleSavePresentationSettings}>
+            <Check size={16} /> {saving ? 'Saving...' : 'Save Presentation Preferences'}
+          </button>
+        </div>
+      </div>
+
+      {/* Itinerary presentation */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <FileText size={18} color="#0d7478" /> Itinerary Presentation
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            Layout of the client itinerary document, sent with quotations and provisional bookings.
+          </p>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+          <div className="sidebar-field">
+            <label>Pricing breakdown position</label>
+            <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_pricing_position} onChange={(e) => setBilling({ ...billing, itinerary_pricing_position: e.target.value })}>
+              <option value="above">Above the day-by-day routing</option>
+              <option value="below">Below the day-by-day routing</option>
+            </select>
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Where the pricing breakdown sits. The day-by-day routing always appears on the itinerary.
+            </p>
+          </div>
+        </div>
+
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label>Terms &amp; Conditions</label>
+          <textarea
+            className="sidebar-select"
+            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
+            value={billing.itinerary_terms}
+            onChange={(e) => setBilling({ ...billing, itinerary_terms: e.target.value })}
+            placeholder="Booking terms, cancellation policy, payment terms..."
+          />
+          <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+            Default text used on every itinerary. Itineraries that set their own terms keep theirs.
+          </p>
+        </div>
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label>Terms position</label>
+          <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_terms_position} onChange={(e) => setBilling({ ...billing, itinerary_terms_position: e.target.value })}>
+            <option value="under_day_by_day">Under the day-by-day routing</option>
+            <option value="before_pricing">Before the pricing breakdown</option>
+            <option value="after_pricing">After the pricing breakdown</option>
+          </select>
+        </div>
+
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label style={{ display: 'block', fontWeight: 600, fontSize: '0.86rem', marginBottom: '0.45rem' }}>
+            Inclusions
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.55rem' }}>
+            <input
+              type="checkbox"
+              id="include-default-inclusions"
+              checked={billing.itinerary_include_default_inclusions === true}
+              onChange={(e) => setBilling({ ...billing, itinerary_include_default_inclusions: e.target.checked })}
+              style={{ width: '16px', height: '16px', accentColor: '#0d7478', cursor: 'pointer' }}
+            />
+            <label htmlFor="include-default-inclusions" style={{ fontSize: '0.85rem', color: '#334155', cursor: 'pointer' }}>
+              Include the default inclusions text below on the itinerary
+            </label>
+          </div>
+          <textarea
+            className="sidebar-select"
+            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
+            value={billing.itinerary_inclusions}
+            onChange={(e) => setBilling({ ...billing, itinerary_inclusions: e.target.value })}
+            placeholder="General inclusions applied to every itinerary..."
+          />
+          <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+            The itinerary always lists each day&rsquo;s services automatically. Tick the box to also print the default text above that list; untick it to show the generated list on its own.
+          </p>
+        </div>
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label>Inclusions position</label>
+          <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_inclusions_position} onChange={(e) => setBilling({ ...billing, itinerary_inclusions_position: e.target.value })}>
+            <option value="under_day_by_day">Under the day-by-day routing</option>
+            <option value="before_pricing">Before the pricing breakdown</option>
+            <option value="after_pricing">After the pricing breakdown</option>
+          </select>
+        </div>
+
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label>Exclusions</label>
+          <textarea
+            className="sidebar-select"
+            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
+            value={billing.itinerary_exclusions}
+            onChange={(e) => setBilling({ ...billing, itinerary_exclusions: e.target.value })}
+            placeholder="What is not included..."
+          />
+        </div>
+        <div className="sidebar-field" style={{ marginTop: '1rem' }}>
+          <label>Exclusions position</label>
+          <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_exclusions_position} onChange={(e) => setBilling({ ...billing, itinerary_exclusions_position: e.target.value })}>
+            <option value="under_day_by_day">Under the day-by-day routing</option>
+            <option value="before_pricing">Before the pricing breakdown</option>
+            <option value="after_pricing">After the pricing breakdown</option>
+          </select>
+          <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+            Blocks keep a fixed order (Terms &amp; Conditions, Inclusions, Exclusions). Blocks sharing the same position appear in that order. Where no position fits, a block falls back to under the day-by-day routing.
+          </p>
+        </div>
+        <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving} onClick={handleSaveItinerarySettings}>
+            <Check size={16} /> {saving ? 'Saving...' : 'Save Itinerary Presentation'}
+          </button>
+        </div>
+      </div>
+
       {/* Document templates (coming soon) */}
       <div className="admin-card" style={{ marginTop: '1.5rem', opacity: 0.85 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
@@ -882,7 +1288,7 @@ export const Settings = () => {
               <LayoutTemplate size={18} color="#0d7478" /> Document Templates
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-              Pick a ready-made layout for how your output documents (itineraries, vouchers, invoices, travel documents) are presented. The layout engine ships in a future release — this is just the placeholder setting page.
+              Pick a ready-made layout for how your output documents (itineraries, vouchers, invoices, travel documents) are presented. The layout engine ships in a future release â€” this is just the placeholder setting page.
             </p>
           </div>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfeff', color: '#0d7478', padding: '0.3rem 0.7rem', borderRadius: '999px', fontSize: '0.78rem', fontWeight: 700 }}>
@@ -902,13 +1308,25 @@ export const Settings = () => {
               <Landmark size={18} color="#0d7478" /> Bank Accounts
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-              Add one account per currency. An invoice uses the account matching its currency.
+              Add one account per currency. An invoice uses the active account matching its currency. Deactivated accounts are hidden from invoices, and a currency with no active account cannot be invoiced.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAddBank}>
             <Plus size={16} /> Add Bank Account
           </button>
         </div>
+
+        {bankAccounts.length > 0 && !bankAccounts.some((b) => b.is_active) && (
+          <div style={{ marginBottom: '1rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '12px', padding: '0.8rem 1rem', display: 'flex', gap: '0.6rem', alignItems: 'flex-start' }}>
+            <AlertTriangle size={16} color="#b91c1c" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div>
+              <strong style={{ color: '#b91c1c', fontSize: '0.87rem' }}>No active bank account</strong>
+              <p style={{ margin: '0.2rem 0 0', color: '#7f1d1d', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                All bank accounts are deactivated, so invoices cannot be generated until you activate one. Itineraries can still be built in any currency.
+              </p>
+            </div>
+          </div>
+        )}
 
         {bankAccounts.length === 0 ? (
           <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>
@@ -931,13 +1349,13 @@ export const Settings = () => {
             </thead>
             <tbody>
               {bankAccounts.map((b) => (
-                <tr key={b.id}>
-                  <td style={{ fontWeight: 700 }}>{b.label || '—'}</td>
-                  <td style={{ fontWeight: 700, color: '#0d7478' }}>{b.currency_code}</td>
+                <tr key={b.id} style={b.is_active ? undefined : { opacity: 0.6, background: '#f8fafc' }}>
+                  <td style={{ fontWeight: 700 }}>{b.label || 'â€”'}</td>
+                  <td style={{ fontWeight: 700, color: b.is_active ? '#0d7478' : '#94a3b8' }}>{b.currency_code}</td>
                   <td>{b.bank_name}</td>
-                  <td>{b.account_holder_name || '—'}</td>
-                  <td>{b.account_number || '—'}</td>
-                  <td>{[b.branch_code, b.swift_code].filter(Boolean).join(' / ') || '—'}</td>
+                  <td>{b.account_holder_name || 'â€”'}</td>
+                  <td>{b.account_number || 'â€”'}</td>
+                  <td>{[b.branch_code, b.swift_code].filter(Boolean).join(' / ') || 'â€”'}</td>
                   <td>
                     {b.is_default ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfdf5', color: '#047857', padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
@@ -950,20 +1368,35 @@ export const Settings = () => {
                     )}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className={`icon-btn ${b.is_active ? '' : 'danger'}`}
-                      title={b.is_active ? 'Deactivate' : 'Activate'}
-                      disabled={saving}
-                      onClick={() => handleToggleBankActive(b)}
-                    >
-                      <Power size={15} />
-                    </button>
+                    {b.is_active ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfdf5', color: '#047857', padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
+                        Active
+                      </span>
+                    ) : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#f1f5f9', color: '#64748b', padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
+                        Inactive &mdash; hidden from invoices
+                      </span>
+                    )}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
+                    <div style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center' }}>
                       <button type="button" className="icon-btn outline" title="Edit" onClick={() => openEditBank(b)}>
                         <Edit3 size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        title={b.is_active ? 'Deactivate â€” this account will no longer be used on invoices' : 'Activate â€” invoices can use this account again'}
+                        disabled={saving}
+                        onClick={() => requestToggleBankActive(b)}
+                        style={{
+                          width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          borderRadius: '8px', cursor: 'pointer',
+                          border: `1px solid ${b.is_active ? '#fca5a5' : '#86efac'}`,
+                          background: b.is_active ? '#fef2f2' : '#f0fdf4',
+                          color: b.is_active ? '#b91c1c' : '#15803d'
+                        }}
+                      >
+                        <Power size={15} />
                       </button>
                       <button type="button" className="icon-btn danger" title="Delete" disabled={saving} onClick={() => handleDeleteBank(b)}>
                         <Trash2 size={15} />
@@ -985,8 +1418,8 @@ export const Settings = () => {
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
               Tax applied on top of each service&apos;s sell price (markup already included in sell).
-              For South African tenants this tax is currency-bound to ZAR — services in any other currency are always 0 / No Tax.
-              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. The default is 15% VAT — set your region&apos;s own tax types here.
+              For South African tenants this tax is currency-bound to ZAR â€” services in any other currency are always 0 / No Tax.
+              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. The default is 15% VAT â€” set your region&apos;s own tax types here.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAdd}>
@@ -1017,12 +1450,12 @@ export const Settings = () => {
             </thead>
             <tbody>
               {taxRates.map((t) => (
-                <tr key={t.id}>
+                <tr key={t.id} style={t.is_active ? undefined : { opacity: 0.6, background: '#f8fafc' }}>
                   <td style={{ fontWeight: 700 }}>{t.name}</td>
                   <td>{t.code}</td>
-                  <td style={{ fontWeight: 700, color: '#0d7478' }}>{Number(t.rate)}%</td>
+                  <td style={{ fontWeight: 700, color: t.is_active ? '#0d7478' : '#94a3b8' }}>{Number(t.rate)}%</td>
                   <td>{t.country || 'South Africa'}</td>
-                  <td>{t.revenue_agency || (t.country === 'South Africa' ? 'SARS' : '—')}</td>
+                  <td>{t.revenue_agency || (t.country === 'South Africa' ? 'SARS' : 'â€”')}</td>
                   <td style={{ textTransform: 'capitalize' }}>{t.applies_to || 'all'}</td>
                   <td>
                     {t.is_default ? (
@@ -1036,20 +1469,35 @@ export const Settings = () => {
                     )}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className={`icon-btn ${t.is_active ? '' : 'danger'}`}
-                      title={t.is_active ? 'Deactivate' : 'Activate'}
-                      disabled={saving}
-                      onClick={() => handleToggleActive(t)}
-                    >
-                      <Power size={15} />
-                    </button>
+                    {t.is_active ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfdf5', color: '#047857', padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
+                        Active
+                      </span>
+                    ) : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#f1f5f9', color: '#64748b', padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
+                        Inactive &mdash; 0% applied
+                      </span>
+                    )}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
+                    <div style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center' }}>
                       <button type="button" className="icon-btn outline" title="Edit" onClick={() => openEdit(t)}>
                         <Edit3 size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        title={t.is_active ? 'Deactivate â€” tax will not be applied' : 'Activate â€” tax will be applied'}
+                        disabled={saving}
+                        onClick={() => handleToggleActive(t)}
+                        style={{
+                          width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          borderRadius: '8px', cursor: 'pointer',
+                          border: `1px solid ${t.is_active ? '#fca5a5' : '#86efac'}`,
+                          background: t.is_active ? '#fef2f2' : '#f0fdf4',
+                          color: t.is_active ? '#b91c1c' : '#15803d'
+                        }}
+                      >
+                        <Power size={15} />
                       </button>
                       <button type="button" className="icon-btn danger" title="Delete" disabled={saving} onClick={() => handleDelete(t)}>
                         <Trash2 size={15} />
@@ -1063,7 +1511,7 @@ export const Settings = () => {
         )}
 
         <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '1rem', display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
-          <ShieldCheck size={13} /> Saved itineraries keep the tax rate that applied at quote time — changing these rates only affects new services.
+          <ShieldCheck size={13} /> Saved itineraries keep the tax rate that applied at quote time â€” changing these rates only affects new services.
         </p>
       </div>
 
@@ -1151,7 +1599,7 @@ export const Settings = () => {
                     <label>Currency</label>
                     <select className="sidebar-select" style={fieldStyle} value={bankForm.currency_code} onChange={(e) => setBankForm({ ...bankForm, currency_code: e.target.value })}>
                       {(currencies.length ? currencies : [{ code: 'ZAR', name: 'South African Rand' }]).map((c) => (
-                        <option key={c.code} value={c.code}>{c.code}{c.name ? ` — ${c.name}` : ''}</option>
+                        <option key={c.code} value={c.code}>{c.code}{c.name ? ` â€” ${c.name}` : ''}</option>
                       ))}
                     </select>
                   </div>
@@ -1196,6 +1644,48 @@ export const Settings = () => {
                 </div>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {confirmDialog && <ConfirmDialog {...confirmDialog} />}
+
+      {/* Deactivate bank account confirmation */}
+      {bankConfirm && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '480px' }}>
+            <div className="modal-header">
+              <h2>Deactivate bank account?</h2>
+              <button className="close-btn" onClick={() => setBankConfirm(null)}><X size={20} /></button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
+              <p style={{ margin: 0, color: '#334155', fontSize: '0.9rem', lineHeight: 1.55 }}>
+                <strong>{bankConfirm.account.label || bankConfirm.account.currency_code}</strong>
+                {' '}({bankConfirm.account.currency_code})
+              </p>
+              <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '0.75rem 0.9rem' }}>
+                <AlertTriangle size={16} color="#b91c1c" style={{ flexShrink: 0, marginTop: '2px' }} />
+                <p style={{ margin: 0, color: '#7f1d1d', fontSize: '0.84rem', lineHeight: 1.5 }}>
+                  {bankConfirm.message}
+                </p>
+              </div>
+              <div className="form-actions" style={{ marginTop: 0 }}>
+                <button type="button" className="secondary-btn" onClick={() => setBankConfirm(null)}>Cancel</button>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  style={{ flex: 1, background: '#b91c1c', borderColor: '#b91c1c', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem' }}
+                  disabled={saving}
+                  onClick={async () => {
+                    const acc = bankConfirm.account;
+                    setBankConfirm(null);
+                    await handleToggleBankActive(acc);
+                  }}
+                >
+                  <Power size={15} /> {saving ? 'Deactivating...' : 'Deactivate'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

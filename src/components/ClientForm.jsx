@@ -11,7 +11,9 @@ export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) =>
   const [form, setForm] = useState({
     name: '',
     email: '',
-    phone: '',
+    contact_tel: '',
+    contact_cell: '',
+    contact_website: '',
     clientType: 'Direct',
     country: '',
     markupPercentage: '',
@@ -82,7 +84,9 @@ export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) =>
         company_id: profile.company_id,
         name,
         email,
-        phone: form.phone.trim(),
+        contact_tel: form.contact_tel.trim(),
+        contact_cell: form.contact_cell.trim(),
+        contact_website: form.contact_website.trim(),
         client_type: form.clientType,
         country: form.country,
         markup_percentage: markup,
@@ -152,14 +156,38 @@ export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) =>
           </div>
           <div>
             <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-              Phone
+              Tel # / Landline
             </label>
             <input
               type="tel"
               className="pricing-select"
-              placeholder="+1 234 567 8900"
-              value={form.phone}
-              onChange={(e) => setForm({ ...form, phone: e.target.value })}
+              placeholder="+27 21 555 0100"
+              value={form.contact_tel}
+              onChange={(e) => setForm({ ...form, contact_tel: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+              Cell #
+            </label>
+            <input
+              type="tel"
+              className="pricing-select"
+              placeholder="+27 82 555 0100"
+              value={form.contact_cell}
+              onChange={(e) => setForm({ ...form, contact_cell: e.target.value })}
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+              Website (optional)
+            </label>
+            <input
+              type="text"
+              className="pricing-select"
+              placeholder="https://www.example.com"
+              value={form.contact_website}
+              onChange={(e) => setForm({ ...form, contact_website: e.target.value })}
             />
           </div>
           <div>

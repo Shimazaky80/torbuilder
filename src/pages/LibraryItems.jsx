@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useConfirm } from '../hooks/useConfirm';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
 import { 
@@ -50,12 +52,50 @@ import {
   Zap
 } from 'lucide-react';
 
+/* Price and count fields may never hold a negative value. Clamps a typed
+   negative number to "0" while leaving empty / non-numeric values (including
+   checked booleans and arrays) untouched so text fields keep working. */
+const clampNonNegative = (value) => {
+  if (typeof value !== 'string' || value.trim() === '') return value;
+  const n = Number(value);
+  return Number.isFinite(n) && n < 0 ? '0' : value;
+};
 
-
-
+/* Reads an image file and re-encodes it as a smaller data URL. Images larger
+   than maxDim are downscaled to keep the longest edge at maxDim and saved as
+   JPEG; small images are returned unchanged (original format preserved). */
+const compressImageDataUrl = (file, maxDim = 1200, quality = 0.82) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Invalid image'));
+      img.onload = () => {
+        const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+        if (scale >= 1) {
+          resolve(reader.result);
+          return;
+        }
+        const w = Math.max(1, Math.round(img.naturalWidth * scale));
+        const h = Math.max(1, Math.round(img.naturalHeight * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 
 export const LibraryItems = () => {
   const [suppliers, setSuppliers] = useState([]);
+  const [confirmDialog, confirm] = useConfirm();
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
   const [libraryItemsList, setLibraryItemsList] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -149,25 +189,25 @@ export const LibraryItems = () => {
     {
       id: 'half_day',
       label: 'Half Day',
-      icon: '🌤️',
-      description: 'Typically 3–5 hours — a morning or afternoon activity.'
+      icon: 'ðŸŒ¤ï¸',
+      description: 'Typically 3â€“5 hours â€” a morning or afternoon activity.'
     },
     {
       id: 'full_day',
       label: 'Full Day',
-      icon: '🌞',
-      description: 'Typically 6–10 hours — a full day of sightseeing or activity.'
+      icon: 'ðŸŒž',
+      description: 'Typically 6â€“10 hours â€” a full day of sightseeing or activity.'
     },
     {
       id: 'escorted_dinner_lunch',
       label: 'Escorted Dinner / Lunch',
-      icon: '🍽️',
+      icon: 'ðŸ½ï¸',
       description: 'A hosted meal (dinner or lunch) with escort / guide.'
     },
     {
       id: 'overland_transfer',
       label: 'Overland Transfer',
-      icon: '🛤️',
+      icon: 'ðŸ›¤ï¸',
       description: 'Long-haul transfer that stays away from the origin overnight.'
     }
   ];
@@ -182,19 +222,19 @@ export const LibraryItems = () => {
     {
       id: 'airport_city',
       label: 'Airport / City',
-      icon: '✈️',
-      description: 'From/to the airport or city transfers to hotels — minutes to a few hours, same day.'
+      icon: 'âœˆï¸',
+      description: 'From/to the airport or city transfers to hotels â€” minutes to a few hours, same day.'
     },
     {
       id: 'dinner',
       label: 'Dinner',
-      icon: '🍽️',
+      icon: 'ðŸ½ï¸',
       description: 'Evening transfers to/from restaurants for dinner.'
     },
     {
       id: 'overland',
       label: 'Overland',
-      icon: '🛤️',
+      icon: 'ðŸ›¤ï¸',
       description: 'Long-haul transfer that spends the night away from the origin city.'
     }
   ];
@@ -214,7 +254,7 @@ export const LibraryItems = () => {
   const isDriverEligibleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours';
 
   // A dedicated driver is only provided for large vehicles (14+ seats) and the
-  // vehicle price already includes the driver — the option only triggers the
+  // vehicle price already includes the driver â€” the option only triggers the
   // driver's meals / accommodation in the itinerary builder (costs come from the
   // Meals & Accommodation module rates).
   const driverMealOptions = [
@@ -249,12 +289,12 @@ export const LibraryItems = () => {
   const feeTypeOptions = {
     accommodation: [
       { id: 'none', label: 'None' },
-      { id: 'entrance', label: '🎟️ Entrance Fees' },
-      { id: 'conservation', label: '🌿 Conservation Levy' }
+      { id: 'entrance', label: 'ðŸŽŸï¸ Entrance Fees' },
+      { id: 'conservation', label: 'ðŸŒ¿ Conservation Levy' }
     ],
     transfers: [
       { id: 'none', label: 'None' },
-      { id: 'entrance', label: '🎟️ Entrance Fees' }
+      { id: 'entrance', label: 'ðŸŽŸï¸ Entrance Fees' }
     ]
   };
   const levyBasisOptions = [
@@ -506,7 +546,7 @@ export const LibraryItems = () => {
           if (idx === seasonIdx) {
             const updatedChildRates = {
               ...(s.childRates || {}),
-              [bandId]: rate
+              [bandId]: clampNonNegative(rate)
             };
             return { ...s, childRates: updatedChildRates };
           }
@@ -525,7 +565,7 @@ export const LibraryItems = () => {
           if (idx === seasonIdx) {
             const updatedChildRates = {
               ...(s.fastTrackChildRates || {}),
-              [bandId]: rate
+              [bandId]: clampNonNegative(rate)
             };
             return { ...s, fastTrackChildRates: updatedChildRates };
           }
@@ -537,7 +577,7 @@ export const LibraryItems = () => {
     }));
   };
 
-  // ── Resolve company_id robustly ──────────────────────────────────────────
+  // â”€â”€ Resolve company_id robustly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // 1. Try profiles.company_id  (normal path)
   // 2. Fall back to companies.owner_id = auth user  (after schema reset)
   const resolveCompanyId = async (user) => {
@@ -605,7 +645,7 @@ export const LibraryItems = () => {
           }
         }
       } catch {
-        // Introspection failed — assume feature is present.
+        // Introspection failed â€” assume feature is present.
       }
 
       const { data: { user } } = await supabase.auth.getUser();
@@ -615,7 +655,7 @@ export const LibraryItems = () => {
       try {
         companyId = await resolveCompanyId(user);
       } catch {
-        // No company linked yet — show empty state without crashing
+        // No company linked yet â€” show empty state without crashing
         setLoading(false);
         return;
       }
@@ -646,7 +686,7 @@ export const LibraryItems = () => {
             }));
         }
       } catch {
-        // table missing — keep fallback
+        // table missing â€” keep fallback
       }
 
       const preselectedId = location.state?.supplierId;
@@ -675,7 +715,7 @@ export const LibraryItems = () => {
 
       if (!profile?.company_id) return;
 
-      // ── Fetch pages of items as plain queries (no PostgREST FK joins).
+      // â”€â”€ Fetch pages of items as plain queries (no PostgREST FK joins).
       // This avoids "schema cache" errors regardless of FK registration state
       // and keeps each request small, loading rows on demand via search/filters.
 
@@ -716,12 +756,12 @@ export const LibraryItems = () => {
 
       const itemIds = (items || []).map(i => i.id);
 
-      // Fetch item_rates separately — no FK join
+      // Fetch item_rates separately â€” no FK join
       const { data: ratesData } = itemIds.length > 0
         ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
         : { data: [] };
 
-      // Fetch car_rental_rates separately — no FK join
+      // Fetch car_rental_rates separately â€” no FK join
       let carRatesData = [];
       if (itemIds.length > 0) {
         try {
@@ -732,7 +772,7 @@ export const LibraryItems = () => {
         }
       }
 
-      // Fetch suppliers separately — no FK join
+      // Fetch suppliers separately â€” no FK join
       const { data: suppliersData } = await supabase
         .from('suppliers')
         .select('id, name')
@@ -804,13 +844,13 @@ export const LibraryItems = () => {
   const handleItemFieldChange = (tempId, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        return { ...item, [field]: value };
+        return { ...item, [field]: clampNonNegative(value) };
       }
       return item;
     }));
   };
 
-  // ── Car Rental groups ──────────────────────────────────────────────────────
+  // â”€â”€ Car Rental groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleAddCarGroup = (tempId) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
@@ -830,7 +870,7 @@ export const LibraryItems = () => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const groups = (item.carGroups || []).map(g =>
-        g.groupId === groupId ? { ...g, [field]: value } : g
+        g.groupId === groupId ? { ...g, [field]: clampNonNegative(value) } : g
       );
       return { ...item, carGroups: groups };
     }));
@@ -864,7 +904,7 @@ export const LibraryItems = () => {
       if (item.tempId !== tempId) return item;
       const groups = (item.carGroups || []).map(g => {
         if (g.groupId !== groupId) return g;
-        const ranges = (g.ranges || []).map((r, idx) => idx === rangeIdx ? { ...r, [field]: value } : r);
+        const ranges = (g.ranges || []).map((r, idx) => idx === rangeIdx ? { ...r, [field]: clampNonNegative(value) } : r);
         return { ...g, ranges };
       });
       return { ...item, carGroups: groups };
@@ -993,23 +1033,25 @@ export const LibraryItems = () => {
       showToast(`Only ${remainingSlots} more image(s) could be added (max 10 total).`, 'info');
     }
 
-    filesToProcess.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target.result;
-        setItemsToSave(prev => prev.map(item => {
-          if (item.tempId === tempId) {
-            if (item.imageUrls.length >= 10) return item;
-            return {
-              ...item,
-              imageUrls: [...item.imageUrls, dataUrl]
-            };
-          }
-          return item;
-        }));
-      };
-      reader.readAsDataURL(file);
-    });
+    (async () => {
+      for (let i = 0; i < filesToProcess.length; i++) {
+        try {
+          const dataUrl = await compressImageDataUrl(filesToProcess[i]);
+          setItemsToSave(prev => prev.map(item => {
+            if (item.tempId === tempId) {
+              if (item.imageUrls.length >= 10) return item;
+              return {
+                ...item,
+                imageUrls: [...item.imageUrls, dataUrl]
+              };
+            }
+            return item;
+          }));
+        } catch {
+          showToast('One image could not be processed and was skipped.', 'error');
+        }
+      }
+    })();
   };
 
   const handleRemoveImage = (tempId, imgIdx) => {
@@ -1229,7 +1271,7 @@ adultRate: 0,
       if (item.tempId !== tempId) return item;
       const updatedSeasons = item.seasons.map((s, idx) => {
         if (idx !== seasonIdx) return s;
-        const updatedTiers = (s.tiers || []).map((t, tIdx) => tIdx === tierIdx ? { ...t, [field]: value } : t);
+        const updatedTiers = (s.tiers || []).map((t, tIdx) => tIdx === tierIdx ? { ...t, [field]: clampNonNegative(value) } : t);
         return { ...s, tiers: updatedTiers };
       });
       return { ...item, seasons: updatedSeasons };
@@ -1252,7 +1294,7 @@ adultRate: 0,
       if (item.tempId === tempId) {
         const updatedSeasons = item.seasons.map((s, idx) => {
           if (idx === seasonIdx) {
-            return { ...s, [field]: value };
+            return { ...s, [field]: clampNonNegative(value) };
           }
           return s;
         });
@@ -1262,7 +1304,7 @@ adultRate: 0,
     }));
   };
 
-  /* Money fields only — snaps a typed rate/fee to a whole number on blur when the
+  /* Money fields only â€” snaps a typed rate/fee to a whole number on blur when the
      "Round input amounts" setting is active. Counts (pax, capacity, ages) never
      go through this. */
   const snapSeasonMoney = (e, tempId, seasonIndex, field) => {
@@ -1777,12 +1819,19 @@ adultRate: 0,
     }
   };
 
-  const handleDeleteItem = async (itemId) => {
-    if (!window.confirm('Delete this library item?')) return;
+  const handleDeleteItem = async (item) => {
+    const ok = await confirm({
+      title: 'Delete library item?',
+      message: `"${item.item_name || item.name || 'This item'}" will be permanently removed.`,
+      detail: 'Itineraries already using this item keep their saved copy.',
+      confirmLabel: 'Delete item',
+      destructive: true
+    });
+    if (!ok) return;
     try {
-      const { error } = await supabase.from('library_items').delete().eq('id', itemId);
+      const { error } = await supabase.from('library_items').delete().eq('id', item.id);
       if (error) throw error;
-      setLibraryItemsList(prev => prev.filter(item => item.id !== itemId));
+      setLibraryItemsList(prev => prev.filter(i => i.id !== item.id));
       setTotalCount(c => Math.max(0, c - 1));
       showToast('Library item deleted', 'success');
     } catch (err) {
@@ -2485,7 +2534,7 @@ adultRate: 0,
               </div>
             )}
 
-            {/* LIBRARY ITEMS CONTAINER — Disabled / Grayed out until a supplier is selected or created */}
+            {/* LIBRARY ITEMS CONTAINER â€” Disabled / Grayed out until a supplier is selected or created */}
             <div style={{
               opacity: selectedSupplierId ? 1 : 0.45,
               pointerEvents: selectedSupplierId ? 'auto' : 'none',
@@ -2579,7 +2628,7 @@ adultRate: 0,
                         )}
                         {currencies.map(c => (
                           <option key={c.code} value={c.code}>
-                            {c.code} – {c.name} ({c.symbol})
+                            {c.code} â€“ {c.name} ({c.symbol})
                           </option>
                         ))}
                       </select>
@@ -2600,19 +2649,19 @@ adultRate: 0,
                           : (item.category === 'Activities / Tours'
                             ? 'e.g., Game Drive / Boat Cruise / Guided Walk'
                             : (item.category === 'Flights / Charter'
-                              ? 'e.g., JNB–NBO Scheduled / Charter Flight'
+                              ? 'e.g., JNBâ€“NBO Scheduled / Charter Flight'
                               : (item.category === 'Meals'
-                              ? 'e.g., Buffet Lunch / À La Carte Dinner'
+                              ? 'e.g., Buffet Lunch / Ã€ La Carte Dinner'
                               : (isGuideCategory(item.category)
                                 ? 'e.g., Freelance Guide / Safari Guide / Walking Guide'
                                 : (isTrainCategory(item.category)
-                                ? 'e.g., CPT–PRY 3 Nights (Journey Name)'
+                                ? 'e.g., CPTâ€“PRY 3 Nights (Journey Name)'
                                 : (isTicketCategory(item.category)
                                 ? 'e.g., Park Entrance Ticket / Game Drive Ticket'
                                 : (isExtrasCategory(item.category)
                                 ? 'e.g., Spa Treatment / Laundry Service / Wi-Fi Pass'
                                 : (isCarRentalCategory(item.category)
-                                ? 'e.g., Self-Drive (Group C) — Toyota Starlet'
+                                ? 'e.g., Self-Drive (Group C) â€” Toyota Starlet'
                                 : 'e.g., Standard Room / Safari Transfer / Game Drive'))))))))}
                         required
                         value={item.name}
@@ -2650,7 +2699,7 @@ adultRate: 0,
                       </div>
                     ) : null}
 
-                    {/* DRIVER OPTION (large vehicles: 14+ seats — Activities / Tours + Transfers) */}
+                    {/* DRIVER OPTION (large vehicles: 14+ seats â€” Activities / Tours + Transfers) */}
                     {dbFeatures.driverOption && isDriverEligibleCategory(item.category) && getVehiclePax(item.maxOccupancy) >= 14 && (
                       <div style={{ background: '#f0fdfa', border: '1px solid #5eead4', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700, color: '#134e4a' }}>
@@ -2663,10 +2712,10 @@ adultRate: 0,
                               handleItemFieldChange(item.tempId, 'driverAccommodation', e.target.checked ? getDefaultDriverAccommodation(item.category, item.transferType) : false);
                             }}
                           />
-                          🚗 Dedicated Driver Required
+                          ðŸš— Dedicated Driver Required
                         </label>
                         <div style={{ fontSize: '0.72rem', color: '#0f766e', marginTop: '0.25rem' }}>
-                          The vehicle price already includes the driver — this only triggers the driver's meals and accommodation in quotes.
+                          The vehicle price already includes the driver â€” this only triggers the driver's meals and accommodation in quotes.
                         </div>
                         {item.driverRequired && (
                           <>
@@ -2713,7 +2762,7 @@ adultRate: 0,
                           <UserCheck size={16} /> Guide Details
                         </div>
                         <div style={{ fontSize: '0.72rem', color: '#7c3aed', marginTop: '0.25rem' }}>
-                          The guide rate is a flat per-trip rate shared among travellers. These flags only trigger the guide's meals &amp; accommodation in quotes — costs come from the Meals and Accommodation module rates.
+                          The guide rate is a flat per-trip rate shared among travellers. These flags only trigger the guide's meals &amp; accommodation in quotes â€” costs come from the Meals and Accommodation module rates.
                         </div>
                         <div style={{ marginTop: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
                           <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569' }}>Guide Meals:</span>
@@ -2785,7 +2834,7 @@ adultRate: 0,
                           <span style={{ fontSize: '0.74rem', color: item.guideDriverOffered ? '#a16207' : '#64748b' }}>
                             {item.guideDriverOffered
                               ? 'Enter separate guide & driver room rates in each season below.'
-                              : 'Not offered — guide & driver automatically use the Single Room rate.'}
+                              : 'Not offered â€” guide & driver automatically use the Single Room rate.'}
                           </span>
                         </div>
                       </div>
@@ -2891,7 +2940,7 @@ adultRate: 0,
                           <TrainFront size={18} color="#f97316" /> Train Journey Details
                         </h4>
                         <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                          Schedule and cabin identity for this journey. The departure date is the exact date the journey departs and is used as a stop in the itinerary builder — quotes wait until itinerary dates match. Departure and arrival times are handled in the itinerary builder.
+                          Schedule and cabin identity for this journey. The departure date is the exact date the journey departs and is used as a stop in the itinerary builder â€” quotes wait until itinerary dates match. Departure and arrival times are handled in the itinerary builder.
                         </span>
                       </div>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.85rem' }}>
@@ -2984,7 +3033,7 @@ adultRate: 0,
                             value={item.menuType || 'a_la_carte'}
                             onChange={(e) => handleItemFieldChange(item.tempId, 'menuType', e.target.value)}
                           >
-                            <option value="a_la_carte">À La Carte</option>
+                            <option value="a_la_carte">Ã€ La Carte</option>
                             <option value="buffet">Buffet</option>
                           </select>
                         </div>
@@ -3059,7 +3108,7 @@ adultRate: 0,
                               }}
                             >
                               <span style={{ fontWeight: 700, fontSize: '0.85rem', color: selected ? '#7c3aed' : '#1e293b', display: 'block' }}>
-                                {tt.icon} {tt.label} {selected && '✓'}
+                                {tt.icon} {tt.label} {selected && 'âœ“'}
                               </span>
                               <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginTop: '0.2rem', lineHeight: 1.35 }}>
                                 {tt.description}
@@ -3115,7 +3164,7 @@ adultRate: 0,
                               }}
                             >
                               <span style={{ fontWeight: 700, fontSize: '0.85rem', color: selected ? '#047857' : '#1e293b', display: 'block' }}>
-                                {tt.icon} {tt.label} {selected && '✓'}
+                                {tt.icon} {tt.label} {selected && 'âœ“'}
                               </span>
                               <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginTop: '0.2rem', lineHeight: 1.35 }}>
                                 {tt.description}
@@ -3152,7 +3201,7 @@ adultRate: 0,
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'flex-end', gap: '0.6rem', flexWrap: 'wrap' }}>
                         <div style={{ flex: '1', minWidth: '180px' }}>
                           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>Maximum Occupancy</span>
-                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : 'Max pax allowed — set the capacity for your vehicle type'}</span>
+                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : 'Max pax allowed â€” set the capacity for your vehicle type'}</span>
                           <input
                             type="number"
                             min="1"
@@ -3173,7 +3222,7 @@ adultRate: 0,
                       </div>
                       {item.vehicleType && (
                         <div style={{ padding: '0.75rem 1rem', borderRadius: '8px', background: '#eff6ff', border: '1px solid #bfdbfe', fontSize: '0.8rem', color: '#1e40af', marginTop: '1rem' }}>
-                          🚐 <strong>{item.vehicleType}</strong> — accommodates up to <strong>{item.maxOccupancy} pax</strong>.
+                          ðŸš <strong>{item.vehicleType}</strong> â€” accommodates up to <strong>{item.maxOccupancy} pax</strong>.
                         </div>
                       )}
                     </div>
@@ -3363,24 +3412,24 @@ adultRate: 0,
                       marginBottom: '1.25rem'
                     }}>
                       <div style={{ fontWeight: 700, marginBottom: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                        💡 Capacity & Sharing Rules Summary:
+                        ðŸ’¡ Capacity & Sharing Rules Summary:
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', marginLeft: '0.5rem' }}>
                         {(item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, item.maxOccupancy || 2, [])).map(r => {
                           const ch = Math.max(0, parseInt(r.maxChildren) || 0);
                           return (
                             <div key={r.adults}>
-                              • <strong>{r.adults} {r.adults === 1 ? 'Adult' : 'Adults'}:</strong> {ch === 0 ? '0 Children (Max ' + r.adults + ' Guests only)' : 'Up to ' + ch + ' Child' + (ch > 1 ? 'ren' : '') + ' sharing (Max ' + (r.adults + ch) + ' Guests)'}
+                              â€¢ <strong>{r.adults} {r.adults === 1 ? 'Adult' : 'Adults'}:</strong> {ch === 0 ? '0 Children (Max ' + r.adults + ' Guests only)' : 'Up to ' + ch + ' Child' + (ch > 1 ? 'ren' : '') + ' sharing (Max ' + (r.adults + ch) + ' Guests)'}
                             </div>
                           );
                         })}
                         <div style={{ marginTop: '0.2rem', color: '#15803d', fontWeight: 600 }}>
-                          • {isTrainCategory(item.category) ? 'Cabin Ceiling' : 'Room Ceiling'}: <strong>{item.maxOccupancy || 2} Total Guests</strong>
+                          â€¢ {isTrainCategory(item.category) ? 'Cabin Ceiling' : 'Room Ceiling'}: <strong>{item.maxOccupancy || 2} Total Guests</strong>
                         </div>
                       </div>
                     </div>
 
-                    {/* ── Child Age Range Configuration (per supplier contract) ── */}
+                    {/* â”€â”€ Child Age Range Configuration (per supplier contract) â”€â”€ */}
                     <div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                         <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155' }}>
@@ -3412,7 +3461,7 @@ adultRate: 0,
                               onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'ageFrom', e.target.value)}
                               style={{ width: '52px', fontSize: '0.8rem', padding: '0.25rem 0.35rem', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'center' }}
                             />
-                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
+                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>â€“</span>
                             <input
                               type="number"
                               min="0"
@@ -3458,7 +3507,7 @@ adultRate: 0,
                       </span>
                     </div>
 
-                    {/* ── Ticket Type ── */}
+                    {/* â”€â”€ Ticket Type â”€â”€ */}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.7rem 1rem' }}>
                       <div>
                         <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>
@@ -3469,7 +3518,7 @@ adultRate: 0,
                         </span>
                       </div>
                       <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
-                        {[{ id: 'standard', label: '🎟️ Standard' }, { id: 'fast_track', label: '⚡ Fast Track' }, { id: 'both', label: '🎟️ ⚡ Both' }].map(opt => (
+                        {[{ id: 'standard', label: 'ðŸŽŸï¸ Standard' }, { id: 'fast_track', label: 'âš¡ Fast Track' }, { id: 'both', label: 'ðŸŽŸï¸ âš¡ Both' }].map(opt => (
                           <button
                             key={opt.id}
                             type="button"
@@ -3490,7 +3539,7 @@ adultRate: 0,
                       </div>
                     </div>
 
-                    {/* ── Child Age Range Configuration (per supplier contract) ── */}
+                    {/* â”€â”€ Child Age Range Configuration (per supplier contract) â”€â”€ */}
                     <div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                         <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155' }}>
@@ -3522,7 +3571,7 @@ adultRate: 0,
                               onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'ageFrom', e.target.value)}
                               style={{ width: '52px', fontSize: '0.8rem', padding: '0.25rem 0.35rem', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'center' }}
                             />
-                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
+                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>â€“</span>
                             <input
                               type="number"
                               min="0"
@@ -3546,7 +3595,7 @@ adultRate: 0,
                       </div>
                       {(item.childAgeRanges || []).length === 0 && (
                         <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.3rem' }}>
-                          No child age ranges set — only the adult rate will apply. Add a tier for children pricing.
+                          No child age ranges set â€” only the adult rate will apply. Add a tier for children pricing.
                         </div>
                       )}
                     </div>
@@ -3641,7 +3690,7 @@ adultRate: 0,
                           boxShadow: (item.pricingModel || 'per_person') === 'per_person' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
                         }}
                       >
-                        👥 Per Person Sharing (PPS)
+                        ðŸ‘¥ Per Person Sharing (PPS)
                       </button>
                       <button
                         type="button"
@@ -3659,7 +3708,7 @@ adultRate: 0,
                           boxShadow: item.pricingModel === 'per_room' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
                         }}
                       >
-                        🏠 Flat Room / Unit Rate
+                        ðŸ  Flat Room / Unit Rate
                       </button>
                     </div>
                     )}
@@ -3682,9 +3731,9 @@ adultRate: 0,
                           </span>
                           <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
                             {item.feeType === 'entrance'
-                              ? 'Entrance fees are charged per person and/or per vehicle — set the relevant rate(s) for each season below.'
+                              ? 'Entrance fees are charged per person and/or per vehicle â€” set the relevant rate(s) for each season below.'
                               : (item.feeType === 'conservation'
-                                ? 'Conservation levies are charged per adult and per child — set the relevant rate(s) for each season below.'
+                                ? 'Conservation levies are charged per adult and per child â€” set the relevant rate(s) for each season below.'
                                 : 'Optionally add entrance fees or a conservation levy on top of the base rates.')}
                           </span>
                         </div>
@@ -3749,7 +3798,7 @@ adultRate: 0,
                       <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.85rem', lineHeight: 1.5 }}>
                         Each group binds a <strong>Vehicle Group</strong>, a <strong>Vehicle</strong> and its <strong>Rate Code</strong> to a set of
                         rental-length ranges. The price for a range is the flat per-vehicle rate for that vehicle rented for that many days.
-                        The <strong>Booking Validity</strong> is the reservation window during which this contract / tariff code can be booked —
+                        The <strong>Booking Validity</strong> is the reservation window during which this contract / tariff code can be booked â€”
                         bookings outside it must not use these rates.
                       </div>
 
@@ -3872,7 +3921,7 @@ adultRate: 0,
                             </div>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                Rate ({item.currency}) — Flat Per Vehicle
+                                Rate ({item.currency}) â€” Flat Per Vehicle
                               </label>
                               <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem' }}>
                                 Bookable between the validity dates above.
@@ -4006,7 +4055,7 @@ adultRate: 0,
                                   value={range.minDays}
                                   onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'minDays', e.target.value)}
                                 />
-                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
+                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>â€“</span>
                                 <input
                                   type="number"
                                   min="1"
@@ -4093,28 +4142,28 @@ adultRate: 0,
                     {/* Rate Guide */}
                     {isGuideCategory(item.category) && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#6b21a8', marginBottom: '0.2rem' }}>🚶 Guide Rate (Per Service Type):</div>
-                        <div>• <strong>Transfer / Half Day / Full Day / Overland / Dinner transfer:</strong> a separate flat per-trip price for each service the guide accompanies. The itinerary builder picks the rate for the service at hand.</div>
-                        <div>• <strong>Meals:</strong> lunch/dinner that trigger when the guide accompanies the trip.</div>
-                        <div>• <strong>Accommodation:</strong> overnight flag that triggers guide accommodation when required.</div>
+                        <div style={{ fontWeight: 700, color: '#6b21a8', marginBottom: '0.2rem' }}>ðŸš¶ Guide Rate (Per Service Type):</div>
+                        <div>â€¢ <strong>Transfer / Half Day / Full Day / Overland / Dinner transfer:</strong> a separate flat per-trip price for each service the guide accompanies. The itinerary builder picks the rate for the service at hand.</div>
+                        <div>â€¢ <strong>Meals:</strong> lunch/dinner that trigger when the guide accompanies the trip.</div>
+                        <div>â€¢ <strong>Accommodation:</strong> overnight flag that triggers guide accommodation when required.</div>
                       </div>
                     )}
                     {isMealsCategory(item.category) && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#b45309', marginBottom: '0.2rem' }}>🍽️ Meal Fares:</div>
-                        <div>• <strong>Adult Rate:</strong> per person meal price.</div>
-                        <div>• <strong>Child Rate:</strong> per child meal price.</div>
-                        <div>• <strong>Guide / Driver Rate:</strong> separate meal prices for the guide and driver when included.</div>
+                        <div style={{ fontWeight: 700, color: '#b45309', marginBottom: '0.2rem' }}>ðŸ½ï¸ Meal Fares:</div>
+                        <div>â€¢ <strong>Adult Rate:</strong> per person meal price.</div>
+                        <div>â€¢ <strong>Child Rate:</strong> per child meal price.</div>
+                        <div>â€¢ <strong>Guide / Driver Rate:</strong> separate meal prices for the guide and driver when included.</div>
                         {parseFloat(item.mealGratuityPercent) > 0 && (
-                          <div>• <strong>Gratuity:</strong> {item.mealGratuityPercent}% added on top of the fare.</div>
+                          <div>â€¢ <strong>Gratuity:</strong> {item.mealGratuityPercent}% added on top of the fare.</div>
                         )}
                       </div>
                     )}
                     {isTicketCategory(item.category) && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🎟️ Ticket Fares:</div>
-                        <div>• <strong>Adult Rate:</strong> per person ticket price.</div>
-                        <div>• <strong>Child Rate:</strong> per child ticket price by age range.</div>
+                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>ðŸŽŸï¸ Ticket Fares:</div>
+                        <div>â€¢ <strong>Adult Rate:</strong> per person ticket price.</div>
+                        <div>â€¢ <strong>Child Rate:</strong> per child ticket price by age range.</div>
                         <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.25rem' }}>
                           Tickets are always quoted per person.
                         </div>
@@ -4122,9 +4171,9 @@ adultRate: 0,
                     )}
                     {isExtrasCategory(item.category) && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#ec4899', marginBottom: '0.2rem' }}>✨ Extras Fares:</div>
-                        <div>• <strong>Adult Rate:</strong> per person extra service price.</div>
-                        <div>• <strong>Child Rate:</strong> per child extra service price.</div>
+                        <div style={{ fontWeight: 700, color: '#ec4899', marginBottom: '0.2rem' }}>âœ¨ Extras Fares:</div>
+                        <div>â€¢ <strong>Adult Rate:</strong> per person extra service price.</div>
+                        <div>â€¢ <strong>Child Rate:</strong> per child extra service price.</div>
                         <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
                           Extras are always quoted per person.
                         </div>
@@ -4132,10 +4181,10 @@ adultRate: 0,
                     )}
                     {isFlightCategory(item.category) && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#4338ca', marginBottom: '0.2rem' }}>✈️ Flight Fares:</div>
-                        <div>• <strong>Adult Rate:</strong> base fare per adult (per flight).</div>
-                        <div>• <strong>Child Rate:</strong> fare per child (up to the child age set below).</div>
-                        <div>• <strong>Taxes &amp; Surcharges:</strong> added on top of the base fare (fuel surcharge, airport fees, etc.).</div>
+                        <div style={{ fontWeight: 700, color: '#4338ca', marginBottom: '0.2rem' }}>âœˆï¸ Flight Fares:</div>
+                        <div>â€¢ <strong>Adult Rate:</strong> base fare per adult (per flight).</div>
+                        <div>â€¢ <strong>Child Rate:</strong> fare per child (up to the child age set below).</div>
+                        <div>â€¢ <strong>Taxes &amp; Surcharges:</strong> added on top of the base fare (fuel surcharge, airport fees, etc.).</div>
                         <div style={{ color: '#4338ca', fontWeight: 600, marginTop: '0.25rem' }}>
                           For charter flights, set the whole-flight rate as the Adult Rate.
                         </div>
@@ -4143,19 +4192,19 @@ adultRate: 0,
                     )}
                     {item.feeType === 'entrance' && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🎟️ Entrance Fee Rates:</div>
-                        <div>• <strong>Per Person:</strong> charged for each visitor entering.</div>
-                        <div>• <strong>Per Vehicle:</strong> charged once per vehicle/departure (e.g. park entry per car).</div>
+                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>ðŸŽŸï¸ Entrance Fee Rates:</div>
+                        <div>â€¢ <strong>Per Person:</strong> charged for each visitor entering.</div>
+                        <div>â€¢ <strong>Per Vehicle:</strong> charged once per vehicle/departure (e.g. park entry per car).</div>
                         <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.25rem' }}>
-                          Both can be set at once — the itinerary builder can apply either one or both together.
+                          Both can be set at once â€” the itinerary builder can apply either one or both together.
                         </div>
                       </div>
                     )}
                     {item.feeType === 'conservation' && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🌿 Conservation Levy Rates:</div>
-                        <div>• <strong>Adult Rate:</strong> charged per adult{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}.</div>
-                        <div>• <strong>Child Rate:</strong> charged per child (up to the child age set below){item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}.</div>
+                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>ðŸŒ¿ Conservation Levy Rates:</div>
+                        <div>â€¢ <strong>Adult Rate:</strong> charged per adult{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}.</div>
+                        <div>â€¢ <strong>Child Rate:</strong> charged per child (up to the child age set below){item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}.</div>
                         <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.25rem' }}>
                           Levies are applied {item.levyBasis === 'per_stay' ? 'once for the stay' : 'nightly for the duration of the stay'}.
                         </div>
@@ -4164,23 +4213,23 @@ adultRate: 0,
                     {isTourStyle && !isFlightCategory(item.category) ? (
                       item.pricingModel === 'tiered' ? (
                         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                          <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>📊 Tiered Pricing Model:</div>
+                          <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>ðŸ“Š Tiered Pricing Model:</div>
                           <div>Contract charges different rates depending on how many passengers are in the vehicle.</div>
                           <div style={{ color: '#1e40af', fontWeight: 600, marginTop: '0.25rem' }}>
-                            Add pax bands (e.g. 1–3 pax → R 2,500; 4+ pax → R 3,200). Child rate is optional.
+                            Add pax bands (e.g. 1â€“3 pax â†’ R 2,500; 4+ pax â†’ R 3,200). Child rate is optional.
                           </div>
                         </div>
                       ) : item.pricingModel === 'per_vehicle' ? (
                         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                          <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>🚐 Flat Rate (Per Vehicle):</div>
+                          <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>ðŸš Flat Rate (Per Vehicle):</div>
                           <div>Contract charges a fixed rate per vehicle per trip for up to <strong>{item.maxOccupancy || 4} pax</strong>, regardless of mix.</div>
                           <div style={{ color: '#1e40af', fontWeight: 600, marginTop: '0.25rem' }}>
-                            Child rate is optional. Total trip price = vehicle rate (or per person × pax when sharing is requested).
+                            Child rate is optional. Total trip price = vehicle rate (or per person Ã— pax when sharing is requested).
                           </div>
                         </div>
                       ) : (
                         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                          <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>👤 Per-Person Transfer Rate:</div>
+                          <div style={{ fontWeight: 700, color: '#1d4ed8', marginBottom: '0.2rem' }}>ðŸ‘¤ Per-Person Transfer Rate:</div>
                           <div>Contract charges per passenger. Add adult rate and an optional child rate.</div>
                           <div style={{ color: '#1e40af', fontWeight: 600, marginTop: '0.25rem' }}>
                             Child rate applies to passengers up to the child age set below.
@@ -4190,20 +4239,20 @@ adultRate: 0,
                     ) : (isFlightCategory(item.category) || isMealsCategory(item.category) || isGuideCategory(item.category) || isTicketCategory(item.category) || isExtrasCategory(item.category)) ? null : (
                     item.pricingModel === 'per_room' ? (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#166534', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? '💡 Flat Cabin Rate Model:' : '💡 Flat Room Rate Model:'}</div>
+                        <div style={{ fontWeight: 700, color: '#166534', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? 'ðŸ’¡ Flat Cabin Rate Model:' : 'ðŸ’¡ Flat Room Rate Model:'}</div>
                         <div>Contract charges a fixed rate per {isTrainCategory(item.category) ? 'cabin per night' : 'room/unit per night'} for up to <strong>{item.maxOccupancy || 2} Total Guests</strong> (regardless of adult or child mix).</div>
                         <div style={{ color: '#00665c', fontWeight: 600, marginTop: '0.25rem' }}>
-                          In the Itinerary Builder, the per-person rate is automatically derived as: <code>{isTrainCategory(item.category) ? 'Cabin Rate' : 'Room Rate'} ÷ Number of Occupants</code>.
+                          In the Itinerary Builder, the per-person rate is automatically derived as: <code>{isTrainCategory(item.category) ? 'Cabin Rate' : 'Room Rate'} Ã· Number of Occupants</code>.
                         </div>
                       </div>
                     ) : (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.65rem 0.85rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#334155', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? '💡 Per-Person Cabin Rates:' : '💡 Per-Person Catalog Rates:'}</div>
+                        <div style={{ fontWeight: 700, color: '#334155', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? 'ðŸ’¡ Per-Person Cabin Rates:' : 'ðŸ’¡ Per-Person Catalog Rates:'}</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.35rem', marginTop: '0.2rem' }}>
-                          <div>• <strong>1 Adult:</strong> Single Cabin rate (per person)</div>
-                          <div>• <strong>2 Adults:</strong> Per Person Sharing (PPS) rate (each adult sharing)</div>
-                          <div>• <strong>3+ Adults:</strong> Extra Adult rate (each additional adult sharing)</div>
-<div>• <strong>Children:</strong> Rate per child by age tier (sharing with adult/s)</div>
+                          <div>â€¢ <strong>1 Adult:</strong> Single Cabin rate (per person)</div>
+                          <div>â€¢ <strong>2 Adults:</strong> Per Person Sharing (PPS) rate (each adult sharing)</div>
+                          <div>â€¢ <strong>3+ Adults:</strong> Extra Adult rate (each additional adult sharing)</div>
+<div>â€¢ <strong>Children:</strong> Rate per child by age tier (sharing with adult/s)</div>
                         </div>
                       </div>
                     ))}
@@ -4254,7 +4303,7 @@ adultRate: 0,
                           {isGuideCategory(item.category) ? (
                             <div style={{ background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                Guide Rates ({item.currency}) — Flat Per Trip by Service Type
+                                Guide Rates ({item.currency}) â€” Flat Per Trip by Service Type
                               </label>
                               <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.65rem', lineHeight: 1.45 }}>
                                 The Guide charges a different flat per-trip rate depending on the service it accompanies.
@@ -4285,7 +4334,7 @@ adultRate: 0,
                           ) : isMealsCategory(item.category) ? (
                             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                Meal Fare ({item.currency}) — Per Person
+                                Meal Fare ({item.currency}) â€” Per Person
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>
@@ -4356,7 +4405,7 @@ adultRate: 0,
                               {item.ticketType !== 'fast_track' && (
                                 <>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                Standard Ticket Fare ({item.currency}) — Per Person
+                                Standard Ticket Fare ({item.currency}) â€” Per Person
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>
@@ -4376,17 +4425,17 @@ adultRate: 0,
                                 </div>
                               </div>
 
-                              {/* Children Pricing per Age Range — Standard */}
+                              {/* Children Pricing per Age Range â€” Standard */}
                               {bands.length > 0 && (
                                 <div style={{ marginTop: '1rem' }}>
                                   <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
-                                    Children Pricing per Age Range (Per Person — {item.currency})
+                                    Children Pricing per Age Range (Per Person â€” {item.currency})
                                   </label>
                                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                     {bands.map((band) => (
                                       <div key={band.id}>
                                         <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
-                                          {band.name} ({band.ageFrom}–{band.ageTo} yrs)
+                                          {band.name} ({band.ageFrom}â€“{band.ageTo} yrs)
                                         </span>
                                         <input
                                           type="number"
@@ -4410,7 +4459,7 @@ adultRate: 0,
                                 <>
                                   {item.ticketType === 'both' && (<hr style={{ border: 'none', borderTop: '1px dashed #99f6e4', marginTop: '1.2rem' }} />)}
                                   <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem', marginTop: '0.4rem' }}>
-                                    Fast Track Ticket Fare ({item.currency}) — Per Person
+                                    Fast Track Ticket Fare ({item.currency}) â€” Per Person
                                   </label>
                                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                     <div>
@@ -4430,17 +4479,17 @@ adultRate: 0,
                                     </div>
                                   </div>
 
-                                  {/* Children Pricing per Age Range — Fast Track */}
+                                  {/* Children Pricing per Age Range â€” Fast Track */}
                                   {bands.length > 0 && (
                                     <div style={{ marginTop: '1rem' }}>
                                       <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
-                                        Fast Track Children Pricing per Age Range (Per Person — {item.currency})
+                                        Fast Track Children Pricing per Age Range (Per Person â€” {item.currency})
                                       </label>
                                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                         {bands.map((band) => (
                                           <div key={band.id}>
                                             <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
-                                              {band.name} ({band.ageFrom}–{band.ageTo} yrs)
+                                              {band.name} ({band.ageFrom}â€“{band.ageTo} yrs)
                                             </span>
                                             <input
                                               type="number"
@@ -4466,7 +4515,7 @@ adultRate: 0,
                           ) : isExtrasCategory(item.category) ? (
                             <div style={{ background: '#fdf2f8', border: '1px solid #fbcfe8', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                Extra Service Fare ({item.currency}) — Per Person
+                                Extra Service Fare ({item.currency}) â€” Per Person
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>
@@ -4507,7 +4556,7 @@ adultRate: 0,
                           ) : isFlightCategory(item.category) ? (
                             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                Flight Fare ({item.currency}) {item.pricingModel === 'per_vehicle' ? '— Per Charter (Whole Flight)' : '— Per Person'}
+                                Flight Fare ({item.currency}) {item.pricingModel === 'per_vehicle' ? 'â€” Per Charter (Whole Flight)' : 'â€” Per Person'}
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>
@@ -4635,7 +4684,7 @@ adultRate: 0,
                                     <Plus size={14} /> Add Pax Tier
                                   </button>
                                   <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.6rem' }}>
-                                    Example: 1–3 pax → R 2,500 / 4–7 pax → R 3,200. The itinerary builder picks the band matching the passenger count.
+                                    Example: 1â€“3 pax â†’ R 2,500 / 4â€“7 pax â†’ R 3,200. The itinerary builder picks the band matching the passenger count.
                                   </div>
                                 </>
                               ) : item.pricingModel === 'per_vehicle' ? (
@@ -4656,7 +4705,7 @@ adultRate: 0,
                                     <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Vehicle</span>
                                   </div>
                                   <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
-                                    Flat price for up to <strong>{item.maxOccupancy || 4} pax</strong>. In quotes, per-person rate is: <code>{item.currency} {parseFloat(season.adultRate) || 0} ÷ (Passengers)</code>.
+                                    Flat price for up to <strong>{item.maxOccupancy || 4} pax</strong>. In quotes, per-person rate is: <code>{item.currency} {parseFloat(season.adultRate) || 0} Ã· (Passengers)</code>.
                                   </div>
                                 </div>
                               ) : (
@@ -4714,7 +4763,7 @@ adultRate: 0,
                                 </div>
                               </div>
                               <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.5rem' }}>
-                                Child rate applies to passengers up to {item.childAge || 12} years old. Children below 1 year usually travel free — confirm with supplier contract.
+                                Child rate applies to passengers up to {item.childAge || 12} years old. Children below 1 year usually travel free â€” confirm with supplier contract.
                               </div>
                             </div>
                           ) : (
@@ -4735,7 +4784,7 @@ adultRate: 0,
                                 <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ {isTrainCategory(item.category) ? 'Cabin' : 'Room'} / Night</span>
                               </div>
                               <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
-                                Flat price for up to <strong>{item.maxOccupancy || 2} Persons</strong>. In quotes, rate per person is: <code>{item.currency} {parseFloat(season.roomRate) || 0} ÷ (Occupants)</code>.
+                                Flat price for up to <strong>{item.maxOccupancy || 2} Persons</strong>. In quotes, rate per person is: <code>{item.currency} {parseFloat(season.roomRate) || 0} Ã· (Occupants)</code>.
                               </div>
                             </div>
                           ) : (
@@ -4743,7 +4792,7 @@ adultRate: 0,
                               {/* Adults Pricing */}
                               <div style={{ marginBottom: '1rem' }}>
                                 <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
-                                  Adults Pricing (Per Person — {item.currency})
+                                  Adults Pricing (Per Person â€” {item.currency})
                                 </label>
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                   <div>
@@ -4789,13 +4838,13 @@ adultRate: 0,
                               {bands.length > 0 && (
                                 <div style={{ marginBottom: '1rem' }}>
                                   <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
-                                    Children Pricing per Age Range (Per Person — {item.currency})
+                                    Children Pricing per Age Range (Per Person â€” {item.currency})
                                   </label>
                                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                     {bands.map((band) => (
                                       <div key={band.id}>
                                         <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
-                                          {band.name} ({band.ageFrom}–{band.ageTo} yrs)
+                                          {band.name} ({band.ageFrom}â€“{band.ageTo} yrs)
                                         </span>
                                         <input 
                                           type="number" 
@@ -4833,7 +4882,7 @@ adultRate: 0,
                           {item.feeType === 'entrance' && (
                             <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#166534', display: 'block', marginBottom: '0.5rem' }}>
-                                🎟️ Entrance Fee Rates ({item.currency})
+                                ðŸŽŸï¸ Entrance Fee Rates ({item.currency})
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '480px' }}>
                                 <div>
@@ -4868,14 +4917,14 @@ adultRate: 0,
                                 </div>
                               </div>
                               <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
-                                Set either rate, or both — the itinerary builder applies whichever rate(s) match the booking.
+                                Set either rate, or both â€” the itinerary builder applies whichever rate(s) match the booking.
                               </div>
                             </div>
                           )}
                           {item.feeType === 'conservation' && (
                             <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#166534', display: 'block', marginBottom: '0.5rem' }}>
-                                🌿 Conservation Levy Rates ({item.currency}) — {item.levyBasis === 'per_stay' ? 'Per Stay' : 'Per Night'}
+                                ðŸŒ¿ Conservation Levy Rates ({item.currency}) â€” {item.levyBasis === 'per_stay' ? 'Per Stay' : 'Per Night'}
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '480px' }}>
                                 <div>
@@ -4932,7 +4981,7 @@ adultRate: 0,
                           {item.category === 'Accommodation' && item.guideDriverOffered && dbFeatures.guideDriver && (
                             <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
                               <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#92400e', display: 'block', marginBottom: '0.5rem' }}>
-                                🚌 Guide & Driver Room Rates (per night — {item.currency})
+                                ðŸšŒ Guide & Driver Room Rates (per night â€” {item.currency})
                               </span>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
                                 <div>
@@ -5172,7 +5221,7 @@ adultRate: 0,
 
                       {uploadingContract === item.tempId ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem', fontSize: '0.85rem', color: '#475569' }}>
-                          <Loader2 size={18} className="spin" style={{ animation: 'spin 1s linear infinite' }} /> Uploading contract…
+                          <Loader2 size={18} className="spin" style={{ animation: 'spin 1s linear infinite' }} /> Uploading contractâ€¦
                         </div>
                       ) : item.contractUrl ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.75rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '6px', padding: '0.45rem 0.75rem', width: 'fit-content' }}>
@@ -5313,12 +5362,12 @@ adultRate: 0,
                         <span style={{ fontWeight: 700, color: '#0f172a', display: 'block' }}>{item.name}</span>
                         {isTourStyle && item.sub_category && item.sub_category !== 'Transfers' && (
                             <span style={{ display: 'inline-block', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                              🚐 {item.sub_category} · {item.max_occupancy || 4} pax
+                              ðŸš {item.sub_category} Â· {item.max_occupancy || 4} pax
                             </span>
                           )}
                           {item.category === 'Activities / Tours' && item.tour_type && (
                             <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#047857', background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                              {tourTypes.find(t => t.id === item.tour_type)?.icon || '🧭'} {(tourTypes.find(t => t.id === item.tour_type)?.label || item.tour_type)}
+                              {tourTypes.find(t => t.id === item.tour_type)?.icon || 'ðŸ§­'} {(tourTypes.find(t => t.id === item.tour_type)?.label || item.tour_type)}
                             </span>
                           )}
                         {transType && (
@@ -5328,24 +5377,24 @@ adultRate: 0,
                         )}
                         {item.driver_required === true && isDriverEligibleCategory(item.category) && (
                           <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdfa', border: '1px solid #5eead4', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                            🚗 Driver{(item.driver_meals || '').split(',').filter(Boolean).map(id => driverMealOptions.find(o => o.id === id)?.label || id).join(' + ')}
+                            ðŸš— Driver{(item.driver_meals || '').split(',').filter(Boolean).map(id => driverMealOptions.find(o => o.id === id)?.label || id).join(' + ')}
                             {item.driver_accommodation === true ? ' (Overnight)' : ''}
                           </span>
                         )}
                         {isGuideCategory(item.category) && (
                           <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#6b21a8', background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                            🚶 Guide{(item.guide_meals || '').split(',').filter(Boolean).map(id => driverMealOptions.find(o => o.id === id)?.label || id).join(' + ')}
+                            ðŸš¶ Guide{(item.guide_meals || '').split(',').filter(Boolean).map(id => driverMealOptions.find(o => o.id === id)?.label || id).join(' + ')}
                             {item.guide_accommodation === true ? ' (Overnight)' : ''}
                           </span>
                         )}
                         {isTrainCategory(item.category) && (
                           <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                            🚂 {(item.train_departure_date || '—')} {parseInt(item.train_journey_nights) > 0 ? `· ${item.train_journey_nights} Night${parseInt(item.train_journey_nights) > 1 ? 's' : ''}` : ''} {item.train_cabin_name ? `· ${item.train_cabin_name}` : ''}
+                            ðŸš‚ {(item.train_departure_date || 'â€”')} {parseInt(item.train_journey_nights) > 0 ? `Â· ${item.train_journey_nights} Night${parseInt(item.train_journey_nights) > 1 ? 's' : ''}` : ''} {item.train_cabin_name ? `Â· ${item.train_cabin_name}` : ''}
                           </span>
                         )}
                         {isTicketCategory(item.category) && (
                           <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
-                            🎟️ {item.child_age_ranges && item.child_age_ranges.length > 0 ? `${item.child_age_ranges.length} Child Age Tier${item.child_age_ranges.length > 1 ? 's' : ''}` : 'Adults Only'}
+                            ðŸŽŸï¸ {item.child_age_ranges && item.child_age_ranges.length > 0 ? `${item.child_age_ranges.length} Child Age Tier${item.child_age_ranges.length > 1 ? 's' : ''}` : 'Adults Only'}
                           </span>
                         )}
                         {item.description && (
@@ -5371,7 +5420,7 @@ adultRate: 0,
                         <FileText size={14} /> View Contract
                       </button>
                     ) : (
-                      <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>—</span>
+                      <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>â€”</span>
                     )}
                   </td>
                   <td>
@@ -5386,7 +5435,7 @@ adultRate: 0,
                   </td>
                   <td>
                     <div style={{ fontSize: '0.85rem', color: '#475569' }}>
-                      <div className="meal-plan-cell">{item.item_rates?.find(r => r.meal_plan)?.meal_plan || '—'}</div>
+                      <div className="meal-plan-cell">{item.item_rates?.find(r => r.meal_plan)?.meal_plan || 'â€”'}</div>
                     </div>
                   </td>
                   <td>
@@ -5398,7 +5447,7 @@ adultRate: 0,
                           <div>Max Occ: <strong>{item.max_occupancy || 2} Persons</strong></div>
                           {(item.category === 'Accommodation' || isTrainCategory(item.category)) && Array.isArray(item.sharing_capacity_rules) && item.sharing_capacity_rules.length > 0 ? (
                             <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem', lineHeight: '1.35' }}>
-                              {item.sharing_capacity_rules.map(r => `${r.adults}A (+${r.maxChildren}Ch)`).join(' · ')}
+                              {item.sharing_capacity_rules.map(r => `${r.adults}A (+${r.maxChildren}Ch)`).join(' Â· ')}
                             </div>
                           ) : (item.category === 'Accommodation' || isTrainCategory(item.category)) ? (
                             <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.2rem' }}>
@@ -5414,49 +5463,49 @@ adultRate: 0,
                       {/* Pricing model badge */}
                       {item.fee_type === 'entrance' && (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdf4', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🎟️ Entrance Fees
+                          ðŸŽŸï¸ Entrance Fees
                         </span>
                       )}
                       {item.fee_type === 'conservation' && (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdf4', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🌿 Conservation Levy {item.conservation_levy_basis === 'per_stay' ? '(Per Stay)' : '(Per Night)'}
+                          ðŸŒ¿ Conservation Levy {item.conservation_levy_basis === 'per_stay' ? '(Per Stay)' : '(Per Night)'}
                         </span>
                       )}
                       {item.category === 'Flights / Charter' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#4338ca', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          ✈️ {item.pricing_model === 'per_vehicle' ? 'Per Charter' : 'Per Person'}
+                          âœˆï¸ {item.pricing_model === 'per_vehicle' ? 'Per Charter' : 'Per Person'}
                         </span>
                       ) : isTourStyle && item.pricing_model === 'per_vehicle' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🚐 Flat Rate (Per Vehicle)
+                          ðŸš Flat Rate (Per Vehicle)
                         </span>
                       ) : isTourStyle && item.pricing_model === 'tiered' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          📊 Tiered (by pax count)
+                          ðŸ“Š Tiered (by pax count)
                         </span>
                       ) : isTourStyle ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#047857', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          👤 Per Person
+                          ðŸ‘¤ Per Person
                         </span>
                       ) : isTicketCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🎟️ Per Person
+                          ðŸŽŸï¸ Per Person
                         </span>
                       ) : isExtrasCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#db2777', background: '#fdf2f8', border: '1px solid #f9a8d4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          ✨ Per Person
+                          âœ¨ Per Person
                         </span>
                       ) : isCarRentalCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0e7490', background: '#ecfeff', border: '1px solid #67e8f9', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🚗 Flat Rate (Per Vehicle)
+                          ðŸš— Flat Rate (Per Vehicle)
                         </span>
                       ) : item.pricing_model === 'per_room' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          {isTrainCategory(item.category) ? '🚂 Flat Cabin Rate' : '🏠 Flat Room Rate'}
+                          {isTrainCategory(item.category) ? 'ðŸš‚ Flat Cabin Rate' : 'ðŸ  Flat Room Rate'}
                         </span>
                       ) : (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#047857', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          👥 Per Person (PPS)
+                          ðŸ‘¥ Per Person (PPS)
                         </span>
                       )}
                       {item.item_rates && item.item_rates.length > 0 ? (
@@ -5475,7 +5524,7 @@ adultRate: 0,
                           const driverRate = parseFloat(rate.driver_rate) || 0;
                           const guideEff = guideDriverOffered && guideRate > 0 ? guideRate : singleRate;
                           const driverEff = guideDriverOffered && driverRate > 0 ? driverRate : singleRate;
-                          const itemMealPlan = item.item_rates?.find(r => r.meal_plan)?.meal_plan || '—';
+                          const itemMealPlan = item.item_rates?.find(r => r.meal_plan)?.meal_plan || 'â€”';
                           const guideMealPlan = rate.guide_meal_plan || itemMealPlan;
                           const driverMealPlan = rate.driver_meal_plan || itemMealPlan;
                           const transferTiers = Array.isArray(rate.tiered_pricing) ? rate.tiered_pricing : [];
@@ -5490,13 +5539,13 @@ adultRate: 0,
                               </div>
 {item.category === 'Guide' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#6b21a8', background: '#faf5ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🚶 Per Trip
+                          ðŸš¶ Per Trip
                         </span>
                       ) : item.category === 'Flights / Charter' ? (
                                 <>{(item.departure_city || item.arrival_city) && (
                                     <div style={{ color: '#4338ca', fontWeight: 600, marginBottom: '0.15rem' }}>
-                                      {[item.departure_city, item.arrival_city].filter(Boolean).join(' → ')}
-                                      {item.flight_number ? ` · ${item.flight_number}` : ''}
+                                      {[item.departure_city, item.arrival_city].filter(Boolean).join(' â†’ ')}
+                                      {item.flight_number ? ` Â· ${item.flight_number}` : ''}
                                     </div>
                                   )}
                                   <div style={{ color: '#4338ca', fontWeight: 600 }}>
@@ -5527,7 +5576,7 @@ adultRate: 0,
                                     const bandRate = parseFloat(childRatesMap[band.id]) || 0;
                                     return bandRate > 0 ? (
                                       <div key={band.id} style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
-                                        <strong>{band.name} ({band.ageFrom}–{band.ageTo} yrs):</strong> {item.currency} {bandRate.toLocaleString()} / child
+                                        <strong>{band.name} ({band.ageFrom}â€“{band.ageTo} yrs):</strong> {item.currency} {bandRate.toLocaleString()} / child
                                       </div>
                                     ) : null;
                                   })}
@@ -5538,7 +5587,7 @@ adultRate: 0,
                                         const bandRate = parseFloat(fastTrackChildRatesMap[band.id]) || 0;
                                         return bandRate > 0 ? (
                                           <div key={`ft-${band.id}`} style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
-                                            <strong>FT {band.name} ({band.ageFrom}–{band.ageTo} yrs):</strong> {item.currency} {bandRate.toLocaleString()} / child
+                                            <strong>FT {band.name} ({band.ageFrom}â€“{band.ageTo} yrs):</strong> {item.currency} {bandRate.toLocaleString()} / child
                                           </div>
                                         ) : null;
                                       }) : null;
@@ -5562,7 +5611,7 @@ adultRate: 0,
                                     <div style={{ color: '#1d4ed8', fontWeight: 600 }}>
                                       {item.currency} {transferAdultRate.toLocaleString()} / vehicle
                                       <span style={{ fontWeight: 400, color: '#64748b', marginLeft: '0.4rem', fontSize: '0.72rem' }}>
-                                        (÷ pax for per-person rate)
+                                        (Ã· pax for per-person rate)
                                       </span>
                                     </div>
                                   ) : item.pricing_model === 'tiered' || rate.rate_basis === 'tiered' ? (
@@ -5570,7 +5619,7 @@ adultRate: 0,
                                       <div style={{ color: '#7c3aed' }}>
                                         {transferTiers.map((t, tIdx) => (
                                           <div key={tIdx} style={{ fontWeight: 600 }}>
-                                            {t.min_pax}–{t.max_pax} pax: {item.currency} {(parseFloat(t.rate) || 0).toLocaleString()}
+                                            {t.min_pax}â€“{t.max_pax} pax: {item.currency} {(parseFloat(t.rate) || 0).toLocaleString()}
                                           </div>
                                         ))}
                                       </div>
@@ -5615,7 +5664,7 @@ adultRate: 0,
                                 <div style={{ color: '#7c3aed', fontWeight: 600 }}>
                                   Flat Rate: {item.currency} {flatRate.toLocaleString()} / {isTrainCategory(item.category) ? 'cabin' : 'room'}
                                   <span style={{ fontWeight: 400, color: '#64748b', marginLeft: '0.4rem', fontSize: '0.72rem' }}>
-                                    (÷ occupants for per-person rate)
+                                    (Ã· occupants for per-person rate)
                                   </span>
                                 </div>
                               ) : (
@@ -5690,18 +5739,18 @@ adultRate: 0,
                               return carRateGroups.map((g, gi) => (
                                 <div key={gi} style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '6px', padding: '0.4rem 0.55rem', marginTop: '0.1rem' }}>
                                   <div style={{ fontWeight: 700, color: '#0e7490', marginBottom: '0.15rem' }}>
-                                    {g.vehicleGroup && `${g.vehicleGroup} · `}{g.vehicleName || 'Vehicle'}
-                                    {g.rateCode && <span style={{ color: '#155e75', fontWeight: 600 }}> — {g.rateCode}</span>}
+                                    {g.vehicleGroup && `${g.vehicleGroup} Â· `}{g.vehicleName || 'Vehicle'}
+                                    {g.rateCode && <span style={{ color: '#155e75', fontWeight: 600 }}> â€” {g.rateCode}</span>}
                                   </div>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.2rem', fontSize: '0.7rem', color: '#0e7490' }}>
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <Briefcase size={11} /> {g.luggage ? `${g.luggage} bags` : '—'}
+                                      <Briefcase size={11} /> {g.luggage ? `${g.luggage} bags` : 'â€”'}
                                     </span>
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <DoorOpen size={11} /> {g.doors ? `${g.doors}` : '—'}
+                                      <DoorOpen size={11} /> {g.doors ? `${g.doors}` : 'â€”'}
                                     </span>
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <Users size={11} /> {g.passengers ? `Max ${g.passengers} pax` : '—'}
+                                      <Users size={11} /> {g.passengers ? `Max ${g.passengers} pax` : 'â€”'}
                                     </span>
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
                                       <Snowflake size={11} /> {g.aircon ? 'AC' : 'No AC'}
@@ -5715,13 +5764,13 @@ adultRate: 0,
                                   </div>
                                   {g.ranges.sort((a, b) => ((a.min_days ?? 99) - (b.min_days ?? 99))).map((r, ri) => (
                                     <div key={ri} style={{ color: '#334155', fontSize: '0.74rem', lineHeight: 1.5 }}>
-                                      {`${r.min_days}${(r.max_days && r.max_days !== r.min_days) ? `–${r.max_days}` : '+'} days: `}
+                                      {`${r.min_days}${(r.max_days && r.max_days !== r.min_days) ? `â€“${r.max_days}` : '+'} days: `}
                                       {item.currency} {(parseFloat(r.price) || 0).toLocaleString()} / vehicle
                                     </div>
                                   ))}
                                   <div style={{ color: '#64748b', fontSize: '0.7rem', marginTop: '0.2rem' }}>
                                     {g.kmsUnlimited ? 'Unlimited km' : `${g.kmsIncluded || 0} km incl.`}
-                                    {(g.validFrom || g.validTo) && ` · Bookable ${g.validFrom || '…'} → ${g.validTo || '…'}`}
+                                    {(g.validFrom || g.validTo) && ` Â· Bookable ${g.validFrom || 'â€¦'} â†’ ${g.validTo || 'â€¦'}`}
                                   </div>
                                 </div>
                               ));
@@ -5740,7 +5789,7 @@ adultRate: 0,
                       <button className="action-btn" onClick={() => handleEditItem(item)} title="Edit Item">
                         <Edit3 size={16} />
                       </button>
-                      <button className="action-btn delete" onClick={() => handleDeleteItem(item.id)} title="Delete Item">
+                      <button className="action-btn delete" onClick={() => handleDeleteItem(item)} title="Delete Item">
                         <Trash2 size={16} />
                       </button>
                     </div>
@@ -5926,6 +5975,8 @@ adultRate: 0,
           </div>
         </div>
       )}
+
+      {confirmDialog && <ConfirmDialog {...confirmDialog} />}
 
     </div>
   );

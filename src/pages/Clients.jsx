@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useListRowLimit } from '../hooks/useListRowLimit';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useConfirm } from '../hooks/useConfirm';
 import { 
   Users, 
   Search, 
@@ -17,7 +19,8 @@ import {
   Percent,
   Globe,
   ChevronDown,
-  Check
+  Check,
+  Upload
 } from 'lucide-react';
 
 const CountrySelect = ({ value, onChange, countries, placeholder }) => {
@@ -129,6 +132,7 @@ const CountrySelect = ({ value, onChange, countries, placeholder }) => {
 
 export const Clients = () => {
   const [clients, setClients] = useState([]);
+  const [confirmDialog, confirm] = useConfirm();
   const [countries, setCountries] = useState([]);
   const [salesTotals, setSalesTotals] = useState({});
   const [loading, setLoading] = useState(true);
@@ -147,15 +151,18 @@ export const Clients = () => {
   const [form, setForm] = useState({
     name: '',
     email: '',
-    phone: '',
     clientType: 'Direct',
     country: '',
     markupPercentage: '',
     depositPercentage: '',
-    isCredit: false,
-    address: '',
-    notes: ''
-  });
+      isCredit: false,
+      address: '',
+      notes: '',
+      contact_cell: '',
+      contact_tel: '',
+      contact_website: '',
+      logo_data_url: ''
+    });
 
   const fetchCountries = useCallback(async () => {
     try {
@@ -205,7 +212,7 @@ export const Clients = () => {
 
       if (term) {
         const t = esc(term);
-        clientQuery = clientQuery.or(`name.ilike.%${t}%,email.ilike.%${t}%,phone.ilike.%${t}%`);
+        clientQuery = clientQuery.or(`name.ilike.%${t}%,email.ilike.%${t}%,contact_tel.ilike.%${t}%,contact_cell.ilike.%${t}%,contact_website.ilike.%${t}%`);
       }
 
       const { data, count, error } = await clientQuery
@@ -266,13 +273,16 @@ export const Clients = () => {
     setForm({
       name: '',
       email: '',
-      phone: '',
+      contact_cell: '',
+      contact_tel: '',
+      contact_website: '',
       clientType: 'Direct',
       country: '',
       markupPercentage: '',
       depositPercentage: '',
       address: '',
-      notes: ''
+      notes: '',
+      logo_data_url: ''
     });
   };
 
@@ -287,14 +297,17 @@ export const Clients = () => {
     setForm({
       name: client.name || '',
       email: client.email || '',
-      phone: client.phone || '',
+      contact_cell: client.contact_cell || '',
+      contact_tel: client.contact_tel || '',
+      contact_website: client.contact_website || '',
       clientType: client.client_type || 'Direct',
       country: client.country || '',
       markupPercentage: client.markup_percentage != null ? String(client.markup_percentage) : '',
       depositPercentage: client.deposit_percentage != null ? String(client.deposit_percentage) : '',
       isCredit: !!client.is_credit,
       address: client.address || '',
-      notes: client.notes || ''
+      notes: client.notes || '',
+      logo_data_url: client.logo_data_url || ''
     });
     setShowInlineForm(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -349,14 +362,16 @@ export const Clients = () => {
         company_id: profile.company_id,
         name,
         email,
-        phone: form.phone.trim(),
         client_type: form.clientType,
       country: form.country,
       markup_percentage: markup,
       deposit_percentage: deposit,
-      is_credit: !!form.isCredit,
       address: form.address.trim(),
-      notes: form.notes.trim()
+      contact_cell: (form.contact_cell || '').trim(),
+      contact_tel: (form.contact_tel || '').trim(),
+      contact_website: (form.contact_website || '').trim(),
+      notes: form.notes.trim(),
+      logo_data_url: form.logo_data_url || ''
     };
 
       if (editingClient) {
@@ -383,16 +398,62 @@ export const Clients = () => {
     }
   };
 
-  const handleDelete = async (clientId) => {
-    if (!window.confirm('Are you sure you want to delete this client?')) return;
+  const handleLogoFile = (file) => {
+    if (!file) return;
+    const allowed = ['image/jpeg', 'image/png', 'image/bmp'];
+    if (!allowed.includes(file.type)) {
+      showToast('Please choose a JPEG, PNG or BMP logo file', 'warning');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 600;
+        let width = img.width;
+        let height = img.height;
+        if (width <= 0 || height <= 0) {
+          showToast('Could not read that logo image', 'error');
+          return;
+        }
+        const scale = Math.min(1, MAX / Math.max(width, height));
+        if (scale < 1) {
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        setForm((prev) => ({ ...prev, logo_data_url: canvas.toDataURL('image/png') }));
+        showToast('Logo added â€” remember to save your changes', 'success');
+      };
+      img.onerror = () => showToast('Could not read that logo image', 'error');
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const clearLogo = () => setForm((prev) => ({ ...prev, logo_data_url: '' }));
+
+  const handleDelete = async (client) => {
+    const ok = await confirm({
+      title: 'Delete client?',
+      message: `"${client.name}" will be permanently removed.`,
+      detail: 'Saved invoices and itineraries keep a snapshot of their bill-to details.',
+      confirmLabel: 'Delete client',
+      destructive: true
+    });
+    if (!ok) return;
     try {
       const { error } = await supabase
         .from('clients')
         .delete()
-        .eq('id', clientId);
+        .eq('id', client.id);
 
       if (error) throw error;
-      setClients(prev => prev.filter(c => c.id !== clientId));
+      setClients(prev => prev.filter(c => c.id !== client.id));
       setTotalClients(prev => (prev == null ? prev : Math.max(0, prev - 1)));
       showToast('Client deleted', 'success');
     } catch (err) {
@@ -495,14 +556,38 @@ export const Clients = () => {
                   </div>
                   <div>
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                      Phone
+                      Cell #
                     </label>
                     <input 
                       type="tel" 
                       className="pricing-select"
-                      placeholder="+1 234 567 8900"
-                      value={form.phone}
-                      onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                      placeholder="+27 82 555 0100"
+                      value={form.contact_cell}
+                      onChange={(e) => setForm({ ...form, contact_cell: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                      Tel # / Landline
+                    </label>
+                    <input 
+                      type="tel" 
+                      className="pricing-select"
+                      placeholder="+27 21 555 0100"
+                      value={form.contact_tel}
+                      onChange={(e) => setForm({ ...form, contact_tel: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                      Website (optional)
+                    </label>
+                    <input 
+                      type="text" 
+                      className="pricing-select"
+                      placeholder="https://www.example.com"
+                      value={form.contact_website}
+                      onChange={(e) => setForm({ ...form, contact_website: e.target.value })}
                     />
                   </div>
                   <div>
@@ -590,7 +675,7 @@ export const Clients = () => {
                 </div>
               </div>
 
-              {/* Address — full width */}
+              {/* Address â€” full width */}
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Address
@@ -604,7 +689,39 @@ export const Clients = () => {
                 />
               </div>
 
-              {/* Notes — full width, expandable */}
+              {/* Client logo â€” full width */}
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                  Client Logo
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                  <label className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                    <Upload size={16} /> {form.logo_data_url ? 'Replace logo' : 'Upload logo'}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/bmp"
+                      style={{ display: 'none' }}
+                      onChange={(e) => { handleLogoFile(e.target.files?.[0]); e.target.value = ''; }}
+                    />
+                  </label>
+                  {form.logo_data_url ? (
+                    <>
+                      <div style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.35rem', background: '#fff' }}>
+                        <img src={form.logo_data_url} alt="Client logo preview" style={{ display: 'block', maxWidth: '140px', maxHeight: '70px', objectFit: 'contain' }} />
+                      </div>
+                      <button type="button" className="action-btn delete" style={{ border: '1px solid #fecaca', borderRadius: '8px' }} onClick={clearLogo} title="Remove logo">
+                        <X size={16} />
+                      </button>
+                    </>
+                  ) : (
+                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                      Optional â€” shown on exported documents and invoices for this client.
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Notes â€” full width, expandable */}
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Notes
@@ -724,10 +841,15 @@ export const Clients = () => {
               <tr key={client.id}>
                 <td>
                   <div className="company-cell">
-                    <span className="company-name">{client.name}</span>
-                    <span className="company-id" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                      <User size={12} /> Client
-                    </span>
+                    {client.logo_data_url ? (
+                      <img src={client.logo_data_url} alt="" style={{ width: '30px', height: '30px', objectFit: 'contain', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff' }} />
+                    ) : null}
+                    <div>
+                      <span className="company-name">{client.name}</span>
+                      <span className="company-id" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <User size={12} /> Client
+                      </span>
+                    </div>
                   </div>
                 </td>
                 <td>
@@ -748,12 +870,22 @@ export const Clients = () => {
                         <Mail size={12} /> {client.email}
                       </div>
                     )}
-                    {client.phone && (
+                    {client.contact_tel && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                        <Phone size={12} /> {client.phone}
+                        <Phone size={12} /> Tel: {client.contact_tel}
                       </div>
                     )}
-                    {!client.email && !client.phone && <span>No contact info</span>}
+                    {client.contact_cell && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                        <Phone size={12} /> Cell: {client.contact_cell}
+                      </div>
+                    )}
+                    {client.contact_website && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                        <Globe size={12} /> {client.contact_website}
+                      </div>
+                    )}
+                    {!client.email && !client.contact_tel && !client.contact_cell && <span>No contact info</span>}
                   </div>
                 </td>
                 <td>
@@ -761,7 +893,7 @@ export const Clients = () => {
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem', color: '#475569' }}>
                       <Globe size={14} color="#863bff" /> {client.country}
                     </span>
-                  ) : <span style={{ color: '#94a3b8' }}>—</span>}
+                  ) : <span style={{ color: '#94a3b8' }}>â€”</span>}
                 </td>
                 <td>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.85rem', fontWeight: 700, color: '#b45309' }}>
@@ -775,7 +907,7 @@ export const Clients = () => {
                       {Number(salesTotals[client.id]).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   ) : (
-                    <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>—</span>
+                    <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>â€”</span>
                   )}
                 </td>
                 <td style={{ maxWidth: '260px' }}>
@@ -803,7 +935,7 @@ export const Clients = () => {
                     </button>
                     <button 
                       className="action-btn delete" 
-                      onClick={() => handleDelete(client.id)} 
+                      onClick={() => handleDelete(client)} 
                       title="Delete Client"
                     >
                       <Trash2 size={16} />
@@ -827,6 +959,8 @@ export const Clients = () => {
           </div>
         )}
       </div>
+
+      {confirmDialog && <ConfirmDialog {...confirmDialog} />}
     </div>
   );
 };

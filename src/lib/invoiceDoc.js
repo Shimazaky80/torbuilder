@@ -47,6 +47,114 @@ export const htmlEscape = (s) => String(s ?? '')
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;');
 
+/* Single summary line showing the total price of all services per person.
+   Used when the Presentation preference is set to "per person". `inv` only
+   needs the three totals (subtotal_excl / tax_total / total_incl). */
+export const perPersonSummary = (inv, pax) => {
+  const count = Number(pax) > 0 ? Number(pax) : 1;
+  return {
+    day_number: 'All',
+    item_name: 'Total price per person — all services',
+    supplier_name: '',
+    quantity: 1,
+    unit_price: round2(Number(inv.total_incl) / count),
+    subtotal_excl: round2(Number(inv.subtotal_excl) / count),
+    tax_amount: round2(Number(inv.tax_total) / count),
+    line_total: round2(Number(inv.total_incl) / count),
+    service_date: null,
+    category: ''
+  };
+};
+
+/* Per-person breakdown rows stored on an invoice at issue time (JSON snapshot
+   written by the shared perPersonPricing helper). Used when the Presentation
+   preference is "per person" so the document shows the same Per person sharing
+   / Single supplement / Per child rows the itinerary exports produce. Falls
+   back to the single total-per-person line when no snapshot exists (older
+   invoices). */
+export const perPersonBreakdownRows = (inv, pax) => {
+  const bd = inv?.per_person_breakdown;
+  if (bd && Array.isArray(bd.rows) && bd.rows.length) {
+    return bd.rows.map((r) => ({
+      day_number: 'All',
+      item_name: r.label || 'Per person',
+      supplier_name: '',
+      quantity: 1,
+      unit_price: round2(Number(r.sell) || 0),
+      subtotal_excl: round2(Number(r.subExcl) || 0),
+      tax_amount: round2(Number(r.tax) || 0),
+      line_total: round2(Number(r.sell) || 0),
+      service_date: null,
+      category: ''
+    }));
+  }
+  return [perPersonSummary(inv, pax)];
+};
+
+/* Resolve which lines to render for a document given the Presentation
+   preference:
+     - 'daily' keeps the full itemisation; the caller may pass precomputed
+       `opts.expandedLines` (accommodation broken into one line per occupied
+       room, every other service unchanged) when the presentation asks for it.
+     - 'per_person' collapses to the stored per-person breakdown rows (or a
+       single total-per-person line). */
+export const docLines = (inv, lines, opts = {}) => {
+  const rendered = lines || [];
+  if (opts.pricingBreakdownMode === 'per_person' && rendered.length > 0) {
+    return perPersonBreakdownRows(inv, rendered[0].quantity);
+  }
+  if (Array.isArray(opts.expandedLines) && opts.expandedLines.length > 0) {
+    return opts.expandedLines;
+  }
+  return rendered;
+};
+
+/* Whether the supplier should appear under / beside the service description.
+   Accommodation is always shown (the client must see who quotes the room);
+   every other category follows the Presentation preference. */
+export const showSupplierIn = (l, opts = {}) => {
+  if (!l?.supplier_name) return false;
+  if (/accommodation/i.test(l.category || '')) return true;
+  return opts.showSupplierInDescription !== false;
+};
+
+/* Industry-standard meal plan abbreviation (e.g. "Bed & Breakfast" -> "B&B").
+   The client itinerary document always includes the accommodation meal plan;
+   on the pricing breakdown it is shown only when the Presentation toggle is on. */
+export const abbrevMealPlan = (mp) => {
+  const s = String(mp || '').trim().toUpperCase();
+  const table = {
+    'ROOM ONLY': 'RO',
+    'BED & BREAKFAST': 'B&B',
+    'BED AND BREAKFAST': 'B&B',
+    'HALF BOARD': 'HB',
+    'HALF-BOARD': 'HB',
+    'FULL BOARD': 'FB',
+    'FULL-BOARD': 'FB',
+    'ALL INCLUSIVE': 'AI',
+    'ALL-INCLUSIVE': 'AI',
+    'SELF CATERING': 'SC',
+    'SELF-CATERING': 'SC'
+  };
+  if (table[s]) return table[s];
+  const norm = s.replace(/[^A-Z0-9]/g, '');
+  const fuzzy = {
+    ROOMONLY: 'RO', BEDBREAKFAST: 'B&B', BEDANDBREAKFAST: 'B&B',
+    HALFBOARD: 'HB', FULLBOARD: 'FB', ALLINCLUSIVE: 'AI', SELFCATERING: 'SC'
+  };
+  return fuzzy[norm] || (String(mp || '').trim() || '');
+};
+
+/* Whether the accommodation meal plan abbreviation should appear under the
+   service description in the pricing breakdown. */
+export const showMealPlanOn = (l, opts = {}) =>
+  /accommodation/i.test(l.category || '') && showMealPlanOnHelp(l, opts);
+const showMealPlanOnHelp = (l, opts = {}) => {
+  const mp = String(l?.meal_plan || '').trim();
+  if (!mp) return false;
+  return opts.showMealPlanOnAccommodation !== false;
+};
+
 export const TYPE_LABEL = { deposit: 'Deposit Invoice', final: 'Final Invoice' };
 export const STATUS_META = {
   proforma: { label: 'Proforma', color: '#b45309', bg: '#fffbeb' },
@@ -60,10 +168,49 @@ export const STATUS_META = {
 export const LOGO_WIDTHS = { sm: 110, md: 160, lg: 220 };
 
 const logoOf = (opts) => {
-  const { logo, logoSize } = opts || {};
+  const { logo, logoSize, logoPosition } = opts || {};
   if (!logo) return '';
   const width = LOGO_WIDTHS[logoSize] || LOGO_WIDTHS.md;
-  return `<img src="${htmlEscape(logo)}" alt="Company logo" style="display:block;max-width:${width}px;height:auto;margin:0 0 10px">`;
+  const align = logoPosition === 'center' ? 'margin:0 auto 10px' : (logoPosition === 'right' ? 'margin:0 0 10px auto' : 'margin:0 0 10px');
+  return `<img src="${htmlEscape(logo)}" alt="Company logo" style="display:block;max-width:${width}px;height:auto;${align}">`;
+};
+
+/* text-align style for a document header/footer block given its alignment pref. */
+const alignStyle = (pos) => (pos === 'center' ? 'text-align:center' : (pos === 'right' ? 'text-align:right' : 'text-align:left'));
+
+/* Optional client logo inside the Bill To block, sized/positioned per tenant prefs. */
+const clientLogoOf = (record, opts = {}) => {
+  const logo = record?.bill_to_logo_data_url || '';
+  if (!logo) return '';
+  const width = LOGO_WIDTHS[opts?.clientLogoSize] || LOGO_WIDTHS.md;
+  const pos = opts?.clientLogoPosition || 'left';
+  const align = pos === 'center' ? 'margin:0 auto 10px' : (pos === 'right' ? 'margin:0 0 10px auto' : 'margin:0 0 10px');
+  return `<img src="${htmlEscape(logo)}" alt="Client logo" style="display:block;max-width:${width}px;height:auto;${align}">`;
+};
+
+/* Bill To / Received From / Credited To box for invoices, receipts and credit notes. */
+const billToBoxOf = (record, opts = {}, label = 'Bill To') => {
+  const addr = (record?.bill_to_address || '').replace(/\n/g, '<br>');
+  const email = record?.bill_to_email || '';
+  const tel = record?.bill_to_tel || '';
+  const cell = record?.bill_to_cell || '';
+  const website = record?.bill_to_website || '';
+  const contactLines = opts?.withContact
+    ? [
+        (tel || cell) ? `Tel: ${[tel, cell].filter(Boolean).join(' · ')}` : '',
+        email ? `Email: ${htmlEscape(email)}` : '',
+        website ? `Website: ${htmlEscape(website)}` : ''
+      ].filter((l) => l !== '')
+    : [];
+  const lines = [
+    `<b>${label}</b>`,
+    clientLogoOf(record, opts),
+    htmlEscape(record?.bill_to_name || '—'),
+    addr ? htmlEscape(addr) : '',
+    ...contactLines,
+    opts?.withEmail && email ? htmlEscape(email) : ''
+  ].filter((l) => l !== '');
+  return `<div class="box" style="${alignStyle(opts?.clientBillingAddressPosition)}">${lines.join('<br>')}</div>`;
 };
 
 export const mailTo = (email, subject, body) => `mailto:${(email || '').trim()}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -130,6 +277,7 @@ export const buildCurrencyLines = (itinerary, currencyCode, paxCount) => {
             item_name: it.description_override || it.item_name || 'Service',
             category: it.category || '',
             supplier_name: it.supplier_name || '',
+            meal_plan: it.meal_plan || '',
             quantity: pax,
             unit_price: round2(gross / (pax || 1)),
             subtotal_excl: net,
@@ -167,6 +315,7 @@ export const buildLinesFromDays = (days, paxCount, currencyCode) => buildCurrenc
       description_override: s.descOverride,
       category: s.category,
       supplier_name: s.supplierName,
+      meal_plan: s.mealPlan || '',
       currency_code: s.currencyCode || currencyCode,
       pax: s.pax || paxCount,
       total_sell: round2((Number(s.sellPP) || 0) * paxCount),
@@ -250,10 +399,11 @@ export const creditNotePayload = (cn, lines) => ({
   totals: { subtotal_excl: cn.subtotal_excl, tax_total: cn.tax_total, total_incl: cn.total_incl }
 });
 
-export const invoiceEmail = (invoice, lines) => {
+export const invoiceEmail = (invoice, lines, opts = {}) => {
   const cur = invoice.currency_code;
   const isProforma = invoice.status === 'proforma';
   const isFinal = invoice.invoice_type === 'final';
+  const renderedLines = docLines(invoice, lines, opts);
   const depositPaidLine = isFinal && Number(invoice.credited_amount) > 0
     ? `Less deposit received (${invoice.credited_invoice_number || 'prior invoice'}): ${fmtMoney(invoice.credited_amount, cur)}`
     : `Less deposit received: ${fmtMoney(invoice.deposit_amount || 0, cur)}`;
@@ -268,7 +418,7 @@ export const invoiceEmail = (invoice, lines) => {
     invoice.bill_to_address || '',
     `Issued: ${invoice.issued_date || '—'}${invoice.due_date ? `   Due: ${invoice.due_date}` : ''}`,
     '',
-    ...(lines || []).map((l) => `Day ${l.day_number}  ${l.item_name}  x${l.quantity}  ${fmtMoney(l.line_total, cur)}`),
+    ...(renderedLines || []).map((l) => `Day ${l.day_number}  ${l.item_name}${showMealPlanOn(l, opts) ? ` - ${abbrevMealPlan(l.meal_plan)}` : ''}  x${l.quantity}  ${fmtMoney(l.line_total, cur)}`),
     '',
     `Subtotal (Excl ${taxWordOf(cur)}): ${fmtMoney(invoice.subtotal_excl, cur)}`,
     `${taxRowLabel(cur, invoice.tax_label, invoice.tax_rate)}: ${fmtMoney(invoice.tax_total, cur)}`,
@@ -362,6 +512,7 @@ export const docStyles = `
 
 export const invoiceDocHtml = (inv, lines, sym, opts) => {
   const isFinal = inv.invoice_type === 'final';
+  const renderedLines = docLines(inv, lines, opts || {});
   const creditLine = isFinal && Number(inv.credited_amount) > 0
     ? `<tr class="grand"><td colspan="6" class="num">Less deposit received${inv.credited_invoice_number ? ` (${htmlEscape(inv.credited_invoice_number)})` : ''}</td><td class="num">-${fmtMoney(inv.credited_amount, sym)}</td></tr>`
     : '';
@@ -370,16 +521,18 @@ export const invoiceDocHtml = (inv, lines, sym, opts) => {
     : `<b>Deposit requested (${Number(inv.deposit_percentage)}%):</b> ${fmtMoney(inv.deposit_amount, sym)}<br><b>Balance remaining after deposit:</b> ${fmtMoney(inv.balance_due, sym)}`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(inv.invoice_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
+    <div style="${alignStyle(opts?.billingAddressPosition)}">
     <h1>${htmlEscape(inv.supplier_name || 'Invoice')}</h1>
     <p class="muted">${inv.supplier_tax_number ? `${taxNoPrefix(inv.currency_code)} ${htmlEscape(inv.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(inv.supplier_address || '').replace(/\n/g, '<br>')}</p>
+    </div>
     <hr/>
     <h2>${inv.status === 'proforma' ? 'PROFORMA — ' : ''}${htmlEscape(TYPE_LABEL[inv.invoice_type] || 'Invoice')} ${htmlEscape(inv.invoice_number)}</h2>
     <p class="muted">Issued: ${htmlEscape(inv.issued_date || '—')}${inv.due_date ? ` · Due: ${htmlEscape(inv.due_date)}` : ''} · Currency: ${htmlEscape(inv.currency_code)}${inv.status === 'paid' ? ' · PAID' : ''}</p>
-    <div class="box"><b>Bill To</b><br>${htmlEscape(inv.bill_to_name || '—')}<br>${htmlEscape(inv.bill_to_address || '').replace(/\n/g, '<br>')}</div>
+      ${billToBoxOf(inv, { ...opts, withContact: true })}
     <table>
       <tr><th>Day</th><th>Description</th><th class="num">Qty</th><th class="num">Unit</th><th class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</th><th class="num">${taxWordUpper(inv.currency_code)}</th><th class="num">Total</th></tr>
-      ${(lines || []).map((l) => `<tr><td>${l.day_number}</td><td>${htmlEscape(l.item_name)}${l.supplier_name ? `<br><span class="muted">${htmlEscape(l.supplier_name)}</span>` : ''}</td><td class="num">${l.quantity}</td><td class="num">${fmtMoney(l.unit_price, sym)}</td><td class="num">${fmtMoney(l.subtotal_excl, sym)}</td><td class="num">${fmtMoney(l.tax_amount, sym)}</td><td class="num">${fmtMoney(l.line_total, sym)}</td></tr>`).join('')}
+      ${renderedLines.map((l) => `<tr><td>${l.day_number}</td><td>${htmlEscape(l.item_name)}${showMealPlanOn(l, opts || {}) ? ` - ${htmlEscape(abbrevMealPlan(l.meal_plan))}` : ''}${showSupplierIn(l, opts || {}) ? `<br><span class="muted">${htmlEscape(l.supplier_name)}</span>` : ''}</td>${l.qty_text ? `<td title="${htmlEscape(l.qty_title || '')}">${htmlEscape(String(l.quantity))}</td>` : `<td class="num">${l.quantity}</td>`}<td class="num">${fmtMoney(l.unit_price, sym)}</td><td class="num">${fmtMoney(l.subtotal_excl, sym)}</td><td class="num">${fmtMoney(l.tax_amount, sym)}</td><td class="num">${fmtMoney(l.line_total, sym)}</td></tr>`).join('')}
       <tr class="grand"><td colspan="6" class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
       <tr class="grand"><td colspan="6" class="num">${htmlEscape(taxDisplayLabel(inv.currency_code, inv.tax_label, inv.tax_rate))} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
       <tr class="grand"><td colspan="6" class="num">${htmlEscape(totalDueLabel(inv))}</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
@@ -394,13 +547,15 @@ export const invoiceDocHtml = (inv, lines, sym, opts) => {
 
 export const receiptDocHtml = (r, sym, opts) => `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(r.receipt_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
+    <div style="${alignStyle(opts?.billingAddressPosition)}">
     <h1>${htmlEscape(r.supplier_name || 'Payment Receipt')}</h1>
     <p class="muted">${r.supplier_tax_number ? `${taxNoPrefix(r.currency_code)} ${htmlEscape(r.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(r.supplier_address || '').replace(/\n/g, '<br>')}</p>
+    </div>
     <hr/>
     <h2>PAYMENT RECEIPT ${htmlEscape(r.receipt_number)}</h2>
     <p class="muted">Date received: ${htmlEscape(r.received_date || '—')} · Currency: ${htmlEscape(r.currency_code)}</p>
-    <div class="box"><b>Received From</b><br>${htmlEscape(r.bill_to_name || '—')}<br>${r.bill_to_email ? htmlEscape(r.bill_to_email) : ''}</div>
+      ${billToBoxOf(r, { ...opts, withEmail: true, withContact: true }, 'Received From')}
     <table>
       <tr><th>Invoice</th><th>Type</th><th>Method</th><th>Reference</th><th class="num">Amount Received</th><th class="num">Balance Remaining</th></tr>
       <tr><td>${htmlEscape(r.invoice_number)}</td><td>${htmlEscape(TYPE_LABEL[r.invoice_type] || r.invoice_type)}</td><td>${htmlEscape(r.payment_method || '—')}</td><td>${htmlEscape(r.payment_reference || '—')}</td><td class="num">${fmtMoney(r.amount, sym)}</td><td class="num">${fmtMoney(r.balance_remaining, sym)}</td></tr>
@@ -411,13 +566,15 @@ export const receiptDocHtml = (r, sym, opts) => `<!doctype html><html><head><met
 
 export const creditNoteDocHtml = (cn, sym, opts) => `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(cn.credit_note_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
+    <div style="${alignStyle(opts?.billingAddressPosition)}">
     <h1>${htmlEscape(cn.supplier_name || 'Credit Note')}</h1>
     <p class="muted">${cn.supplier_tax_number ? `${taxNoPrefix(cn.currency_code)} ${htmlEscape(cn.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(cn.supplier_address || '').replace(/\n/g, '<br>')}</p>
+    </div>
     <hr/>
     <h2>CREDIT NOTE ${htmlEscape(cn.credit_note_number)}</h2>
     <p class="muted">Date: ${htmlEscape(cn.issued_date || '—')} · Against invoice: ${htmlEscape(cn.invoice_number)} · Currency: ${htmlEscape(cn.currency_code)}</p>
-    <div class="box"><b>Credited To</b><br>${htmlEscape(cn.bill_to_name || '—')}<br>${htmlEscape(cn.bill_to_address || '').replace(/\n/g, '<br>')}</div>
+      ${billToBoxOf(cn, { ...opts, withContact: true }, 'Credited To')}
     ${cn.reason ? `<p class="muted"><b>Reason:</b> ${htmlEscape(cn.reason)}</p>` : ''}
     <table>
       <tr><th>Description</th><th class="num">Amount</th></tr>
@@ -429,9 +586,10 @@ export const creditNoteDocHtml = (cn, sym, opts) => `<!doctype html><html><head>
     </body></html>`;
 
 /* Genuine Excel workbook (HTML-table .xls), mirroring the itinerary export style. */
-export const invoiceExcelHtml = (inv, lines, sym) => {
+export const invoiceExcelHtml = (inv, lines, sym, opts = {}) => {
   const isFinal = inv.invoice_type === 'final';
-  const rows = (lines || []).map((l) => `<tr><td>${l.day_number}</td><td>${htmlEscape(l.service_date || '')}</td><td>${htmlEscape(l.category || '')}</td><td>${htmlEscape(l.item_name)}${l.supplier_name ? ` — ${htmlEscape(l.supplier_name)}` : ''}</td><td>${l.quantity}</td><td>${fmtMoney(l.unit_price, sym)}</td><td>${fmtMoney(l.subtotal_excl, sym)}</td><td>${fmtMoney(l.tax_amount, sym)}</td><td>${fmtMoney(l.line_total, sym)}</td></tr>`).join('');
+  const renderedLines = docLines(inv, lines, opts);
+  const rows = renderedLines.map((l) => `<tr><td>${l.day_number}</td><td>${htmlEscape(l.service_date || '')}</td><td>${htmlEscape(l.category || '')}</td><td>${htmlEscape(l.item_name)}${showMealPlanOn(l, opts) ? ` - ${htmlEscape(abbrevMealPlan(l.meal_plan))}` : ''}${showSupplierIn(l, opts) ? ` — ${htmlEscape(l.supplier_name)}` : ''}</td><td>${l.quantity}</td><td>${fmtMoney(l.unit_price, sym)}</td><td>${fmtMoney(l.subtotal_excl, sym)}</td><td>${fmtMoney(l.tax_amount, sym)}</td><td>${fmtMoney(l.line_total, sym)}</td></tr>`).join('');
   const credit = isFinal && Number(inv.credited_amount) > 0
     ? `<tr><td colspan="8" class="num">Less deposit received${inv.credited_invoice_number ? ` (${htmlEscape(inv.credited_invoice_number)})` : ''}</td><td class="num">-${fmtMoney(inv.credited_amount, sym)}</td></tr>`
     : '';

@@ -74,7 +74,7 @@ export const Itineraries = () => {
 
       let itineraryQuery = supabase
         .from('itineraries')
-        .select('*, clients(name, client_type, markup_percentage, deposit_percentage, email, phone, country)', { count: 'exact' })
+        .select('*, clients(name, client_type, markup_percentage, deposit_percentage, email, country)', { count: 'exact' })
         .eq('company_id', profile.company_id);
 
       const q = searchQuery.trim();

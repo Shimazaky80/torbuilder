@@ -6,6 +6,8 @@ import { useListRowLimit } from '../hooks/useListRowLimit';
 import {
   round2,
   fmtMoney,
+  numOr,
+  vatOfInclusive,
   effectiveBalance,
   TYPE_LABEL,
   STATUS_META,
@@ -24,11 +26,17 @@ import {
   receiptDocHtml,
   creditNoteDocHtml,
   invoiceExcelHtml,
+  docLines,
+  showSupplierIn,
+  showMealPlanOn,
+  abbrevMealPlan,
   isZar,
   taxWordOf,
   taxWordUpper,
   taxDisplayLabel
 } from '../lib/invoiceDoc';
+import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
+import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import {
   Receipt,
   Plus,
@@ -38,6 +46,7 @@ import {
   Send,
   Copy,
   Ban,
+  AlertTriangle,
   CheckCircle2,
   Download,
   Search,
@@ -78,6 +87,8 @@ export const Invoices = () => {
   const [itinerariesLoading, setItinerariesLoading] = useState(false);
   const [selectedItinerary, setSelectedItinerary] = useState(null);
   const [selectedCurrency, setSelectedCurrency] = useState('');
+  const [itineraryRates, setItineraryRates] = useState(new Map());
+  const [itineraryAgeRanges, setItineraryAgeRanges] = useState(new Map());
   const [selectedBankId, setSelectedBankId] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [issuing, setIssuing] = useState(false);
@@ -181,6 +192,7 @@ export const Invoices = () => {
     setWizardStep(1);
     setSelectedItinerary(null);
     setSelectedCurrency('');
+    setItineraryRates(new Map());
     setSelectedBankId('');
     setDueDate('');
     setItinerariesLoading(true);
@@ -204,10 +216,36 @@ export const Invoices = () => {
     try {
       const { data, error } = await supabase
         .from('itineraries')
-        .select('*, clients(name, email, address, deposit_percentage), itinerary_days(day_number, day_date, itinerary_day_items(item_name, description_override, category, supplier_name, currency_code, pax, total_sell, tax_rate, tax_label, is_included, sort_order))')
+        .select('*, clients(name, email, address, deposit_percentage, logo_data_url, contact_tel, contact_cell, contact_website), itinerary_days(day_number, day_date, itinerary_day_items(item_name, description_override, category, supplier_name, currency_code, pax, total_sell, tax_rate, tax_label, meal_plan, is_included, sort_order, item_id, room_allocations, markup_percentage))')
         .eq('id', id)
         .single();
       if (error) throw error;
+      /* Contracted Library rates for the itinerary's accommodation items, used
+         to derive the per-person breakdown (single / sharing / child classes)
+         from the stored room allocations. */
+      const ratesMap = new Map();
+      const ids = [...new Set((data.itinerary_days || [])
+        .flatMap((d) => (d.itinerary_day_items || []).map((it) => it.item_id))
+        .filter(Boolean))];
+      if (ids.length) {
+        const { data: rates } = await supabase
+          .from('item_rates')
+          .select('*')
+          .in('item_id', ids);
+        (rates || []).forEach((r) => {
+          const k = String(r.item_id);
+          if (!ratesMap.has(k)) ratesMap.set(k, []);
+          ratesMap.get(k).push(r);
+        });
+        const { data: libItems } = await supabase
+          .from('library_items')
+          .select('id, child_age_ranges')
+          .in('id', ids);
+        const ageMap = new Map();
+        (libItems || []).forEach((li) => ageMap.set(String(li.id), li.child_age_ranges || []));
+        setItineraryAgeRanges(ageMap);
+      }
+      setItineraryRates(ratesMap);
       setSelectedItinerary(data);
       setWizardStep(2);
     } catch (err) {
@@ -253,6 +291,120 @@ export const Invoices = () => {
       const liveDeposit = invoices.some((inv) => inv.itinerary_id === selectedItinerary.id
         && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'deposit' && inv.status !== 'void' && inv.status !== 'paid');
 
+      /* Per-person breakdown (Per person sharing / Single supplement / Per
+         child) for this currency, from the itinerary's room allocations and
+         contracted Library rates. Stored on the invoice as an immutable
+         snapshot when issued. */
+      const travellers = [];
+      for (let i = 0; i < (Number(selectedItinerary.num_adults) || 0); i += 1) travellers.push({ age: 30 });
+      for (let i = 0; i < (Number(selectedItinerary.num_children) || 0); i += 1) travellers.push({ age: 8 });
+      const services = [];
+      (selectedItinerary.itinerary_days || []).forEach((d) => {
+        (d.itinerary_day_items || []).forEach((it) => {
+          if (it.is_included === false) return;
+          const ccy = (it.currency_code || selectedItinerary.currency_code || 'ZAR').toUpperCase();
+          if (ccy !== code) return;
+          const pax = Number(it.pax) || paxCount || 1;
+          services.push({
+            category: it.category || '',
+            currencyCode: ccy,
+            sellPP: (Number(it.total_sell) || 0) / pax,
+            taxRate: it.tax_rate,
+            itemId: it.item_id || null,
+            roomAllocations: Array.isArray(it.room_allocations) ? it.room_allocations : [],
+            markup: Number(it.markup_percentage) || 0
+          });
+        });
+      });
+      const rateBy = (itemId) => {
+        if (!itemId) return null;
+        const arr = itineraryRates.get(String(itemId)) || [];
+        const rate = arr.find((r) => (r.currency || '').toUpperCase() === code) || arr[0] || null;
+        return rate ? { ...rate, _ageRanges: itineraryAgeRanges.get(String(itemId)) || [] } : null;
+      };
+      const perPersonBreakdown = breakdownSnapshot(computePerPersonRows({ services, travellers, rateBy }));
+
+      /* Expanded daily lines for this currency: used when the Presentation
+         preference is "Service per day (detailed)" with accommodation lines
+         split per occupied room. Non-accommodation services stay on their own
+         lines exactly as billed; each night stop is instead decomposed into
+         one line per occupied room (e.g. 2A / 1A / 2A, 1C) priced against the
+         contracted Library rate and reconciled to the billed accommodation
+         total. When the room-split setting is off this stays null so the
+         standard itemisation is used unchanged. */
+      let expandedLines = null;
+      if (billing?.pricing_breakdown_mode === 'daily' && billing?.pricing_breakdown_accommodation === 'rooms') {
+        expandedLines = [];
+        const fallbackAdults = Number(selectedItinerary.num_adults) || 0;
+        const fallbackChildren = Number(selectedItinerary.num_children) || 0;
+        let sort = 0;
+        (selectedItinerary.itinerary_days || [])
+          .slice()
+          .sort((a, b) => (a.day_number || 0) - (b.day_number || 0))
+          .forEach((d) => {
+            (d.itinerary_day_items || []).forEach((it) => {
+              if (it.is_included === false) return;
+              const ccy = (it.currency_code || selectedItinerary.currency_code || 'ZAR').toUpperCase();
+              if (ccy !== code) return;
+              const pax = Number(it.pax) || paxCount || 1;
+              const taxRate = numOr(it.tax_rate, agg.taxEntries[0]?.rate ?? 0);
+              const gross = round2(Number(it.total_sell) || 0);
+              const vat = round2(vatOfInclusive(gross, taxRate));
+              const net = round2(gross - vat);
+              const label = taxDisplayLabel(code, it.tax_label || '', taxRate);
+              const baseLine = {
+                day_number: d.day_number || 1,
+                service_date: d.day_date || null,
+                item_name: it.description_override || it.item_name || 'Service',
+                category: it.category || '',
+                supplier_name: it.supplier_name || '',
+                meal_plan: it.meal_plan || '',
+                subtotal_excl: net,
+                tax_amount: vat,
+                line_total: gross,
+                tax_label: label,
+                tax_rate: taxRate,
+                currency_code: ccy
+              };
+              if (!/accommodation/i.test(it.category || '')) {
+                expandedLines.push({
+                  ...baseLine,
+                  quantity: pax,
+                  unit_price: round2(gross / (pax || 1)),
+                  sort_order: sort++
+                });
+                return;
+              }
+              const itemId = it.item_id || null;
+              const baseRate = itemId ? rateBy(itemId) : null;
+              const bd = accommodationBreakdown({
+                mode: 'rooms',
+                lineTotal: gross,
+                rooms: Array.isArray(it.room_allocations) ? it.room_allocations : [],
+                rate: baseRate,
+                ageRanges: Array.isArray(baseRate?._ageRanges) ? baseRate._ageRanges : [],
+                markup: Number(it.markup_percentage) || 0,
+                taxRate,
+                fallbackAdults,
+                fallbackChildren
+              });
+              bd.rows.forEach((r) => {
+                expandedLines.push({
+                  ...baseLine,
+                  quantity: r.qty,
+                  qty_text: true,
+                  qty_title: r.qtyTitle,
+                  unit_price: r.unit,
+                  subtotal_excl: r.subExcl,
+                  tax_amount: r.tax,
+                  line_total: r.lineTotal,
+                  sort_order: sort++
+                });
+              });
+            });
+          });
+      }
+
       /* An itinerary may carry several live invoices while the travellers are
          still travelling. Issuing stops only when there is no money still
          outstanding, or when the most recent invoice for this currency is an
@@ -267,9 +419,9 @@ export const Invoices = () => {
       } else {
         issueType = 'deposit';
       }
-      return { code, ...agg, paidTotal, outstanding, hasPaidDeposit, issueType, invoiced: !issueType, blockReason };
+      return { code, ...agg, perPersonBreakdown, expandedLines, paidTotal, outstanding, hasPaidDeposit, issueType, invoiced: !issueType, blockReason };
     });
-  }, [selectedItinerary, invoices, paidByCurrency]);
+  }, [selectedItinerary, invoices, paidByCurrency, itineraryRates, itineraryAgeRanges, billing]);
 
   const selectedGroup = useMemo(
     () => currencyGroups.find((g) => g.code === selectedCurrency) || null,
@@ -363,8 +515,8 @@ export const Invoices = () => {
         subtotal_excl: selectedGroup.subtotalExcl,
         tax_total: selectedGroup.taxTotal,
         total_incl: gross,
-        tax_label: selectedGroup.taxEntries[0]?.label || 'VAT',
-        tax_rate: selectedGroup.taxEntries[0]?.rate ?? 15,
+        tax_label: selectedGroup.taxEntries[0]?.label || 'Tax',
+        tax_rate: selectedGroup.taxEntries[0]?.rate ?? 0,
         deposit_percentage: pct,
         deposit_amount: depositAmount,
         balance_due: balance,
@@ -376,10 +528,15 @@ export const Invoices = () => {
         bill_to_name: client.name || '',
         bill_to_email: client.email || '',
         bill_to_address: client.address || '',
+        bill_to_tel: client.contact_tel || '',
+        bill_to_cell: client.contact_cell || '',
+        bill_to_website: client.contact_website || '',
+        bill_to_logo_data_url: client.logo_data_url || '',
         supplier_name: billing?.legal_name || '',
         supplier_tax_number: billing?.tax_number || '',
         supplier_address: billing?.billing_address || '',
         bank_details: bankDetails,
+        per_person_breakdown: selectedGroup.perPersonBreakdown || null,
         notes: null
       };
 
@@ -425,7 +582,7 @@ export const Invoices = () => {
     if (!inv.itinerary_id) return [];
     const { data: itin, error: itinErr } = await supabase
       .from('itineraries')
-      .select('*, itinerary_days(day_number, day_date, itinerary_day_items(item_name, description_override, category, supplier_name, currency_code, pax, total_sell, tax_rate, tax_label, is_included, sort_order))')
+      .select('*, itinerary_days(day_number, day_date, itinerary_day_items(item_name, description_override, category, supplier_name, currency_code, pax, total_sell, tax_rate, tax_label, meal_plan, is_included, sort_order))')
       .eq('id', inv.itinerary_id)
       .maybeSingle();
     if (itinErr || !itin) return [];
@@ -544,6 +701,10 @@ export const Invoices = () => {
         payment_reference: receiptForm.payment_reference || '',
         bill_to_name: inv.bill_to_name || '',
         bill_to_email: inv.bill_to_email || '',
+        bill_to_tel: inv.bill_to_tel || '',
+        bill_to_cell: inv.bill_to_cell || '',
+        bill_to_website: inv.bill_to_website || '',
+        bill_to_address: inv.bill_to_address || '',
         supplier_name: inv.supplier_name || '',
         supplier_tax_number: inv.supplier_tax_number || '',
         supplier_address: inv.supplier_address || '',
@@ -649,10 +810,12 @@ export const Invoices = () => {
 
   /* Voiding ALWAYS raises a matching credit note so the client account balances
      and the itinerary/currency slot is freed for a replacement invoice. */
+  const [voidTarget, setVoidTarget] = useState(null);
+  const [voidReason, setVoidReason] = useState('');
+
   const voidInvoice = async (inv, lines) => {
-    const reason = window.prompt(`Void invoice ${inv.invoice_number}? A credit note will be raised automatically. Reason:`, inv.void_reason || '');
-    if (!reason || !reason.trim()) return;
-    const trimmed = reason.trim();
+    const trimmed = voidReason.trim();
+    if (!trimmed) return;
     try {
       const { data: existing } = await supabase
         .from('credit_notes')
@@ -689,6 +852,9 @@ export const Invoices = () => {
           bill_to_name: inv.bill_to_name,
           bill_to_email: inv.bill_to_email,
           bill_to_address: inv.bill_to_address,
+          bill_to_tel: inv.bill_to_tel,
+          bill_to_cell: inv.bill_to_cell,
+          bill_to_website: inv.bill_to_website,
           supplier_name: inv.supplier_name,
           supplier_tax_number: inv.supplier_tax_number,
           supplier_address: inv.supplier_address
@@ -713,9 +879,16 @@ export const Invoices = () => {
       await fetchInvoices(companyId);
       await reloadViewing(inv.id);
       showToast(`${inv.invoice_number} voided and credited (${note.credit_note_number})`, 'success');
+      setVoidTarget(null);
+      setVoidReason('');
     } catch (err) {
       showToast(err.message || 'Failed to void invoice', 'error');
     }
+  };
+
+  const requestVoidInvoice = (inv) => {
+    setVoidTarget(inv);
+    setVoidReason(inv.void_reason || '');
   };
 
   const exportJson = (inv, lines) => {
@@ -726,7 +899,7 @@ export const Invoices = () => {
   };
 
   const exportExcel = (inv, lines) => {
-    downloadBlob(invoiceExcelHtml(inv, lines, symOf(inv.currency_code)), `${inv.invoice_number}.xls`, 'application/vnd.ms-excel');
+    downloadBlob(invoiceExcelHtml(inv, lines, symOf(inv.currency_code), branding), `${inv.invoice_number}.xls`, 'application/vnd.ms-excel');
     showToast('Invoice exported as Excel', 'success');
   };
 
@@ -741,13 +914,13 @@ export const Invoices = () => {
   };
 
   const emitEmail = (inv, lines) => {
-    const m = invoiceEmail(inv, lines);
+    const m = invoiceEmail(inv, lines, branding);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
     window.open(mailTo(m.to, m.subject, m.body), '_blank');
   };
 
   const copyInvoice = (inv, lines) => {
-    const m = invoiceEmail(inv, lines);
+    const m = invoiceEmail(inv, lines, branding);
     void clipboardCopy(`${m.subject}\n\n${m.body}`);
     showToast('Invoice copied to clipboard', 'success');
   };
@@ -762,7 +935,18 @@ export const Invoices = () => {
   };
 
   const fieldStyle = { width: '100%', padding: '0.6rem 0.75rem', fontSize: '0.9rem' };
-  const branding = { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' };
+  const branding = {
+    logo: billing?.logo_data_url || '',
+    logoSize: billing?.logo_size || 'md',
+    showSupplierInDescription: billing?.show_supplier_in_description !== false,
+    pricingBreakdownMode: billing?.pricing_breakdown_mode || 'daily',
+    showMealPlanOnAccommodation: billing?.show_meal_plan_on_accommodation !== false,
+    logoPosition: ['left', 'center', 'right'].includes(billing?.logo_position) ? billing.logo_position : 'left',
+    billingAddressPosition: ['left', 'center', 'right'].includes(billing?.billing_address_position) ? billing.billing_address_position : 'left',
+    clientLogoSize: ['sm', 'md', 'lg'].includes(billing?.client_logo_size) ? billing.client_logo_size : 'md',
+    clientLogoPosition: ['left', 'center', 'right'].includes(billing?.client_logo_position) ? billing.client_logo_position : 'left',
+    clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left'
+  };
 
   return (
     <div className="page-container">
@@ -901,7 +1085,7 @@ export const Invoices = () => {
                   </button>
                 )}
                 {viewing.status !== 'void' && (
-                  <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: '#b91c1c' }} onClick={() => voidInvoice(viewing, viewLines)}>
+                  <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: '#b91c1c' }}                 onClick={() => requestVoidInvoice(viewing)}>
                     <Ban size={15} /> Void
                   </button>
                 )}
@@ -928,10 +1112,13 @@ export const Invoices = () => {
                     {viewing.paid_at && <div style={{ fontSize: '0.85rem', color: '#047857' }}>Paid: {String(viewing.paid_at).slice(0, 10)}</div>}
                   </div>
                 </div>
-                <div style={{ marginTop: '0.85rem' }}>
+                <div style={{ marginTop: '0.85rem', textAlign: branding.clientBillingAddressPosition === 'center' ? 'center' : (branding.clientBillingAddressPosition === 'right' ? 'right' : 'left') }}>
                   <div style={{ fontSize: '0.8rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Bill To</div>
+                  {viewing.bill_to_logo_data_url && <img src={viewing.bill_to_logo_data_url} alt="Client logo" style={{ display: 'block', maxWidth: `${LOGO_WIDTHS[branding.clientLogoSize] || LOGO_WIDTHS.md}px`, maxHeight: '64px', objectFit: 'contain', marginBottom: '6px', marginLeft: branding.clientLogoPosition === 'center' ? 'auto' : (branding.clientLogoPosition === 'right' ? 'auto' : '0'), marginRight: branding.clientLogoPosition === 'center' ? 'auto' : (branding.clientLogoPosition === 'right' ? '0' : 'auto') }} />}
                   <div style={{ fontWeight: 700 }}>{viewing.bill_to_name || 'â€”'}</div>
                   {viewing.bill_to_email && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>{viewing.bill_to_email}</div>}
+                  {(viewing.bill_to_tel || viewing.bill_to_cell) && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Tel: {[viewing.bill_to_tel, viewing.bill_to_cell].filter(Boolean).join(' · ')}</div>}
+                  {viewing.bill_to_website && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Website: {viewing.bill_to_website}</div>}
                   {viewing.bill_to_address && <div style={{ fontSize: '0.85rem', color: '#64748b', whiteSpace: 'pre-line' }}>{viewing.bill_to_address}</div>}
                 </div>
 
@@ -948,11 +1135,11 @@ export const Invoices = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {viewLines.map((l) => (
-                      <tr key={l.id}>
+                    {docLines(viewing, viewLines, branding).map((l, i) => (
+                      <tr key={l.id || i}>
                         <td>{l.day_number}</td>
-                        <td>{l.item_name}{l.supplier_name ? <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{l.supplier_name}</div> : null}</td>
-                        <td style={{ textAlign: 'right' }}>{l.quantity}</td>
+                        <td>{l.item_name}{showMealPlanOn(l, branding) ? <> - {abbrevMealPlan(l.meal_plan)}</> : null}{showSupplierIn(l, branding) ? <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{l.supplier_name}</div> : null}</td>
+                        <td style={{ textAlign: l.qty_text ? 'left' : 'right' }}>{l.quantity}</td>
                         <td style={{ textAlign: 'right' }}>{fmtMoney(l.unit_price, symOf(viewing.currency_code))}</td>
                         <td style={{ textAlign: 'right' }}>{fmtMoney(l.subtotal_excl, symOf(viewing.currency_code))}</td>
                         <td style={{ textAlign: 'right' }}>{fmtMoney(l.tax_amount, symOf(viewing.currency_code))}</td>
@@ -1243,11 +1430,11 @@ export const Invoices = () => {
                     <tr><th>Day</th><th>Service</th><th style={{ textAlign: 'right' }}>Qty</th><th style={{ textAlign: 'right' }}>Total (Incl Tax)</th></tr>
                   </thead>
                   <tbody>
-                    {selectedGroup.lines.map((l, i) => (
+                    {docLines({ subtotal_excl: selectedGroup.subtotalExcl, tax_total: selectedGroup.taxTotal, total_incl: selectedGroup.totalIncl, currency_code: selectedGroup.code, per_person_breakdown: selectedGroup.perPersonBreakdown }, selectedGroup.lines, { ...branding, expandedLines: selectedGroup.expandedLines ?? undefined }).map((l, i) => (
                       <tr key={i}>
                         <td>{l.day_number}</td>
-                        <td>{l.item_name}</td>
-                        <td style={{ textAlign: 'right' }}>{l.quantity}</td>
+                        <td>{l.item_name}{showMealPlanOn(l, branding) ? <> - {abbrevMealPlan(l.meal_plan)}</> : null}{showSupplierIn(l, branding) ? <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{l.supplier_name}</div> : null}</td>
+                        <td style={{ textAlign: l.qty_text ? 'left' : 'right' }}>{l.quantity}</td>
                         <td style={{ textAlign: 'right' }}>{fmtMoney(l.line_total, selectedGroup.code)}</td>
                       </tr>
                     ))}
@@ -1312,6 +1499,48 @@ export const Invoices = () => {
                 </div>
               </div>
             )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {voidTarget && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '480px' }}>
+            <div className="modal-header">
+              <h2>Void invoice {voidTarget.invoice_number}?</h2>
+              <button className="close-btn" onClick={() => setVoidTarget(null)}><X size={20} /></button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
+              <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '0.75rem 0.9rem' }}>
+                <AlertTriangle size={16} color="#b91c1c" style={{ flexShrink: 0, marginTop: '2px' }} />
+                <p style={{ margin: 0, color: '#7f1d1d', fontSize: '0.84rem', lineHeight: 1.5 }}>
+                  A matching credit note will be raised automatically so the client account balances and the itinerary slot is freed for a replacement invoice.
+                </p>
+              </div>
+              <div className="sidebar-field">
+                <label>Reason *</label>
+                <textarea
+                  className="sidebar-select"
+                  style={{ ...fieldStyle, minHeight: '90px', resize: 'vertical', fontFamily: 'inherit' }}
+                  value={voidReason}
+                  onChange={(e) => setVoidReason(e.target.value)}
+                  placeholder="e.g. Duplicate invoice issued in error"
+                  autoFocus
+                />
+              </div>
+              <div className="form-actions" style={{ marginTop: 0 }}>
+                <button type="button" className="secondary-btn" onClick={() => setVoidTarget(null)}>Cancel</button>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem', background: '#b91c1c', borderColor: '#b91c1c' }}
+                  disabled={!voidReason.trim()}
+                  onClick={() => voidInvoice(voidTarget, viewLines)}
+                >
+                  <Ban size={15} /> Void &amp; raise credit note
+                </button>
+              </div>
             </div>
           </div>
         </div>
