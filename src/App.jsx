@@ -8,7 +8,7 @@ import { Suppliers } from './pages/Suppliers';
 import { Clients } from './pages/Clients';
 import { Itineraries } from './pages/Itineraries';
 import { ItineraryBuilder } from './pages/ItineraryBuilder';
-import { Invoices } from './pages/Invoices';
+import { Finance } from './pages/Finance';
 import { Settings } from './pages/Settings';
 import { LibraryItems } from './pages/LibraryItems';
 import { Analytics } from './pages/Analytics';
@@ -43,7 +43,9 @@ function App() {
                         <Route path="packages" element={<div>Packages (Coming Soon)</div>} />
                         <Route path="itineraries" element={<Itineraries />} />
                         <Route path="itineraries/builder" element={<ItineraryBuilder />} />
-                        <Route path="invoices" element={<Invoices />} />
+                        <Route path="finance" element={<Finance />} />
+                        {/* The module was renamed Invoices -> Finance; keep old links working. */}
+                        <Route path="invoices" element={<Navigate to="/finance" replace />} />
                         <Route path="tariffs" element={<div>Tariffs (Coming Soon)</div>} />
                         <Route path="analytics" element={<Analytics />} />
                         <Route path="users" element={<div>Users (Coming Soon)</div>} />

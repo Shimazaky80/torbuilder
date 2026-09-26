@@ -1,5 +1,5 @@
 /* Shared invoice / receipt / credit-note helpers.
-   Used by the Invoices module and the Itinerary Builder so both produce
+   Used by the Finance module and the Itinerary Builder so both produce
    identical documents, emails and accounting exports. */
 
 export const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;

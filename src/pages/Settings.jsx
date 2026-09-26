@@ -1025,7 +1025,7 @@ export const Settings = () => {
             <Rows3 size={18} color="#0d7478" /> List View Preferences
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            How many rows each list module (Clients, Suppliers, Library Items, Itineraries, Invoices) displays by default. Settings and Dashboard always show everything.
+                            How many rows each list module (Clients, Suppliers, Library Items, Itineraries, Finance) displays by default. Settings and Dashboard always show everything.
           </p>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>

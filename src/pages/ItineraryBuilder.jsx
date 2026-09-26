@@ -1747,7 +1747,7 @@ export const ItineraryBuilder = () => {
 
   /* Load this itinerary's issued invoices so the builder can reflect real
      deposit/final state (issued, paid, outstanding) without a round-trip to
-     the Invoices module. */
+     the Finance module. */
   const loadItineraryInvoices = useCallback(async () => {
     const iid = meta.itineraryId || lastItineraryIdRef.current;
     if (!companyId || !iid) { setItineraryInvoices([]); setItineraryReceipts([]); return; }
@@ -5143,8 +5143,8 @@ const missing = !sv.confirmationNumber ||
                 <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice || !!activeInvoice} onClick={() => handleIssueInvoiceHere()}>
                   <FileText size={15} />                   {activeInvoice ? (isProvisional ? 'Invoice issued' : 'Invoice issued') : 'Issue Invoice Here'}
                 </button>
-                <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => navigate('/invoices')}>
-                  <Receipt size={15} /> Issue Invoice in Invoice module
+                <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => navigate('/finance')}>
+                  <Receipt size={15} /> Issue Invoice in Finance module
                 </button>
               </div>
 

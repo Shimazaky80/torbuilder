@@ -30,7 +30,7 @@ const navItems = [
   { id: 'library-items', label: 'Library Items', icon: Package, path: '/library-items' },
   { id: 'packages', label: 'Packages', icon: Backpack, path: '/packages' },
   { id: 'itineraries', label: 'Itineraries', icon: Map, path: '/itineraries' },
-  { id: 'invoices', label: 'Invoices', icon: Receipt, path: '/invoices' },
+  { id: 'finance', label: 'Finance', icon: Receipt, path: '/finance' },
   { id: 'tariffs', label: 'Tariffs', icon: Tag, path: '/tariffs' },
   { id: 'analytics', label: 'Analytics', icon: BarChart3, path: '/analytics' },
   { id: 'users', label: 'Users', icon: UserCircle, path: '/users' },

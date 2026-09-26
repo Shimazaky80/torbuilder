@@ -57,7 +57,7 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 
-export const Invoices = () => {
+export const Finance = () => {
   const { showToast } = useToast();
   const { currencies } = useCurrencies();
   const [companyId, setCompanyId] = useState(null);
@@ -957,7 +957,7 @@ export const Invoices = () => {
       <div className="page-header">
         <div>
           <h1 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.5rem', margin: 0 }}>
-            <Receipt size={22} color="#0d7478" /> Invoices
+            <Receipt size={22} color="#0d7478" /> Finance
           </h1>
           <p style={{ color: '#64748b', margin: '0.35rem 0 0', fontSize: '0.9rem' }}>
             Issue one invoice per itinerary currency. Services are always taken from the itinerary and can never be edited here.
@@ -1553,4 +1553,4 @@ export const Invoices = () => {
   );
 };
 
-export default Invoices;
+export default Finance;
