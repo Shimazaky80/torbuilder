@@ -770,13 +770,13 @@ export const Invoices = () => {
   };
 
   const emitReceiptEmail = (r) => {
-    const m = receiptEmail(r);
+    const m = receiptEmail(r, branding);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
     window.open(mailTo(m.to, m.subject, m.body), '_blank');
   };
 
   const copyReceipt = (r) => {
-    const m = receiptEmail(r);
+    const m = receiptEmail(r, branding);
     void clipboardCopy(`${m.subject}\n\n${m.body}`);
     showToast('Receipt copied to clipboard', 'success');
   };
@@ -797,13 +797,13 @@ export const Invoices = () => {
   };
 
   const emitCreditNoteEmail = (cn) => {
-    const m = creditNoteEmail(cn);
+    const m = creditNoteEmail(cn, branding);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
     window.open(mailTo(m.to, m.subject, m.body), '_blank');
   };
 
   const copyCreditNote = (cn) => {
-    const m = creditNoteEmail(cn);
+    const m = creditNoteEmail(cn, branding);
     void clipboardCopy(`${m.subject}\n\n${m.body}`);
     showToast('Credit note copied to clipboard', 'success');
   };
@@ -945,7 +945,10 @@ export const Invoices = () => {
     billingAddressPosition: ['left', 'center', 'right'].includes(billing?.billing_address_position) ? billing.billing_address_position : 'left',
     clientLogoSize: ['sm', 'md', 'lg'].includes(billing?.client_logo_size) ? billing.client_logo_size : 'md',
     clientLogoPosition: ['left', 'center', 'right'].includes(billing?.client_logo_position) ? billing.client_logo_position : 'left',
-    clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left'
+    clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left',
+    companyContactEmail: billing?.contact_email || '',
+    companyContactTel: billing?.contact_tel || '',
+    companyContactCell: billing?.contact_cell || ''
   };
 
   return (

@@ -188,6 +188,31 @@ const clientLogoOf = (record, opts = {}) => {
   return `<img src="${htmlEscape(logo)}" alt="Client logo" style="display:block;max-width:${width}px;height:auto;${align}">`;
 };
 
+/* Tenant (Bill From) contact lines, shown under the company details on
+   invoices, receipts and credit notes. Values come from the company billing
+   profile via the shared branding options. */
+const companyContactHtml = (opts = {}) => {
+  const tel = String(opts?.companyContactTel || '').trim();
+  const cell = String(opts?.companyContactCell || '').trim();
+  const email = String(opts?.companyContactEmail || '').trim();
+  const parts = [
+    (tel || cell) ? `Tel: ${htmlEscape([tel, cell].filter(Boolean).join(' · '))}` : '',
+    email ? `Email: ${htmlEscape(email)}` : ''
+  ].filter(Boolean);
+  return parts.length ? parts.join('<br>') : '';
+};
+
+/* Same tenant contact block for the plain-text email bodies. */
+const companyContactText = (opts = {}) => {
+  const tel = String(opts?.companyContactTel || '').trim();
+  const cell = String(opts?.companyContactCell || '').trim();
+  const email = String(opts?.companyContactEmail || '').trim();
+  return [
+    (tel || cell) ? `Tel: ${[tel, cell].filter(Boolean).join(' · ')}` : '',
+    email ? `Email: ${email}` : ''
+  ].filter(Boolean).join('\n');
+};
+
 /* Bill To / Received From / Credited To box for invoices, receipts and credit notes. */
 const billToBoxOf = (record, opts = {}, label = 'Bill To') => {
   const addr = (record?.bill_to_address || '').replace(/\n/g, '<br>');
@@ -321,7 +346,7 @@ export const buildLinesFromDays = (days, paxCount, currencyCode) => buildCurrenc
       total_sell: round2((Number(s.sellPP) || 0) * paxCount),
       tax_rate: s.taxRate,
       tax_label: s.taxLabel,
-      is_included: true
+      is_included: !s.isOptional
     }))
   }))
 }, currencyCode, paxCount);
@@ -413,6 +438,7 @@ export const invoiceEmail = (invoice, lines, opts = {}) => {
     invoice.supplier_name || '',
     invoice.supplier_tax_number ? `${taxNoPrefix(cur)} ${invoice.supplier_tax_number}` : '',
     invoice.supplier_address || '',
+    companyContactText(opts),
     '',
     `Bill To: ${invoice.bill_to_name || '—'}`,
     invoice.bill_to_address || '',
@@ -443,7 +469,7 @@ export const invoiceEmail = (invoice, lines, opts = {}) => {
   };
 };
 
-export const receiptEmail = (receipt) => {
+export const receiptEmail = (receipt, opts = {}) => {
   const cur = receipt.currency_code;
   const body = [
     `PAYMENT RECEIPT ${receipt.receipt_number}`,
@@ -451,6 +477,7 @@ export const receiptEmail = (receipt) => {
     receipt.supplier_name || '',
     receipt.supplier_tax_number ? `${taxNoPrefix(receipt.currency_code)} ${receipt.supplier_tax_number}` : '',
     receipt.supplier_address || '',
+    companyContactText(opts),
     '',
     `Received from: ${receipt.bill_to_name || '—'}`,
     `Date received: ${receipt.received_date || '—'}`,
@@ -470,7 +497,7 @@ export const receiptEmail = (receipt) => {
   };
 };
 
-export const creditNoteEmail = (cn) => {
+export const creditNoteEmail = (cn, opts = {}) => {
   const cur = cn.currency_code;
   const body = [
     `CREDIT NOTE ${cn.credit_note_number}`,
@@ -478,6 +505,7 @@ export const creditNoteEmail = (cn) => {
     cn.supplier_name || '',
     cn.supplier_tax_number ? `${taxNoPrefix(cur)} ${cn.supplier_tax_number}` : '',
     cn.supplier_address || '',
+    companyContactText(opts),
     '',
     `Credited to: ${cn.bill_to_name || '—'}`,
     `Date: ${cn.issued_date || '—'}`,
@@ -525,6 +553,7 @@ export const invoiceDocHtml = (inv, lines, sym, opts) => {
     <h1>${htmlEscape(inv.supplier_name || 'Invoice')}</h1>
     <p class="muted">${inv.supplier_tax_number ? `${taxNoPrefix(inv.currency_code)} ${htmlEscape(inv.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(inv.supplier_address || '').replace(/\n/g, '<br>')}</p>
+    ${companyContactHtml(opts) ? `<p class="muted">${companyContactHtml(opts)}</p>` : ''}
     </div>
     <hr/>
     <h2>${inv.status === 'proforma' ? 'PROFORMA — ' : ''}${htmlEscape(TYPE_LABEL[inv.invoice_type] || 'Invoice')} ${htmlEscape(inv.invoice_number)}</h2>
@@ -551,6 +580,7 @@ export const receiptDocHtml = (r, sym, opts) => `<!doctype html><html><head><met
     <h1>${htmlEscape(r.supplier_name || 'Payment Receipt')}</h1>
     <p class="muted">${r.supplier_tax_number ? `${taxNoPrefix(r.currency_code)} ${htmlEscape(r.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(r.supplier_address || '').replace(/\n/g, '<br>')}</p>
+    ${companyContactHtml(opts) ? `<p class="muted">${companyContactHtml(opts)}</p>` : ''}
     </div>
     <hr/>
     <h2>PAYMENT RECEIPT ${htmlEscape(r.receipt_number)}</h2>
@@ -570,6 +600,7 @@ export const creditNoteDocHtml = (cn, sym, opts) => `<!doctype html><html><head>
     <h1>${htmlEscape(cn.supplier_name || 'Credit Note')}</h1>
     <p class="muted">${cn.supplier_tax_number ? `${taxNoPrefix(cn.currency_code)} ${htmlEscape(cn.supplier_tax_number)}` : ''}</p>
     <p class="muted">${htmlEscape(cn.supplier_address || '').replace(/\n/g, '<br>')}</p>
+    ${companyContactHtml(opts) ? `<p class="muted">${companyContactHtml(opts)}</p>` : ''}
     </div>
     <hr/>
     <h2>CREDIT NOTE ${htmlEscape(cn.credit_note_number)}</h2>

@@ -70,6 +70,8 @@ import {
 
 const toISODate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
+const isAccommodationItem = (item) => /accommodation/i.test(item?.category || '');
+
 const ymdOf = (iso) => {
   const [y, m, d] = toISODate(iso).split('-').map(Number);
   return [y || 0, m || 0, d || 0];
@@ -256,6 +258,7 @@ const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) =
   (days || []).forEach((d) => {
     (d.services || []).forEach((sv) => {
       if ((sv.currencyCode || 'ZAR').toUpperCase() !== String(code).toUpperCase()) return;
+      if (sv.isOptional) return;
       services.push({
         category: sv.category,
         currencyCode: sv.currencyCode,
@@ -1005,6 +1008,7 @@ export const ItineraryBuilder = () => {
   const [placementRepeat, setPlacementRepeat] = useState(false);
   const [placementRepeatCount, setPlacementRepeatCount] = useState(2);
   const [placementCopyDays, setPlacementCopyDays] = useState([]);
+  const [placementOptional, setPlacementOptional] = useState(false);
   const [roomApplyPrompt, setRoomApplyPrompt] = useState(null);
   const [vehicleDraft, setVehicleDraft] = useState(null);
 
@@ -1068,6 +1072,8 @@ export const ItineraryBuilder = () => {
     let t = 0;
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
+        /* Optional / alternative services are excluded from the client total. */
+        if (sv.isOptional) return;
         const line = (Number(sv.sellPP) || 0) * paxCount;
         t += line;
       });
@@ -1081,6 +1087,7 @@ export const ItineraryBuilder = () => {
     let t = 0;
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
+        if (sv.isOptional) return;
         const line = (Number(sv.sellPP) || 0) * paxCount;
         const rate = numOr(sv.taxRate, defaultTaxRate);
         t += vatOfInclusive(line, rate);
@@ -1093,6 +1100,7 @@ export const ItineraryBuilder = () => {
     let c = 0;
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
+        if (sv.isOptional) return;
         c += (Number(sv.buyPP) || 0) * paxCount;
       });
     });
@@ -1412,6 +1420,7 @@ export const ItineraryBuilder = () => {
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
               roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
               repeatGroupId: ii.repeat_group_id || null,
+              isOptional: ii.is_included === false,
               mealPlan: ii.meal_plan || '',
               checkInTime: ii.check_in_time || '',
               checkOutTime: ii.check_out_time || '',
@@ -1553,13 +1562,39 @@ export const ItineraryBuilder = () => {
       const byCurr = {};
       (d.services || []).forEach((sv) => {
         const code = sv.currencyCode || 'ZAR';
-        if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {}, services: [] };
+        if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {}, services: [], optBuy: 0, optSell: 0, optTax: 0, optTaxByLabel: {}, optionalServices: [] };
         const line = (Number(sv.sellPP) || 0) * paxCount;
         const buyLine = (Number(sv.buyPP) || 0) * paxCount;
         const rate = numOr(sv.taxRate, defaultTaxRate);
         const taxAmt = vatOfInclusive(line, rate);
         const taxInAmt = vatOfInclusive(buyLine, rate);
         const label = sv.taxLabel || 'VAT';
+        /* Optional / alternative services are kept out of the final price and
+           invoiced totals, and gathered into their own priced group so the
+           client can add them separately. */
+        if (sv.isOptional) {
+          byCurr[code].optBuy += buyLine;
+          byCurr[code].optSell += line;
+          byCurr[code].optTax += taxAmt;
+          if (!byCurr[code].optTaxByLabel[label]) byCurr[code].optTaxByLabel[label] = { amount: 0, rate };
+          byCurr[code].optTaxByLabel[label].amount += taxAmt;
+          byCurr[code].optionalServices.push({
+            name: sv.name || 'Service',
+            supplierName: sv.supplierName || '',
+            category: sv.category || '',
+            mealPlan: sv.mealPlan || '',
+            itemId: sv.itemId || null,
+            roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
+            markup: Number(sv.markup) || 0,
+            taxRate: numOr(sv.taxRate, defaultTaxRate),
+            qty: paxCount,
+            unit: (Number(sv.sellPP) || 0),
+            subExcl: round2(line - taxAmt),
+            tax: round2(taxAmt),
+            sell: round2(line)
+          });
+          return;
+        }
         byCurr[code].buy += buyLine;
         byCurr[code].sell += line;
         byCurr[code].tax += taxAmt;
@@ -1595,18 +1630,26 @@ export const ItineraryBuilder = () => {
       const g = map.get(code);
       const cur = currencies.find((c) => (c.code || '').toUpperCase() === code.toUpperCase());
       const taxByLabel = {};
+      const optTaxByLabel = {};
       g.days.forEach((r) => {
         Object.entries(r.taxByLabel || {}).forEach(([label, info]) => {
           if (!taxByLabel[label]) taxByLabel[label] = { amount: 0, rate: info.rate };
           taxByLabel[label].amount += info.amount;
         });
+        Object.entries(r.optTaxByLabel || {}).forEach(([label, info]) => {
+          if (!optTaxByLabel[label]) optTaxByLabel[label] = { amount: 0, rate: info.rate };
+          optTaxByLabel[label].amount += info.amount;
+        });
       });
+      const optionalServices = g.days.flatMap((r) => r.optionalServices || []);
       return {
         code,
         symbol: cur?.symbol || code,
         name: cur?.name || '',
         days: g.days,
         count: g.days.reduce((a, r) => a + r.count, 0),
+        optionalCount: optionalServices.length,
+        optionalServices,
         totalBuy: round2(g.days.reduce((a, r) => a + r.buy, 0)),
         totalSell: round2(g.days.reduce((a, r) => a + r.sell, 0)),
         totalTax: round2(g.days.reduce((a, r) => a + r.tax, 0)),
@@ -1615,6 +1658,14 @@ export const ItineraryBuilder = () => {
         totalInclTax: round2(g.days.reduce((a, r) => a + r.sell, 0)),
         totalExcl: round2(g.days.reduce((a, r) => a + r.sell, 0) - g.days.reduce((a, r) => a + r.tax, 0)),
         taxEntries: Object.entries(taxByLabel).map(([label, info]) => ({
+          label,
+          rate: info.rate,
+          amount: round2(info.amount)
+        })),
+        optionalTotalSell: round2(g.days.reduce((a, r) => a + (r.optSell || 0), 0)),
+        optionalTotalTax: round2(g.days.reduce((a, r) => a + (r.optTax || 0), 0)),
+        optionalTotalExcl: round2(g.days.reduce((a, r) => a + (r.optSell || 0), 0) - g.days.reduce((a, r) => a + (r.optTax || 0), 0)),
+        optionalTaxEntries: Object.entries(optTaxByLabel).map(([label, info]) => ({
           label,
           rate: info.rate,
           amount: round2(info.amount)
@@ -1717,6 +1768,7 @@ export const ItineraryBuilder = () => {
       endTime: item.endTime || item.end_time || '',
       notes: '',
       item_rates: item.item_rates || [],
+      isOptional: !!options.isOptional,
       repeatGroupId: options.repeatGroupId || null
     };
 
@@ -1726,7 +1778,9 @@ export const ItineraryBuilder = () => {
     const dayLabel = days[dayIndex] ? `Day ${days[dayIndex].dayNumber}` : 'the selected day';
     showToast(`${via === 'double-click' ? 'Added' : 'Dropped'} "${item.name}" into ${dayLabel}`, 'success');
 
-    if (accomCat && !options.suppressRoomModal) {
+    /* An alternative room is only one of the options being offered, so there is
+       nothing to allocate to it — the traveller allocation modal is skipped. */
+    if (accomCat && !options.suppressRoomModal && !options.isOptional) {
       setRoomModalState({
         isOpen: true,
         dayIndex,
@@ -1742,6 +1796,7 @@ export const ItineraryBuilder = () => {
     setPlacementRepeat(false);
     setPlacementRepeatCount(Math.min(2, Math.max(1, days.length - dayIndex)));
     setPlacementCopyDays([]);
+    setPlacementOptional(false);
   }, [days.length]);
 
   const isVehicleServiceItem = useCallback((item) => {
@@ -1811,24 +1866,60 @@ export const ItineraryBuilder = () => {
     openPlacementPrompt(dayIndex, item, via);
   }, [vehicleDraft, openPlacementPrompt]);
 
+  /* Every accommodation on a day holds its own room allocation, so the pax
+     already sleeping on that day is the sum of the allocated travellers
+     across all of its accommodation services. */
+  const accommodationPaxOnDay = useCallback((dayIndex) => {
+    const day = days[dayIndex];
+    if (!day) return 0;
+    return (day.services || [])
+      .filter((sv) => /accommodation/i.test(sv.category || ''))
+      .reduce((sum, sv) => {
+        const rooms = Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [];
+        return sum + rooms.reduce((n, rm) => n + ((rm.allocatedTravellers || []).length), 0);
+      }, 0);
+  }, [days]);
+
   const confirmPlacement = useCallback(() => {
     if (!placementDraft) return;
+    const isOptional = !!placementOptional;
     const baseDay = placementDraft.dayIndex;
     const repeatCount = placementRepeat ? Math.max(1, Math.min(days.length - baseDay, Number(placementRepeatCount) || 1)) : 1;
     const repeatDays = Array.from({ length: repeatCount }, (_, index) => baseDay + index);
     const selectedDays = [...new Set([...repeatDays, ...placementCopyDays.map(Number)])]
       .filter((index) => index >= 0 && index < days.length)
       .sort((a, b) => a - b);
+
+    /* A normal room cannot be added once every traveller already sleeps
+       somewhere that day — the party is fully allocated. An alternative
+       room is allowed, because the client is choosing between options. */
+    if (!isOptional && /accommodation/i.test(placementDraft.item?.category || '')) {
+      const totalPax = (meta.travellers || []).length || paxCount;
+      if (totalPax > 0) {
+        const fullDays = selectedDays.filter((dayIndex) => accommodationPaxOnDay(dayIndex) >= totalPax);
+        if (fullDays.length) {
+          const blocked = fullDays.map((dayIndex) => `Day ${days[dayIndex]?.dayNumber ?? dayIndex + 1}`).join(', ');
+          showToast(
+            `All ${totalPax} pax already have accommodation on ${blocked}. Mark this as an Alternative to add it anyway.`,
+            'warning'
+          );
+          return;
+        }
+      }
+    }
+
     const repeatGroupId = selectedDays.length > 1 ? nextId() : null;
     selectedDays.forEach((dayIndex, index) => {
       createService(dayIndex, placementDraft.item, index === 0 ? placementDraft.via : 'copy', {
         repeatGroupId,
+        isOptional,
         suppressRoomModal: index !== 0
       });
     });
     setPlacementDraft(null);
     setPlacementCopyDays([]);
-  }, [placementDraft, placementRepeat, placementRepeatCount, placementCopyDays, days.length, nextId, createService]);
+    setPlacementOptional(false);
+  }, [placementDraft, placementOptional, placementRepeat, placementRepeatCount, placementCopyDays, days, meta.travellers, paxCount, accommodationPaxOnDay, showToast, nextId, createService]);
 
   const openRoomAllocationModal = useCallback((dayIndex, sv) => {
     const libraryItem = libraryItems.find((it) => it.id === sv.itemId) || {};
@@ -1857,6 +1948,9 @@ export const ItineraryBuilder = () => {
       const services = day.services || [];
       for (let j = 0; j < services.length; j++) {
         const sv = services[j];
+        /* Optional / alternative rooms are options the client has not chosen,
+           so they are not required to be fully allocated. */
+        if (sv.isOptional) continue;
         const check = validateRoomAllocation(sv, meta.travellers || []);
         if (!check.isValid) {
           return {
@@ -2169,6 +2263,7 @@ return !!sv.time; /* activities / meals / other */
             maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
             roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
             repeatGroupId: ii.repeat_group_id || null,
+            isOptional: ii.is_included === false,
             mealPlan: ii.meal_plan || '',
             checkInTime: ii.check_in_time || '',
             checkOutTime: ii.check_out_time || '',
@@ -2345,6 +2440,49 @@ return !!sv.time; /* activities / meals / other */
       });
       return rows;
     };
+    /* Optional / alternative services are priced in their own table directly
+       under the main breakdown, so the client can see the full cost of adding
+       them without them inflating the total due. */
+    const optionalRowsOf = (grp) => {
+      const rows = [];
+      (grp.days || []).forEach((r) => {
+        (r.optionalServices || []).forEach((sv) => {
+          rows.push({
+            day: r.day,
+            date: r.date || '—',
+            name: sv.name || 'Service',
+            supplierName: sv.supplierName || '',
+            category: sv.category || '',
+            mealPlan: sv.mealPlan || '',
+            qty: paxCount,
+            unit: round2(sv.unit),
+            subExcl: sv.subExcl,
+            tax: sv.tax,
+            sell: sv.sell
+          });
+        });
+      });
+      return rows;
+    };
+    const optionalSectionHtml = (grp, style) => {
+      const rows = optionalRowsOf(grp);
+      if (!rows.length) return '';
+      const isAcc = (r) => /accommodation/i.test(r.category || '');
+      const heading = style === 'pdf'
+        ? `<h2 style="color:#0d7478;font-size:16px;margin:20px 0 6px;border-bottom:2px solid #0d7478;padding-bottom:4px;">Optional &amp; Alternative Extras — ${esc(grp.code)} (${esc(grp.symbol)})</h2>`
+        : `<h2 style="color:#0d7478;margin-top:16px;margin-bottom:6px;">Optional &amp; Alternative Extras — ${esc(grp.code)} (${esc(grp.symbol)})</h2>`;
+      const note = `<p style="color:#666;font-size:12px;margin:0 0 6px;">Not included in the total due. Priced separately so you can add any of these if you choose.</p>`;
+      const body = rows.map((r) => `<tr><td>Day ${esc(r.day)}</td><td>${esc(r.date || '—')}</td><td>${rowDescHtml(r, esc)}${isAcc(r) ? ' <em>(alternative)</em>' : ' <em>(optional)</em>'}</td><td>${paxCount}</td><td class="num">${fmtMoney(round2(r.unit), grp.symbol)}</td><td>${fmtMoney(r.subExcl, grp.symbol)}</td><td>${fmtMoney(r.tax, grp.symbol)}</td><td><b>${fmtMoney(r.sell, grp.symbol)}</b></td></tr>`).join('');
+      const taxRows = (grp.optionalTaxEntries || []).map((e) => `<tr><td colspan="7" align="right">${esc(e.label)} (${Number(e.rate)}%)</td><td><b>${fmtMoney(e.amount, grp.symbol)}</b></td></tr>`).join('');
+      return `${heading}${note}
+        <table ${style === 'pdf' ? '' : 'border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;"'}>
+          <tr><th>Day</th><th>Date</th><th>Description</th><th>Qty</th><th class="num">Unit</th><th>Subtotal (Excl. ${esc(taxWordOf(grp.code))})</th><th>${esc(taxWordUpper(grp.code))}</th><th>Total (Incl. ${esc(taxWordUpper(grp.code))})</th></tr>
+          ${body}
+          <tr><td colspan="7" align="right">Subtotal (Excl. ${esc(taxWordOf(grp.code))})</td><td><b>${fmtMoney(grp.optionalTotalExcl, grp.symbol)}</b></td></tr>
+          ${taxRows}
+          <tr><td colspan="7" align="right"><b>TOTAL IF ALL ADDED (${esc(grp.code)})</b></td><td><b>${fmtMoney(grp.optionalTotalSell, grp.symbol)}</b></td></tr>
+        </table>`;
+    };
     const rowDescHtml = (r, escFn) => {
       const l = { category: r.category, mealPlan: r.mealPlan, supplierName: r.supplierName };
       const mealTxt = showMealPlanOf(l) ? ` - ${escFn(abbrevMealPlan(r.mealPlan))}` : '';
@@ -2429,14 +2567,20 @@ return !!sv.time; /* activities / meals / other */
           const category = String(sv.category || '').trim();
           const supplier = String(sv.supplierName || sv.supplier_name || '').trim();
           const meal = String(sv.mealPlan || '').trim();
+          /* Optional / alternative services are badged in the routing so the
+             client can see at a glance they are not part of the confirmed
+             itinerary. */
+          const badge = sv.isOptional
+            ? ` <span style="color:#b45309;font-size:12px;font-style:italic;">(${isAccommodationItem(sv) ? 'alternative' : 'optional'} - not included)</span>`
+            : '';
           if (/accommodation/i.test(category)) {
             const shared = supplier
               ? (supplierUse.get(supplier.toLowerCase()) || 0) > 1
               : false;
             const head = shared && supplier ? `${supplier}, ${name}` : (supplier || name);
-            return `<strong>Accommodation</strong>: ${esc(head)}${meal ? `, ${esc(abbrevMealPlan(meal))}` : ''}`;
+            return `<strong>Accommodation</strong>: ${esc(head)}${meal ? `, ${esc(abbrevMealPlan(meal))}` : ''}${badge}`;
           }
-          return `<strong>${esc(category || 'Service')}</strong>: ${esc(name)}`;
+          return `<strong>${esc(category || 'Service')}</strong>: ${esc(name)}${badge}`;
         }).filter(Boolean);
         return `<div style="margin:0 0 14px;">
           <div style="background:#eee;font-weight:700;color:#0d7478;padding:6px 10px;">Day ${num}${date ? ` &mdash; ${esc(date)}` : ''}</div>
@@ -2460,6 +2604,9 @@ return !!sv.time; /* activities / meals / other */
       const byKey = new Map();
       (days || []).forEach((d) => {
         (d?.services || []).forEach((sv) => {
+          /* Optional / alternative services are not part of the itinerary, so
+             they must not be advertised as inclusions. */
+          if (sv?.isOptional) return;
           const type = String(sv?.category || '').trim();
           const name = String(sv?.name || '').trim();
           const supplier = String(sv?.supplierName || sv?.supplier_name || '').trim();
@@ -2579,6 +2726,16 @@ return !!sv.time; /* activities / meals / other */
         lines.push([`Subtotal (Excl. ${taxWordOf(grp.code)})`, '', '', '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
         lines.push([`${taxWordUpper(grp.code)} (${taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code))} ${taxRateOf(grp.code)}%)`, '', '', '', '', '', '', grp.totalTax].map(csvEscape).join(','));
         lines.push([`TOTAL DUE (${grp.code} INCL. ${taxWordUpper(grp.code)})`, '', '', '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
+        const optRows = optionalRowsOf(grp);
+        if (optRows.length) {
+          lines.push('');
+          lines.push([`Optional & Alternative Extras (${grp.code}) - not included in the total due`].map(csvEscape).join(','));
+          lines.push(header);
+          optRows.forEach((r) => lines.push([`Day ${r.day}`, r.date, `${rowDesc(r)}${/accommodation/i.test(r.category || '') ? ' (alternative)' : ' (optional)'}`, r.qty, round2(r.unit), r.subExcl, r.tax, r.sell].map(csvEscape).join(',')));
+          lines.push([`Subtotal (Excl. ${taxWordOf(grp.code)})`, '', '', '', '', '', '', grp.optionalTotalExcl].map(csvEscape).join(','));
+          (grp.optionalTaxEntries || []).forEach((e) => lines.push([`${e.label} (${Number(e.rate)}%)`, '', '', '', '', '', '', e.amount].map(csvEscape).join(',')));
+          lines.push([`TOTAL IF ALL ADDED (${grp.code})`, '', '', '', '', '', '', grp.optionalTotalSell].map(csvEscape).join(','));
+        }
       });
 
       downloadBlob(lines.join('\n'), `${safeName}.csv`, 'text/csv;charset=utf-8');
@@ -2598,6 +2755,7 @@ return !!sv.time; /* activities / meals / other */
           <tr><td colspan="7" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td><b>${fmtMoney(grp.totalTax, grp.symbol)}</b></td></tr>
           <tr><td colspan="7" align="right"><b>TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</b></td><td><b>${fmtMoney(grp.totalInclTax, grp.symbol)}</b></td></tr>
         </table>
+        ${optionalSectionHtml(grp, 'word')}
       `).join('');
 
       const body = `
@@ -2639,6 +2797,7 @@ return !!sv.time; /* activities / meals / other */
           <tr class="grand"><td colspan="7" align="right">${esc(taxWordUpper(grp.code))} (${esc(taxDisplayLabel(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td class="num">${fmtMoney(grp.totalTax, grp.symbol)}</td></tr>
           <tr class="grand"><td colspan="7" align="right">TOTAL DUE (${esc(grp.code)} INCL. ${esc(taxWordUpper(grp.code))})</td><td class="num">${fmtMoney(grp.totalInclTax, grp.symbol)}</td></tr>
         </table>
+        ${optionalSectionHtml(grp, 'pdf')}
       `).join('');
 
       w.document.write(`<!doctype html><html><head><title>${esc(meta.itineraryName)}</title><style>
@@ -2787,7 +2946,7 @@ return !!sv.time; /* activities / meals / other */
           start_time: s.startTime || null,
           end_time: s.endTime || null,
           notes: s.notes || null,
-          is_included: true,
+          is_included: !s.isOptional,
           sort_order: si
         }));
         if (svcRows.length) {
@@ -3051,7 +3210,10 @@ return !!sv.time; /* activities / meals / other */
       billingAddressPosition: ['left', 'center', 'right'].includes(billing?.billing_address_position) ? billing.billing_address_position : 'left',
       clientLogoSize: ['sm', 'md', 'lg'].includes(billing?.client_logo_size) ? billing.client_logo_size : 'md',
       clientLogoPosition: ['left', 'center', 'right'].includes(billing?.client_logo_position) ? billing.client_logo_position : 'left',
-      clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left'
+      clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left',
+      companyContactEmail: billing?.contact_email || '',
+      companyContactTel: billing?.contact_tel || '',
+      companyContactCell: billing?.contact_cell || ''
     };
     const m = invoiceEmail(inv, agg.lines, docOpts);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
@@ -3300,6 +3462,11 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
       <div key={sv.key} style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.7rem 0.85rem', marginBottom: '0.6rem', background: '#fff' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.55rem' }}>
           <strong style={{ fontSize: '0.88rem', color: '#1a202c' }}>{repairText(sv.name)}</strong>
+          {sv.isOptional && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem', fontWeight: 800, color: '#b45309', background: '#fffbeb', border: '1px solid #fcd34d', padding: '0.15rem 0.5rem', borderRadius: '999px', whiteSpace: 'nowrap' }}>
+              {isAccom ? 'Alternative' : 'Optional'} · not in final price
+            </span>
+          )}
           {tab === 'travel-documents' ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.72rem', fontWeight: 800, color: ok ? '#15803d' : '#b45309', background: ok ? '#f0fdf4' : '#fffbeb', padding: '0.15rem 0.5rem', borderRadius: '999px' }}>
               <CheckCircle2 size={12} /> {ok ? 'OK · Confirmed' : 'OK · ' + (sv.confirmationStatus || 'RQ')}
@@ -3936,13 +4103,13 @@ const missing = !sv.confirmationNumber ||
                                         borderRadius: '6px',
                                         fontSize: '0.75rem',
                                         fontWeight: 700,
-                                        background: '#fee2e2',
-                                        color: '#b91c1c',
-                                        border: '1px solid #fca5a5',
+                                        background: sv.isOptional ? '#fffbeb' : '#fee2e2',
+                                        color: sv.isOptional ? '#b45309' : '#b91c1c',
+                                        border: sv.isOptional ? '1px solid #fcd34d' : '1px solid #fca5a5',
                                         cursor: 'pointer'
                                       }}
                                     >
-                                      ⚠️ Room Allocation Required
+                                      {sv.isOptional ? 'Alternative · Allocate rooms if chosen' : '⚠️ Room Allocation Required'}
                                     </button>
                                   );
                                 })()}
@@ -4155,6 +4322,33 @@ const missing = !sv.confirmationNumber ||
                         </tr>
                       </tbody>
                     </table>
+                    {g.optionalServices && g.optionalServices.length > 0 && (
+                      <div style={{ marginTop: '0.75rem', border: '1px dashed #fcd34d', borderRadius: '10px', padding: '0.75rem 0.9rem', background: '#fffbeb' }}>
+                        <div style={{ fontWeight: 800, color: '#b45309', marginBottom: '0.35rem', fontSize: '0.9rem' }}>
+                          Optional &amp; Alternative Extras — {g.code}
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: '#92400e', marginBottom: '0.5rem' }}>
+                          Not included in the {g.code} total due. Priced separately so the client can add them if they choose.
+                        </div>
+                        <table className="admin-table">
+                          <tbody>
+                            {g.optionalServices.map((sv, i) => (
+                              <tr key={`${sv.itemId || 'opt'}-${i}`}>
+                                <td>{repairText(sv.name || 'Service')}</td>
+                                <td style={{ fontSize: '0.75rem', color: '#92400e' }}>
+                                  {/accommodation/i.test(sv.category || '') ? 'Alternative' : 'Optional'}
+                                </td>
+                                <td className="num" style={{ color: '#0d7478', fontWeight: 700 }}>{fmtMoney(sv.sell, g.symbol)}</td>
+                              </tr>
+                            ))}
+                            <tr style={{ background: '#fef3c7' }}>
+                              <td colSpan="2" style={{ textAlign: 'right', fontWeight: 800 }}>TOTAL IF ALL ADDED ({g.code})</td>
+                              <td className="num" style={{ color: '#b45309', fontWeight: 900 }}>{fmtMoney(g.optionalTotalSell, g.symbol)}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </section>
                 ))}
               </div>
@@ -5073,6 +5267,20 @@ const missing = !sv.confirmationNumber ||
                     <p className="placement-subtitle">Choose where this service should appear in the itinerary.</p>
                   </div>
                   <button className="close-btn" onClick={() => setPlacementDraft(null)} aria-label="Close"><X size={20} /></button>
+                </div>
+
+                <div className="placement-option-card">
+                  <label className="placement-check-row">
+                    <input type="checkbox" checked={placementOptional} onChange={(e) => setPlacementOptional(e.target.checked)} />
+                    <span>
+                      <strong>{isAccommodationItem(placementDraft.item) ? 'Add as an alternative' : 'Add as optional'}</strong>
+                      <small>
+                        {isAccommodationItem(placementDraft.item)
+                          ? 'Offered alongside the confirmed room. Not included in the final price and priced separately for the client.'
+                          : 'Not included in the final price. Priced separately for the client so they can choose to add it.'}
+                      </small>
+                    </span>
+                  </label>
                 </div>
 
                 <div className="placement-option-card">
