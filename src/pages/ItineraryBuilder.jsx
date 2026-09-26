@@ -66,7 +66,7 @@ import {
   abbrevMealPlan
 } from '../lib/invoiceDoc';
 
-/* â”€â”€â”€ Pure helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* ─── Pure helpers ─────────────────────────────────────────────────────────── */
 
 const toISODate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
@@ -151,10 +151,10 @@ const rateForItem = (item, code) => {
 const effectiveAdultRate = (rate) =>
   rate ? parseFloat(rate.price_1_adult) || parseFloat(rate.unit_price) || 0 : 0;
 
-// Contract pricing model â€” drives whether a rate is charged per traveller or
+// Contract pricing model — drives whether a rate is charged per traveller or
 // once (flat / per vehicle / per trip). A flat-rate item (e.g. a city tour
 // charged per vehicle) must NOT be multiplied by pax: its per-person figure is
-// the contract total divided by the travellers, so per-pax Ã— pax == contract.
+// the contract total divided by the travellers, so per-pax × pax == contract.
 const FLAT_BASIS = new Set(['per_vehicle', 'per_trip', 'per_room', 'flat']);
 
 const basisOfItem = (item, code) => {
@@ -214,8 +214,8 @@ const accommodationPaxRate = (rate, pax) => {
 //   per_person_sharing (accommodation): single rate when 1 traveller,
 //   per-person sharing rate when 2+, keyed by occupancy (never the single
 //   rate multiplied by pax).
-//   flat / per_vehicle / per_trip / per_room: contract total Ã· travellers,
-//   so the line (perPax Ã— pax) reproduces the contract amount exactly.
+//   flat / per_vehicle / per_trip / per_room: contract total ÷ travellers,
+//   so the line (perPax × pax) reproduces the contract amount exactly.
 const contractPaxRate = (item, code, pax) => {
   const rate = rateForItem(item, code);
   const raw = effectiveAdultRate(rate);
@@ -346,27 +346,81 @@ const emailOf = (sup) =>
 
 
 /* Repair classic UTF-8-misread-as-Latin-1 mojibake in text that arrived via a
-   legacy-codepage import (Ã©→é, Ã±→ñ, â€™→’, â€“→–, â€”→—, Ã¤→ä, Ã¸→ø, …).
+   legacy-codepage import (U+00C3 U+00A9 -> "é", U+00E2 U+20AC U+2122 -> "’",
+   U+00F0 U+0178 U+0153 U+0178 U+00EF U+00B8 U+008F -> "🎟️").
    Pure no-op on clean strings; used only to normalise on-screen day-by-day
    library labels + notes. Never touches the database. */
+const MOJIBAKE_ALIASES = [
+  // Undefined CP1252 slots (0x81/0x8D/0x8F/0x90/0x9D) that the legacy importer
+  // surfaced as neighbouring printable glyphs, plus its lossy U+FFFD stand-ins.
+  [/\u00c2\u00b6/g, '\u00b7'], [/\u00c2\u00ba/g, '\u00b7'], [/\u00c2\u00bf/g, '\u00b7'],
+  [/\u00c2\u00b0\u2026/g, '\u00b7'],
+  [/\u00c3\ufffd/g, '\u00c3'], [/\u00e2\u20ac\ufffd/g, '\u201d']
+];
+
+// CP1252 byte -> char, including the five undefined slots that the importer
+// emitted as raw C1 controls instead of a replacement glyph.
+const CP1252_CHARS = (() => {
+  const t = [];
+  for (let i = 0; i < 256; i++) t.push(String.fromCharCode(i));
+  const over = {
+    0x80: '\u20ac', 0x82: '\u201a', 0x83: '\u0192', 0x84: '\u201e', 0x85: '\u2026',
+    0x86: '\u2020', 0x87: '\u2021', 0x88: '\u02c6', 0x89: '\u2030', 0x8a: '\u0160',
+    0x8b: '\u2039', 0x8c: '\u0152', 0x8e: '\u017d', 0x91: '\u2018', 0x92: '\u2019',
+    0x93: '\u201c', 0x94: '\u201d', 0x95: '\u2022', 0x96: '\u2013', 0x97: '\u2014',
+    0x98: '\u02dc', 0x99: '\u2122', 0x9a: '\u0161', 0x9b: '\u203a', 0x9c: '\u0153',
+    0x9e: '\u017e', 0x9f: '\u0178'
+  };
+  for (const [b, c] of Object.entries(over)) t[b] = c;
+  return t;
+})();
+
+const CP1252_BYTES = (() => {
+  const m = new Map();
+  for (let i = 0; i < 256; i++) if (!m.has(CP1252_CHARS[i])) m.set(CP1252_CHARS[i], i);
+  return m;
+})();
+
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+
+// Round-trips a suspected mojibake run back through CP1252 -> UTF-8.
+// Returns null unless the result is valid UTF-8 and actually different, so
+// already-clean text is never touched.
+const decodeCp1252Run = (s) => {
+  if (!s) return null;
+  const bytes = [];
+  for (const ch of s) {
+    const b = CP1252_BYTES.get(ch);
+    if (b === undefined) return null;
+    bytes.push(b);
+  }
+  try {
+    const out = utf8Decoder.decode(Uint8Array.from(bytes));
+    return out === s ? null : out;
+  } catch {
+    return null;
+  }
+};
+
+// Longest decodable prefix, so a clean glyph sitting next to a corrupt run
+// (e.g. "U+00C3 U+00A9 and £5") still gets repaired without swallowing the
+// clean part.
+const decodeCp1252RunPartial = (run) => {
+  const whole = decodeCp1252Run(run);
+  if (whole !== null) return whole;
+  for (let len = run.length - 1; len >= 1; len--) {
+    const head = decodeCp1252Run(run.slice(0, len));
+    if (head !== null) return head + run.slice(len);
+  }
+  return run;
+};
+
 const repairText = (txt) => {
   if (!txt || typeof txt !== 'string') return txt || '';
-  const TR = [
-    [/Ã©/g, 'é'], [/Ã¨/g, 'è'], [/Ãª/g, 'ê'], [/Ã«/g, 'ë'],
-    [/Ã¢/g, 'â'], [/Ã´/g, 'ô'], [/Ã¶/g, 'ö'], [/Ã¼/g, 'ü'], [/Ã¹/g, 'ù'],
-    [/Ã¤/g, 'ä'], [/Ã¶/g, 'ö'], [/Ãº/g, 'ú'], [/Ã­/g, 'í'], [/Ã³/g, 'ó'], [/Ã¡/g, 'á'],
-    [/Ã±/g, 'ñ'], [/Ã§/g, 'ç'], [/Ã±/g, 'ñ'], [/Ã¸/g, 'ø'], [/Ã¦/g, 'æ'], [/ÃŸ/g, 'ß'],
-    [/Ã˜/g, 'Ø'], [/Ã…/g, 'Å'], [/Ã‰/g, 'É'], [/Ãˆ/g, 'È'], [/Ãœ/g, 'Ü'], [/Ã–/g, 'Ö'], [/Ã„/g, 'Ä'], [/Ã�/g, 'Ã'],
-    [/â€™/g, '’'], [/â€œ/g, '“'], [/â€�/g, '”'], [/â€“/g, '–'], [/â€”/g, '—'],
-    [/â€¦/g, '…'], [/â€˜/g, '‘'], [/â€š/g, '‚'],
-    [/Â¶/g, '·'], [/Âº/g, '·'], [/Â°…/g, '·'], [/Â¿/g, '·'],
-    [/Â·/g, '·'], [/Â°/g, '°'], [/Â±/g, '±'], [/Â²/g, '²'], [/Â³/g, '³'],
-    [/Â´/g, '´'], [/Âµ/g, 'µ'], [/Â¶/g, '¶'], [/Â¸/g, '¸'], [/Â¹/g, '¹'],
-    [/Â»/g, '»'], [/Â¼/g, '¼'], [/Â½/g, '½'], [/Â¾/g, '¾']
-  ];
   let out = String(txt);
-  for (const [r, rep] of TR) out = String(out).replace(r, rep);
-  return out;
+  for (const [re, rep] of MOJIBAKE_ALIASES) out = out.replace(re, rep);
+  // eslint-disable-next-line no-control-regex
+  return out.replace(/[^\x00-\x7F]+/g, decodeCp1252RunPartial);
 };
 
 /* Merge raw library_items + item_rates + car_rental_rates + suppliers rows into
@@ -929,7 +983,7 @@ const cancellationNoticeEmail = (meta, pricingGroups, depositPct = DEPOSIT_PCT, 
 
 
 
-/* â”€â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* ─── Component ────────────────────────────────────────────────────────────── */
 
 export const ItineraryBuilder = () => {
   const navigate = useNavigate();
@@ -938,7 +992,7 @@ export const ItineraryBuilder = () => {
   const { showToast } = useToast();
   const { currencies } = useCurrencies();
 
-  const [meta, setMeta] = useState({
+  const [meta, setMetaRaw] = useState({
     itineraryId: data?.itineraryId || null,
     referenceNumber: data?.referenceNumber || null,
     itineraryName: data?.itineraryName || '',
@@ -974,7 +1028,7 @@ export const ItineraryBuilder = () => {
   const [currencyCode, setCurrencyCode] = useState('ZAR');
   const [currencyOpen, setCurrencyOpen] = useState(false);
   const [currencySearch, setCurrencySearch] = useState('');
-  const [days, setDays] = useState([]);
+  const [days, setDaysRaw] = useState([]);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
   const [activeTab, setActiveTab] = useState('itinerary');
   const [saving, setSaving] = useState(false);
@@ -1032,12 +1086,63 @@ export const ItineraryBuilder = () => {
   const isInProgress = stage === 'in_progress';
   const isCompleted = stage === 'completed';
   const isCancelled = stage === 'cancelled';
-  const isReadOnly = isCompleted || isCancelled;
+  /* A booking locks the itinerary: once it is Provisional or Confirmed the
+     commercial content (days, services, pricing, notes, client/traveller
+     details) is frozen so nothing can drift from what was booked. Only the
+     status badge stays live, and moving it back to Quotation re-opens
+     editing. Completed/Cancelled itineraries stay locked permanently. */
+  const isReadOnly = isProvisional || isConfirmed || isCompleted || isCancelled;
+  const editLockedRef = useRef(isReadOnly);
+  const hydrateRef = useRef(false);
+
+  useEffect(() => {
+    editLockedRef.current = isReadOnly;
+  }, [isReadOnly]);
+
+  const EDIT_LOCK_MESSAGE =
+    'This itinerary is locked for editing. Change its status back to Quotation to make changes.';
+
+  /* Every itinerary mutation funnels through these two wrappers, so a stale
+     modal or keyboard path cannot slip past the disabled controls. Hydration
+     (loading a saved itinerary) bypasses the lock. */
+  const setDays = useCallback((update) => {
+    if (editLockedRef.current && !hydrateRef.current) {
+      showToast(EDIT_LOCK_MESSAGE, 'warning');
+      return;
+    }
+    setDaysRaw(update);
+  }, [showToast]);
+
+  const setMeta = useCallback((update) => {
+    setMetaRaw((prev) => {
+      const next = typeof update === 'function' ? update(prev) : update;
+      if (!next || next === prev) return next;
+      if (editLockedRef.current && !hydrateRef.current) {
+        // The status badge must stay live so the booking can be re-opened;
+        // every other itinerary field is frozen.
+        const touchesContent = Object.keys(next).some((k) => k !== 'status' && next[k] !== prev[k]);
+        return touchesContent ? prev : next;
+      }
+      return next;
+    });
+  }, []);
+
   const completedRef = useRef(isReadOnly);
 
   useEffect(() => {
     completedRef.current = isReadOnly;
   }, [isReadOnly]);
+
+  /* Terminal states only (Completed / Cancelled). Unlike the edit lock these
+     also stop operational work such as raising the stage invoice, which must
+     stay available while a booking is Provisional or Confirmed. */
+  const isTerminal = isCompleted || isCancelled;
+  const terminalRef = useRef(isTerminal);
+
+  useEffect(() => {
+    terminalRef.current = isTerminal;
+  }, [isTerminal]);
+
   const normaliseCountry = (value) => String(value || '').trim().toLowerCase();
   const isSouthAfricanTenant = useMemo(
     () => normaliseCountry(billing?.operating_country || 'South Africa') === 'south africa',
@@ -1337,14 +1442,17 @@ export const ItineraryBuilder = () => {
       notes: '',
       services: []
     }));
+    hydrateRef.current = true;
     setDays(built);
+    hydrateRef.current = false;
     setSelectedDayIndex(0);
-  }, [meta.travelStart, meta.travelEnd, nextId]);
+  }, [meta.travelStart, meta.travelEnd, nextId, setDays ]);
 
   const loadExistingDays = useCallback(async () => {
     const id = data?.itineraryId;
     if (!id) return false;
     try {
+      hydrateRef.current = true;
       const { data: it } = await supabase
         .from('itineraries')
         .select('*')
@@ -1436,6 +1544,8 @@ export const ItineraryBuilder = () => {
       return false;
     } catch {
       return false;
+    } finally {
+      hydrateRef.current = false;
     }
   }, [data, meta.travelStart, meta.numAdults, meta.numChildren, meta.client, nextId, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency]);
 
@@ -1446,15 +1556,17 @@ export const ItineraryBuilder = () => {
       try {
         const username = await getLoggedInUserName();
         if (username) {
+          hydrateRef.current = true;
           setMeta((prev) => ({
             ...prev,
             consultantName: prev.consultantName || username
           }));
+          hydrateRef.current = false;
         }
       } catch { /* noop */ }
     };
     fetchConsultant();
-  }, []);
+  }, [setMeta]);
 
   useEffect(() => {
     const boot = async () => {
@@ -1522,7 +1634,7 @@ export const ItineraryBuilder = () => {
     return () => { cancelled = true; };
   }, [companyId, meta.itineraryId]);
 
-  /* â”€â”€ Derived lists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── Derived lists ─────────────────────────────────────────────────────── */
 
   const categoryOptions = useMemo(() => {
     const set = new Set(categoryChips.length ? categoryChips : DEFAULT_CATEGORY_CHIPS);
@@ -1674,7 +1786,7 @@ export const ItineraryBuilder = () => {
     });
   }, [days, paxCount, currencies, defaultTaxRate]);
 
-  /* â”€â”€ Day / pricing helpers (called from handlers, not render) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── Day / pricing helpers (called from handlers, not render) ─────────── */
 
   const normalizeDays = useCallback((arr) => arr.map((d, i) => ({
     ...d,
@@ -1692,7 +1804,7 @@ export const ItineraryBuilder = () => {
       }
       return prev;
     });
-  }, []);
+  }, [setMeta]);
 
   const dayTotals = useCallback((day) => {
     let buy = 0;
@@ -1789,7 +1901,7 @@ export const ItineraryBuilder = () => {
         service: svc
       });
     }
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency]);
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays ]);
 
   const openPlacementPrompt = useCallback((dayIndex, item, via) => {
     setPlacementDraft({ dayIndex, item, via });
@@ -2005,7 +2117,7 @@ export const ItineraryBuilder = () => {
     } else {
       showToast('Room allocation & rates updated', 'success');
     }
-  }, [roomModalState, paxCount, days, showToast]);
+  }, [roomModalState, paxCount, days, showToast, setDays ]);
 
   const applyRoomAllocationToRelated = useCallback((applyToAll) => {
     if (!roomApplyPrompt) return;
@@ -2022,19 +2134,25 @@ export const ItineraryBuilder = () => {
     }
     setRoomApplyPrompt(null);
     showToast(applyToAll ? 'Room allocation applied to all repeated days' : 'Room allocation saved for this day only', 'success');
-  }, [roomApplyPrompt, paxCount, showToast]);
+  }, [roomApplyPrompt, paxCount, showToast, setDays ]);
 
   /* Patch one or more fields of a single service item (used by the Service
      Request / Travel Documents tabs for time, confirmation status, numbers,
-     category details and service-specific notes). */
+     category details and service-specific notes).
+
+     This is the ONLY write path that stays open while a booking is locked,
+     because a Provisional booking cannot be confirmed until the supplier
+     results are captured. It writes through setDaysRaw so the itinerary edit
+     lock does not reject it; the card still only exposes the operational
+     fields (contract/library fields are locked by `contractLocked`). */
   const updateService = useCallback((dayKey, svKey, patch) => {
-    if (completedRef.current) return;
-    setDays((prev) => prev.map((d) => (
+    if (terminalRef.current) return;
+    setDaysRaw((prev) => prev.map((d) => (
       d.key === dayKey
         ? { ...d, services: d.services.map((s) => (s.key === svKey ? { ...s, ...patch } : s)) }
         : d
     )));
-  }, []);
+  }, [setDaysRaw, terminalRef]);
 
   /* A service is only ready once its Provisional booking fields are captured:
      time, confirmation number and flight number on every service; vehicle type
@@ -2082,7 +2200,7 @@ return !!sv.time; /* activities / meals / other */
     setDays((prev) => prev.map((d, i) => (
       i === dayIdx ? { ...d, services: d.services.filter((s) => s.key !== svcKey) } : d
     )));
-  }, []);
+  }, [setDays]);
 
   const updateServicePricing = useCallback((dayIdx, svcKey, field, rawValue) => {
     if (completedRef.current) return;
@@ -2107,7 +2225,7 @@ return !!sv.time; /* activities / meals / other */
         })
       };
     }));
-  }, []);
+  }, [setDays]);
 
   const moveService = useCallback((dayIdx, fromKey, toKey) => {
     if (completedRef.current) return;
@@ -2121,7 +2239,7 @@ return !!sv.time; /* activities / meals / other */
       arr.splice(ti, 0, moved);
       return { ...d, services: arr };
     }));
-  }, []);
+  }, [setDays]);
 
   const handleServiceDragStart = useCallback((e, dayIdx, svcKey) => {
     e.dataTransfer.effectAllowed = 'move';
@@ -2149,7 +2267,7 @@ return !!sv.time; /* activities / meals / other */
     setDays(next);
     applyDateExtension(next);
     setSelectedDayIndex(days.length);
-  }, [days, normalizeDays, applyDateExtension, nextId]);
+  }, [days, normalizeDays, applyDateExtension, nextId, setDays ]);
 
   const duplicateDay = useCallback((idx) => {
     if (completedRef.current) return;
@@ -2167,13 +2285,13 @@ return !!sv.time; /* activities / meals / other */
     applyDateExtension(next);
     setSelectedDayIndex(idx + 1);
     setKebabFor(null);
-  }, [days, normalizeDays, applyDateExtension, nextId]);
+  }, [days, normalizeDays, applyDateExtension, nextId, setDays ]);
 
   const clearDay = useCallback((idx) => {
     if (completedRef.current) return;
     setDays((prev) => prev.map((d, i) => (i === idx ? { ...d, services: [] } : d)));
     setKebabFor(null);
-  }, []);
+  }, [setDays]);
 
   const deleteDay = useCallback((idx) => {
     if (completedRef.current) return;
@@ -2186,9 +2304,9 @@ return !!sv.time; /* activities / meals / other */
     applyDateExtension(next);
     setSelectedDayIndex((prev) => Math.max(0, Math.min(prev, next.length - 1)));
     setKebabFor(null);
-  }, [days, normalizeDays, applyDateExtension, showToast]);
+  }, [days, normalizeDays, applyDateExtension, showToast, setDays ]);
 
-  /* â”€â”€ Copy / Export / Save â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── Copy / Export / Save ──────────────────────────────────────────────── */
 
   const openCopy = useCallback(async () => {
     setCopyOpen(true);
@@ -2286,7 +2404,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency]);
+  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency, setDays ]);
 
   const handleCopy = useCallback(() => {
     if (!meta.itineraryId) {
@@ -2504,7 +2622,27 @@ return !!sv.time; /* activities / meals / other */
       : '';
     const hdrAlign = billing?.billing_address_position === 'center' ? 'text-align:center' : (billing?.billing_address_position === 'right' ? 'text-align:right' : 'text-align:left');
     const hdrLegal = billing?.legal_name ? `<div style="${hdrAlign}"><b>${esc(billing.legal_name)}</b></div>` : '';
-    const hdrAddress = billing?.billing_address ? `<div style="${hdrAlign};color:#666;font-size:12px;margin-bottom:32px;">${esc(billing.billing_address).replace(/\n/g, '<br>')}</div>` : '';
+    /* Company address plus the tenant contact lines (Tel / Email / Website) from
+       the company profile, mirroring the Bill-from block on invoices, receipts
+       and credit notes. Kept in one wrapper so the 32px gap below the company
+       details stays where it was. */
+    const hdrAddressLine = billing?.billing_address
+      ? `<div style="color:#666;font-size:12px;">${esc(billing.billing_address).replace(/\n/g, '<br>')}</div>`
+      : '';
+    const hdrContactLine = (label, value) => (value
+      ? `<div>${esc(label)}: ${esc(value)}</div>`
+      : '');
+    const coTel = String(billing?.contact_tel || '').trim();
+    const coCell = String(billing?.contact_cell || '').trim();
+    const hdrContact = [
+      hdrContactLine('Tel', [coTel, coCell].filter(Boolean).join(' · ')),
+      hdrContactLine('Email', String(billing?.contact_email || '').trim()),
+      hdrContactLine('Web', String(billing?.contact_website || '').trim())
+    ].join('');
+    const hdrContactBlock = hdrContact ? `<div style="color:#666;font-size:12px;">${hdrContact}</div>` : '';
+    const hdrAddress = (hdrAddressLine || hdrContactBlock)
+      ? `<div style="${hdrAlign};margin-bottom:32px;">${hdrAddressLine}${hdrContactBlock}</div>`
+      : '';
     const designer = meta.consultantName ? esc(meta.consultantName) : '—';
     const travellersList = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean);
     const travellersHtml = travellersList.length
@@ -2984,7 +3122,7 @@ return !!sv.time; /* activities / meals / other */
      header + immutable line items and records the accounting export. */
   const handleIssueInvoiceHere = useCallback(async ({ silent = false } = {}) => {
     if (!companyId) { showToast('Company not found', 'error'); return null; }
-    if (completedRef.current) return null;
+    if (terminalRef.current) return null;
     const type = isProvisional ? 'deposit' : 'final';
     const label = type === 'deposit' ? 'Deposit' : 'Final';
     const existing = itineraryInvoices.find((inv) => inv.invoice_type === type
@@ -3213,7 +3351,8 @@ return !!sv.time; /* activities / meals / other */
       clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left',
       companyContactEmail: billing?.contact_email || '',
       companyContactTel: billing?.contact_tel || '',
-      companyContactCell: billing?.contact_cell || ''
+      companyContactCell: billing?.contact_cell || '',
+      companyContactWebsite: billing?.contact_website || ''
     };
     const m = invoiceEmail(inv, agg.lines, docOpts);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
@@ -3249,7 +3388,7 @@ return !!sv.time; /* activities / meals / other */
     if (!w) showToast('Please allow pop-ups to view the receipt', 'warning');
   }, [svcSymbol, showToast, billing]);
 
-  /* â”€â”€ Edit itinerary details (Client & Tour) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── Edit itinerary details (Client & Tour) ─────────────────────────────── */
 
   const handleDetailsSave = useCallback(async (payload) => {
     if (completedRef.current) return;
@@ -3308,7 +3447,7 @@ return !!sv.time; /* activities / meals / other */
     }
   }, [meta.itineraryId, meta.client, showToast]);
 
-  /* â”€â”€ Edit a day service (name + description override) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── Edit a day service (name + description override) ──────────────────── */
 
 const openServiceEditor = useCallback((dayIdx, sv) => {
     const li = sv.itemId ? libraryItems.find((x) => x.id === sv.itemId) : null;
@@ -3358,7 +3497,7 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     setCopyDays([]);
     setCopyAllDays(false);
     showToast('Service updated', 'success');
-  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency]);
+  }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays ]);
 
   /* Copy the service currently being edited to all days or specific days.
      Creates deep clones so each occurrence remains independently editable.
@@ -3408,9 +3547,9 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     setCopyDays([]);
     setCopyAllDays(false);
     showToast(`Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`, 'success');
-  }, [days, editSvc, nextId, showToast]);
+  }, [days, editSvc, nextId, showToast, setDays ]);
 
-  /* â”€â”€ Render: no data guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* ── Render: no data guard ────────────────────────────────────────────── */
 
   if (!data) {
     return (
@@ -3441,17 +3580,23 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
   }
 
   /* Single source of truth for a per-service card. Rendered identically in BOTH
-     the "Provisional Service Request" tab (editable) and the "Travel Documents"
-     tab (forced read-only, supplier OK badge, printable). Contract / library
+     the "Provisional Service Request" tab and the "Travel Documents" tab
+     (forced read-only, supplier OK badge, printable). Contract / library
      fields are ALWAYS locked regardless of tab so the signed contract can never
-     be overridden by hand-typed data. */
+     be overridden by hand-typed data.
+
+     The Service Request tab is the one place that stays editable while the
+     itinerary is locked: a Provisional booking cannot be confirmed until the
+     supplier results below are captured, so these operational fields (times,
+     confirmation/flight numbers, vehicle, check-in/out, OK status) must remain
+     writable. The locked tabs keep using canEdit = false. */
   const renderServiceCard = (sv, day, { editable, tab }) => {
     const cat = sv.category || '';
     const isTransfer = /transfers?/i.test(cat);
     const isAccom = /accommodation/i.test(cat);
     const isActivity = /activities?|tours?|excursions?/i.test(cat);
     const isMeal = /meals?|dinner|lunch|breakfast/i.test(cat);
-    const canEdit = editable && !isReadOnly;
+    const canEdit = tab === 'service-request' ? editable && !isTerminal : editable && !isReadOnly;
     /* Fields sourced from the contract / library item — never editable. */
     const contractLocked = isTransfer ? ['vehicleType', 'capacity'] : isAccom ? ['maxOccupancy', 'mealPlan'] : ['vehicleType', 'maxOccupancy'];
     const ro = (field) => !canEdit || contractLocked.includes(field);
@@ -3628,7 +3773,7 @@ const missing = !sv.confirmationNumber ||
       </header>
 
       <div className="builder-layout">
-        {/* â”€â”€ Builder sidebar: library item picker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        {/* ── Builder sidebar: library item picker ─────────────────────── */}
         <aside className="builder-sidebar">
           <div className="builder-sidebar-header">
             <div className="sidebar-search">
@@ -3762,7 +3907,7 @@ const missing = !sv.confirmationNumber ||
           </div>
         </aside>
 
-        {/* â”€â”€ Main panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        {/* ── Main panel ─────────────────────────────────────────────────── */}
         <div className="builder-main">
           {/* Header card */}
           <div className="builder-header-card">
@@ -3869,6 +4014,24 @@ const missing = !sv.confirmationNumber ||
             </div>
           </div>
 
+          {isReadOnly && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: isCancelled ? '#fee2e2' : isCompleted ? '#f3e8ff' : '#fff7ed', border: `1px solid ${isCancelled ? '#fecaca' : isCompleted ? '#e9d5ff' : '#fed7aa'}`, color: isCancelled ? '#b91c1c' : isCompleted ? '#6b21a8' : '#9a3412', borderRadius: '12px', padding: '0.85rem 1.1rem', fontSize: '0.88rem', fontWeight: 600, marginBottom: '1rem' }}>
+              <Lock size={16} />
+              <div>
+                {isCancelled
+                  ? <>This itinerary is <strong>Cancelled</strong> and revoked. Change its status from the badge above to re-open it.</>
+                  : isCompleted
+                    ? <>This itinerary is <strong>Completed</strong> and read-only. Change its status from the badge above to edit it again.</>
+                    : <>This itinerary is <strong>{isProvisional ? 'Provisional Booking' : 'Confirmed Booking'}</strong> and locked for editing. Change its status back to <strong>Quotation</strong> from the badge above to make changes.</>}
+                {isProvisional && (
+                  <div style={{ marginTop: '0.3rem', fontWeight: 500, opacity: 0.9 }}>
+                    Supplier confirmations on the Service Request tab stay editable so this booking can still be confirmed.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Tabs — hidden stages are locked out of their documents */}
           <div className="builder-tabs">
             <button type="button" className={`builder-tab ${activeTab === 'itinerary' ? 'active' : ''}`} onClick={() => setActiveTab('itinerary')}>
@@ -3926,14 +4089,6 @@ const missing = !sv.confirmationNumber ||
           {/* Day-by-day */}
           {tab === 'itinerary' && (
             <>
-              {isReadOnly && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: isCancelled ? '#fee2e2' : '#f3e8ff', border: `1px solid ${isCancelled ? '#fecaca' : '#e9d5ff'}`, color: isCancelled ? '#b91c1c' : '#6b21a8', borderRadius: '12px', padding: '0.85rem 1.1rem', fontSize: '0.88rem', fontWeight: 600, marginBottom: '1rem' }}>
-                  <Lock size={16} />
-                  {isCancelled
-                    ? <>This itinerary is <strong>Cancelled</strong> and revoked. Change its status from the badge above to re-open it.</>
-                    : <>This itinerary is <strong>Completed</strong> and read-only. Change its status from the badge above to edit it again.</>}
-                </div>
-              )}
               <div className="day-strip-wrap" style={{ flexShrink: 0 }}>
                 <div className="day-strip">
                   {days.map((d, i) => {
@@ -4125,7 +4280,7 @@ const missing = !sv.confirmationNumber ||
                               value={sv.buyPP}
                               disabled={isReadOnly}
                               onChange={isReadOnly ? undefined : (e) => updateServicePricing(selectedDayIndex, sv.key, 'buyPP', e.target.value)}
-                              title="Buy price â€” the supplier rate per person. Edit it directly to negotiate."
+                              title="Buy price — the supplier rate per person. Edit it directly to negotiate."
                             />
                           </div>
                           <div className="svc-cell svc-markup-cell">
@@ -4253,7 +4408,7 @@ const missing = !sv.confirmationNumber ||
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                 <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', margin: 0 }}>Pricing Summary</h3>
                 <span style={{ fontSize: '0.85rem', color: '#64748b' }}>
-                  {paxCount} traveller(s) Â· client markup {markupPct}%
+                  {paxCount} traveller(s) · client markup {markupPct}%
                 </span>
               </div>
               {pricingGroups.length === 0 && (
@@ -4501,7 +4656,7 @@ const missing = !sv.confirmationNumber ||
                     <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
                   </div>
                   <div style={{ padding: '0.85rem 1rem' }}>
-{grp.svcs.map(({ sv, day }) => renderServiceCard(sv, day, { editable: !isReadOnly, tab: 'service-request' }))}
+  {grp.svcs.map(({ sv, day }) => renderServiceCard(sv, day, { editable: !isTerminal, tab: 'service-request' }))}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
                       <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} disabled={!emailOf(grp.sup)} onClick={() => {
                         const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount);
@@ -5115,7 +5270,7 @@ const missing = !sv.confirmationNumber ||
                         >
                           <option value="">Apply tax type...</option>
                           {taxRates.filter((t) => t.is_active).map((t) => (
-                            <option key={t.id} value={t.id}>{t.name} â€” {Number(t.rate)}%</option>
+                            <option key={t.id} value={t.id}>{t.name} — {Number(t.rate)}%</option>
                           ))}
                         </select>
                       )}

@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- Migration: Accommodation Occupancy & Sharing Capacity Limits
 -- Adds max_adults and max_children to support granular accommodation rules
 -- =============================================================================

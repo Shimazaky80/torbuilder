@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
@@ -161,7 +161,7 @@ function SearchableCountryInput({ value, onChange }) {
           className="sidebar-select"
           style={{ width: '100%', padding: '0.6rem 0.75rem 0.6rem 2rem', fontSize: '0.9rem' }}
           value={open ? query : value}
-          placeholder="Type to search countryâ€¦"
+          placeholder="Type to search country…"
           onFocus={() => { setQuery(''); setOpen(true); }}
           onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
           onKeyDown={(e) => {
@@ -177,7 +177,7 @@ function SearchableCountryInput({ value, onChange }) {
       {open && (
         <div style={{ position: 'absolute', zIndex: 30, top: '100%', left: 0, right: 0, marginTop: '0.25rem', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', boxShadow: '0 10px 25px rgba(0,0,0,0.12)', maxHeight: '220px', overflowY: 'auto' }}>
           {filtered.length === 0 ? (
-            <div style={{ padding: '0.6rem 0.75rem', color: '#94a3b8', fontSize: '0.85rem' }}>No matches â€” press Enter to use &quot;{query.trim()}&quot;</div>
+            <div style={{ padding: '0.6rem 0.75rem', color: '#94a3b8', fontSize: '0.85rem' }}>No matches — press Enter to use &quot;{query.trim()}&quot;</div>
           ) : filtered.map((c) => (
             <button
               type="button"
@@ -249,7 +249,8 @@ export const Settings = () => {
     itinerary_exclusions_position: 'under_day_by_day',
     contact_email: '',
     contact_tel: '',
-    contact_cell: ''
+    contact_cell: '',
+    contact_website: ''
   });
   const [bankAccounts, setBankAccounts] = useState([]);
   const [bankModalOpen, setBankModalOpen] = useState(false);
@@ -321,7 +322,8 @@ export const Settings = () => {
         itinerary_exclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(data.itinerary_exclusions_position) ? data.itinerary_exclusions_position : 'under_day_by_day',
         contact_email: data.contact_email || '',
         contact_tel: data.contact_tel || '',
-        contact_cell: data.contact_cell || ''
+        contact_cell: data.contact_cell || '',
+        contact_website: data.contact_website || ''
       });
     }
   }, []);
@@ -549,7 +551,8 @@ export const Settings = () => {
         logo_size: ['sm', 'md', 'lg'].includes(billing.logo_size) ? billing.logo_size : 'md',
         contact_email: billing.contact_email.trim(),
         contact_tel: billing.contact_tel.trim(),
-        contact_cell: billing.contact_cell.trim()
+        contact_cell: billing.contact_cell.trim(),
+        contact_website: billing.contact_website.trim()
       });
     if (ok) showToast('Company profile saved', 'success');
   };
@@ -599,7 +602,7 @@ export const Settings = () => {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         setBilling((prev) => ({ ...prev, logo_data_url: canvas.toDataURL('image/png') }));
-        showToast('Logo added â€” remember to save your changes', 'success');
+        showToast('Logo added — remember to save your changes', 'success');
       };
       img.onerror = () => showToast('Could not read that logo image', 'error');
       img.src = reader.result;
@@ -833,7 +836,7 @@ export const Settings = () => {
             <SettingsIcon size={22} color="#0d7478" /> Settings
           </h1>
           <p style={{ color: '#64748b', margin: '0.35rem 0 0', fontSize: '0.9rem' }}>
-            Tenant configuration â€” tax rules, defaults and company settings.
+            Tenant configuration — tax rules, defaults and company settings.
           </p>
         </div>
       </div>
@@ -875,6 +878,7 @@ export const Settings = () => {
             <input className="sidebar-select" style={fieldStyle} type="email" value={billing.contact_email} onChange={(e) => setBilling({ ...billing, contact_email: e.target.value })} placeholder="Email" />
             <input className="sidebar-select" style={fieldStyle} value={billing.contact_tel} onChange={(e) => setBilling({ ...billing, contact_tel: e.target.value })} placeholder="Telephone" />
             <input className="sidebar-select" style={fieldStyle} value={billing.contact_cell} onChange={(e) => setBilling({ ...billing, contact_cell: e.target.value })} placeholder="Cell / Mobile" />
+            <input className="sidebar-select" style={fieldStyle} type="url" value={billing.contact_website} onChange={(e) => setBilling({ ...billing, contact_website: e.target.value })} placeholder="Website" />
           </div>
           <p style={{ margin: '0.35rem 0 0', color: '#94a3b8', fontSize: '0.76rem', lineHeight: 1.45 }}>
             These appear on your printed documents (invoices, receipts, credit notes, itineraries) in the supplier / Bill-from header, so clients always have a way to reach you without scrolling to a footer.
@@ -891,7 +895,7 @@ export const Settings = () => {
               <ImageIcon size={15} color="#0d7478" /> Company Logo
             </strong>
             <p style={{ margin: '0.3rem 0 0', color: '#64748b', fontSize: '0.8rem' }}>
-              Appears on your printed Company documents (invoices, receipts, credit notes, itineraries). JPEG, PNG or BMP â€” auto-resized to 512px and stored as PNG.
+              Appears on your printed Company documents (invoices, receipts, credit notes, itineraries). JPEG, PNG or BMP — auto-resized to 512px and stored as PNG.
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
@@ -920,7 +924,7 @@ export const Settings = () => {
             <input id="company-logo-input" type="file" accept=".jpg,.jpeg,.png,.bmp,image/jpeg,image/png,image/bmp" style={{ display: 'none' }} onChange={(e) => { handleLogoFile(e.target.files?.[0]); e.target.value = ''; }} />
           </div>
           <p style={{ margin: '0.6rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
-            Recommended: export your logo at 300â€“500px wide (landscape usually works best on a document header). The size above controls how wide it prints â€” Medium (160px) is the typical industry standard.
+            Recommended: export your logo at 300–500px wide (landscape usually works best on a document header). The size above controls how wide it prints — Medium (160px) is the typical industry standard.
           </p>
         </div>
         <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'flex-end' }}>
@@ -964,7 +968,7 @@ export const Settings = () => {
             <Percent size={18} color="#0d7478" /> Money Entry Preferences
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            Applies to money / rate fields only â€” never to counts such as pax, capacity or occupancy.
+            Applies to money / rate fields only — never to counts such as pax, capacity or occupancy.
           </p>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
@@ -1071,7 +1075,7 @@ export const Settings = () => {
               Show supplier under the service description
             </label>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
-              When on, each service line also shows its supplier beneath the description. When off, only the service description appears â€” accommodation always shows its supplier so clients can see who quotes the room.
+              When on, each service line also shows its supplier beneath the description. When off, only the service description appears — accommodation always shows its supplier so clients can see who quotes the room.
             </p>
           </div>
           <div className="sidebar-field">
@@ -1091,7 +1095,7 @@ export const Settings = () => {
               <option value="rooms">One line per room (occupancy split)</option>
             </select>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
-              Applies to the daily breakdown. One line shows the whole accommodation with the total per person. Room split puts each occupied room on its own line â€” e.g. one line for 2 travellers, one for 1 traveller, one for 2A, 1C â€” with the number of adults and children in the Qty column. All other services stay on their own lines as usual.
+              Applies to the daily breakdown. One line shows the whole accommodation with the total per person. Room split puts each occupied room on its own line — e.g. one line for 2 travellers, one for 1 traveller, one for 2A, 1C — with the number of adults and children in the Qty column. All other services stay on their own lines as usual.
             </p>
           </div>
           <div className="sidebar-field">
@@ -1288,7 +1292,7 @@ export const Settings = () => {
               <LayoutTemplate size={18} color="#0d7478" /> Document Templates
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-              Pick a ready-made layout for how your output documents (itineraries, vouchers, invoices, travel documents) are presented. The layout engine ships in a future release â€” this is just the placeholder setting page.
+              Pick a ready-made layout for how your output documents (itineraries, vouchers, invoices, travel documents) are presented. The layout engine ships in a future release — this is just the placeholder setting page.
             </p>
           </div>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfeff', color: '#0d7478', padding: '0.3rem 0.7rem', borderRadius: '999px', fontSize: '0.78rem', fontWeight: 700 }}>
@@ -1350,12 +1354,12 @@ export const Settings = () => {
             <tbody>
               {bankAccounts.map((b) => (
                 <tr key={b.id} style={b.is_active ? undefined : { opacity: 0.6, background: '#f8fafc' }}>
-                  <td style={{ fontWeight: 700 }}>{b.label || 'â€”'}</td>
+                  <td style={{ fontWeight: 700 }}>{b.label || '—'}</td>
                   <td style={{ fontWeight: 700, color: b.is_active ? '#0d7478' : '#94a3b8' }}>{b.currency_code}</td>
                   <td>{b.bank_name}</td>
-                  <td>{b.account_holder_name || 'â€”'}</td>
-                  <td>{b.account_number || 'â€”'}</td>
-                  <td>{[b.branch_code, b.swift_code].filter(Boolean).join(' / ') || 'â€”'}</td>
+                  <td>{b.account_holder_name || '—'}</td>
+                  <td>{b.account_number || '—'}</td>
+                  <td>{[b.branch_code, b.swift_code].filter(Boolean).join(' / ') || '—'}</td>
                   <td>
                     {b.is_default ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfdf5', color: '#047857', padding: '0.25rem 0.6rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 700 }}>
@@ -1385,7 +1389,7 @@ export const Settings = () => {
                       </button>
                       <button
                         type="button"
-                        title={b.is_active ? 'Deactivate â€” this account will no longer be used on invoices' : 'Activate â€” invoices can use this account again'}
+                        title={b.is_active ? 'Deactivate — this account will no longer be used on invoices' : 'Activate — invoices can use this account again'}
                         disabled={saving}
                         onClick={() => requestToggleBankActive(b)}
                         style={{
@@ -1418,8 +1422,8 @@ export const Settings = () => {
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
               Tax applied on top of each service&apos;s sell price (markup already included in sell).
-              For South African tenants this tax is currency-bound to ZAR â€” services in any other currency are always 0 / No Tax.
-              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. The default is 15% VAT â€” set your region&apos;s own tax types here.
+              For South African tenants this tax is currency-bound to ZAR — services in any other currency are always 0 / No Tax.
+              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. The default is 15% VAT — set your region&apos;s own tax types here.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAdd}>
@@ -1455,7 +1459,7 @@ export const Settings = () => {
                   <td>{t.code}</td>
                   <td style={{ fontWeight: 700, color: t.is_active ? '#0d7478' : '#94a3b8' }}>{Number(t.rate)}%</td>
                   <td>{t.country || 'South Africa'}</td>
-                  <td>{t.revenue_agency || (t.country === 'South Africa' ? 'SARS' : 'â€”')}</td>
+                  <td>{t.revenue_agency || (t.country === 'South Africa' ? 'SARS' : '—')}</td>
                   <td style={{ textTransform: 'capitalize' }}>{t.applies_to || 'all'}</td>
                   <td>
                     {t.is_default ? (
@@ -1486,7 +1490,7 @@ export const Settings = () => {
                       </button>
                       <button
                         type="button"
-                        title={t.is_active ? 'Deactivate â€” tax will not be applied' : 'Activate â€” tax will be applied'}
+                        title={t.is_active ? 'Deactivate — tax will not be applied' : 'Activate — tax will be applied'}
                         disabled={saving}
                         onClick={() => handleToggleActive(t)}
                         style={{
@@ -1511,7 +1515,7 @@ export const Settings = () => {
         )}
 
         <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '1rem', display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
-          <ShieldCheck size={13} /> Saved itineraries keep the tax rate that applied at quote time â€” changing these rates only affects new services.
+          <ShieldCheck size={13} /> Saved itineraries keep the tax rate that applied at quote time — changing these rates only affects new services.
         </p>
       </div>
 
@@ -1599,7 +1603,7 @@ export const Settings = () => {
                     <label>Currency</label>
                     <select className="sidebar-select" style={fieldStyle} value={bankForm.currency_code} onChange={(e) => setBankForm({ ...bankForm, currency_code: e.target.value })}>
                       {(currencies.length ? currencies : [{ code: 'ZAR', name: 'South African Rand' }]).map((c) => (
-                        <option key={c.code} value={c.code}>{c.code}{c.name ? ` â€” ${c.name}` : ''}</option>
+                        <option key={c.code} value={c.code}>{c.code}{c.name ? ` — ${c.name}` : ''}</option>
                       ))}
                     </select>
                   </div>

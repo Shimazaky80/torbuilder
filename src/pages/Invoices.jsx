@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
@@ -186,7 +186,7 @@ export const Invoices = () => {
     });
   }, [invoices, statusFilter, typeFilter]);
 
-  /* â”€â”€ Wizard: load qualified itineraries (provisional â†’ deposit, confirmed â†’ final) */
+  /* ── Wizard: load qualified itineraries (provisional → deposit, confirmed → final) */
   const openWizard = async () => {
     setWizardOpen(true);
     setWizardStep(1);
@@ -948,7 +948,8 @@ export const Invoices = () => {
     clientBillingAddressPosition: ['left', 'center', 'right'].includes(billing?.client_billing_address_position) ? billing.client_billing_address_position : 'left',
     companyContactEmail: billing?.contact_email || '',
     companyContactTel: billing?.contact_tel || '',
-    companyContactCell: billing?.contact_cell || ''
+    companyContactCell: billing?.contact_cell || '',
+    companyContactWebsite: billing?.contact_website || ''
   };
 
   return (
@@ -971,7 +972,7 @@ export const Invoices = () => {
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
           <div style={{ position: 'relative', flex: '1 1 240px' }}>
             <Search size={15} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-            <input className="sidebar-select" style={{ width: '100%', padding: '0.55rem 0.75rem 0.55rem 2rem', fontSize: '0.9rem' }} placeholder="Search number, client or itineraryâ€¦" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <input className="sidebar-select" style={{ width: '100%', padding: '0.55rem 0.75rem 0.55rem 2rem', fontSize: '0.9rem' }} placeholder="Search number, client or itinerary…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
           <select className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
             <option value="all">All types</option>
@@ -991,7 +992,7 @@ export const Invoices = () => {
         </div>
 
         {loading ? (
-          <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading invoicesâ€¦</div>
+          <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading invoices…</div>
         ) : filtered.length === 0 ? (
           <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>
             {search.trim() ? 'No invoices match your search.' : <>No invoices yet. Click <b>New Invoice</b> to issue one from a provisional or confirmed itinerary.</>}
@@ -1016,8 +1017,8 @@ export const Invoices = () => {
                 <tr key={inv.id}>
                   <td style={{ fontWeight: 700 }}>{inv.invoice_number}</td>
                   <td>{TYPE_LABEL[inv.invoice_type] || inv.invoice_type}</td>
-                  <td>{inv.itineraries?.reference_number || 'â€”'}<div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{inv.itineraries?.itinerary_name || ''}</div></td>
-                  <td>{inv.bill_to_name || 'â€”'}</td>
+                  <td>{inv.itineraries?.reference_number || '—'}<div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{inv.itineraries?.itinerary_name || ''}</div></td>
+                  <td>{inv.bill_to_name || '—'}</td>
                   <td style={{ fontWeight: 700, color: '#0d7478' }}>{inv.currency_code}</td>
                   <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmtMoney(inv.total_incl, inv.currency_code)}</td>
                   <td>{badge(inv.status)}</td>
@@ -1051,7 +1052,7 @@ export const Invoices = () => {
           <div className="modal-content tall" style={{ maxWidth: '880px', width: '94%' }}>
             <div className="modal-header">
               <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-                {viewing.status === 'proforma' ? 'Proforma â€” ' : ''}{TYPE_LABEL[viewing.invoice_type] || 'Invoice'} {viewing.invoice_number}
+                {viewing.status === 'proforma' ? 'Proforma — ' : ''}{TYPE_LABEL[viewing.invoice_type] || 'Invoice'} {viewing.invoice_number}
                 {badge(viewing.status)}
               </h2>
               <button className="close-btn" onClick={() => setViewing(null)}><X size={20} /></button>
@@ -1096,7 +1097,7 @@ export const Invoices = () => {
 
               {viewing.status === 'proforma' && (
                 <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '10px', padding: '0.7rem 1rem', marginBottom: '1rem', fontSize: '0.88rem', fontWeight: 600 }}>
-                  This is a <b>proforma</b> deposit request. It secures the booking but is not yet a tax invoice â€” confirm payment received, then issue a receipt.
+                  This is a <b>proforma</b> deposit request. It secures the booking but is not yet a tax invoice — confirm payment received, then issue a receipt.
                 </div>
               )}
 
@@ -1118,7 +1119,7 @@ export const Invoices = () => {
                 <div style={{ marginTop: '0.85rem', textAlign: branding.clientBillingAddressPosition === 'center' ? 'center' : (branding.clientBillingAddressPosition === 'right' ? 'right' : 'left') }}>
                   <div style={{ fontSize: '0.8rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Bill To</div>
                   {viewing.bill_to_logo_data_url && <img src={viewing.bill_to_logo_data_url} alt="Client logo" style={{ display: 'block', maxWidth: `${LOGO_WIDTHS[branding.clientLogoSize] || LOGO_WIDTHS.md}px`, maxHeight: '64px', objectFit: 'contain', marginBottom: '6px', marginLeft: branding.clientLogoPosition === 'center' ? 'auto' : (branding.clientLogoPosition === 'right' ? 'auto' : '0'), marginRight: branding.clientLogoPosition === 'center' ? 'auto' : (branding.clientLogoPosition === 'right' ? '0' : 'auto') }} />}
-                  <div style={{ fontWeight: 700 }}>{viewing.bill_to_name || 'â€”'}</div>
+                  <div style={{ fontWeight: 700 }}>{viewing.bill_to_name || '—'}</div>
                   {viewing.bill_to_email && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>{viewing.bill_to_email}</div>}
                   {(viewing.bill_to_tel || viewing.bill_to_cell) && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Tel: {[viewing.bill_to_tel, viewing.bill_to_cell].filter(Boolean).join(' · ')}</div>}
                   {viewing.bill_to_website && <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Website: {viewing.bill_to_website}</div>}
@@ -1203,12 +1204,12 @@ export const Invoices = () => {
                         <div key={k}><span style={{ color: '#64748b' }}>{k.replace(/_/g, ' ')}:</span> {v}</div>
                       ))}
                     </div>
-                  ) : <div style={{ fontSize: '0.9rem', color: '#94a3b8' }}>No bank account set for {viewing.currency_code}. Add one in Settings â†’ Bank Accounts.</div>}
+                  ) : <div style={{ fontSize: '0.9rem', color: '#94a3b8' }}>No bank account set for {viewing.currency_code}. Add one in Settings → Bank Accounts.</div>}
                 </div>
 
                 {viewing.status === 'void' && (
                   <div style={{ marginTop: '0.85rem', color: '#b91c1c', fontWeight: 700 }}>
-                    VOIDED{viewing.void_reason ? ` â€” ${viewing.void_reason}` : ''}
+                    VOIDED{viewing.void_reason ? ` — ${viewing.void_reason}` : ''}
                   </div>
                 )}
               </div>
@@ -1269,7 +1270,7 @@ export const Invoices = () => {
                         <tr key={cn.id}>
                           <td style={{ fontWeight: 700 }}>{cn.credit_note_number}</td>
                           <td>{cn.issued_date}</td>
-                          <td style={{ color: '#64748b' }}>{cn.reason || 'â€”'}</td>
+                          <td style={{ color: '#64748b' }}>{cn.reason || '—'}</td>
                           <td style={{ textAlign: 'right', fontWeight: 700, color: '#047857' }}>{fmtMoney(cn.total_incl, symOf(cn.currency_code))}</td>
                           <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                             <button type="button" className="secondary-btn" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem', marginRight: '0.3rem' }} onClick={() => printCreditNote(cn)}>Print</button>
@@ -1336,7 +1337,7 @@ export const Invoices = () => {
             <div className="form-actions">
               <button type="button" className="secondary-btn" onClick={() => setReceiptPromptFor(null)}>Cancel</button>
               <button type="button" className="primary-btn" style={{ flex: 1 }} disabled={issuingReceipt} onClick={submitReceipt}>
-                {issuingReceipt ? 'Issuingâ€¦' : 'Issue Receipt'}
+                {issuingReceipt ? 'Issuing…' : 'Issue Receipt'}
               </button>
             </div>
           </div>
@@ -1348,7 +1349,7 @@ export const Invoices = () => {
         <div className="modal-overlay">
           <div className="modal-content tall" style={{ maxWidth: '820px', width: '94%' }}>
             <div className="modal-header">
-              <h2>New Invoice â€” Step {wizardStep} of 3</h2>
+              <h2>New Invoice — Step {wizardStep} of 3</h2>
               <button className="close-btn" onClick={() => setWizardOpen(false)}><X size={20} /></button>
             </div>
 
@@ -1359,7 +1360,7 @@ export const Invoices = () => {
               Pick a provisional or confirmed itinerary to raise a proforma invoice for. Every invoice starts as a proforma; it becomes a numbered, locked invoice the moment payment is confirmed and a receipt is issued.
             </p>
                 {itinerariesLoading ? (
-                  <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading itinerariesâ€¦</div>
+                  <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>Loading itineraries…</div>
                 ) : itineraries.length === 0 ? (
                   <div style={{ padding: '2rem 0', textAlign: 'center', color: '#94a3b8' }}>No provisional or confirmed itineraries available.</div>
                 ) : (
@@ -1370,9 +1371,9 @@ export const Invoices = () => {
                     <tbody>
                       {itineraries.map((it) => (
                         <tr key={it.id}>
-                          <td style={{ fontWeight: 700 }}>{it.reference_number || 'â€”'}</td>
+                          <td style={{ fontWeight: 700 }}>{it.reference_number || '—'}</td>
                           <td>{it.itinerary_name}</td>
-                          <td>{it.clients?.name || 'â€”'}</td>
+                          <td>{it.clients?.name || '—'}</td>
                           <td style={{ textTransform: 'capitalize' }}>{it.status.replace('_', ' ')}</td>
                           <td style={{ textAlign: 'right' }}>
                             <button type="button" className="secondary-btn" style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }} onClick={() => loadItinerary(it.id)}>Select</button>
@@ -1388,7 +1389,7 @@ export const Invoices = () => {
             {wizardStep === 2 && selectedItinerary && (
               <div>
                 <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
-                  <b>{selectedItinerary.reference_number}</b> Â· {selectedItinerary.itinerary_name} Â· status <b style={{ textTransform: 'capitalize' }}>{selectedItinerary.status}</b>.
+                  <b>{selectedItinerary.reference_number}</b> · {selectedItinerary.itinerary_name} · status <b style={{ textTransform: 'capitalize' }}>{selectedItinerary.status}</b>.
                   Pick the currency to invoice. Each currency is invoiced separately; once the deposit is paid the next invoice clears the remaining balance.
                 </p>
                 <table className="admin-table">
@@ -1476,7 +1477,7 @@ export const Invoices = () => {
                   <div className="sidebar-field">
                     <label>Bank Account ({selectedGroup.code})</label>
                     <select className="sidebar-select" style={fieldStyle} value={chosenBank?.id || ''} onChange={(e) => setSelectedBankId(e.target.value)}>
-                      {availableBanks.length === 0 && <option value="">No {selectedGroup.code} account â€” add one in Settings</option>}
+                      {availableBanks.length === 0 && <option value="">No {selectedGroup.code} account — add one in Settings</option>}
                       {availableBanks.map((b) => (
                         <option key={b.id} value={b.id}>{b.label || b.bank_name || b.currency_code}{b.is_default ? ' (default)' : ''}</option>
                       ))}
@@ -1497,7 +1498,7 @@ export const Invoices = () => {
                 <div className="form-actions" style={{ marginTop: '0.5rem' }}>
                   <button type="button" className="secondary-btn" onClick={() => setWizardStep(2)}>Back</button>
                   <button type="button" className="primary-btn" style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem' }} disabled={issuing} onClick={handleIssue}>
-                    <Check size={16} /> {issuing ? 'Issuingâ€¦' : (selectedGroup.issueType === 'deposit' ? 'Issue Proforma' : 'Validate Final Invoice')}
+                    <Check size={16} /> {issuing ? 'Issuing…' : (selectedGroup.issueType === 'deposit' ? 'Issue Proforma' : 'Validate Final Invoice')}
                   </button>
                 </div>
               </div>

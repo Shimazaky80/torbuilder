@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useListRowLimit } from '../hooks/useListRowLimit';
@@ -427,7 +427,7 @@ export const Clients = () => {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         setForm((prev) => ({ ...prev, logo_data_url: canvas.toDataURL('image/png') }));
-        showToast('Logo added â€” remember to save your changes', 'success');
+        showToast('Logo added — remember to save your changes', 'success');
       };
       img.onerror = () => showToast('Could not read that logo image', 'error');
       img.src = reader.result;
@@ -675,7 +675,7 @@ export const Clients = () => {
                 </div>
               </div>
 
-              {/* Address â€” full width */}
+              {/* Address — full width */}
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Address
@@ -689,7 +689,7 @@ export const Clients = () => {
                 />
               </div>
 
-              {/* Client logo â€” full width */}
+              {/* Client logo — full width */}
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Client Logo
@@ -715,13 +715,13 @@ export const Clients = () => {
                     </>
                   ) : (
                     <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-                      Optional â€” shown on exported documents and invoices for this client.
+                      Optional — shown on exported documents and invoices for this client.
                     </span>
                   )}
                 </div>
               </div>
 
-              {/* Notes â€” full width, expandable */}
+              {/* Notes — full width, expandable */}
               <div>
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Notes
@@ -893,7 +893,7 @@ export const Clients = () => {
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem', color: '#475569' }}>
                       <Globe size={14} color="#863bff" /> {client.country}
                     </span>
-                  ) : <span style={{ color: '#94a3b8' }}>â€”</span>}
+                  ) : <span style={{ color: '#94a3b8' }}>—</span>}
                 </td>
                 <td>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.85rem', fontWeight: 700, color: '#b45309' }}>
@@ -907,7 +907,7 @@ export const Clients = () => {
                       {Number(salesTotals[client.id]).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   ) : (
-                    <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>â€”</span>
+                    <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>—</span>
                   )}
                 </td>
                 <td style={{ maxWidth: '260px' }}>

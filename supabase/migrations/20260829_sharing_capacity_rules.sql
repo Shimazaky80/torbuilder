@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- Migration: Conditional Room Sharing Capacity Rules by Adult Count
 -- Adds sharing_capacity_rules JSONB to support per-adult-count child sharing limits
 -- =============================================================================

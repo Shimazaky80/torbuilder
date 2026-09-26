@@ -195,9 +195,11 @@ const companyContactHtml = (opts = {}) => {
   const tel = String(opts?.companyContactTel || '').trim();
   const cell = String(opts?.companyContactCell || '').trim();
   const email = String(opts?.companyContactEmail || '').trim();
+  const website = String(opts?.companyContactWebsite || '').trim();
   const parts = [
     (tel || cell) ? `Tel: ${htmlEscape([tel, cell].filter(Boolean).join(' · '))}` : '',
-    email ? `Email: ${htmlEscape(email)}` : ''
+    email ? `Email: ${htmlEscape(email)}` : '',
+    website ? `Web: ${htmlEscape(website)}` : ''
   ].filter(Boolean);
   return parts.length ? parts.join('<br>') : '';
 };
@@ -207,9 +209,11 @@ const companyContactText = (opts = {}) => {
   const tel = String(opts?.companyContactTel || '').trim();
   const cell = String(opts?.companyContactCell || '').trim();
   const email = String(opts?.companyContactEmail || '').trim();
+  const website = String(opts?.companyContactWebsite || '').trim();
   return [
     (tel || cell) ? `Tel: ${[tel, cell].filter(Boolean).join(' · ')}` : '',
-    email ? `Email: ${email}` : ''
+    email ? `Email: ${email}` : '',
+    website ? `Web: ${website}` : ''
   ].filter(Boolean).join('\n');
 };
 
