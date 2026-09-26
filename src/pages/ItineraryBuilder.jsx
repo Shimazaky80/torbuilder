@@ -1209,6 +1209,30 @@ export const ItineraryBuilder = () => {
     editLockedRef.current = isReadOnly;
   }, [isReadOnly]);
 
+  /* Which tabs exist at the current stage. Itinerary / Travelers / Pricing /
+     Notes are available at every stage; the rest are stage-gated. Derived as a
+     stable string key so the guard effect below cannot re-run per render. */
+  const availableTabsKey = useMemo(() => {
+    const base = 'itinerary,client,pricing,notes';
+    if (isProvisional) return `${base},service-request,invoices`;
+    if (isConfirmed || isInProgress) return `${base},travel-docs,invoices,vouchers`;
+    if (isInProgress) return `${base},operations`;
+    if (isCompleted) return `${base},post-tour`;
+    if (isCancelled) return `${base},cancellation`;
+    return base;
+  }, [isProvisional, isConfirmed, isInProgress, isCompleted, isCancelled]);
+
+  /* A status change can retire the tab the user is standing on: Provisional ->
+     Quotation retires Service Request, and Confirmed/In Progress -> Quotation
+     retires Travel Documents and Vouchers. The panel for a retired tab renders
+     nothing at all, so without this the service list would look like every
+     service had vanished. Fall back to Itinerary, the canonical view of every
+     day and service at every stage. Nothing is mutated — this only moves the
+     view, so no service is ever lost. */
+  useEffect(() => {
+    if (!availableTabsKey.split(',').includes(activeTab)) setActiveTab('itinerary');
+  }, [availableTabsKey, activeTab]);
+
   const EDIT_LOCK_MESSAGE =
     'This itinerary is locked for editing. Change its status back to Quotation to make changes.';
 
@@ -3088,6 +3112,20 @@ return !!sv.time; /* activities / meals / other */
       showToast('Company not found', 'error');
       return false;
     }
+    /* Saving rewrites the days wholesale (delete + re-insert), so an empty
+       in-memory `days` on an itinerary that already has days stored would
+       destroy them. Refuse rather than wipe — this can only happen if the
+       working copy failed to hydrate, never as a deliberate user action. */
+    if (meta.itineraryId && days.length === 0) {
+      const { count } = await supabase
+        .from('itinerary_days')
+        .select('id', { count: 'exact', head: true })
+        .eq('itinerary_id', meta.itineraryId);
+      if (count) {
+        showToast('This itinerary already has saved days, but none are loaded. Reload the page before saving so nothing is lost.', 'error');
+        return false;
+      }
+    }
     const allocCheck = validateAllRoomAllocations();
     if (!allocCheck.isValid) {
       showToast(`Room Allocation Guardrail (Day ${allocCheck.dayNumber}): ${allocCheck.reason}`, 'error');
@@ -3547,13 +3585,22 @@ return !!sv.time; /* activities / meals / other */
         tourType: payload.tourType || meta.tourType,
         consultantName: payload.consultantName || meta.consultantName
       };
+      /* Functional update: renumber the days and re-date them from the new
+         travel start WITHOUT rebuilding the list from a captured `days`
+         snapshot. Reading a stale `days` here used to blank every service the
+         moment the user saved the details form, because this callback is not
+         re-created on every `days` change. */
+      setDays((prev) => prev.map((d, i) => ({
+        ...d,
+        dayNumber: i + 1,
+        date: payload.travelStart ? addDaysToDate(payload.travelStart, i) : d.date || ''
+      })));
       const nextDays = days.map((d, i) => ({
         ...d,
         dayNumber: i + 1,
         date: payload.travelStart ? addDaysToDate(payload.travelStart, i) : d.date || ''
       }));
       setMeta((prev) => ({ ...prev, ...nextMeta }));
-      setDays(nextDays);
       setLastSavedKey(JSON.stringify({ days: nextDays, meta: nextMeta }));
       setDetailsOpen(false);
       setSaved(true);
@@ -3563,7 +3610,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [meta.itineraryId, meta.client, showToast]);
+  }, [meta, showToast, days, setDays, setMeta]);
 
   /* ── Edit a day service (name + description override) ──────────────────── */
 
