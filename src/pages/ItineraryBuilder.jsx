@@ -972,6 +972,11 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
     `Itinerary: ${meta.itineraryName} (${meta.referenceNumber || meta.reference || '—'})`,
     `Travellers: ${guests}`,
     ...travellerDetailLines(meta.travellers),
+    /* Notes last so a guide reads the operational detail first, then the
+       per-traveller notes (allergies, accessibility, celebrations). */
+    ...(travellerNoteLines(meta.travellers).length
+      ? ['', 'Notes:', ...travellerNoteLines(meta.travellers).map((l) => `• ${l}`)]
+      : []),
     `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
     '',
     ...lines,
@@ -2803,9 +2808,19 @@ return !!sv.time; /* activities / meals / other */
       : '';
     const designer = meta.consultantName ? esc(meta.consultantName) : '—';
     const travellersList = (meta.travellers || []).map((tr) => travellerName(tr)).filter(Boolean);
-    const travellersHtml = travellersList.length
-      ? `<p style="margin:2px 0;">${travellersList.map((n) => esc(n)).join('<br>')}</p>`
-      : '';
+    /* Names plus each traveller's note. Shared by the Word and PDF itinerary
+       exports so both carry the same traveller notes as the voucher documents —
+       a note recorded on the Client form must not stop at the email. */
+    const travellersHtml = (() => {
+      const list = (meta.travellers || []).filter((tr) => travellerName(tr));
+      if (!list.length) return '';
+      return `<p style="margin:2px 0;">${list.map((tr) => {
+        const note = (tr.notes || '').trim();
+        return esc(travellerName(tr)) + (note
+          ? `<br><span style="color:#475569;font-size:0.9em;">Note: ${esc(note)}</span>`
+          : '');
+      }).join('<br>')}</p>`;
+    })();
     const paxWord = paxCount > 0 ? `${paxCount} traveller${paxCount === 1 ? '' : 's'}` : '—';
 
     /* Client Bill-To block on the itinerary document: optional logo, name,
