@@ -1723,6 +1723,25 @@ export const ItineraryBuilder = () => {
     boot();
   }, [data, fetchCompanyId, loadCompanyMeta, fetchItineraryItemIds, loadLibraryItemsByIds, loadExistingDays, initDaysFromRange]);
 
+  /* Safety net for the day skeleton. The boot pass above runs exactly once and
+     builds the days from the travel range, but it is async — if the user sets
+     the travel dates (or hits Save) before it lands, the working copy can still
+     be empty. Left alone, that saves an itinerary header with no days at all.
+     So whenever a complete travel range is known and there are simply no days
+     yet, (re)generate them. Guarded on `days.length === 0` so it can never
+     touch days that already exist, and it cannot loop: once it runs, the
+     skeleton is present. */
+  useEffect(() => {
+    if (!bootedState) return;
+    if (days.length > 0) return;
+    if (!meta.travelStart || !meta.travelEnd) return;
+    /* Deferred a tick so the skeleton lands in its own render instead of
+       cascading out of this effect. React clears the timer if the deps change
+       or the page unmounts first, so only one rebuild is ever queued. */
+    const t = setTimeout(() => initDaysFromRange(), 0);
+    return () => clearTimeout(t);
+  }, [bootedState, days.length, meta.travelStart, meta.travelEnd, initDaysFromRange]);
+
   /* Load this itinerary's issued invoices so the builder can reflect real
      deposit/final state (issued, paid, outstanding) without a round-trip to
      the Invoices module. */
@@ -3113,18 +3132,24 @@ return !!sv.time; /* activities / meals / other */
       return false;
     }
     /* Saving rewrites the days wholesale (delete + re-insert), so an empty
-       in-memory `days` on an itinerary that already has days stored would
-       destroy them. Refuse rather than wipe — this can only happen if the
-       working copy failed to hydrate, never as a deliberate user action. */
-    if (meta.itineraryId && days.length === 0) {
-      const { count } = await supabase
-        .from('itinerary_days')
-        .select('id', { count: 'exact', head: true })
-        .eq('itinerary_id', meta.itineraryId);
-      if (count) {
-        showToast('This itinerary already has saved days, but none are loaded. Reload the page before saving so nothing is lost.', 'error');
-        return false;
+       in-memory `days` is never something to persist:
+         - on an itinerary that already has days stored it would destroy them;
+         - on a new itinerary it writes a header with no days at all, which is
+           how a booking can end up "saved" yet empty.
+       Refuse both, and say which case it is. */
+    if (days.length === 0) {
+      if (meta.itineraryId) {
+        const { count } = await supabase
+          .from('itinerary_days')
+          .select('id', { count: 'exact', head: true })
+          .eq('itinerary_id', meta.itineraryId);
+        if (count) {
+          showToast('This itinerary already has saved days, but none are loaded. Reload the page before saving so nothing is lost.', 'error');
+          return false;
+        }
       }
+      showToast('Add at least one day before saving this itinerary.', 'warning');
+      return false;
     }
     const allocCheck = validateAllRoomAllocations();
     if (!allocCheck.isValid) {
