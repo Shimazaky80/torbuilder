@@ -1209,30 +1209,6 @@ export const ItineraryBuilder = () => {
     editLockedRef.current = isReadOnly;
   }, [isReadOnly]);
 
-  /* Which tabs exist at the current stage. Itinerary / Travelers / Pricing /
-     Notes are available at every stage; the rest are stage-gated. Derived as a
-     stable string key so the guard effect below cannot re-run per render. */
-  const availableTabsKey = useMemo(() => {
-    const base = 'itinerary,client,pricing,notes';
-    if (isProvisional) return `${base},service-request,invoices`;
-    if (isConfirmed || isInProgress) return `${base},travel-docs,invoices,vouchers`;
-    if (isInProgress) return `${base},operations`;
-    if (isCompleted) return `${base},post-tour`;
-    if (isCancelled) return `${base},cancellation`;
-    return base;
-  }, [isProvisional, isConfirmed, isInProgress, isCompleted, isCancelled]);
-
-  /* A status change can retire the tab the user is standing on: Provisional ->
-     Quotation retires Service Request, and Confirmed/In Progress -> Quotation
-     retires Travel Documents and Vouchers. The panel for a retired tab renders
-     nothing at all, so without this the service list would look like every
-     service had vanished. Fall back to Itinerary, the canonical view of every
-     day and service at every stage. Nothing is mutated — this only moves the
-     view, so no service is ever lost. */
-  useEffect(() => {
-    if (!availableTabsKey.split(',').includes(activeTab)) setActiveTab('itinerary');
-  }, [availableTabsKey, activeTab]);
-
   const EDIT_LOCK_MESSAGE =
     'This itinerary is locked for editing. Change its status back to Quotation to make changes.';
 
@@ -1389,6 +1365,17 @@ export const ItineraryBuilder = () => {
      the full travel pack; in progress adds operational briefs; completed
      shows post-tour closure; cancelled shows the cancellation module and
      revokes everything else. */
+  /* Which tabs exist at the current stage. Itinerary / Travelers / Pricing /
+     Notes are available at every stage; the rest are stage-gated.
+     This is the SINGLE source of truth for stage gating — the tab bar, the
+     panels and the fallback below all read it, so a gate can never disagree
+     with itself.
+     A status change can retire the tab the user is standing on: Provisional ->
+     Quotation retires Service Request, and Confirmed/In Progress -> Quotation
+     retires Travel Documents and Vouchers. `tab` therefore falls back to
+     Itinerary, the canonical view of every day and service at every stage, so a
+     retired tab can never leave a blank panel that looks like lost services.
+     Nothing is mutated here — only the view moves, so no service is lost. */
   const visibleTabIds = useMemo(() => {
     const ids = ['itinerary', 'client', 'pricing', 'notes'];
     if (isProvisional) ids.push('service-request', 'invoices');
@@ -4224,53 +4211,53 @@ const missing = !sv.confirmationNumber ||
 
           {/* Tabs — hidden stages are locked out of their documents */}
           <div className="builder-tabs">
-            <button type="button" className={`builder-tab ${activeTab === 'itinerary' ? 'active' : ''}`} onClick={() => setActiveTab('itinerary')}>
+            <button type="button" className={`builder-tab ${tab === 'itinerary' ? 'active' : ''}`} onClick={() => setActiveTab('itinerary')}>
               <Route size={15} /> Itinerary
             </button>
-            <button type="button" className={`builder-tab ${activeTab === 'client' ? 'active' : ''}`} onClick={() => setActiveTab('client')}>
+            <button type="button" className={`builder-tab ${tab === 'client' ? 'active' : ''}`} onClick={() => setActiveTab('client')}>
               <User size={15} /> Travelers Info
             </button>
-            <button type="button" className={`builder-tab ${activeTab === 'pricing' ? 'active' : ''}`} onClick={() => setActiveTab('pricing')}>
+            <button type="button" className={`builder-tab ${tab === 'pricing' ? 'active' : ''}`} onClick={() => setActiveTab('pricing')}>
               <Receipt size={15} /> Pricing
             </button>
-            <button type="button" className={`builder-tab ${activeTab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
+            <button type="button" className={`builder-tab ${tab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
               <StickyNote size={15} /> Notes
             </button>
             {isProvisional && (
               <>
-                <button type="button" className={`builder-tab ${activeTab === 'service-request' ? 'active' : ''}`} onClick={() => setActiveTab('service-request')}>
+                <button type="button" className={`builder-tab ${tab === 'service-request' ? 'active' : ''}`} onClick={() => setActiveTab('service-request')}>
                   <Mail size={15} /> Service Request
                 </button>
-                <button type="button" className={`builder-tab ${activeTab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
+                <button type="button" className={`builder-tab ${tab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
                   <Receipt size={15} /> Deposit Request
                 </button>
               </>
             )}
             {(isConfirmed || isInProgress) && (
               <>
-                <button type="button" className={`builder-tab ${activeTab === 'travel-docs' ? 'active' : ''}`} onClick={() => setActiveTab('travel-docs')}>
+                <button type="button" className={`builder-tab ${tab === 'travel-docs' ? 'active' : ''}`} onClick={() => setActiveTab('travel-docs')}>
                   <Plane size={15} /> Travel Documents
                 </button>
-                <button type="button" className={`builder-tab ${activeTab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
+                <button type="button" className={`builder-tab ${tab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
                   <Receipt size={15} /> Invoices
                 </button>
-                <button type="button" className={`builder-tab ${activeTab === 'vouchers' ? 'active' : ''}`} onClick={() => setActiveTab('vouchers')}>
+                <button type="button" className={`builder-tab ${tab === 'vouchers' ? 'active' : ''}`} onClick={() => setActiveTab('vouchers')}>
                   <Ticket size={15} /> Vouchers
                 </button>
               </>
             )}
             {isInProgress && (
-              <button type="button" className={`builder-tab ${activeTab === 'operations' ? 'active' : ''}`} onClick={() => setActiveTab('operations')}>
+              <button type="button" className={`builder-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setActiveTab('operations')}>
                 <Calendar size={15} /> Operations
               </button>
             )}
             {isCompleted && (
-              <button type="button" className={`builder-tab ${activeTab === 'post-tour' ? 'active' : ''}`} onClick={() => setActiveTab('post-tour')}>
+              <button type="button" className={`builder-tab ${tab === 'post-tour' ? 'active' : ''}`} onClick={() => setActiveTab('post-tour')}>
                 <CheckCircle2 size={15} /> Post-Tour
               </button>
             )}
             {isCancelled && (
-              <button type="button" className={`builder-tab ${activeTab === 'cancellation' ? 'active' : ''}`} onClick={() => setActiveTab('cancellation')}>
+              <button type="button" className={`builder-tab ${tab === 'cancellation' ? 'active' : ''}`} onClick={() => setActiveTab('cancellation')}>
                 <X size={15} /> Cancellation
               </button>
             )}
