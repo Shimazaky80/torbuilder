@@ -748,13 +748,19 @@ const safeNameOf = (label) => {
   return s || 'voucher';
 };
 
+/* Display name for a traveller. Guards against a missing first name: a template
+   literal would stringify it to the literal text "undefined", which is truthy
+   and so would defeat a `|| 'Traveller'` fallback — and these names go out to
+   suppliers on vouchers. */
+const travellerName = (tr) => `${(tr?.name || '').trim()} ${(tr?.surname || '').trim()}`.trim() || 'Traveller';
+
 /* Per-traveller detail lines (nationality, passport, emergency contact, dietary,
    insurance) so important client info travels into vouchers + documents. Notes are
    intentionally NOT inline here — they are compounded at the bottom of the voucher
    in a single Notes box, each labelled with the traveller it belongs to. */
 const travellerDetailLines = (travellers) => {
   return (Array.isArray(travellers) ? travellers : []).map((tr) => {
-    const who = `${tr.name} ${tr.surname || ''}`.trim() || 'Traveller';
+    const who = travellerName(tr);
     const bits = [
       tr.nationality ? `Nationality: ${tr.nationality}` : '',
       tr.passportNumber ? `Passport: ${tr.passportNumber}` : '',
@@ -770,7 +776,7 @@ const travellerDetailLines = (travellers) => {
    notes are stacked together in the voucher Notes box across every voucher. */
 const travellerNoteLines = (travellers) => {
   return (Array.isArray(travellers) ? travellers : []).map((tr) => {
-    const who = `${tr.name} ${tr.surname || ''}`.trim() || 'Traveller';
+    const who = travellerName(tr);
     const note = (tr.notes || '').trim();
     return note ? `${who}: ${note}` : '';
   }).filter(Boolean);
@@ -793,7 +799,7 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount, billing) => 
     `Itinerary: ${meta.itineraryName}`,
     `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
     `Tour Designer: ${meta.consultantName || '—'}`,
-    `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
+    `Travellers: ${(meta.travellers || []).map((tr) => travellerName(tr)).filter(Boolean).join(', ') || '—'}`,
     ...travellerDetailLines(meta.travellers),
     `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
     '',
@@ -840,7 +846,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
       </table>
     </div>`;
   }).join('\n');
-  const trav = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
+  const trav = (meta.travellers || []).map((tr) => travellerName(tr)).filter(Boolean).join(', ') || '—';
   const notes = travellerNoteLines(meta.travellers);
   /* Tenant company profile in the voucher header. A voucher is issued to the
      supplier, so it carries the agency's details (not the client's) plus the
@@ -939,7 +945,7 @@ const invoiceHeaderLines = (meta) => [
   `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
   `Tour Designer: ${meta.consultantName || '—'}`,
   `Client: ${meta.client?.name || '—'}`,
-  `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
+  `Travellers: ${(meta.travellers || []).map((tr) => travellerName(tr)).filter(Boolean).join(', ') || '—'}`,
   ...travellerDetailLines(meta.travellers),
   `Dates: ${meta.travelStart} to ${meta.travelEnd}`
 ];
@@ -956,7 +962,7 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
       `  Estimated value: ${currencySymbol}${line.toFixed(2)}`
     ].filter((l) => l !== '').join('\n');
   });
-  const guests = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
+  const guests = (meta.travellers || []).map((tr) => travellerName(tr)).filter(Boolean).join(', ') || '—';
   const coTel = [billing?.contact_tel, billing?.contact_cell].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
   return [
     ...companyProfileLines(billing),
@@ -1598,6 +1604,11 @@ export const ItineraryBuilder = () => {
           travelEnd: toISODate(it.travel_end_date) || prev.travelEnd,
           status: it.status || prev.status,
           notes: it.notes || '',
+          /* Travellers must be reloaded from the persisted row too. They are only
+             ever entered on the Client form, so they are not in the route state on
+             every entry (refresh, deep link, copied URL), and without this the
+             working copy silently starts with none. */
+          travellers: Array.isArray(it.travellers) ? it.travellers : (prev.travellers || []),
           numAdults: it.num_adults ?? prev.numAdults,
           numChildren: it.num_children ?? prev.numChildren,
           agencyRef: it.agency_reference || prev.agencyRef,
@@ -2791,7 +2802,7 @@ return !!sv.time; /* activities / meals / other */
       ? `<div style="${hdrAlign};margin-bottom:32px;">${hdrAddressLine}${hdrContactBlock}</div>`
       : '';
     const designer = meta.consultantName ? esc(meta.consultantName) : '—';
-    const travellersList = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean);
+    const travellersList = (meta.travellers || []).map((tr) => travellerName(tr)).filter(Boolean);
     const travellersHtml = travellersList.length
       ? `<p style="margin:2px 0;">${travellersList.map((n) => esc(n)).join('<br>')}</p>`
       : '';
@@ -3151,13 +3162,30 @@ return !!sv.time; /* activities / meals / other */
       const finalEnd = toISODate(meta.travelEnd) || finalStart;
       const fallbackConsultant = await getLoggedInUserName();
       const finalConsultant = meta.consultantName || fallbackConsultant || null;
+      /* Travellers and their notes are only ever entered on the Client form, so an
+         empty list here means the working copy never loaded them — it is never a
+         deliberate deletion (there is no UI for one). Persisting it would wipe every
+         traveller and note on the record, so fall back to what is stored. */
+      let travellersToSave = Array.isArray(meta.travellers) ? meta.travellers : [];
+      if (travellersToSave.length === 0 && meta.itineraryId) {
+        const { data: stored } = await supabase
+          .from('itineraries')
+          .select('travellers')
+          .eq('id', meta.itineraryId)
+          .maybeSingle();
+        const storedTravellers = Array.isArray(stored?.travellers) ? stored.travellers : [];
+        if (storedTravellers.length > 0) {
+          travellersToSave = storedTravellers;
+          setMeta((prev) => ({ ...prev, travellers: storedTravellers }));
+        }
+      }
       const headerPayload = {
         itinerary_name: meta.itineraryName,
         travel_start_date: finalStart || null,
         travel_end_date: finalEnd || null,
         num_adults: Number(meta.numAdults) || 0,
         num_children: Number(meta.numChildren) || 0,
-        travellers: meta.travellers || [],
+        travellers: travellersToSave,
         agency_reference: meta.agencyRef || null,
         notes: meta.notes || null,
         status: meta.status || 'quotation',
@@ -4536,6 +4564,7 @@ const missing = !sv.confirmationNumber ||
                     <th>Name</th>
                     <th>Surname</th>
                     <th>Age</th>
+                    <th>Note</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4545,11 +4574,12 @@ const missing = !sv.confirmationNumber ||
                       <td>{t.name || '—'}</td>
                       <td>{t.surname || '—'}</td>
                       <td>{t.age || '—'}</td>
+                      <td style={{ maxWidth: '22rem', whiteSpace: 'pre-wrap' }}>{t.notes || '—'}</td>
                     </tr>
                   ))}
                   {!meta.travellers?.length && (
                     <tr>
-                      <td colSpan="4" style={{ color: '#94a3b8' }}>No traveller details recorded.</td>
+                      <td colSpan="5" style={{ color: '#94a3b8' }}>No traveller details recorded.</td>
                     </tr>
                   )}
                 </tbody>
