@@ -331,6 +331,75 @@ const statusLabelOf = (v) => STATUS_OPTIONS.find((s) => s.value === v)?.label ||
 const mailTo = (email, subject, body) =>
   `mailto:${(email || '').trim()}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 
+/* ─── Tenant company profile (Bill-from) for the travel documents ───────────
+   The company profile from Settings — name, billing address and the
+   Tel / Email / Web contact lines — is stamped onto every supplier-facing
+   travel document (vouchers, daily briefs, reconfirmation drafts) so the
+   supplier always knows who is asking and how to reach the agency. */
+const companyContactLines = (billing) => {
+  const tel = String(billing?.contact_tel || '').trim();
+  const cell = String(billing?.contact_cell || '').trim();
+  const email = String(billing?.contact_email || '').trim();
+  const web = String(billing?.contact_website || '').trim();
+  return [
+    (tel || cell) ? `Tel: ${[tel, cell].filter(Boolean).join(' · ')}` : '',
+    email ? `Email: ${email}` : '',
+    web ? `Web: ${web}` : ''
+  ].filter(Boolean);
+};
+
+const companyNameOf = (billing) =>
+  String(billing?.legal_name || billing?.name || '').trim();
+
+/* Supplier records for the services on an itinerary, keyed by supplier id.
+   Services carry their own supplier_id (persisted on itinerary_day_items), so
+   the supplier's email/phone resolve for every service — including custom
+   services that never came from a library item. Without this the provisional
+   service requests and the confirmed reconfirmations fall back to
+   "No email on file" even when the supplier has an email on file. */
+const fetchSupplierMap = async (supplierIds) => {
+  const ids = [...new Set((supplierIds || []).filter(Boolean))];
+  if (!ids.length) return {};
+  const { data } = await supabase
+    .from('suppliers')
+    .select('id, name, email, phone, website, contact_person, address, country, province_state, city, city_location')
+    .in('id', ids);
+  const map = {};
+  (data || []).forEach((s) => { map[s.id] = s; });
+  return map;
+};
+
+/* Attach the resolved supplier onto each service so servicesBySupplier() and
+   the per-service email drafts can reach it without another lookup. */
+const attachSuppliers = (builtDays, supMap) => {
+  if (!supMap || !Object.keys(supMap).length) return builtDays;
+  builtDays.forEach((d) => {
+    (d.services || []).forEach((sv) => {
+      const sup = supMap[sv.supplierId] || null;
+      if (sup) sv.supplierObj = sup;
+    });
+  });
+  return builtDays;
+};
+
+const companyAddressOf = (billing) =>
+  String(billing?.billing_address || '').trim();
+
+/* Name + address + contact, as plain lines for the text-only documents. */
+const companyProfileLines = (billing) => [
+  companyNameOf(billing),
+  companyAddressOf(billing),
+  ...companyContactLines(billing)
+].filter(Boolean);
+
+/* "Kind regards," followed by the full company profile — the sign-off block on
+   every supplier email draft. */
+const companySignOffLines = (billing) => [
+  'Kind regards,',
+  '',
+  ...companyProfileLines(billing)
+];
+
 const emailOf = (sup) =>
   (sup && (sup.email || sup.contact_email || sup.email_address || '').trim()) || '';
 
@@ -530,8 +599,10 @@ const servicesBySupplier = (days, libraryItems) => {
   const groups = {};
   const order = [];
   const supplierOf = (sv) => {
+    /* supplierObj (resolved on load) wins; the library item is the fallback for
+       services added in-session before a supplier fetch has run. */
     const li = (libraryItems || []).find((it) => it.id === sv.itemId);
-    return li?.supplier || sv.supplierObj || null;
+    return sv.supplierObj || li?.supplier || sv.sup || null;
   };
   const groupKeyOf = (sv) => {
     const sup = supplierOf(sv);
@@ -561,7 +632,7 @@ const servicesBySupplier = (days, libraryItems) => {
 };
 
 /* One combined mailto body for every service going to a single supplier. */
-const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount) => {
+const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount, billing) => {
   const adults = Number(meta.numAdults) || 0;
   const children = Number(meta.numChildren) || 0;
   const bodies = group.svcs.map(({ sv, day }) => {
@@ -586,7 +657,7 @@ const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount) =>
     '',
     `Thank you for your assistance.`,
     '',
-    `Kind regards,`
+    ...companySignOffLines(billing)
   ].join('\n');
   return {
     to: group.email,
@@ -597,7 +668,7 @@ const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount) =>
 
 /* Confirmed-stage reconfirmation — one mailto draft per supplier, carrying the
    per-category confirmation details (status OK + supplier confirmation data). */
-const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCount) => {
+const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCount, billing) => {
   const adults = Number(meta.numAdults) || 0;
   const children = Number(meta.numChildren) || 0;
   const bodies = group.svcs.map(({ sv, day }) => [
@@ -620,7 +691,7 @@ const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCoun
     '',
     `Thank you for your cooperation,`,
     '',
-    `Kind regards,`
+    ...companySignOffLines(billing)
   ].join('\n');
   return {
     to: group.email,
@@ -632,7 +703,7 @@ const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCoun
 /* Per-item email line group shared by the single-service draft and the
    combined-per-supplier draft so both styles carry the exact same fields in
    the exact same order (Service → Dates → Time → Guests → Special Req).      */
-const serviceItemLines = (sv, day, meta, currencySymbol, paxCount) => {
+const serviceItemLines = (sv, day, meta, currencySymbol, paxCount, libraryItems) => {
   const adults = Number(meta.numAdults) || 0;
   const children = Number(meta.numChildren) || 0;
   const dayShot = formatDateShort(day.date);
@@ -649,17 +720,19 @@ const serviceItemLines = (sv, day, meta, currencySymbol, paxCount) => {
 };
 
 /* One mailto draft per item, sent straight to the item's supplier. */
-const serviceItemEmail = (sv, day, amount, meta, currencySymbol, paxCount) => {
+const serviceItemEmail = (sv, day, amount, meta, currencySymbol, paxCount, billing, libraryItems) => {
   const agencyLabel = meta.agencyRef || meta.agency_reference || meta.client?.name || 'Direct Client';
   const body = [
     `We would like to place a provisional request for the following service on behalf of our client:`,
     '',
-    serviceItemLines(sv, day, meta, currencySymbol, paxCount),
+    serviceItemLines(sv, day, meta, currencySymbol, paxCount, libraryItems),
     '',
     `Estimated net: ${currencySymbol}${amount.toFixed(2)}`,
     `Our Reference#: ${meta.referenceNumber || meta.reference || '—'}`,
     `Agency/Direct Client: ${agencyLabel}`,
-    `Client Nationality: ${meta.client?.nationality || '—'}`
+    `Client Nationality: ${meta.client?.nationality || '—'}`,
+    '',
+    ...companySignOffLines(billing)
   ].join('\n');
   return {
     to: emailOf(sv.sup || sv.supplierObj) || sv.supplierEmail || '',
@@ -702,7 +775,7 @@ const travellerNoteLines = (travellers) => {
     return note ? `${who}: ${note}` : '';
   }).filter(Boolean);
 };
-const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
+const voucherFor = (group, allDays, meta, currencySymbol, paxCount, billing) => {
   const dateStr = (day) => (day.date ? formatDateLong(day.date) : '');
   const lines = group.svcs.map(({ sv, day }) => [
     `• ${repairText(sv.name)}`,
@@ -710,12 +783,16 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
     ...voucherDetailLines(sv).map((l) => `  ${l}`)
   ].filter((l) => l !== '').join('\n'));
   return [
+    /* A voucher is issued to the supplier, so it leads with the agency's own
+       details and carries only the travellers, the supplier and the services —
+       never the client's profile. */
+    ...companyProfileLines(billing),
+    ...(companyProfileLines(billing).length ? ['', '─'.repeat(34)] : []),
     `SERVICE VOUCHER`,
     `Supplier: ${group.label}`,
     `Itinerary: ${meta.itineraryName}`,
     `Reference: ${meta.referenceNumber || meta.reference || '—'}`,
     `Tour Designer: ${meta.consultantName || '—'}`,
-    `Client: ${meta.client?.name || '—'}`,
     `Travellers: ${(meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—'}`,
     ...travellerDetailLines(meta.travellers),
     `Guests: ${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)`,
@@ -725,7 +802,9 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
       ? ['', 'Notes:', ...travellerNoteLines(meta.travellers).map((l) => `• ${l}`)]
       : []),
     '',
-    `Thank you for your cooperation.`
+    `Thank you for your cooperation.`,
+    '',
+    ...companySignOffLines(billing)
   ].join('\n');
 };
 
@@ -733,7 +812,11 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount) => {
    read-only fields that voucherFor emits so the downloaded file is identical
    to what is shown and emailed — vouchers cannot be edited or diverge. */
 const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) => {
-  const { logo = '', logoSize = 'md' } = opts || {};
+  const {
+    logo = '', logoSize = 'md',
+    companyName = '', companyAddress = '',
+    companyTel = '', companyCell = '', companyEmail = '', companyWebsite = ''
+  } = opts || {};
   const esc = htmlEscape;
   const dateStr = (day) => (day.date ? formatDateLong(day.date) : '');
   const logoW = LOGO_WIDTHS[logoSize] || LOGO_WIDTHS.md;
@@ -758,8 +841,21 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
     </div>`;
   }).join('\n');
   const trav = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
-  const clientLine = meta.client?.name ? esc(meta.client.name) : '—';
   const notes = travellerNoteLines(meta.travellers);
+  /* Tenant company profile in the voucher header. A voucher is issued to the
+     supplier, so it carries the agency's details (not the client's) plus the
+     travellers, the supplier and the services. */
+  const coTel = [companyTel, companyCell].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
+  const coLine = (label, value) => (value
+    ? `<div style="color:#0f766e;font-size:11px;">${esc(label)}: ${esc(value)}</div>`
+    : '');
+  const coBlock = [
+    companyName ? `<div style="font-weight:700;color:#134e4a;">${esc(companyName)}</div>` : '',
+    companyAddress ? `<div style="color:#475569;font-size:11px;">${esc(companyAddress).replace(/\n/g, '<br>')}</div>` : '',
+    coLine('Tel', coTel),
+    coLine('Email', companyEmail),
+    coLine('Web', companyWebsite)
+  ].join('');
   return `<!doctype html><html><head><meta charset="utf-8"><title>Voucher — ${esc(group.label)}</title>
 <style>
   * { box-sizing: border-box; }
@@ -767,7 +863,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
   .doc { max-width: 820px; margin: 0 auto; border: 1px solid #cbd5e1; border-top: 6px solid #0d7478; border-radius: 10px; overflow: hidden; background: #fff; }
   .hd { background: #f0fdfa; padding: 18px 22px; border-bottom: 2px solid #99f6e4; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
   .hd .lg { flex: 0 0 auto; }
-  .hd .lg img { display: block; max-width: ${logoW}px; height: auto; }
+  .hd .lg img { display: block; max-width: ${logoW}px; height: auto; margin-bottom: 8px; }
   .hd .tt h1 { font-size: 20px; margin: 0 0 2px; color: #0d7478; letter-spacing: 1px; }
   .hd .tt .sub { font-size: 11px; color: #0f766e; text-transform: uppercase; letter-spacing: 1.5px; }
   .meta { padding: 12px 22px; border-bottom: 1px solid #e2e8f0; background: #fbfdfd; font-size: 12px; }
@@ -787,7 +883,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
 </style></head><body>
   <div class="doc">
     <div class="hd">
-      <div class="lg">${logo ? `<img src="${esc(logo)}" alt="Company logo">` : ''}</div>
+      <div class="lg">${logo ? `<img src="${esc(logo)}" alt="Company logo">` : ''}${coBlock}</div>
       <div class="tt" style="text-align:right">
         <div class="sub">Supplier</div>
         <h1>Service Voucher</h1>
@@ -797,8 +893,8 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
     <div class="meta">
       <table>
         <tr><td class="h">Itinerary</td><td>${esc(meta.itineraryName || '—')}</td><td class="h">Reference</td><td>${esc(meta.referenceNumber || meta.reference || '—')}</td></tr>
-        <tr><td class="h">Client</td><td>${clientLine}</td><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td></tr>
-        <tr><td class="h">Tour Designer</td><td>${esc(meta.consultantName || '—')}</td><td class="h">Dates</td><td>${esc(formatDateLong(meta.travelStart))} → ${esc(formatDateLong(meta.travelEnd))}</td></tr>
+        <tr><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td><td class="h">Dates</td><td>${esc(formatDateLong(meta.travelStart))} → ${esc(formatDateLong(meta.travelEnd))}</td></tr>
+        <tr><td class="h">Tour Designer</td><td colspan="3">${esc(meta.consultantName || '—')}</td></tr>
         <tr><td class="h">Travellers</td><td colspan="3">${esc(trav)}</td></tr>
         ${travellerDetailLines(meta.travellers).map((d) => `<tr><td class="h">Traveller details</td><td colspan="3">${esc(d)}</td></tr>`).join('')}
         ${notes.map((n) => `<tr><td class="h">Note</td><td colspan="3">${esc(n)}</td></tr>`).join('')}
@@ -849,7 +945,7 @@ const invoiceHeaderLines = (meta) => [
 ];
 
 /* Daily service brief for one day — operational handover for guides/suppliers. */
-const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
+const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
   const lines = (day.services || []).map((sv) => {
     const line = round2((Number(sv.sellPP) || 0) * paxCount);
     return [
@@ -861,7 +957,10 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
     ].filter((l) => l !== '').join('\n');
   });
   const guests = (meta.travellers || []).map((tr) => `${tr.name} ${tr.surname || ''}`.trim()).filter(Boolean).join(', ') || '—';
+  const coTel = [billing?.contact_tel, billing?.contact_cell].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
   return [
+    ...companyProfileLines(billing),
+    ...(companyProfileLines(billing).length ? ['', '─'.repeat(34), ''] : []),
     `DAILY SERVICE BRIEF — Day ${day.dayNumber}`,
     day.date ? `Date: ${formatDateLong(day.date)}` : '',
     `Itinerary: ${meta.itineraryName} (${meta.referenceNumber || meta.reference || '—'})`,
@@ -871,7 +970,7 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol) => {
     '',
     ...lines,
     '',
-    'Operational contact: ' + (meta.client?.contact_cell || meta.client?.contact_tel || '—')
+    'Operational contact: ' + (coTel || companyNameOf(billing) || '—')
   ].join('\n');
 };
 
@@ -1077,6 +1176,17 @@ export const ItineraryBuilder = () => {
   const currencyObj = currencies.find((c) => (c.code || '').toUpperCase() === currencyCode.toUpperCase());
   const currencySymbol = currencyObj?.symbol || currencyCode;
   const paxCount = (Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0);
+  /* Company profile options for the supplier-facing travel documents. */
+  const voucherOpts = {
+    logo: billing?.logo_data_url || '',
+    logoSize: billing?.logo_size || 'md',
+    companyName: companyNameOf(billing),
+    companyAddress: companyAddressOf(billing),
+    companyTel: billing?.contact_tel || '',
+    companyCell: billing?.contact_cell || '',
+    companyEmail: billing?.contact_email || '',
+    companyWebsite: billing?.contact_website || ''
+  };
   const markupPct = Number(meta.client?.markup_percentage) || 0;
   const currentDay = days[selectedDayIndex] || null;
   const stage = meta.status || 'quotation';
@@ -1504,6 +1614,7 @@ export const ItineraryBuilder = () => {
             return {
               key: nextId(),
               itemId: ii.item_id || null,
+              supplierId: ii.supplier_id || null,
               name: ii.item_name || '',
               category: ii.category || '',
               supplierName: ii.supplier_name || '',
@@ -1538,7 +1649,9 @@ export const ItineraryBuilder = () => {
             };
           })
         }));
-        setDays(built);
+        setDays(attachSuppliers(built, await fetchSupplierMap(
+          built.flatMap((d) => (d.services || []).map((s) => s.supplierId))
+        )));
         return true;
       }
       return false;
@@ -1851,6 +1964,7 @@ export const ItineraryBuilder = () => {
     const svc = {
       key: nextId(),
       itemId: item.id,
+      supplierId: item.supplier_id || item.supplierId || item.supplier?.id || null,
       name: item.name,
       category: item.category || '',
       supplierName: item.supplier?.name || '',
@@ -2357,6 +2471,7 @@ return !!sv.time; /* activities / meals / other */
           return {
             key: nextId(),
             itemId: ii.item_id || null,
+            supplierId: ii.supplier_id || null,
             name: ii.item_name || '',
             category: ii.category || '',
             supplierName: ii.supplier_name || '',
@@ -2392,7 +2507,9 @@ return !!sv.time; /* activities / meals / other */
         })
       }));
       const merged = [...days.slice(0, insertIdx), ...src, ...days.slice(insertIdx)];
-      const next = normalizeDays(merged);
+      const next = attachSuppliers(normalizeDays(merged), await fetchSupplierMap(
+        merged.flatMap((d) => (d.services || []).map((s) => s.supplierId))
+      ));
       setDays(next);
       applyDateExtension(next);
       setSelectedDayIndex(insertIdx);
@@ -3051,6 +3168,7 @@ return !!sv.time; /* activities / meals / other */
           itinerary_day_id: newDay.id,
           company_id: companyId,
           item_id: s.itemId || null,
+          supplier_id: s.supplierId || s.supplier_id || null,
           item_name: s.name,
           description_override: s.descOverride || null,
           category: s.category || null,
@@ -4634,7 +4752,7 @@ const missing = !sv.confirmationNumber ||
                   const perm = servicesBySupplier(days, libraryItems).filter((g) => emailOf(g.sup));
                   if (!perm.length) { showToast('No supplier email on file', 'warning'); return; }
                   const first = perm[0];
-                  const m = supplierRequestEmail(first, days, meta, currencySymbol, paxCount);
+                  const m = supplierRequestEmail(first, days, meta, currencySymbol, paxCount, billing);
                   window.open(mailTo(m.to, m.subject, m.body), '_blank');
                 }}>
                   <Mail size={15} /> Compose all requests
@@ -4659,7 +4777,7 @@ const missing = !sv.confirmationNumber ||
   {grp.svcs.map(({ sv, day }) => renderServiceCard(sv, day, { editable: !isTerminal, tab: 'service-request' }))}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
                       <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} disabled={!emailOf(grp.sup)} onClick={() => {
-                        const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount);
+                        const m = supplierRequestEmail(grp, days, meta, currencySymbol, paxCount, billing);
                         window.open(mailTo(m.to, m.subject, m.body), '_blank');
                       }}>
                         <Mail size={14} /> Compose ({grp.label}) request
@@ -4720,7 +4838,7 @@ const missing = !sv.confirmationNumber ||
                     {grp.svcs.map(({ sv, day }) => renderServiceCard(sv, day, { editable: false, tab: 'travel-documents' }))}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.8rem' }}>
                       <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem', background: '#9e1e50', borderColor: '#9e1e50', color: '#fff' }} disabled={!emailOf(grp.sup)} onClick={() => {
-                        const m = supplierConfirmationEmail(grp, days, meta, currencySymbol, paxCount);
+                        const m = supplierConfirmationEmail(grp, days, meta, currencySymbol, paxCount, billing);
                         window.open(mailTo(m.to, m.subject, m.body), '_blank');
                       }}>
                         <FileText size={14} /> Compose reconfirmation to {grp.label}
@@ -4756,7 +4874,7 @@ const missing = !sv.confirmationNumber ||
                         className="primary-btn"
                         onClick={() => {
                           bulkConfirmGroups.forEach((g) => {
-                            const m = supplierConfirmationEmail(g, days, meta, currencySymbol, paxCount);
+                            const m = supplierConfirmationEmail(g, days, meta, currencySymbol, paxCount, billing);
                             window.open(mailTo(m.to, m.subject, m.body), '_blank');
                           });
                           setBulkConfirmOpen(false);
@@ -4966,7 +5084,7 @@ const missing = !sv.confirmationNumber ||
               </p>
 
               {servicesBySupplier(days, libraryItems).map((grp) => {
-                const m = voucherFor(grp, days, meta, currencySymbol, paxCount);
+                const m = voucherFor(grp, days, meta, currencySymbol, paxCount, billing);
                 return (
                   <div key={grp.key} className="voucher-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden', background: '#ffffff', borderLeft: '4px solid #0d7478' }}>
                     <div style={{ padding: '0.9rem 1rem', background: '#f0fdfa', borderBottom: '1px solid #99f6e4' }}>
@@ -4985,10 +5103,10 @@ const missing = !sv.confirmationNumber ||
                       <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={!emailOf(grp.sup)} onClick={() => window.open(mailTo(emailOf(grp.sup), `Voucher — ${grp.label}`, m), '_blank')}>
                         <Mail size={14} /> Email voucher to supplier
                       </button>
-                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => openPrintWindow(voucherDocHtml(grp, days, meta, currencySymbol, paxCount, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), 300)}>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => openPrintWindow(voucherDocHtml(grp, days, meta, currencySymbol, paxCount, voucherOpts), 300)}>
                         <Printer size={14} /> PDF / Print
                       </button>
-                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => downloadBlob(voucherDocHtml(grp, days, meta, currencySymbol, paxCount, { logo: billing?.logo_data_url || '', logoSize: billing?.logo_size || 'md' }), `${safeNameOf(grp.label)}-voucher.doc`, 'application/msword')}>
+                      <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => downloadBlob(voucherDocHtml(grp, days, meta, currencySymbol, paxCount, voucherOpts), `${safeNameOf(grp.label)}-voucher.doc`, 'application/msword')}>
                         <Download size={14} /> Word
                       </button>
                     </div>
@@ -5009,7 +5127,7 @@ const missing = !sv.confirmationNumber ||
                 trip — guides and suppliers get their service times, contact details and expected values.
               </p>
               {days.map((d) => {
-                const brief = dailyBriefFor(d, meta, paxCount, currencySymbol);
+                const brief = dailyBriefFor(d, meta, paxCount, currencySymbol, billing);
                 return (
                   <div key={d.key} className="voucher-card" style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '0.9rem', overflow: 'hidden', background: '#ffffff', borderLeft: '4px solid #0f766e' }}>
                     <div style={{ padding: '0.9rem 1rem', background: '#f0fdfa', borderBottom: '1px solid #99f6e4' }}>
@@ -5029,7 +5147,7 @@ const missing = !sv.confirmationNumber ||
               })}
               <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
                 <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                  const all = days.map((d) => dailyBriefFor(d, meta, paxCount, currencySymbol)).join('\n\n══════════════════════════════════════\n\n');
+                  const all = days.map((d) => dailyBriefFor(d, meta, paxCount, currencySymbol, billing)).join('\n\n══════════════════════════════════════\n\n');
                   void clipboardCopy(all);
                   showToast('All daily briefs copied to clipboard', 'success');
                 }}>
