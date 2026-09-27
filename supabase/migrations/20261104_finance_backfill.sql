@@ -198,6 +198,12 @@ BEGIN
   -- A receipt row links to its invoice but carries no itinerary or client of
   -- its own, so both are taken from the invoice it settles. Without that the
   -- cash cannot be attributed to the booking in the per-itinerary view.
+  --
+  -- Note there is no `invoice is void` filter here, and that is deliberate. Cash
+  -- that was genuinely received is posted even when the invoice it settled has
+  -- since been withdrawn, which leaves the booking showing a credit balance.
+  -- That balance is a real refund or client-credit decision for a human to make,
+  -- not a posting error to be netted away here.
   FOR r IN
     SELECT rc.*, i.itinerary_id AS inv_itinerary_id, i.client_id AS inv_client_id
       FROM public.invoice_receipts rc
