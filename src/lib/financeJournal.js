@@ -288,6 +288,72 @@ export const mirrorLinesForReversal = (origLines) =>
       description: l.description || ''
     }));
 
+/* Scale a set of amounts so the side they represent sums to exactly `target`.
+   Rounding each line independently leaves a residual, and that residual has to
+   land somewhere. It goes on the largest line of the side, which is the line
+   least distorted by a fraction of a cent. */
+const scaleSide = (side, factor, target) => {
+  const amounts = side.map((l) => round2(num(l.amount) * factor));
+  const sum = round2(amounts.reduce((s, a) => s + a, 0));
+  const residual = round2(target - sum);
+  if (residual !== 0 && amounts.length) {
+    let idx = 0;
+    for (let i = 1; i < amounts.length; i += 1) if (amounts[i] > amounts[idx]) idx = i;
+    amounts[idx] = round2(amounts[idx] + residual);
+  }
+  return amounts;
+};
+
+/* Reverse PART of a posting — a credit note for less than the invoice it
+   settles, which is what a price decrease on an already-settled booking is.
+
+   Same accounts, same flipped sides as a full reversal, scaled to the amount
+   actually credited. Each side is driven to the target on its own, because the
+   original's debits and credits round separately: scaling them by one shared
+   factor and hoping they agree leaves the entry out by a cent, and a ledger
+   that does not balance cannot be relied on at all.
+
+   A credit for the whole invoice is a plain mirror, so the common case is
+   untouched. */
+export const scaleLinesForPartialReversal = (origLines, targetTotal, originalTotal) => {
+  const lines = (origLines || []).filter((l) => round2(l.amount) > 0);
+  if (!lines.length) return [];
+
+  const target = round2(targetTotal);
+  /* The original entry's own total is the scaling basis, so a balanced entry
+     stays balanced. Falls back to the largest line if it was not supplied. */
+  const basis = round2(originalTotal) > 0
+    ? round2(originalTotal)
+    : round2(Math.max(...lines.map((l) => num(l.amount))));
+
+  if (target >= basis) return mirrorLinesForReversal(lines);
+  if (target <= 0) return [];
+
+  const factor = target / basis;
+  const debitSide = lines.filter((l) => l.line_type === 'debit');
+  const creditSide = lines.filter((l) => l.line_type !== 'debit');
+  const dr = scaleSide(debitSide, factor, target);
+  const cr = scaleSide(creditSide, factor, target);
+
+  /* Original debits become credits, and vice versa. */
+  const flippedDebits = debitSide.map((l, i) => ({
+    code: l.account_code || l.code,
+    line_type: 'credit',
+    amount: dr[i],
+    description: l.description || ''
+  }));
+  const flippedCredits = creditSide.map((l, i) => ({
+    code: l.account_code || l.code,
+    line_type: 'debit',
+    amount: cr[i],
+    description: l.description || ''
+  }));
+
+  /* A line can round away to nothing at small credit amounts. The table forbids
+     a zero amount, and a zero line is only ever a rounding artefact anyway. */
+  return [...flippedDebits, ...flippedCredits].filter((l) => l.amount > 0);
+};
+
 /* Reverse a posting by mirroring the lines that were ACTUALLY posted.
 
    Recomputing the reversal from the document's own fields is wrong the moment
@@ -316,15 +382,25 @@ export const buildReversalFromOriginal = async (companyId, creditNote) => {
         .order('sort_order', { ascending: true });
 
       if (origLines && origLines.length) {
+        /* How much is actually being credited. A credit note may be for less
+           than the invoice — a price decrease on a settled booking — in which
+           case only that much is reversed and the rest of the invoice stands. */
+        const creditTotal = round2(creditNote.total_incl ?? creditNote.total ?? 0);
+        const reversing = creditTotal > 0 && creditTotal < round2(original.total_debit || 0);
+
         return {
           source_type: 'credit_note',
           source_id: creditNote.id || null,
           reference: creditNote.credit_note_number || '',
-          narration: `Reversal of ${original.reference || 'invoice'}`,
+          narration: reversing
+            ? `Partial reversal of ${original.reference || 'invoice'}`
+            : `Reversal of ${original.reference || 'invoice'}`,
           itinerary_id: original.itinerary_id || null,
           client_id: original.client_id || null,
           currency_code: original.currency_code || 'ZAR',
-          lines: mirrorLinesForReversal(origLines)
+          lines: reversing
+            ? scaleLinesForPartialReversal(origLines, creditTotal, original.total_debit)
+            : mirrorLinesForReversal(origLines)
         };
       }
     }

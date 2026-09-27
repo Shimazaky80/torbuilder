@@ -1085,6 +1085,11 @@ export const Finance = () => {
      and the itinerary/currency slot is freed for a replacement invoice. */
   const [voidTarget, setVoidTarget] = useState(null);
   const [voidReason, setVoidReason] = useState('');
+  /* A credit note raised on its own, for less than the invoice, without voiding
+     it — what a price decrease on a settled booking needs. */
+  const [creditDraft, setCreditDraft] = useState(null);
+  const [creditAmount, setCreditAmount] = useState('');
+  const [creditReason, setCreditReason] = useState('');
 
   const voidInvoice = async (inv, lines) => {
     const trimmed = voidReason.trim();
@@ -1165,6 +1170,112 @@ export const Finance = () => {
   const requestVoidInvoice = (inv) => {
     setVoidTarget(inv);
     setVoidReason(inv.void_reason || '');
+  };
+
+  /* Raise a credit note for a chosen amount against an invoice, WITHOUT voiding
+     it. Voiding is the special case where the credit covers everything
+     outstanding, so the two share this path rather than duplicating the
+     numbering, the tax split and the journal posting. */
+  const raiseCreditNote = async (inv, totalIncl, reason, lines) => {
+    const gross = round2(totalIncl);
+    const why = reason.trim();
+    if (!inv || gross <= 0 || !why) return;
+
+    const total = round2(inv.total_incl || 0);
+    const alreadyCredited = round2(inv.credited_amount || 0);
+    const remaining = round2(total - alreadyCredited);
+    if (gross > remaining + 0.009) {
+      showToast(`That is more than the ${fmtMoney(remaining, symOf(inv.currency_code))} still outstanding on ${inv.invoice_number}`, 'error');
+      return;
+    }
+    /* Voiding the invoice is only correct when the credit clears everything.
+       A part credit leaves a live invoice the client still owes, so voiding it
+       would cancel a document that is still valid. */
+    const voidsInvoice = gross >= remaining - 0.009;
+
+    try {
+      const { data: cnNumber, error: cnErr } = await supabase.rpc('get_next_credit_note_reference', { p_company_id: companyId });
+      if (cnErr || !cnNumber) throw new Error(cnErr?.message || 'Could not allocate credit note number');
+
+      const ratio = total > 0 ? gross / total : 0;
+      const cnRow = {
+        company_id: companyId,
+        invoice_id: inv.id,
+        invoice_number: inv.invoice_number,
+        invoice_type: inv.invoice_type,
+        credit_note_number: cnNumber,
+        status: 'issued',
+        currency_code: inv.currency_code,
+        /* Net and tax in proportion to the amount credited, with tax as the
+           remainder so the three always reconcile. */
+        subtotal_excl: round2((Number(inv.subtotal_excl) || 0) * ratio),
+        tax_total: 0,
+        total_incl: gross,
+        tax_label: inv.tax_label,
+        tax_rate: inv.tax_rate,
+        reason: why,
+        issued_date: new Date().toISOString().slice(0, 10),
+        bill_to_name: inv.bill_to_name,
+        bill_to_email: inv.bill_to_email,
+        bill_to_address: inv.bill_to_address,
+        bill_to_tel: inv.bill_to_tel,
+        bill_to_cell: inv.bill_to_cell,
+        bill_to_website: inv.bill_to_website,
+        supplier_name: inv.supplier_name,
+        supplier_tax_number: inv.supplier_tax_number,
+        supplier_address: inv.supplier_address
+      };
+      cnRow.tax_total = round2(gross - cnRow.subtotal_excl);
+
+      const { data: createdCn, error: cnErr2 } = await supabase
+        .from('credit_notes')
+        .insert([{ ...cnRow, accounting_export: creditNotePayload(cnRow, lines || []) }])
+        .select('*')
+        .single();
+      if (cnErr2) throw cnErr2;
+
+      /* Record the credit against the invoice. credited_amount is what the final
+         invoice subtracts when it posts, so without this the credited amount
+         would be billed a second time. */
+      const invPatch = { credited_amount: round2(alreadyCredited + gross) };
+      if (voidsInvoice) {
+        invPatch.status = 'void';
+        invPatch.void_reason = why;
+        invPatch.credit_note_id = createdCn.id;
+        invPatch.credit_note_number = createdCn.credit_note_number;
+      }
+      const { error: invErr } = await supabase.from('invoices').update(invPatch).eq('id', inv.id);
+      if (invErr) {
+        /* A credit note with no credit against the invoice would be re-credited
+           on the next attempt, so take it back out. */
+        await supabase.from('credit_notes').delete().eq('id', createdCn.id);
+        throw invErr;
+      }
+
+      await postCreditNote(companyId, createdCn);
+      await fetchInvoices(companyId);
+      await reloadViewing(inv.id);
+      setCreditDraft(null);
+      setCreditAmount('');
+      setCreditReason('');
+      showToast(
+        voidsInvoice
+          ? `${inv.invoice_number} voided and credited (${createdCn.credit_note_number})`
+          : `${createdCn.credit_note_number} raised for ${fmtMoney(gross, symOf(inv.currency_code))}`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err.message || 'Failed to raise credit note', 'error');
+    }
+  };
+
+  const requestCreditNote = (inv, suggestedAmount) => {
+    const total = round2(inv.total_incl || 0);
+    const remaining = round2(total - round2(inv.credited_amount || 0));
+    const amount = suggestedAmount > 0 ? Math.min(suggestedAmount, remaining) : remaining;
+    setCreditDraft({ inv, remaining });
+    setCreditAmount(amount > 0 ? String(round2(amount)) : '');
+    setCreditReason('');
   };
 
   const exportJson = (inv, lines) => {
@@ -1777,7 +1888,7 @@ export const Finance = () => {
                       </tbody>
                     </table>
                     {selectedGroup.reissue.options.map((o) => (
-                      <div key={o.kind} style={{ marginTop: '0.6rem', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                      <div key={`${o.kind}-${o.amount}`} style={{ marginTop: '0.6rem', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '0.82rem', color: '#334155' }}>{o.label}</span>
                         {o.kind === 'invoice' ? (
                           <span style={{ fontSize: '0.72rem', color: '#92400e' }}>Use Select &rarr; confirm below to issue it.</span>
@@ -1786,9 +1897,15 @@ export const Finance = () => {
                             type="button"
                             className="secondary-btn"
                             style={{ padding: '0.25rem 0.55rem', fontSize: '0.75rem' }}
-                            onClick={() => setVoidTarget(selectedGroup.settledInvoice)}
+                            /* A decrease credits only the movement, so it opens the
+                               credit note dialog rather than voiding the whole
+                               settled invoice. amount 0 means cancel it outright. */
+                            onClick={() => {
+                              if (o.amount > 0) requestCreditNote(selectedGroup.settledInvoice, o.amount);
+                              else requestVoidInvoice(selectedGroup.settledInvoice);
+                            }}
                           >
-                            Raise credit note
+                            {o.amount > 0 ? 'Raise credit note' : 'Void settled invoice'}
                           </button>
                         )}
                       </div>
@@ -1892,6 +2009,60 @@ export const Finance = () => {
                 </div>
               </div>
             )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {creditDraft && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '480px' }}>
+            <div className="modal-header">
+              <h2>Raise credit note</h2>
+              <button className="close-btn" onClick={() => setCreditDraft(null)}><X size={20} /></button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
+              <p style={{ margin: 0, color: '#475569', fontSize: '0.84rem', lineHeight: 1.5 }}>
+                Against <b>{creditDraft.inv.invoice_number}</b>. {fmtMoney(creditDraft.remaining, symOf(creditDraft.inv.currency_code))} is still
+                outstanding on it. Credit less than that and the invoice stays live with the reduced balance;
+                credit the whole of it and the invoice is voided.
+              </p>
+              <div className="sidebar-field">
+                <label>Amount to credit (incl tax) *</label>
+                <input
+                  className="sidebar-select"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  max={creditDraft.remaining}
+                  style={fieldStyle}
+                  value={creditAmount}
+                  onChange={(e) => setCreditAmount(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <div className="sidebar-field">
+                <label>Reason *</label>
+                <textarea
+                  className="sidebar-select"
+                  style={{ ...fieldStyle, minHeight: '70px', resize: 'vertical', fontFamily: 'inherit' }}
+                  value={creditReason}
+                  onChange={(e) => setCreditReason(e.target.value)}
+                  placeholder="e.g. Accommodation repriced down after supplier confirmation"
+                />
+              </div>
+              <div className="form-actions" style={{ marginTop: 0 }}>
+                <button type="button" className="secondary-btn" onClick={() => setCreditDraft(null)}>Cancel</button>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  style={{ flex: 1 }}
+                  disabled={!(Number(creditAmount) > 0) || !creditReason.trim()}
+                  onClick={() => raiseCreditNote(creditDraft.inv, Number(creditAmount), creditReason, [])}
+                >
+                  Raise credit note
+                </button>
+              </div>
             </div>
           </div>
         </div>
