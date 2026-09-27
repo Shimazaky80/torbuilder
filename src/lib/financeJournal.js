@@ -360,6 +360,86 @@ export const postCreditNote = (companyId, creditNote) =>
 export const postCostOfSales = (companyId, args) =>
   postEntry(companyId, { ...buildCostOfSalesEntry(args), source_id: args.itineraryId });
 
+/* ── What changed since a booking was settled ────────────────────────────────
+   Once a booking is settled, raising another invoice is only legitimate if
+   something actually changed: the client moved it back to Quotation, or a
+   service was added, removed or repriced. Without that comparison the app
+   happily raises a second invoice for a trip that has already been billed in
+   full, which is duplicate billing rather than accounting.
+
+   A settled invoice carries `accounting_export.lines` — a snapshot of what was
+   priced at the moment it was issued. Diffing that snapshot against the
+   itinerary's current pricing yields the changes, and the increases and
+   decreases separately, because an increase is billed and a decrease is
+   credited. They are not netted here: a client who adds a day and drops
+   another needs an invoice for the addition and a credit note for the
+   removal, not a single number that hides both. */
+
+const lineKey = (l) => {
+  /* item_id is the stable identity of a priced line. Older invoices predate it,
+     so fall back to day + description, which is stable for as long as the
+     description is. */
+  const id = l.item_id || l.itemId;
+  if (id) return String(id);
+  return `${l.day ?? l.day_number ?? ''}|${String(l.description || l.item_name || '').trim().toLowerCase()}`;
+};
+
+export const fingerprintBilledLines = (lines) =>
+  (lines || [])
+    .map((l) => ({
+      key: lineKey(l),
+      description: l.description || l.item_name || '',
+      quantity: Number(l.quantity) || 0,
+      tax_rate: Number(l.tax_rate) || 0,
+      tax_amount: round2(l.tax_amount || 0),
+      line_total: round2(l.line_total || 0)
+    }))
+    .filter((l) => l.key && l.key !== '|');
+
+/* Compare what was billed against what the itinerary now says. Returns the
+   changed lines with their before/after values, plus the gross increase and
+   gross decrease. `unchanged` is true when nothing moved at all, which is the
+   signal that a further invoice would be a duplicate. */
+export const diffAgainstBilledLines = (billedLines, currentLines) => {
+  const billed = new Map(fingerprintBilledLines(billedLines).map((l) => [l.key, l]));
+  const current = new Map(fingerprintBilledLines(currentLines).map((l) => [l.key, l]));
+
+  const changed = [];
+  let increase = 0;
+  let decrease = 0;
+
+  for (const [key, now] of current) {
+    const was = billed.get(key);
+    if (!was) {
+      /* Newly priced line: the whole amount is new billable work. */
+      const delta = round2(now.line_total - now.tax_amount);
+      changed.push({ key, description: now.description, status: 'added', before: 0, after: now.line_total, delta });
+      if (delta > 0) increase = round2(increase + delta);
+      else if (delta < 0) decrease = round2(decrease + delta);
+      continue;
+    }
+    if (round2(was.line_total) === round2(now.line_total) && round2(was.tax_amount) === round2(now.tax_amount)) continue;
+    /* Repriced line: only the movement is billable, never the whole amount
+       again — re-billing the unchanged part is the double-count this guards. */
+    const wasNet = round2(was.line_total - was.tax_amount);
+    const nowNet = round2(now.line_total - now.tax_amount);
+    const delta = round2(nowNet - wasNet);
+    changed.push({ key, description: now.description, status: 'repriced', before: was.line_total, after: now.line_total, delta });
+    if (delta > 0) increase = round2(increase + delta);
+    else if (delta < 0) decrease = round2(decrease + delta);
+  }
+
+  for (const [key, was] of billed) {
+    if (current.has(key)) continue;
+    /* Priced line that has been taken off the itinerary: a credit. */
+    const wasNet = round2(was.line_total - was.tax_amount);
+    changed.push({ key, description: was.description, status: 'removed', before: was.line_total, after: 0, delta: -wasNet });
+    decrease = round2(decrease - wasNet);
+  }
+
+  return { changed, increase: round2(increase), decrease: round2(decrease), unchanged: !changed.length };
+};
+
 /* ── Cost of sales ──────────────────────────────────────────────────────────
    Profitability per currency, from the pricing groups the builder already
    computes. Reads `totalExcl` (net of tax), NOT `totalSell`: totalSell is
