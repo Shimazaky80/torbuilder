@@ -1004,7 +1004,16 @@ export const Finance = () => {
       if (inv.status === 'proforma' || inv.status === 'draft') {
         await postInvoice(companyId, { ...inv, status: 'paid' });
       }
-      await postReceipt(companyId, { ...row, id: created.id, accounting_export: accounting });
+      /* A receipt row only links to its invoice, so the itinerary and client
+         are carried across here — without them the journal cannot attribute
+         the cash to the booking it settled. */
+      await postReceipt(companyId, {
+        ...row,
+        id: created.id,
+        accounting_export: accounting,
+        itinerary_id: inv.itinerary_id || null,
+        client_id: inv.client_id || null
+      });
 
       await fetchInvoices(companyId);
       await reloadViewing(inv.id);
