@@ -63,28 +63,60 @@ export const ensureChartOfAccounts = async (companyId) => {
    Zero-amount lines are dropped: a rounding artefact must not become a line,
    and journal_lines.amount is constrained to > 0.                             */
 
-/* Sale on credit.
-     Debit  Accounts Receivable   total incl. tax
-     Credit Sales                 net of tax
-     Credit VAT Payable           tax
-   With no tax this collapses to exactly the Sales / AR pair. */
+/* What a single invoice document is actually worth in the ledger.
+
+   An itinerary is billed as a PAIR: a deposit invoice to secure the booking,
+   then a final invoice for what is left. Both documents carry the same
+   total_incl — the final one records the deposit in credited_amount rather
+   than re-stating a lower total — so posting each document for its full
+   total_incl would recognise the same sale twice.
+
+   So the trip is split:
+     deposit invoice  ->  the deposit
+     final invoice    ->  total_incl - credited_amount
+   which sums to total_incl exactly once, and gives the deposit receipt a real
+   AR debit to credit against at the moment the money actually arrives. */
+export const invoicePostingAmount = (invoice) => {
+  const total = round2(num(invoice.total_incl));
+  if (invoice.invoice_type === 'deposit') {
+    /* A deposit invoice with no deposit percentage is not a deposit at all;
+       fall back to the full total rather than posting nothing. */
+    const dep = round2(num(invoice.deposit_amount));
+    return dep > 0 ? Math.min(dep, total) : total;
+  }
+  const credited = round2(num(invoice.credited_amount));
+  return Math.max(0, round2(total - credited));
+};
+
+/* Sale on credit, for the slice of the sale this document represents.
+     Debit  Accounts Receivable   amount receivable from this document
+     Credit Sales                 its share of the net sale
+     Credit VAT Payable           its share of the tax
+   Net and tax are taken in proportion to the amount being posted, with tax as
+   the balancing figure so the entry always balances: a 1c skew in VAT is a far
+   smaller evil than an entry that does not balance at all. */
 export const buildInvoiceEntry = (invoice) => {
-  const gross = round2(invoice.total_incl);
-  const net = round2(invoice.subtotal_excl);
-  const tax = round2(num(invoice.tax_total) || round2(gross - net));
+  const total = round2(num(invoice.total_incl));
+  const gross = invoicePostingAmount(invoice);
+  const ratio = total > 0 ? gross / total : 0;
+  const net = round2(num(invoice.subtotal_excl) * ratio);
+  const tax = round2(gross - net);
   const label = invoice.tax_label || 'Tax';
-  const credit = invoice.invoice_type === 'deposit' ? 'Deposit invoice' : 'Sales invoice';
+  const ref = invoice.invoice_number || '';
+  const isDeposit = invoice.invoice_type === 'deposit';
+  const credit = isDeposit ? 'Deposit invoice' : 'Sales invoice';
+  const share = isDeposit ? 'deposit' : 'balance';
   return {
     source_type: 'invoice',
-    reference: invoice.invoice_number || '',
-    narration: `${credit} ${invoice.invoice_number || ''} — ${invoice.bill_to_name || ''}`.trim(),
+    reference: ref,
+    narration: `${credit} ${ref} — ${invoice.bill_to_name || ''}`.trim(),
     itinerary_id: invoice.itinerary_id || null,
     client_id: invoice.client_id || null,
     currency_code: invoice.currency_code || 'ZAR',
     lines: [
-      { code: 'AR', line_type: 'debit', amount: gross, description: `Amount receivable — ${invoice.invoice_number || ''}` },
-      { code: 'SALES', line_type: 'credit', amount: net, description: `Net sale — ${invoice.invoice_number || ''}` },
-      ...(tax > 0 ? [{ code: 'VAT', line_type: 'credit', amount: tax, description: `${label} — ${invoice.invoice_number || ''}` }] : [])
+      { code: 'AR', line_type: 'debit', amount: gross, description: `Amount receivable (${share}) — ${ref}` },
+      { code: 'SALES', line_type: 'credit', amount: net, description: `Net sale (${share}) — ${ref}` },
+      ...(tax > 0 ? [{ code: 'VAT', line_type: 'credit', amount: tax, description: `${label} (${share}) — ${ref}` }] : [])
     ]
   };
 };
@@ -106,29 +138,6 @@ export const buildReceiptEntry = (receipt) => {
     lines: [
       { code: 'BANK', line_type: 'debit', amount, description: `Payment received — ${receipt.payment_method || 'receipt'}` },
       { code: 'AR', line_type: 'credit', amount, description: `Applied to ${receipt.invoice_number || 'invoice'}` }
-    ]
-  };
-};
-
-/* Reverse of an invoice.
-     Debit  Sales                 net
-     Debit  VAT Payable           tax
-     Credit Accounts Receivable  gross */
-export const buildCreditNoteEntry = (creditNote) => {
-  const gross = round2(creditNote.total_incl);
-  const net = round2(creditNote.subtotal_excl);
-  const tax = round2(num(creditNote.tax_total) || round2(gross - net));
-  return {
-    source_type: 'credit_note',
-    reference: creditNote.credit_note_number || creditNote.invoice_number || '',
-    narration: `Credit note ${creditNote.credit_note_number || ''} — reversal`.trim(),
-    itinerary_id: creditNote.itinerary_id || null,
-    client_id: creditNote.client_id || null,
-    currency_code: creditNote.currency_code || 'ZAR',
-    lines: [
-      { code: 'SALES', line_type: 'debit', amount: net, description: 'Reversal of net sale' },
-      ...(tax > 0 ? [{ code: 'VAT', line_type: 'debit', amount: tax, description: 'Reversal of VAT' }] : []),
-      { code: 'AR', line_type: 'credit', amount: gross, description: 'Receivable reversed' }
     ]
   };
 };
@@ -155,31 +164,37 @@ export const buildCostOfSalesEntry = ({ itineraryId, reference, narration, curre
 };
 
 /* Normalise and prove an entry balances. Throws on an unbalanced entry so a
-   broken posting can never reach the ledger. */
+   broken posting can never reach the ledger.
+
+   An entry whose lines all fall away to zero is NOT an error: a final invoice
+   that has been credited in full has nothing left to recognise. That is a
+   legitimate no-op, flagged with `nothing_to_post` so the caller can skip it
+   quietly. Supplying no lines at all IS an error, because that means a bug. */
 export const buildEntry = (draft) => {
-  const lines = (draft.lines || [])
-    .map((l) => ({ ...l, amount: round2(l.amount) }))
-    .filter((l) => l.amount > 0);
-
-  const totalDebit = round2(lines.filter((l) => l.line_type === 'debit').reduce((a, l) => a + l.amount, 0));
-  const totalCredit = round2(lines.filter((l) => l.line_type === 'credit').reduce((a, l) => a + l.amount, 0));
-
-  if (!lines.length) throw new Error('Journal entry has no lines');
-  if (totalDebit !== totalCredit) {
-    throw new Error(`Journal entry does not balance: debits ${totalDebit} vs credits ${totalCredit}`);
-  }
-  return {
+  const supplied = draft.lines || [];
+  const base = {
     source_type: draft.source_type,
     source_id: draft.source_id || null,
     reference: draft.reference || '',
     narration: draft.narration || '',
     itinerary_id: draft.itinerary_id || null,
     client_id: draft.client_id || null,
-    currency_code: draft.currency_code || 'ZAR',
-    total_debit: totalDebit,
-    total_credit: totalCredit,
-    lines
+    currency_code: draft.currency_code || 'ZAR'
   };
+  if (draft.nothing_to_post) return { ...base, total_debit: 0, total_credit: 0, nothing_to_post: true, lines: [] };
+
+  const lines = supplied
+    .map((l) => ({ ...l, amount: round2(l.amount) }))
+    .filter((l) => l.amount > 0);
+
+  const totalDebit = round2(lines.filter((l) => l.line_type === 'debit').reduce((a, l) => a + l.amount, 0));
+  const totalCredit = round2(lines.filter((l) => l.line_type === 'credit').reduce((a, l) => a + l.amount, 0));
+
+  if (!supplied.length) throw new Error('Journal entry has no lines');
+  if (totalDebit !== totalCredit) {
+    throw new Error(`Journal entry does not balance: debits ${totalDebit} vs credits ${totalCredit}`);
+  }
+  return { ...base, total_debit: totalDebit, total_credit: totalCredit, nothing_to_post: !lines.length, lines };
 };
 
 /* Persist an entry. Skips when the source document is already posted, so this
@@ -187,6 +202,13 @@ export const buildEntry = (draft) => {
 export const postEntry = async (companyId, draft) => {
   if (!companyId) throw new Error('postEntry requires a company');
   const entry = buildEntry(draft);
+
+  /* Nothing left to recognise (a fully credited final invoice). Skipping is
+     correct: the entry would be a 0/0 header with no lines, and the unique
+     source index would then block a later genuine posting of that document. */
+  if (entry.nothing_to_post) {
+    return { entryId: null, created: false, skipped: true };
+  }
 
   if (entry.source_id) {
     /* currency_code is part of the idempotency key: one itinerary can hold
@@ -253,6 +275,78 @@ export const postEntry = async (companyId, draft) => {
   return { entryId: created.id, created: true };
 };
 
+/* Flip the sides of a posted entry: a debit becomes a credit and vice versa.
+   Amounts and order are untouched, which is what makes the reversal cancel the
+   original exactly rather than approximately. */
+export const mirrorLinesForReversal = (origLines) =>
+  (origLines || [])
+    .filter((l) => round2(l.amount) > 0)
+    .map((l) => ({
+      code: l.account_code || l.code,
+      line_type: l.line_type === 'debit' ? 'credit' : 'debit',
+      amount: round2(l.amount),
+      description: l.description || ''
+    }));
+
+/* Reverse a posting by mirroring the lines that were ACTUALLY posted.
+
+   Recomputing the reversal from the document's own fields is wrong the moment
+   the posting rules change under an old entry: voiding an invoice posted under
+   the old "every invoice is worth its full total_incl" rule would reverse the
+   new, smaller amount and leave the difference stranded in the ledger forever.
+   A reversal has to cancel precisely what was booked, so the original entry is
+   the only trustworthy source. Falls back to the document fields only when the
+   invoice was never posted to the journal at all (it predates the ledger). */
+export const buildReversalFromOriginal = async (companyId, creditNote) => {
+  const originalId = creditNote.invoice_id || null;
+  if (originalId) {
+    const { data: original } = await supabase
+      .from('journal_entries')
+      .select('id, reference, currency_code, itinerary_id, client_id, total_debit')
+      .eq('company_id', companyId)
+      .eq('source_type', 'invoice')
+      .eq('source_id', originalId)
+      .maybeSingle();
+
+    if (original) {
+      const { data: origLines } = await supabase
+        .from('journal_lines')
+        .select('account_code, account_name, line_type, amount, description')
+        .eq('entry_id', original.id)
+        .order('sort_order', { ascending: true });
+
+      if (origLines && origLines.length) {
+        return {
+          source_type: 'credit_note',
+          source_id: creditNote.id || null,
+          reference: creditNote.credit_note_number || '',
+          narration: `Reversal of ${original.reference || 'invoice'}`,
+          itinerary_id: original.itinerary_id || null,
+          client_id: original.client_id || null,
+          currency_code: original.currency_code || 'ZAR',
+          lines: mirrorLinesForReversal(origLines)
+        };
+      }
+    }
+  }
+
+  /* The original was never booked (it predates the ledger, or its own posting
+     was a no-op). Post nothing: a reversal of nothing is a phantom entry, and
+     the unique source index would then block a real posting of that credit
+     note later. */
+  return {
+    source_type: 'credit_note',
+    source_id: creditNote.id || null,
+    reference: creditNote.credit_note_number || '',
+    narration: `Reversal of ${creditNote.invoice_number || 'invoice'} (original was never posted)`,
+    itinerary_id: creditNote.itinerary_id || null,
+    client_id: creditNote.client_id || null,
+    currency_code: creditNote.currency_code || 'ZAR',
+    nothing_to_post: true,
+    lines: []
+  };
+};
+
 /* Convenience wrappers for the document types Finance posts. */
 export const postInvoice = (companyId, invoice) =>
   postEntry(companyId, { ...buildInvoiceEntry(invoice), source_id: invoice.id });
@@ -261,7 +355,7 @@ export const postReceipt = (companyId, receipt) =>
   postEntry(companyId, { ...buildReceiptEntry(receipt), source_id: receipt.id });
 
 export const postCreditNote = (companyId, creditNote) =>
-  postEntry(companyId, { ...buildCreditNoteEntry(creditNote), source_id: creditNote.id });
+  buildReversalFromOriginal(companyId, creditNote).then((draft) => postEntry(companyId, draft));
 
 export const postCostOfSales = (companyId, args) =>
   postEntry(companyId, { ...buildCostOfSalesEntry(args), source_id: args.itineraryId });
