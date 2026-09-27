@@ -179,7 +179,7 @@ BEGIN
         INSERT INTO public.journal_lines
           (company_id, entry_id, account_id, account_code, account_name, account_type,
            line_type, amount, description, itinerary_id, sort_order)
-        SELECT v_entry, a.id, a.code, a.name, a.account_type,
+        SELECT r.company_id, v_entry, a.id, a.code, a.name, a.account_type,
                l.lt, l.amt, l.descr, r.itinerary_id, v_ord
           FROM public.finance_accounts a
          WHERE a.company_id = r.company_id AND a.code = l.code;
@@ -251,7 +251,7 @@ BEGIN
         INSERT INTO public.journal_lines
           (company_id, entry_id, account_id, account_code, account_name, account_type,
            line_type, amount, description, itinerary_id, sort_order)
-        SELECT v_entry, a.id, a.code, a.name, a.account_type,
+        SELECT r.company_id, v_entry, a.id, a.code, a.name, a.account_type,
                l.lt, l.amt, l.descr, r.inv_itinerary_id, v_ord
           FROM public.finance_accounts a
          WHERE a.company_id = r.company_id AND a.code = l.code;
