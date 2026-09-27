@@ -1191,14 +1191,14 @@ export const Finance = () => {
         /* A void stops crediting, so any later final that was relying on this
            document for its credit has to give that credit up. */
         await releaseCreditToFinals(inv);
+        /* A void stops crediting, so any later final that was relying on this
+           document for its credit has to give that credit up. Unconditional
+           here: this path always reverses the invoice in full. */
+        await releaseCreditToFinals(inv);
+
         /* The credit note is the reversing document, so the ledger reverses
            with it. Idempotent per credit note. */
-      /* A void stops crediting, so any later final that was relying on this
-         document for its credit has to give that credit up. Only on a full
-         void: a part credit leaves the invoice live and still crediting. */
-      if (voidsInvoice) await releaseCreditToFinals(inv);
-
-      await postCreditNote(companyId, createdCn);
+        await postCreditNote(companyId, createdCn);
       }
 
       await fetchInvoices(companyId);
