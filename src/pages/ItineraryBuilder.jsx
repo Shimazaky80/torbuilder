@@ -47,6 +47,8 @@ import { validateRoomAllocation, isAdultTraveller } from '../lib/roomAllocationH
 import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import { LIBRARY_ITEM_LIGHT_FIELDS } from '../lib/libraryItemFields';
+import { postInvoice, postReceipt } from '../lib/financeJournal';
+import { InvoiceFinanceRow, JournalEntryCard, CostOfSalesPanel } from '../components/finance/FinanceJournalViews';
 import {
   buildLinesFromDays,
   accountingPayload,
@@ -1127,6 +1129,8 @@ export const ItineraryBuilder = () => {
   const [bankAccounts, setBankAccounts] = useState([]);
   const [itineraryInvoices, setItineraryInvoices] = useState([]);
   const [itineraryReceipts, setItineraryReceipts] = useState([]);
+  const [itineraryJournal, setItineraryJournal] = useState([]);
+  const [openInvoiceId, setOpenInvoiceId] = useState(null);
   const [issuingInvoice, setIssuingInvoice] = useState(false);
   const [emailFormat, setEmailFormat] = useState('pdf');
   const [searchTerm, setSearchTerm] = useState('');
@@ -1350,6 +1354,33 @@ export const ItineraryBuilder = () => {
     [invoicesInCurrency]
   );
   const activeInvoice = invoiceTypeForStage === 'final' ? finalInvoice : depositInvoice;
+  /* Journal entries and receipts keyed by the document they belong to, so the
+     Finance tab can hang both off the invoice that produced them instead of
+     re-querying per invoice. */
+  const journalBySource = useMemo(() => {
+    const map = new Map();
+    for (const e of itineraryJournal) {
+      if (!e.source_id) continue;
+      const key = `${e.source_type}|${e.source_id}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(e);
+    }
+    return map;
+  }, [itineraryJournal]);
+  const receiptsByInvoice = useMemo(() => {
+    const map = new Map();
+    for (const r of itineraryReceipts) {
+      if (!map.has(r.invoice_id)) map.set(r.invoice_id, []);
+      map.get(r.invoice_id).push(r);
+    }
+    return map;
+  }, [itineraryReceipts]);
+  /* Every entry for the itinerary that is not tied to one invoice (cost of
+     sales), shown as its own group at the bottom of the tab. */
+  const standaloneJournal = useMemo(
+    () => itineraryJournal.filter((e) => !e.source_id || e.source_type === 'cost_of_sales'),
+    [itineraryJournal]
+  );
   const paidDepositTotal = useMemo(
     () => round2(invoicesInCurrency
       .filter((inv) => inv.invoice_type === 'deposit' && inv.status === 'paid')
@@ -1388,9 +1419,15 @@ export const ItineraryBuilder = () => {
      retired tab can never leave a blank panel that looks like lost services.
      Nothing is mutated here — only the view moves, so no service is lost. */
   const visibleTabIds = useMemo(() => {
-    const ids = ['itinerary', 'client', 'pricing', 'notes'];
-    if (isProvisional) ids.push('service-request', 'invoices');
-    if (isConfirmed || isInProgress) ids.push('travel-docs', 'invoices', 'vouchers');
+    /* 'itinerary' stays first and is never gated: it holds the day-by-day, and
+       every stage must be able to see and edit its days. */
+    const ids = ['itinerary', 'client', 'pricing', 'notes', 'finance'];
+    /* Finance is deliberately NOT status-gated. A deposit invoice is a real
+       financial document at the provisional stage, and recognition follows the
+       invoice rather than the itinerary lifecycle, so its journal has to be
+       visible wherever the invoice can be issued. */
+    if (isProvisional) ids.push('service-request');
+    if (isConfirmed || isInProgress) ids.push('travel-docs', 'vouchers');
     if (isInProgress) ids.push('operations');
     if (isCompleted) ids.push('post-tour');
     if (isCancelled) ids.push('cancellation');
@@ -1750,7 +1787,12 @@ export const ItineraryBuilder = () => {
      the Finance module. */
   const loadItineraryInvoices = useCallback(async () => {
     const iid = meta.itineraryId || lastItineraryIdRef.current;
-    if (!companyId || !iid) { setItineraryInvoices([]); setItineraryReceipts([]); return; }
+    if (!companyId || !iid) {
+      setItineraryInvoices([]);
+      setItineraryReceipts([]);
+      setItineraryJournal([]);
+      return;
+    }
     const { data } = await supabase
       .from('invoices')
       .select('*')
@@ -1758,6 +1800,29 @@ export const ItineraryBuilder = () => {
       .order('created_at', { ascending: false });
     const rows = data || [];
     setItineraryInvoices(rows);
+
+    /* Journal for this itinerary. Loaded here rather than on tab open so the
+       invoice list, its receipts and its journal always arrive together and
+       can never disagree. */
+    const { data: entries } = await supabase
+      .from('journal_entries')
+      .select('*')
+      .eq('itinerary_id', iid)
+      .order('entry_date', { ascending: false })
+      .order('created_at', { ascending: false });
+    const entryRows = entries || [];
+    const entryIds = entryRows.map((e) => e.id);
+    let lineRows = [];
+    if (entryIds.length) {
+      const { data: lines } = await supabase
+        .from('journal_lines')
+        .select('*')
+        .in('entry_id', entryIds)
+        .order('sort_order', { ascending: true });
+      lineRows = lines || [];
+    }
+    setItineraryJournal(entryRows.map((e) => ({ ...e, lines: lineRows.filter((l) => l.entry_id === e.id) })));
+
     const ids = rows.map((r) => r.id);
     if (ids.length === 0) { setItineraryReceipts([]); return; }
     const { data: receipts } = await supabase
@@ -1770,28 +1835,11 @@ export const ItineraryBuilder = () => {
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const iid = meta.itineraryId || lastItineraryIdRef.current;
-      if (!companyId || !iid) { if (!cancelled) { setItineraryInvoices([]); setItineraryReceipts([]); } return; }
-      const { data } = await supabase
-        .from('invoices')
-        .select('*')
-        .eq('itinerary_id', iid)
-        .order('created_at', { ascending: false });
-      const rows = data || [];
-      if (cancelled) return;
-      setItineraryInvoices(rows);
-      const ids = rows.map((r) => r.id);
-      if (ids.length === 0) { setItineraryReceipts([]); return; }
-      const { data: receipts } = await supabase
-        .from('invoice_receipts')
-        .select('*')
-        .in('invoice_id', ids)
-        .order('created_at', { ascending: false });
-      if (!cancelled) setItineraryReceipts(receipts || []);
-    })();
+    loadItineraryInvoices().catch(() => {
+      if (!cancelled) { setItineraryInvoices([]); setItineraryReceipts([]); setItineraryJournal([]); }
+    });
     return () => { cancelled = true; };
-  }, [companyId, meta.itineraryId]);
+  }, [loadItineraryInvoices]);
 
   /* ── Derived lists ─────────────────────────────────────────────────────── */
 
@@ -3459,6 +3507,14 @@ return !!sv.time; /* activities / meals / other */
       }
 
       await loadItineraryInvoices();
+      /* Recognition follows the invoice, not the itinerary stage. A deposit
+         invoice is created as a proforma draft, so it posts nothing until it
+         is actually validated (see confirmPayment); a final invoice is
+         created validated and posts straight away. postInvoice is idempotent
+         per invoice, so a repeat call cannot double-post. */
+      if (created.status && created.status !== 'proforma') {
+        await postInvoice(companyId, created);
+      }
       if (!silent) showToast(`${label} invoice ${number} issued`, 'success');
       return created;
     } catch (err) {
@@ -3521,7 +3577,11 @@ return !!sv.time; /* activities / meals / other */
         accounting_export: accounting,
         notes: null
       };
-      const { error } = await supabase.from('invoice_receipts').insert([row]);
+      const { data: receiptRow, error } = await supabase
+        .from('invoice_receipts')
+        .insert([row])
+        .select('id')
+        .single();
       if (error) throw error;
 
       const paidUpdate = { status: 'paid', paid_at: new Date().toISOString() };
@@ -3531,6 +3591,14 @@ return !!sv.time; /* activities / meals / other */
         .update(paidUpdate)
         .eq('id', inv.id);
       if (paidErr) throw paidErr;
+
+      /* Payment is the moment a proforma deposit becomes a real document, so
+         this is where its sale is finally recognised. A deposit that already
+         posted as validated is skipped by the idempotent postInvoice. */
+      if (inv.status === 'proforma' || inv.status === 'draft') {
+        await postInvoice(companyId, { ...inv, status: 'paid' });
+      }
+      await postReceipt(companyId, { ...row, id: receiptRow.id, invoice_id: inv.id });
 
       await loadItineraryInvoices();
       showToast(`Receipt ${number} issued — payment confirmed`, 'success');
@@ -4266,23 +4334,20 @@ const missing = !sv.confirmationNumber ||
             <button type="button" className={`builder-tab ${tab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
               <StickyNote size={15} /> Notes
             </button>
+            {/* Finance is always available — the deposit request, the invoice
+                journal, its receipts and cost of sales all live here. */}
+            <button type="button" className={`builder-tab ${tab === 'finance' ? 'active' : ''}`} onClick={() => setActiveTab('finance')}>
+              <Receipt size={15} /> Finance
+            </button>
             {isProvisional && (
-              <>
-                <button type="button" className={`builder-tab ${tab === 'service-request' ? 'active' : ''}`} onClick={() => setActiveTab('service-request')}>
-                  <Mail size={15} /> Service Request
-                </button>
-                <button type="button" className={`builder-tab ${tab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
-                  <Receipt size={15} /> Deposit Request
-                </button>
-              </>
+              <button type="button" className={`builder-tab ${tab === 'service-request' ? 'active' : ''}`} onClick={() => setActiveTab('service-request')}>
+                <Mail size={15} /> Service Request
+              </button>
             )}
             {(isConfirmed || isInProgress) && (
               <>
                 <button type="button" className={`builder-tab ${tab === 'travel-docs' ? 'active' : ''}`} onClick={() => setActiveTab('travel-docs')}>
                   <Plane size={15} /> Travel Documents
-                </button>
-                <button type="button" className={`builder-tab ${tab === 'invoices' ? 'active' : ''}`} onClick={() => setActiveTab('invoices')}>
-                  <Receipt size={15} /> Invoices
                 </button>
                 <button type="button" className={`builder-tab ${tab === 'vouchers' ? 'active' : ''}`} onClick={() => setActiveTab('vouchers')}>
                   <Ticket size={15} /> Vouchers
@@ -4994,8 +5059,56 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Invoices (provisional → deposit request, confirmed+ → final) ── */}
-          {tab === 'invoices' && (
+          {/* ─── Finance: invoice ledger, journals, receipts, cost of sales ─── */}
+          {tab === 'finance' && (
+            <>
+              <div className="builder-panel-card">
+                <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                  Invoices &amp; journal
+                </h3>
+                <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.75rem', maxWidth: '760px' }}>
+                  Every invoice raised on this itinerary, with the double-entry journal it posted and the
+                  receipts raised against it. Open an invoice to see its journal lines.
+                </p>
+                {invoicesInCurrency.length === 0 ? (
+                  <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: 0 }}>
+                    No invoice issued for {currencyCode} yet.
+                  </p>
+                ) : (
+                  <div>
+                    {invoicesInCurrency.map((inv) => (
+                      <InvoiceFinanceRow
+                        key={inv.id}
+                        invoice={inv}
+                        symbol={currencySymbol}
+                        open={openInvoiceId === inv.id}
+                        onToggle={() => setOpenInvoiceId((cur) => (cur === inv.id ? null : inv.id))}
+                        entries={journalBySource.get(`invoice|${inv.id}`) || []}
+                        receipts={receiptsByInvoice.get(inv.id) || []}
+                        onViewReceipt={viewReceipt}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {standaloneJournal.length > 0 && (
+                  <div style={{ marginTop: '1.25rem' }}>
+                    <div style={{ fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.45rem' }}>
+                      Other entries
+                    </div>
+                    <div style={{ display: 'grid', gap: '0.5rem' }}>
+                      {standaloneJournal.map((e) => (
+                        <JournalEntryCard key={e.id} entry={e} symbol={currencySymbol} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* ─── Stage invoice (provisional → deposit request, confirmed+ → final) ── */}
+          {tab === 'finance' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
                 Invoice
@@ -5134,7 +5247,7 @@ const missing = !sv.confirmationNumber ||
                   </button>
                 ) : (
                   <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: 0 }}>
-            3287|        Issue the invoice below first — the receipt is raised automatically when you confirm payment.
+                  Issue the invoice below first — the receipt is raised automatically when you confirm payment.
                   </p>
                 )}
               </div>
@@ -5171,6 +5284,20 @@ const missing = !sv.confirmationNumber ||
                     : `The ${emailFormat} file downloads (or is shared on supported devices), ready to attach to the email that follows.`}
                 </p>
               </div>
+            </div>
+          )}
+
+          {/* ─── Cost of sales (per itinerary, per currency) ─────────────────── */}
+          {tab === 'finance' && (
+            <div className="builder-panel-card">
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
+                Cost of sales
+              </h3>
+              <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.75rem', maxWidth: '760px' }}>
+                What this itinerary earns against what it costs. The net sale excludes tax, because tax
+                collected is payable to SARS rather than kept as margin. Green is a profit, red is a loss.
+              </p>
+              <CostOfSalesPanel groups={pricingGroups} />
             </div>
           )}
 

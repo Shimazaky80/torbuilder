@@ -3,6 +3,8 @@ import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
+import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
+import { ReceiptsPanel, JournalPanel, TenantCostOfSalesPanel, AccountingPanel } from '../components/finance/FinanceTenantViews';
 import {
   round2,
   fmtMoney,
@@ -72,6 +74,16 @@ export const Finance = () => {
   const [search, setSearch] = useState('');
   const searchTimeoutRef = useRef(null);
   const { limit: pageSize } = useListRowLimit();
+
+  /* Tenant-wide finance views. Loaded together so the tabs, the ledger totals
+     and the cost-of-sales figures can never disagree with each other. */
+  const [activeTab, setActiveTab] = useState('invoices');
+  const [journalEntries, setJournalEntries] = useState([]);
+  const [allReceipts, setAllReceipts] = useState([]);
+  const [tenancyRows, setTenancyRows] = useState([]);
+  const [tenancyItineraries, setTenancyItineraries] = useState([]);
+  const [connections, setConnections] = useState([]);
+  const [busyProvider, setBusyProvider] = useState(null);
 
   const [viewing, setViewing] = useState(null);
   const [viewLines, setViewLines] = useState([]);
@@ -185,6 +197,164 @@ export const Finance = () => {
       return true;
     });
   }, [invoices, statusFilter, typeFilter]);
+
+  /* ── Tenant-wide ledger, receipts, cost of sales and connections ────────── */
+  const loadTenantFinance = useCallback(async (cid) => {
+    const id = cid || companyId;
+    if (!id) return;
+
+    const [entriesRes, receiptsRes, itinsRes, connRes] = await Promise.all([
+      supabase.from('journal_entries').select('*').eq('company_id', id).order('entry_date', { ascending: false }).order('created_at', { ascending: false }),
+      supabase.from('invoice_receipts').select('*').eq('company_id', id).order('received_date', { ascending: false }),
+      supabase.from('itineraries').select('id, reference_number, reference, status, client_id, clients(name)').eq('company_id', id),
+      supabase.from('accounting_connections').select('*').eq('company_id', id)
+    ]);
+
+    const entries = entriesRes.data || [];
+    if (entries.length) {
+      const { data: lines } = await supabase
+        .from('journal_lines')
+        .select('*')
+        .in('entry_id', entries.map((e) => e.id))
+        .order('sort_order', { ascending: true });
+      setJournalEntries(entries.map((e) => ({ ...e, lines: (lines || []).filter((l) => l.entry_id === e.id) })));
+    } else {
+      setJournalEntries([]);
+    }
+    setAllReceipts(receiptsRes.data || []);
+    setConnections(connRes.data || []);
+
+    const itins = (itinsRes.data || []).map((i) => ({ ...i, client_name: i.clients?.name || '' }));
+    setTenancyItineraries(itins);
+
+    /* Cost of sales is derived from the persisted day items rather than the
+       live builder state, so it reflects what was actually saved. */
+    const itinIds = itins.map((i) => i.id);
+    if (itinIds.length) {
+      const { data: days } = await supabase
+        .from('itinerary_days')
+        .select('id, itinerary_id')
+        .in('itinerary_id', itinIds);
+      const dayIds = (days || []).map((d) => d.id);
+      if (dayIds.length) {
+        const { data: items } = await supabase
+          .from('itinerary_day_items')
+          .select('itinerary_day_id, currency_code, total_buy, total_sell, tax_rate, is_included')
+          .in('itinerary_day_id', dayIds);
+        const itinOfDay = new Map((days || []).map((d) => [d.id, d.itinerary_id]));
+        setTenancyRows(costOfSalesFromDayItems((items || []).map((it) => ({ ...it, itinerary_id: itinOfDay.get(it.itinerary_day_id) }))));
+      } else {
+        setTenancyRows([]);
+      }
+    } else {
+      setTenancyRows([]);
+    }
+  }, [companyId]);
+
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    (async () => {
+      await loadTenantFinance(companyId);
+      if (cancelled) return;
+    })();
+    return () => { cancelled = true; };
+  }, [companyId, activeTab, loadTenantFinance]);
+
+  /* Push the ledger out as a file the accounts team can import. Provider-
+     specific dialects differ, so this emits the provider-agnostic journal plus
+     a chart-of-accounts mapping they can map onto their own codes. */
+  const pushLedgerFile = async (provider) => {
+    if (!companyId) return;
+    setBusyProvider(provider);
+    try {
+      const payload = {
+        schema: 'torbuilder.ledger/v1',
+        provider,
+        generated_at: new Date().toISOString(),
+        company_id: companyId,
+        chart_of_accounts: CHART_OF_ACCOUNTS,
+        entries: journalEntries.map((e) => ({
+          entry_date: e.entry_date,
+          reference: e.reference,
+          source_type: e.source_type,
+          narration: e.narration,
+          itinerary_id: e.itinerary_id,
+          currency: e.currency_code,
+          total_debit: e.total_debit,
+          total_credit: e.total_credit,
+          lines: (e.lines || []).map((l) => ({
+            account_code: l.account_code,
+            account_name: l.account_name,
+            line_type: l.line_type,
+            amount: l.amount,
+            description: l.description
+          }))
+        }))
+      };
+      downloadBlob(JSON.stringify(payload, null, 2), `${provider}-ledger-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
+      await supabase.from('accounting_sync_log').insert([{
+        company_id: companyId, provider, direction: 'push', status: 'success',
+        records_count: journalEntries.length, message: 'Ledger exported by the user.'
+      }]).then(() => {}).catch(() => {});
+      showToast(`${journalEntries.length} journal entries exported for ${provider}`, 'success');
+    } catch (err) {
+      showToast(err.message || 'Export failed', 'error');
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const syncNow = async (provider) => {
+    if (!companyId) return;
+    setBusyProvider(provider);
+    try {
+      /* Live sync needs a server-side OAuth integration to hold provider
+         credentials. Recording the attempt keeps the audit trail honest rather
+         than silently reporting a sync that never happened. */
+      await supabase.from('accounting_sync_log').insert([{
+        company_id: companyId, provider, direction: 'live', status: 'error', records_count: 0,
+        message: 'Live sync requires a server-side OAuth integration, which is not configured yet. Use Push to export the ledger.'
+      }]).then(() => {}).catch(() => {});
+      showToast('Live sync needs a server-side integration — use Push to export the ledger instead.', 'warning');
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const setConnectionMode = async (provider, mode) => {
+    if (!companyId) return;
+    const { error } = await supabase.from('accounting_connections').upsert(
+      { company_id: companyId, provider, mode, status: 'disconnected' },
+      { onConflict: 'company_id,provider' }
+    );
+    if (error) { showToast(error.message || 'Could not save the connection', 'error'); return; }
+    await loadTenantFinance(companyId);
+  };
+
+  const postCostOfSalesRow = async (row) => {
+    if (!companyId) return;
+    /* Guard the write, not just the button: recognising cost creates a real
+       supplier liability, and an uncommitted quotation is not an obligation. */
+    const itin = tenancyItineraries.find((i) => i.id === row.itinerary_id);
+    if (itin && !['confirmed', 'in_progress', 'completed'].includes(itin.status)) {
+      showToast(`Cost of sales can only be recognised on a committed booking — ${itin.reference_number || itin.reference || 'this itinerary'} is ${itin.status}.`, 'warning');
+      return;
+    }
+    try {
+      const res = await postCostOfSales(companyId, {
+        itineraryId: row.itinerary_id,
+        reference: 'COS',
+        narration: 'Cost of sales recognised from contracted rates',
+        currencyCode: row.code,
+        cost: row.cost
+      });
+      showToast(res.created ? 'Cost of sales posted to the journal' : 'Already posted — no duplicate created', 'success');
+      await loadTenantFinance(companyId);
+    } catch (err) {
+      showToast(err.message || 'Could not post cost of sales', 'error');
+    }
+  };
 
   /* ── Wizard: load qualified itineraries (provisional → deposit, confirmed → final) */
   const openWizard = async () => {
@@ -544,7 +714,7 @@ export const Finance = () => {
       const { data: created, error: invErr } = await supabase
         .from('invoices')
         .insert([{ ...header, accounting_export: accounting }])
-        .select('id')
+        .select('*')
         .single();
       if (invErr) throw invErr;
 
@@ -557,6 +727,11 @@ export const Finance = () => {
 
       await fetchInvoices(companyId);
       setWizardOpen(false);
+      /* A deposit is created as a proforma draft and posts nothing until it is
+         validated; a final invoice is created validated and posts now. */
+      if (created.status && created.status !== 'proforma') {
+        await postInvoice(companyId, created);
+      }
       showToast(`${TYPE_LABEL[selectedGroup.issueType]} ${number} issued`, 'success');
     } catch (err) {
       const msg = /duplicate key|unique/i.test(err.message || '')
@@ -742,6 +917,13 @@ export const Finance = () => {
         .eq('id', inv.id);
       if (paidErr) throw paidErr;
 
+      /* A proforma deposit becomes a real document on payment, so its sale is
+         recognised here. postInvoice is idempotent per invoice. */
+      if (inv.status === 'proforma' || inv.status === 'draft') {
+        await postInvoice(companyId, { ...inv, status: 'paid' });
+      }
+      await postReceipt(companyId, { ...row, id: created.id, accounting_export: accounting });
+
       await fetchInvoices(companyId);
       await reloadViewing(inv.id);
       setReceiptPromptFor(null);
@@ -874,6 +1056,9 @@ export const Finance = () => {
           .from('invoices')
           .update({ credit_note_id: createdCn.id, credit_note_number: createdCn.credit_note_number })
           .eq('id', inv.id);
+        /* The credit note is the reversing document, so the ledger reverses
+           with it. Idempotent per credit note. */
+        await postCreditNote(companyId, createdCn);
       }
 
       await fetchInvoices(companyId);
@@ -968,6 +1153,23 @@ export const Finance = () => {
         </button>
       </div>
 
+      {/* Tenant-wide tabs. The per-itinerary view of the same data lives on the
+          itinerary's own Finance tab; these are the cross-itinerary rollups. */}
+      <div className="builder-tabs" style={{ marginTop: '1.25rem' }}>
+        {[
+          ['invoices', 'Invoices'],
+          ['receipts', 'Receipts'],
+          ['journal', 'Journal'],
+          ['cost-of-sales', 'Cost of Sales'],
+          ['accounting', 'Accounting']
+        ].map(([id, label]) => (
+          <button key={id} type="button" className={`builder-tab ${activeTab === id ? 'active' : ''}`} onClick={() => setActiveTab(id)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'invoices' && (
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
           <div style={{ position: 'relative', flex: '1 1 240px' }}>
@@ -1045,6 +1247,37 @@ export const Finance = () => {
           </div>
         )}
       </div>
+      )}
+
+      {activeTab === 'receipts' && (
+        <ReceiptsPanel receipts={allReceipts} onViewReceipt={(r) => printReceipt(r)} />
+      )}
+
+      {activeTab === 'journal' && (
+        <JournalPanel
+          entries={journalEntries}
+          itineraries={tenancyItineraries}
+          onExport={() => pushLedgerFile('general-ledger')}
+        />
+      )}
+
+      {activeTab === 'cost-of-sales' && (
+        <TenantCostOfSalesPanel
+          rows={tenancyRows}
+          itineraries={tenancyItineraries}
+          onPost={postCostOfSalesRow}
+        />
+      )}
+
+      {activeTab === 'accounting' && (
+        <AccountingPanel
+          connections={connections}
+          onSetMode={setConnectionMode}
+          onPush={pushLedgerFile}
+          onSync={syncNow}
+          busyProvider={busyProvider}
+        />
+      )}
 
       {/* View invoice */}
       {viewing && (
