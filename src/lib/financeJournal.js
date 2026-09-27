@@ -189,12 +189,16 @@ export const postEntry = async (companyId, draft) => {
   const entry = buildEntry(draft);
 
   if (entry.source_id) {
+    /* currency_code is part of the idempotency key: one itinerary can hold
+       services in several currencies, and each is a separate accrual. Keying on
+       the document alone would make the second currency a silent no-op. */
     const { data: existing } = await supabase
       .from('journal_entries')
       .select('id')
       .eq('company_id', companyId)
       .eq('source_type', entry.source_type)
       .eq('source_id', entry.source_id)
+      .eq('currency_code', entry.currency_code)
       .maybeSingle();
     if (existing) return { entryId: existing.id, created: false };
   }
@@ -232,6 +236,7 @@ export const postEntry = async (companyId, draft) => {
       account_id: acct.id,
       account_code: acct.code,
       account_name: acct.name,
+      account_type: acct.account_type,
       line_type: l.line_type,
       amount: l.amount,
       description: l.description || '',
@@ -348,7 +353,13 @@ export const buildGeneralLedger = (entries, lines) => {
   const dated = lines
     .map((l) => {
       const e = byEntry.get(l.entry_id);
-      return e ? { ...l, entry_date: e.entry_date, reference: e.reference, narration: e.narration, source_type: e.source_type, itinerary_id: e.itinerary_id } : null;
+      /* currency_code lives on the entry, not the line, so it has to be carried
+         across — without it every currency collapses into one running balance.
+         account_type is denormalised onto the line, which is what lets the
+         ledger present each balance from the account's own natural side. */
+      return e
+        ? { ...l, entry_date: e.entry_date, currency_code: e.currency_code, reference: e.reference, narration: e.narration, source_type: e.source_type, itinerary_id: e.itinerary_id }
+        : null;
     })
     .filter(Boolean)
     .sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)) || a.sort_order - b.sort_order);

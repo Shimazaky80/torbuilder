@@ -13,9 +13,10 @@
 --   * Every journal entry must balance: total debits = total credits. A partial
 --     unique index guarantees at most ONE entry per source document, so
 --     re-posting an invoice is idempotent rather than duplicating the ledger.
---   * account_code / account_name are denormalised onto each line. The ledger
---     has to stay readable (and exportable) even if an account is later
---     renamed, and exports must not require a live join.
+--   * account_code / account_name / account_type are denormalised onto each
+--     line. The ledger groups and presents lines by account type (a revenue
+--     balance reads from its credit side), and it has to stay readable and
+--     exportable even if an account is later renamed — without a live join.
 --
 -- Idempotent: safe to re-run.
 
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS public.journal_lines (
     account_id        UUID NOT NULL REFERENCES public.finance_accounts(id),
     account_code      TEXT NOT NULL,
     account_name      TEXT NOT NULL,
+    account_type      TEXT NOT NULL,
     line_type         TEXT NOT NULL,
     amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
     description       TEXT NOT NULL DEFAULT '',
@@ -96,9 +98,17 @@ CREATE INDEX IF NOT EXISTS journal_lines_account_idx
   ON public.journal_lines (company_id, account_code);
 
 -- At most one entry per source document, so re-posting is idempotent.
+--
+-- currency_code is part of the key because one itinerary can hold services in
+-- more than one currency. Each currency is a separate accrual against a
+-- separate set of supplier obligations; collapsing them into a single entry
+-- would either drop a currency or invent an exchange rate we were never given.
+-- For single-currency documents (invoice, receipt, credit note) this is a
+-- no-op, so their idempotency is unchanged.
+--
 -- Manual entries (source_id IS NULL) are exempt and may be many.
 CREATE UNIQUE INDEX IF NOT EXISTS journal_entries_source_unique
-  ON public.journal_entries (company_id, source_type, source_id)
+  ON public.journal_entries (company_id, source_type, source_id, currency_code)
   WHERE source_id IS NOT NULL;
 
 -- A journal entry must balance. Enforced in the database, not just the app, so

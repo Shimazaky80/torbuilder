@@ -207,7 +207,14 @@ export const Finance = () => {
       supabase.from('journal_entries').select('*').eq('company_id', id).order('entry_date', { ascending: false }).order('created_at', { ascending: false }),
       supabase.from('invoice_receipts').select('*').eq('company_id', id).order('received_date', { ascending: false }),
       supabase.from('itineraries').select('id, reference_number, reference, status, client_id, clients(name)').eq('company_id', id),
-      supabase.from('accounting_connections').select('*').eq('company_id', id)
+      // Columns listed explicitly to keep `credentials` out of the browser. The
+      // Accounting tab only ever renders status and last-sync metadata, and
+      // `select('*')` here would hand OAuth material to the client the moment
+      // anyone pasted a real token instead of a credential reference.
+      supabase
+        .from('accounting_connections')
+        .select('id, company_id, provider, mode, status, last_sync_at, last_error, created_at, updated_at')
+        .eq('company_id', id)
     ]);
 
     const entries = entriesRes.data || [];
