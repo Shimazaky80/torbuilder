@@ -375,13 +375,20 @@ export const postCostOfSales = (companyId, args) =>
    another needs an invoice for the addition and a credit note for the
    removal, not a single number that hides both. */
 
-const lineKey = (l) => {
-  /* item_id is the stable identity of a priced line. Older invoices predate it,
-     so fall back to day + description, which is stable for as long as the
-     description is. */
+/* Identity of a priced line. `item_id` is the stable handle; older invoices
+   predate it, so fall back to day + description.
+
+   The two shapes being compared use different field names — a settled
+   invoice's accounting_export lines carry `day`/`description`, while the
+   itinerary's own lines carry `day_number`/`item_name` — so both spellings are
+   accepted. Without that, every current line would key to an empty string and
+   the comparison would report the whole itinerary as newly added. */
+export const lineKey = (l) => {
   const id = l.item_id || l.itemId;
   if (id) return String(id);
-  return `${l.day ?? l.day_number ?? ''}|${String(l.description || l.item_name || '').trim().toLowerCase()}`;
+  const day = l.day ?? l.day_number ?? '';
+  const desc = String(l.description || l.item_name || '').trim().toLowerCase();
+  return desc ? `${day}|${desc}` : '';
 };
 
 export const fingerprintBilledLines = (lines) =>
@@ -394,12 +401,16 @@ export const fingerprintBilledLines = (lines) =>
       tax_amount: round2(l.tax_amount || 0),
       line_total: round2(l.line_total || 0)
     }))
-    .filter((l) => l.key && l.key !== '|');
+    .filter((l) => l.key);
 
 /* Compare what was billed against what the itinerary now says. Returns the
-   changed lines with their before/after values, plus the gross increase and
-   gross decrease. `unchanged` is true when nothing moved at all, which is the
-   signal that a further invoice would be a duplicate. */
+   changed lines with their before/after values, plus the movement both net of
+   tax and gross. `unchanged` is true when nothing moved at all, which is the
+   signal that a further invoice would be a duplicate.
+
+   Documents are always gross — an invoice's total_incl and a credit note's
+   total_incl include the tax — so callers billing a change must use the gross
+   figures. The net figures are what belongs in the ledger. */
 export const diffAgainstBilledLines = (billedLines, currentLines) => {
   const billed = new Map(fingerprintBilledLines(billedLines).map((l) => [l.key, l]));
   const current = new Map(fingerprintBilledLines(currentLines).map((l) => [l.key, l]));
@@ -407,37 +418,134 @@ export const diffAgainstBilledLines = (billedLines, currentLines) => {
   const changed = [];
   let increase = 0;
   let decrease = 0;
+  let increaseGross = 0;
+  let decreaseGross = 0;
+
+  const record = (entry) => {
+    changed.push(entry);
+    if (entry.netDelta > 0) {
+      increase = round2(increase + entry.netDelta);
+      increaseGross = round2(increaseGross + entry.grossDelta);
+    } else if (entry.netDelta < 0) {
+      decrease = round2(decrease + entry.netDelta);
+      decreaseGross = round2(decreaseGross + entry.grossDelta);
+    }
+  };
 
   for (const [key, now] of current) {
     const was = billed.get(key);
     if (!was) {
       /* Newly priced line: the whole amount is new billable work. */
-      const delta = round2(now.line_total - now.tax_amount);
-      changed.push({ key, description: now.description, status: 'added', before: 0, after: now.line_total, delta });
-      if (delta > 0) increase = round2(increase + delta);
-      else if (delta < 0) decrease = round2(decrease + delta);
+      record({
+        key, description: now.description, status: 'added',
+        before: 0, after: now.line_total,
+        netDelta: round2(now.line_total - now.tax_amount),
+        grossDelta: round2(now.line_total)
+      });
       continue;
     }
     if (round2(was.line_total) === round2(now.line_total) && round2(was.tax_amount) === round2(now.tax_amount)) continue;
     /* Repriced line: only the movement is billable, never the whole amount
        again — re-billing the unchanged part is the double-count this guards. */
-    const wasNet = round2(was.line_total - was.tax_amount);
-    const nowNet = round2(now.line_total - now.tax_amount);
-    const delta = round2(nowNet - wasNet);
-    changed.push({ key, description: now.description, status: 'repriced', before: was.line_total, after: now.line_total, delta });
-    if (delta > 0) increase = round2(increase + delta);
-    else if (delta < 0) decrease = round2(decrease + delta);
+    record({
+      key, description: now.description, status: 'repriced',
+      before: was.line_total, after: now.line_total,
+      netDelta: round2((now.line_total - now.tax_amount) - (was.line_total - was.tax_amount)),
+      grossDelta: round2(now.line_total - was.line_total)
+    });
   }
 
   for (const [key, was] of billed) {
     if (current.has(key)) continue;
     /* Priced line that has been taken off the itinerary: a credit. */
-    const wasNet = round2(was.line_total - was.tax_amount);
-    changed.push({ key, description: was.description, status: 'removed', before: was.line_total, after: 0, delta: -wasNet });
-    decrease = round2(decrease - wasNet);
+    record({
+      key, description: was.description, status: 'removed',
+      before: was.line_total, after: 0,
+      netDelta: -round2(was.line_total - was.tax_amount),
+      grossDelta: -round2(was.line_total)
+    });
   }
 
-  return { changed, increase: round2(increase), decrease: round2(decrease), unchanged: !changed.length };
+  return {
+    changed,
+    increase: round2(increase),
+    decrease: round2(decrease),
+    increaseGross: round2(increaseGross),
+    decreaseGross: round2(decreaseGross),
+    unchanged: !changed.length
+  };
+};
+
+const fmtDelta = (n) => new Intl.NumberFormat('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(round2(n));
+
+/* Decide what may be done about a booking that has already been billed.
+
+   outstanding > 0   -> nothing settled yet, the normal deposit/final flow runs
+   outstanding <= 0  -> the booking is settled. A further invoice is only
+                        legitimate if the client reopened it (status back to
+                        Quotation) or a priced service actually moved. Then the
+                        honest options are an invoice for what went UP, a credit
+                        note for what came DOWN, or both.
+
+   Returns { blocked, reason, options } where options is a list of
+   { kind: 'invoice' | 'credit_note', amount, label } the user may choose from.
+   An empty options list means "raise nothing". */
+export const decideReissue = ({ outstanding, diff, itineraryStatus, currencyCode = '' }) => {
+  const owed = round2(outstanding || 0);
+  if (owed > 0.009) return { blocked: false, settled: false, reason: '', options: [] };
+
+  const settled = true;
+  const reopened = String(itineraryStatus || '').toLowerCase() === 'quotation';
+  const d = diff || { changed: [], increase: 0, decrease: 0, increaseGross: 0, decreaseGross: 0, unchanged: true };
+  /* Documents are gross, so the amounts offered to the user are the gross
+     movements. Older callers may pass a diff with only the net figures, in
+     which case those stand in. */
+  const increase = round2(d.increaseGross ?? d.increase ?? 0);
+  const decrease = round2(Math.abs(d.decreaseGross ?? d.decrease ?? 0));
+  const ccy = currencyCode ? ` ${currencyCode}` : '';
+
+  /* Reopened with no repricing: the trip is unchanged, so the only way to bill
+     again is to cancel what was already issued and start the document afresh. */
+  if (reopened && d.unchanged) {
+    return {
+      blocked: true,
+      settled,
+      reason: `This booking was reopened but nothing has been repriced. Cancel the settled invoice with a credit note before issuing a new one${ccy}.`,
+      options: [{ kind: 'credit_note', amount: 0, label: 'Credit note to cancel the settled invoice' }]
+    };
+  }
+
+  if (d.unchanged) {
+    return {
+      blocked: true,
+      settled,
+      reason: `Already settled in full. Repricing a service, or moving the booking back to Quotation, is what allows a further invoice${ccy}.`,
+      options: []
+    };
+  }
+
+  const options = [];
+  if (increase > 0.009) {
+    options.push({ kind: 'invoice', amount: increase, label: `Invoice the ${fmtDelta(increase)}${ccy} increase` });
+  }
+  if (decrease > 0.009) {
+    options.push({ kind: 'credit_note', amount: decrease, label: `Credit note for the ${fmtDelta(decrease)}${ccy} decrease` });
+  }
+  if (!options.length) {
+    return {
+      blocked: true,
+      settled,
+      reason: `Services moved but the net amount did not change${ccy}. Nothing to bill.`,
+      options: []
+    };
+  }
+  return {
+    blocked: false,
+    settled,
+    reopened,
+    reason: `This booking is settled. ${d.changed.length} priced service${d.changed.length === 1 ? '' : 's'} changed since it was issued.`,
+    options
+  };
 };
 
 /* ── Cost of sales ──────────────────────────────────────────────────────────

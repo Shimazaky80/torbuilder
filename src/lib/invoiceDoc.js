@@ -376,6 +376,10 @@ export const accountingPayload = (invoice, lines) => ({
   },
   lines: (lines || []).map((l) => ({
     description: l.item_name,
+    /* Stable line identity, so a settled invoice can later be diffed against
+       the itinerary to detect what changed. Null on invoices issued before
+       this was captured, which fall back to day + description. */
+    item_id: l.item_id || null,
     day: l.day_number,
     service_date: l.service_date,
     quantity: l.quantity,

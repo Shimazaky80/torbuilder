@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
-import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
+import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, diffAgainstBilledLines, decideReissue, lineKey, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
 import { ReceiptsPanel, JournalPanel, TenantCostOfSalesPanel, AccountingPanel } from '../components/finance/FinanceTenantViews';
 import {
   round2,
@@ -532,6 +532,11 @@ export const Finance = () => {
               const baseLine = {
                 day_number: d.day_number || 1,
                 service_date: d.day_date || null,
+                /* Stable identity of the priced line. Carried into the invoice's
+                   accounting_export so a later comparison against this itinerary
+                   can tell a repriced service from a replaced one, rather than
+                   matching on a description the user is free to edit. */
+                item_id: it.item_id || null,
                 item_name: it.description_override || it.item_name || 'Service',
                 category: it.category || '',
                 supplier_name: it.supplier_name || '',
@@ -586,17 +591,61 @@ export const Finance = () => {
          still travelling. Issuing stops only when there is no money still
          outstanding, or when the most recent invoice for this currency is an
          untouched deposit proforma (so we never stack a new one on top of a
-         request that has not been paid yet). */
+         request that has not been paid yet).
+
+         Once the booking is SETTLED, that is not enough on its own: the app
+         used to stack a second invoice onto a trip already billed in full. The
+         settled invoice's pricing snapshot is diffed against the itinerary as
+         it now stands, and a further invoice is only offered when something
+         genuinely moved or the client reopened the booking. */
+      const settledInvoice = [...invoices]
+        .filter((inv) => inv.itinerary_id === selectedItinerary.id
+          && (inv.currency_code || '').toUpperCase() === code
+          && inv.status !== 'void'
+          && inv.accounting_export
+          && Array.isArray(inv.accounting_export.lines)
+          && inv.accounting_export.lines.length)
+        .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0] || null;
+
+      const settledDiff = settledInvoice
+        ? diffAgainstBilledLines(settledInvoice.accounting_export.lines, agg.lines)
+        : { changed: [], increase: 0, decrease: 0, unchanged: true };
+      const reissue = decideReissue({
+        outstanding,
+        diff: settledDiff,
+        itineraryStatus: selectedItinerary.status,
+        currencyCode: code
+      });
+
       let issueType = null;
       let blockReason = '';
-      if (outstanding <= 0.009) {
+      if (reissue.blocked) {
+        blockReason = reissue.reason;
+      } else if (reissue.settled) {
+        /* Settled, but something changed: issue only the movement. */
+        issueType = 'invoice';
+      } else if (outstanding <= 0.009) {
         blockReason = 'Paid in full';
       } else if (liveDeposit) {
         blockReason = 'Deposit invoice issued';
       } else {
         issueType = 'deposit';
       }
-      return { code, ...agg, perPersonBreakdown, expandedLines, paidTotal, outstanding, hasPaidDeposit, issueType, invoiced: !issueType, blockReason };
+      return {
+        code,
+        ...agg,
+        perPersonBreakdown,
+        expandedLines,
+        paidTotal,
+        outstanding,
+        hasPaidDeposit,
+        issueType,
+        invoiced: !issueType,
+        blockReason,
+        settledInvoice,
+        settledDiff,
+        reissue
+      };
     });
   }, [selectedItinerary, invoices, paidByCurrency, itineraryRates, itineraryAgeRanges, billing]);
 
@@ -639,7 +688,19 @@ export const Finance = () => {
     }
     setIssuing(true);
     try {
-      const gross = selectedGroup.totalIncl;
+      /* A settled booking with a change bills ONLY what moved. Re-billing the
+         unchanged part is the double-count the guard exists to prevent, so the
+         delta becomes the whole document: header totals and line items alike. */
+      const settledDelta = selectedGroup.reissue?.settled
+        ? (selectedGroup.reissue.options.find((o) => o.kind === 'invoice')?.amount || 0)
+        : 0;
+      const isDelta = settledDelta > 0.009;
+      const gross = isDelta ? settledDelta : selectedGroup.totalIncl;
+      /* Apportion the group's net share onto the movement, so a delta document
+         carries a believable VAT figure rather than the whole trip's tax. */
+      const groupTotal = round2(selectedGroup.totalIncl);
+      const netRatio = groupTotal > 0 ? round2(selectedGroup.subtotalExcl) / groupTotal : 1;
+      const deltaNet = isDelta ? round2(gross * netRatio) : round2(selectedGroup.subtotalExcl);
       const pct = depositPct;
       const isFinal = selectedGroup.issueType === 'final';
 
@@ -686,11 +747,16 @@ export const Finance = () => {
         itinerary_id: selectedItinerary.id,
         client_id: selectedItinerary.client_id || null,
         invoice_number: number,
-        invoice_type: selectedGroup.issueType,
-        status: isFinal ? 'validated' : 'proforma',
+        /* A delta is a neutral supplementary invoice, not a deposit request and
+           not a fresh final. 'invoice' is the type the lifecycle migration
+           already allows for exactly this. */
+        invoice_type: isDelta ? 'invoice' : selectedGroup.issueType,
+        status: isDelta ? 'validated' : (isFinal ? 'validated' : 'proforma'),
         currency_code: selectedGroup.code,
-        subtotal_excl: selectedGroup.subtotalExcl,
-        tax_total: selectedGroup.taxTotal,
+        /* On a delta the tax is apportioned off the movement, with net as the
+           balancing figure so the document's own totals add up exactly. */
+        subtotal_excl: deltaNet,
+        tax_total: round2(gross - deltaNet),
         total_incl: gross,
         tax_label: selectedGroup.taxEntries[0]?.label || 'Tax',
         tax_rate: selectedGroup.taxEntries[0]?.rate ?? 0,
@@ -717,7 +783,16 @@ export const Finance = () => {
         notes: null
       };
 
-      const accounting = accountingPayload({ ...header, bank_details: bankDetails }, selectedGroup.lines);
+      /* A delta document itemises only what moved, so the printed invoice
+         cannot be mistaken for a second charge for the whole trip. */
+      const deltaKeys = new Set((selectedGroup.settledDiff?.changed || [])
+        .filter((c) => c.grossDelta > 0)
+        .map((c) => c.key));
+      const issueLines = isDelta
+        ? selectedGroup.lines.filter((l) => deltaKeys.has(lineKey(l)) || deltaKeys.size === 0)
+        : selectedGroup.lines;
+
+      const accounting = accountingPayload({ ...header, bank_details: bankDetails }, issueLines);
       const { data: created, error: invErr } = await supabase
         .from('invoices')
         .insert([{ ...header, accounting_export: accounting }])
@@ -725,7 +800,7 @@ export const Finance = () => {
         .single();
       if (invErr) throw invErr;
 
-      const lineRows = selectedGroup.lines.map((l) => ({ ...l, invoice_id: created.id, company_id: companyId }));
+      const lineRows = issueLines.map((l) => ({ ...l, invoice_id: created.id, company_id: companyId }));
       const { error: lineErr } = await supabase.from('invoice_line_items').insert(lineRows);
       if (lineErr) {
         await supabase.from('invoices').delete().eq('id', created.id);
@@ -1666,9 +1741,71 @@ export const Finance = () => {
             {wizardStep === 3 && selectedGroup && (
               <div>
                 <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
-                  {selectedGroup.issueType === 'deposit' ? 'Proforma Deposit Invoice' : TYPE_LABEL[selectedGroup.issueType]} for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. Review the breakdown and confirm.
+                  {selectedGroup.reissue?.settled
+                    ? <>Change invoice for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. This booking is already settled, so only the movement below can be billed.</>
+                    : <>{selectedGroup.issueType === 'deposit' ? 'Proforma Deposit Invoice' : TYPE_LABEL[selectedGroup.issueType]} for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. Review the breakdown and confirm.</>}
                 </p>
 
+                {selectedGroup.reissue?.settled && (
+                  <div style={{ margin: '0.75rem 0', border: '1px solid #fcd34d', background: '#fffbeb', borderRadius: '10px', padding: '0.85rem 1rem' }}>
+                    <div style={{ fontWeight: 800, fontSize: '0.85rem', color: '#92400e', marginBottom: '0.4rem' }}>
+                      {selectedGroup.settledDiff.changed.length} priced service{selectedGroup.settledDiff.changed.length === 1 ? '' : 's'} changed since {selectedGroup.settledInvoice?.invoice_number}
+                    </div>
+                    <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
+                      <tbody>
+                        {selectedGroup.settledDiff.changed.map((c) => (
+                          <tr key={c.key}>
+                            <td style={{ padding: '0.15rem 0' }}>{c.description || 'Service'}</td>
+                            <td style={{ color: '#64748b' }}>{c.status}</td>
+                            <td style={{ textAlign: 'right' }}>
+                              {c.status === 'added' ? '' : <span style={{ color: '#94a3b8' }}>{fmtMoney(c.before, selectedGroup.code)} &rarr; </span>}
+                              <b style={{ color: c.grossDelta > 0 ? '#b45309' : '#047857' }}>
+                                {c.grossDelta > 0 ? '+' : ''}{fmtMoney(c.grossDelta, selectedGroup.code)}
+                              </b>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {selectedGroup.reissue.options.map((o) => (
+                      <div key={o.kind} style={{ marginTop: '0.6rem', display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '0.82rem', color: '#334155' }}>{o.label}</span>
+                        {o.kind === 'invoice' ? (
+                          <span style={{ fontSize: '0.72rem', color: '#92400e' }}>Use Select &rarr; confirm below to issue it.</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="secondary-btn"
+                            style={{ padding: '0.25rem 0.55rem', fontSize: '0.75rem' }}
+                            onClick={() => setVoidTarget(selectedGroup.settledInvoice)}
+                          >
+                            Raise credit note
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {selectedGroup.reissue?.settled && (
+                  <table className="admin-table">
+                    <thead>
+                      <tr><th>Service</th><th style={{ textAlign: 'right' }}>Movement</th></tr>
+                    </thead>
+                    <tbody>
+                      {(selectedGroup.settledDiff.changed || [])
+                        .filter((c) => c.grossDelta > 0)
+                        .map((c) => (
+                          <tr key={c.key}>
+                            <td>{c.description || 'Service'}</td>
+                            <td style={{ textAlign: 'right', fontWeight: 700, color: '#b45309' }}>{fmtMoney(c.grossDelta, selectedGroup.code)}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {!selectedGroup.reissue?.settled && (
                 <table className="admin-table">
                   <thead>
                     <tr><th>Day</th><th>Service</th><th style={{ textAlign: 'right' }}>Qty</th><th style={{ textAlign: 'right' }}>Total (Incl Tax)</th></tr>
@@ -1684,7 +1821,9 @@ export const Finance = () => {
                     ))}
                   </tbody>
                 </table>
+                )}
 
+                {!selectedGroup.reissue?.settled && (
                 <div style={{ marginTop: '0.75rem', background: '#f8fafc', borderRadius: '10px', padding: '0.85rem 1rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Subtotal (Excl {taxWordOf(selectedGroup.code)})</span><b>{fmtMoney(selectedGroup.subtotalExcl, symOf(selectedGroup.code))}</b></div>
                   {selectedGroup.taxEntries.map((te) => (
@@ -1712,6 +1851,7 @@ export const Finance = () => {
                     )}
                   </div>
                 </div>
+                )}
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
                   <div className="sidebar-field">
@@ -1738,7 +1878,7 @@ export const Finance = () => {
                 <div className="form-actions" style={{ marginTop: '0.5rem' }}>
                   <button type="button" className="secondary-btn" onClick={() => setWizardStep(2)}>Back</button>
                   <button type="button" className="primary-btn" style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem' }} disabled={issuing} onClick={handleIssue}>
-                    <Check size={16} /> {issuing ? 'Issuing…' : (selectedGroup.issueType === 'deposit' ? 'Issue Proforma' : 'Validate Final Invoice')}
+                    <Check size={16} /> {issuing ? 'Issuing…' : (selectedGroup.reissue?.settled ? 'Issue Change Invoice' : (selectedGroup.issueType === 'deposit' ? 'Issue Proforma' : 'Validate Final Invoice'))}
                   </button>
                 </div>
               </div>
