@@ -1091,6 +1091,42 @@ export const Finance = () => {
   const [creditAmount, setCreditAmount] = useState('');
   const [creditReason, setCreditReason] = useState('');
 
+  /* What a document actually collected, which is what a sibling invoice would
+     have recorded as money already covered. A deposit invoice carries the whole
+     trip value in total_incl but only ever collected its deposit, so using
+     total_incl here would release far more credit than was ever given. */
+  const collectedAmount = (inv) => round2(
+    inv.invoice_type === 'deposit'
+      ? (Number(inv.deposit_amount) || 0)
+      : (Number(inv.total_incl) || 0)
+  );
+
+  /* A voided document stops crediting. A later final invoice for the same
+     booking records the deposit as money already covered and subtracts it when
+     it posts, so voiding the deposit has to release that credit too — otherwise
+     the final bills less than the trip is worth, by exactly the amount that was
+     withdrawn. The cash is untouched: if the client paid a deposit that is then
+     voided, the payment stands and the booking correctly shows a credit. */
+  const releaseCreditToFinals = async (inv) => {
+    const by = collectedAmount(inv);
+    if (by <= 0 || !inv.itinerary_id) return;
+    const { data: finals } = await supabase
+      .from('invoices')
+      .select('id, invoice_number, credited_amount')
+      .eq('itinerary_id', inv.itinerary_id)
+      .eq('currency_code', inv.currency_code)
+      .eq('invoice_type', 'final')
+      .neq('status', 'void')
+      .gt('credited_amount', 0);
+
+    for (const f of finals || []) {
+      const was = round2(f.credited_amount);
+      const next = Math.max(0, round2(was - by));
+      if (next === was) continue;
+      await supabase.from('invoices').update({ credited_amount: next }).eq('id', f.id);
+    }
+  };
+
   const voidInvoice = async (inv, lines) => {
     const trimmed = voidReason.trim();
     if (!trimmed) return;
@@ -1152,9 +1188,17 @@ export const Finance = () => {
           .from('invoices')
           .update({ credit_note_id: createdCn.id, credit_note_number: createdCn.credit_note_number })
           .eq('id', inv.id);
+        /* A void stops crediting, so any later final that was relying on this
+           document for its credit has to give that credit up. */
+        await releaseCreditToFinals(inv);
         /* The credit note is the reversing document, so the ledger reverses
            with it. Idempotent per credit note. */
-        await postCreditNote(companyId, createdCn);
+      /* A void stops crediting, so any later final that was relying on this
+         document for its credit has to give that credit up. Only on a full
+         void: a part credit leaves the invoice live and still crediting. */
+      if (voidsInvoice) await releaseCreditToFinals(inv);
+
+      await postCreditNote(companyId, createdCn);
       }
 
       await fetchInvoices(companyId);
