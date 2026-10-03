@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { useNavigate } from 'react-router-dom';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -374,7 +375,7 @@ export const Itineraries = () => {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <select
+            <SearchableSelect
               className="pricing-select"
               style={{ width: 'auto', minWidth: '150px', padding: '0.55rem 0.75rem', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#334155', background: '#f8fafc' }}
               value={statusFilter}
@@ -387,7 +388,7 @@ export const Itineraries = () => {
               <option value="in_progress">In Progress</option>
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>
-            </select>
+            </SearchableSelect>
           </div>
         </div>
 

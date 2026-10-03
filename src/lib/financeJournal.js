@@ -16,7 +16,7 @@ import { supabase } from './supabase';
         additionally skips an existing posting so re-running is a no-op.        */
 
 export const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const num = (n) => Number(n) || 0;
+export const num = (n) => Number(n) || 0;
 
 /* Chart of accounts, seeded per company on first use. Codes are stable and are
    what the accounting exports emit, so they must not be renumbered casually. */
@@ -63,30 +63,21 @@ export const ensureChartOfAccounts = async (companyId) => {
    Zero-amount lines are dropped: a rounding artefact must not become a line,
    and journal_lines.amount is constrained to > 0.                             */
 
-/* What a single invoice document is actually worth in the ledger.
+/* What a single invoice document is worth in the ledger.
 
-   An itinerary is billed as a PAIR: a deposit invoice to secure the booking,
-   then a final invoice for what is left. Both documents carry the same
-   total_incl — the final one records the deposit in credited_amount rather
-   than re-stating a lower total — so posting each document for its full
-   total_incl would recognise the same sale twice.
+   One rule, and only one: an invoice is worth what it says it is. Every
+   invoice bills a specific amount, that amount is total_incl, and the receipt
+   raised against it credits that same figure.
 
-   So the trip is split:
-     deposit invoice  ->  the deposit
-     final invoice    ->  total_incl - credited_amount
-   which sums to total_incl exactly once, and gives the deposit receipt a real
-   AR debit to credit against at the moment the money actually arrives. */
-export const invoicePostingAmount = (invoice) => {
-  const total = round2(num(invoice.total_incl));
-  if (invoice.invoice_type === 'deposit') {
-    /* A deposit invoice with no deposit percentage is not a deposit at all;
-       fall back to the full total rather than posting nothing. */
-    const dep = round2(num(invoice.deposit_amount));
-    return dep > 0 ? Math.min(dep, total) : total;
-  }
-  const credited = round2(num(invoice.credited_amount));
-  return Math.max(0, round2(total - credited));
-};
+   There used to be a second rule layered on top, because a booking was billed
+   as a PAIR of documents that each carried the whole trip total: the deposit
+   invoice billed deposit_amount and the final billed total_incl minus the
+   deposit, so that the pair summed to the trip exactly once. That made
+   total_incl mean two different things depending on the document's type, and
+   every caller had to know which. A trip is now invoiced one document at a
+   time, each carrying its own balance, so a document's total is the amount it
+   bills and nothing has to be inferred from its type. */
+export const invoicePostingAmount = (invoice) => Math.max(0, round2(num(invoice.total_incl)));
 
 /* Sale on credit, for the slice of the sale this document represents.
      Debit  Accounts Receivable   amount receivable from this document
@@ -97,26 +88,38 @@ export const invoicePostingAmount = (invoice) => {
    smaller evil than an entry that does not balance at all. */
 export const buildInvoiceEntry = (invoice) => {
   const total = round2(num(invoice.total_incl));
+  const ref = invoice.invoice_number || '';
+  /* A voided invoice, or one that has been credited in full, has already been
+     reversed by its credit note. Posting it would put the sale back, so this is
+     a quiet no-op rather than a second recognition. */
+  if (invoice.status === 'void' || round2(num(invoice.credited_amount)) >= total - 0.009) {
+    return {
+      source_type: 'invoice',
+      reference: ref,
+      narration: `Invoice ${ref} — ${invoice.bill_to_name || ''}`.trim(),
+      itinerary_id: invoice.itinerary_id || null,
+      client_id: invoice.client_id || null,
+      currency_code: invoice.currency_code || 'ZAR',
+      nothing_to_post: true,
+      lines: []
+    };
+  }
   const gross = invoicePostingAmount(invoice);
   const ratio = total > 0 ? gross / total : 0;
   const net = round2(num(invoice.subtotal_excl) * ratio);
   const tax = round2(gross - net);
   const label = invoice.tax_label || 'Tax';
-  const ref = invoice.invoice_number || '';
-  const isDeposit = invoice.invoice_type === 'deposit';
-  const credit = isDeposit ? 'Deposit invoice' : 'Sales invoice';
-  const share = isDeposit ? 'deposit' : 'balance';
   return {
     source_type: 'invoice',
     reference: ref,
-    narration: `${credit} ${ref} — ${invoice.bill_to_name || ''}`.trim(),
+    narration: `Invoice ${ref} — ${invoice.bill_to_name || ''}`.trim(),
     itinerary_id: invoice.itinerary_id || null,
     client_id: invoice.client_id || null,
     currency_code: invoice.currency_code || 'ZAR',
     lines: [
-      { code: 'AR', line_type: 'debit', amount: gross, description: `Amount receivable (${share}) — ${ref}` },
-      { code: 'SALES', line_type: 'credit', amount: net, description: `Net sale (${share}) — ${ref}` },
-      ...(tax > 0 ? [{ code: 'VAT', line_type: 'credit', amount: tax, description: `${label} (${share}) — ${ref}` }] : [])
+      { code: 'AR', line_type: 'debit', amount: gross, description: `Amount receivable — ${ref}` },
+      { code: 'SALES', line_type: 'credit', amount: net, description: `Net sale — ${ref}` },
+      ...(tax > 0 ? [{ code: 'VAT', line_type: 'credit', amount: tax, description: `${label} — ${ref}` }] : [])
     ]
   };
 };
@@ -126,19 +129,105 @@ export const buildInvoiceEntry = (invoice) => {
      Credit Accounts Receivable   amount applied to the invoice
    Any shortfall is left on the receivable rather than written off, so the
    ledger always reflects what is still owed. */
+/* Scale a set of invoice line items so they add up to exactly `target`.
+
+   An invoice does not always bill the whole trip: it may be the balance after a
+   part payment, or the movement on a repriced booking. The document still has
+   to show lines that add up to the figure it is asking for, or the client is
+   handed a total their own itemisation does not reach.
+
+   Lines are scaled in proportion, and the rounding drift is pushed onto the
+   largest one so the sum is exact rather than a cent or two adrift. */
+export const scaleInvoiceLines = (lines, target) => {
+  const src = (lines || []).filter((l) => round2(num(l.line_total)) > 0.009);
+  const want = round2(num(target));
+  if (!src.length || want <= 0) return lines || [];
+  const basis = round2(src.reduce((a, l) => a + num(l.line_total), 0));
+  /* Already at or above the target: the lines describe it, do not touch them. */
+  if (basis <= 0 || want >= basis) return lines || [];
+
+  const factor = want / basis;
+  const out = src.map((l) => {
+    const lineTotal = round2(num(l.line_total) * factor);
+    const net = round2(num(l.subtotal_excl) * factor);
+    return {
+      ...l,
+      unit_price: round2(num(l.unit_price) * factor),
+      subtotal_excl: net,
+      tax_amount: round2(lineTotal - net),
+      line_total: lineTotal
+    };
+  });
+
+  const drift = round2(want - out.reduce((a, l) => a + l.line_total, 0));
+  if (drift !== 0) {
+    let big = 0;
+    for (let k = 1; k < out.length; k++) if (out[k].line_total > out[big].line_total) big = k;
+    out[big] = {
+      ...out[big],
+      line_total: round2(out[big].line_total + drift),
+      tax_amount: round2(out[big].tax_amount + drift)
+    };
+  }
+  return out;
+};
+
+/* Money moving against an invoice, in whichever direction.
+     direction 'in'          Debit  Bank / Cash            amount received
+                           Credit Accounts Receivable   amount applied
+     direction 'out'         Debit  Accounts Receivable   amount handed back
+                           Credit Bank / Cash            amount refunded
+     direction 'wallet_out'  Debit  Accounts Receivable   credit paid to client
+                           Credit Bank / Cash            from their wallet
+     direction 'apply'       no entry
+
+   A refund is the mirror image of a receipt. The charge it sits against stands,
+   so the receivable goes back up by exactly what left the bank: a client who is
+   refunded R2 000 on an invoice owing R5 000 genuinely owes R7 000 afterwards.
+   Modelling it as a reversal of the receipt keeps that true without a
+   special case anywhere in the balance arithmetic.
+
+   'apply' posts nothing on purpose. Spending credit the client already holds is
+   not a new economic event: the credit note left that money sitting on
+   receivables, and settling a new invoice with it moves nothing between
+   accounts. Posting it would credit receivables a second time and inflate the
+   ledger against a transaction that changed no cash.
+
+   'wallet_out' uses the same accounts as 'out' but for the opposite reason. The
+   credit note already credited receivables, which is what made the client's
+   credit real; paying it out debits receivables to clear that credit and credits
+   bank for the cash that left. Same pair of lines, opposite meaning from a
+   refund -- which is why the direction has to be read rather than assumed. */
 export const buildReceiptEntry = (receipt) => {
   const amount = round2(receipt.amount);
+  const direction = receipt.direction || 'in';
+  const ref = receipt.receipt_number || '';
+  const invoice = receipt.invoice_number || 'invoice';
+
+  /* Credit spent settling an invoice: documented, but not posted. */
+  if (direction === 'apply') return null;
+
+  const isRefund = direction === 'out';
+  const isPayout = direction === 'wallet_out';
+  const isOutflow = isRefund || isPayout;
+  const label = isPayout ? 'Credit refunded' : isRefund ? 'Refund' : 'Receipt';
+
   return {
-    source_type: 'receipt',
-    reference: receipt.receipt_number || '',
-    narration: `Receipt ${receipt.receipt_number || ''} — ${receipt.bill_to_name || ''}`.trim(),
+    source_type: isPayout ? 'credit_payout' : isRefund ? 'refund' : 'receipt',
+    reference: ref,
+    narration: `${label} ${ref} - ${receipt.bill_to_name || ''}`.trim(),
     itinerary_id: receipt.itinerary_id || null,
     client_id: receipt.client_id || null,
     currency_code: receipt.currency_code || 'ZAR',
-    lines: [
-      { code: 'BANK', line_type: 'debit', amount, description: `Payment received — ${receipt.payment_method || 'receipt'}` },
-      { code: 'AR', line_type: 'credit', amount, description: `Applied to ${receipt.invoice_number || 'invoice'}` }
-    ]
+    lines: isOutflow
+      ? [
+          { code: 'AR', line_type: 'debit', amount, description: isPayout ? `Credit paid to client - ${invoice}` : `Refunded to client - ${invoice}` },
+          { code: 'BANK', line_type: 'credit', amount, description: isPayout ? 'Credit paid from wallet' : `Refund paid - ${receipt.payment_method || 'refund'}` }
+        ]
+      : [
+          { code: 'BANK', line_type: 'debit', amount, description: `Payment received - ${receipt.payment_method || 'receipt'}` },
+          { code: 'AR', line_type: 'credit', amount, description: `Applied to ${invoice}` }
+        ]
   };
 };
 
@@ -427,8 +516,13 @@ export const buildReversalFromOriginal = async (companyId, creditNote) => {
 export const postInvoice = (companyId, invoice) =>
   postEntry(companyId, { ...buildInvoiceEntry(invoice), source_id: invoice.id });
 
-export const postReceipt = (companyId, receipt) =>
-  postEntry(companyId, { ...buildReceiptEntry(receipt), source_id: receipt.id });
+/* Settling an invoice from client credit produces no journal entry, so a null
+   draft here is expected rather than a fault. */
+export const postReceipt = (companyId, receipt) => {
+  const draft = buildReceiptEntry(receipt);
+  if (!draft) return Promise.resolve(null);
+  return postEntry(companyId, { ...draft, source_id: receipt.id });
+};
 
 export const postCreditNote = (companyId, creditNote) =>
   buildReversalFromOriginal(companyId, creditNote).then((draft) => postEntry(companyId, draft));

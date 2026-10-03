@@ -21,6 +21,8 @@ const ConfirmDialog = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel, busy]);
 
+  if (!title && !message && !onConfirm && !onCancel && !children) return null;
+
   const border = destructive ? '#fecaca' : '#e2e8f0';
   const text = destructive ? '#7f1d1d' : '#334155';
   const detailText = destructive ? '#991b1b' : '#475569';

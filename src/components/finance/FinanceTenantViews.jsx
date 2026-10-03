@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import SearchableSelect from '../SearchableSelect';
 import { AlertTriangle, Download, Landmark, Link2, RefreshCw, ScrollText } from 'lucide-react';
 import { JournalEntryCard, CostOfSalesPanel } from './FinanceJournalViews';
 import { buildGeneralLedger } from '../../lib/financeJournal';
@@ -116,13 +117,13 @@ export function JournalPanel({ entries, itineraries, onExport }) {
         <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '1.1rem', margin: 0 }}>
           <ScrollText size={17} color="#0d7478" /> Journal
         </h2>
-        <select className="sidebar-select" style={{ width: 'auto', marginLeft: '0.5rem' }} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+        <SearchableSelect className="sidebar-select" style={{ width: 'auto', marginLeft: '0.5rem' }} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
           <option value="all">All sources</option>
           <option value="invoice">Invoices</option>
           <option value="receipt">Receipts</option>
           <option value="credit_note">Credit notes</option>
           <option value="cost_of_sales">Cost of sales</option>
-        </select>
+        </SearchableSelect>
         <button type="button" className={`icon-btn outline ${showLedger ? 'active' : ''}`} title="Toggle general ledger view" onClick={() => setShowLedger((v) => !v)}>
           General ledger
         </button>
@@ -243,7 +244,7 @@ export function TenantCostOfSalesPanel({ rows, itineraries, onPost }) {
           {summary.total} priced · <strong style={{ color: '#15803d' }}>{summary.profit} profitable</strong> ·{' '}
           <strong style={{ color: '#b91c1c' }}>{summary.loss} at a loss</strong>
         </span>
-        <select
+        <SearchableSelect
           className="sidebar-select"
           style={{ width: 'auto', marginLeft: 'auto' }}
           value={statusScope}
@@ -257,7 +258,7 @@ export function TenantCostOfSalesPanel({ rows, itineraries, onPost }) {
           <option value="completed">Completed only</option>
           <option value="provisional">Provisional only</option>
           <option value="quotation">Quotation only</option>
-        </select>
+        </SearchableSelect>
         <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 700, color: '#475569' }}>
           <input type="checkbox" checked={onlyLosses} onChange={(e) => setOnlyLosses(e.target.checked)} /> Loss-making only
         </label>
@@ -346,10 +347,10 @@ export function AccountingPanel({ connections, onSetMode, onPush, onSync, busyPr
             </div>
 
             <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center', marginTop: '0.75rem' }}>
-              <select className="sidebar-select" style={{ width: 'auto' }} value={conn?.mode || 'push'} onChange={(e) => onSetMode?.(id, e.target.value)}>
+              <SearchableSelect className="sidebar-select" style={{ width: 'auto' }} value={conn?.mode || 'push'} onChange={(e) => onSetMode?.(id, e.target.value)}>
                 <option value="push">Push (export a file)</option>
                 <option value="live">Live (two-way API sync)</option>
-              </select>
+              </SearchableSelect>
               <button type="button" className="primary-btn" disabled={busyProvider === id} onClick={() => onPush?.(id)}>
                 <Download size={14} /> Push ledger
               </button>

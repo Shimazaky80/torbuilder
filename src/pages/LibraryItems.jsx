@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
@@ -7,26 +8,27 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { useConfirm } from '../hooks/useConfirm';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
-import { 
-  Package, 
-  Building2, 
-  Search, 
-  Plus, 
+import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis } from '../lib/surchargeFees';
+import {
+  Package,
+  Building2,
+  Search,
+  Plus,
   Minus,
   Users,
   User,
-  Edit3, 
-  Trash2, 
-  X, 
-  Check, 
+  Edit3,
+  Trash2,
+  X,
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Hotel, 
-  Bus, 
-  Utensils, 
-  Compass, 
-  UserCheck, 
+  Hotel,
+  Bus,
+  Utensils,
+  Compass,
+  UserCheck,
   Sparkles,
   Plane,
   Car,
@@ -49,7 +51,8 @@ import {
   Cog,
   Fuel,
   Snowflake,
-  Zap
+  Zap,
+  Receipt
 } from 'lucide-react';
 
 /* Price and count fields may never hold a negative value. Clamps a typed
@@ -93,6 +96,48 @@ const compressImageDataUrl = (file, maxDim = 1200, quality = 0.82) =>
     reader.readAsDataURL(file);
   });
 
+/* Previous / next controls that step the Seasonal Rates Matrix through one
+   season at a time. */
+const seasonNavBtnStyle = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '28px',
+  height: '28px',
+  borderRadius: '999px',
+  border: '1px solid #cbd5e1',
+  background: '#ffffff',
+  color: '#0f766e',
+  cursor: 'pointer'
+};
+
+/* The surcharge fee columns written onto one season's item_rates row.
+   Entrance fees and conservation levies used to be extra columns on an
+   Accommodation / Transfers item's season. They are separate library items now,
+   so only a Surcharge Fees item writes these, and only into the columns its own
+   rate basis actually uses - the unused ones are left off entirely rather than
+   written as 0, so a stale fee can never be read back out of a season row.
+     per_person / per_adult -> the per-person figure
+     per_child              -> the per-child figure
+     per_vehicle            -> the per-vehicle figure
+     per_unit               -> the unit price */
+const surchargeRateFees = (itemData, season) => {
+  if (itemData?.category !== SURCHARGE_CATEGORY) return {};
+  const unitBasis = itemData.surchargeUnitBasis || 'per_person';
+  const num = (v) => parseFloat(v) || 0;
+  const isEntrance = (itemData.surchargeType || 'entrance_fee') === 'entrance_fee';
+  if (isEntrance) {
+    if (unitBasis === 'per_vehicle') {
+      return { entrance_fee_per_vehicle: num(season.entranceFeeVehicle) };
+    }
+    return { entrance_fee_per_person: num(season.entranceFeePerson) };
+  }
+  if (unitBasis === 'per_child') {
+    return { conservation_levy_per_child: num(season.levyChildRate) };
+  }
+  return { conservation_levy_per_adult: num(season.levyAdultRate) };
+};
+
 export const LibraryItems = () => {
   const [suppliers, setSuppliers] = useState([]);
   const [confirmDialog, confirm] = useConfirm();
@@ -111,6 +156,9 @@ export const LibraryItems = () => {
   // Editing state: when set, the inline form updates these items instead of inserting.
   // Maps form tempId -> existing library_items row id.
   const [editingItems, setEditingItems] = useState({});
+
+  // Seasonal Rates Matrix shows one season at a time: Maps form tempId -> visible season index.
+  const [activeSeasonByItem, setActiveSeasonByItem] = useState({});
 
   // Image gallery lightbox & description popup
   const [lightbox, setLightbox] = useState(null); // { images: [], index: number }
@@ -146,7 +194,7 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, surchargeFees: true });
   const url = import.meta.env.VITE_SUPABASE_URL;
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
@@ -161,6 +209,7 @@ export const LibraryItems = () => {
 
   const categoryOptions = [
     { id: 'Accommodation', label: 'Accommodation', icon: Hotel, color: '#863bff' },
+    { id: 'Surcharge Fees', label: 'Surcharge Fees', icon: Receipt, color: '#f43f5e' },
     { id: 'Transfers', label: 'Transfers', icon: Bus, color: '#3b82f6' },
     { id: 'Activities / Tours', label: 'Activities / Tours', icon: Compass, color: '#10b981' },
     { id: 'Flights / Charter', label: 'Flights / Charter', icon: Plane, color: '#6366f1' },
@@ -172,9 +221,30 @@ export const LibraryItems = () => {
     { id: 'Car Rental', label: 'Car Rental', icon: Car, color: '#06b6d4' }
   ];
 
-  // Category options are driven by the library_categories table when present,
-  // falling back to the built-in list above (e.g. before the migration is run).
+// Category options are driven by the library_categories table when present,
+// falling back to the built-in list above (e.g. before the migration is run).
   const [categories, setCategories] = useState(categoryOptions);
+
+  /* A surcharge is linked to the one accommodation it belongs to, so the picker
+     offers properties only - a levy does not belong to a transfer or a tour.
+     Built from the saved library as well as anything currently on screen, so a
+     surcharge created alongside its accommodation can link to it immediately. */
+  const accommodationLinkOptions = useMemo(() => {
+    const byId = new Map();
+    libraryItemsList.forEach((li) => {
+      if (li && li.id && /^accommodation$/i.test(String(li.category || ''))) byId.set(li.id, li);
+    });
+    itemsToSave.forEach((item) => {
+      const id = editingItems[item.tempId] || item.id;
+      if (id && /^accommodation$/i.test(String(item.category || ''))) {
+        if (!byId.has(id)) byId.set(id, { id, name: item.name, location: item.destinationRegion || item.location || '' });
+      }
+    });
+    return [...byId.values()]
+      .map((li) => ({ id: li.id, label: li.location ? `${li.name} — ${li.location}` : li.name }))
+      .sort((a, b) => String(a.label).localeCompare(String(b.label)));
+  }, [libraryItemsList, itemsToSave, editingItems]);
+
 
   const mealPlanOptions = [
     'Room Only',
@@ -282,26 +352,6 @@ export const LibraryItems = () => {
   const getDefaultDriverAccommodation = (category, transferType) =>
     category === 'Transfers' && transferType === 'overland';
 
-  // Surcharge fees added on top of base rates.
-  // - Entrance fees: per person and/or per vehicle (Accommodation + Transfers).
-  // - Conservation levy: per adult and per child, charged per night or per stay
-  //   (Accommodation).
-  const feeTypeOptions = {
-    accommodation: [
-      { id: 'none', label: 'None' },
-      { id: 'entrance', label: '🎟️ Entrance Fees' },
-      { id: 'conservation', label: '🌿 Conservation Levy' }
-    ],
-    transfers: [
-      { id: 'none', label: 'None' },
-      { id: 'entrance', label: '🎟️ Entrance Fees' }
-    ]
-  };
-  const levyBasisOptions = [
-    { id: 'per_night', label: 'Per Night' },
-    { id: 'per_stay', label: 'Per Stay' }
-  ];
-
   // Dynamic Country Options derived from full currencies table
   const countryOptions = currencies.length > 0
     ? [...new Set(currencies.map(c => c.country).filter(Boolean))].sort()
@@ -388,6 +438,9 @@ export const LibraryItems = () => {
       tempId: Date.now() + Math.random(),
       itemIndex: index,
       name: '',
+      destinationRegion: '',
+      destinationArea: '',
+      identifierCode: '',
       category: 'Accommodation',
       currency: 'ZAR',
       mealPlan: 'Bed & Breakfast',
@@ -407,6 +460,14 @@ export const LibraryItems = () => {
       mealGratuityPercent: 0,
       feeType: 'none',
       levyBasis: 'per_night',
+      /* Surcharge Fees items only. A surcharge is its own library item rather
+         than a switch on an accommodation, so it carries its own type, basis,
+         rate basis, chargeable flag and the property it belongs to. */
+      surchargeType: 'entrance_fee',
+      surchargeChargeBasis: 'once_off',
+      surchargeUnitBasis: 'per_person',
+      surchargeChargeable: true,
+      linkedItemId: '',
       childAge: 12,
       pricingModel: 'per_person', // 'per_person' | 'per_room' | transfer: 'per_vehicle' | 'tiered'
       maxOccupancy: initialMaxOcc,
@@ -434,7 +495,8 @@ export const LibraryItems = () => {
           seasonName: 'Base Season',
           validFrom: '',
           validTo: '',
-          roomRate: 0, // Flat Room / Unit Rate (Divided by number of occupants)
+          roomRate: 0, // Flat Room / Unit Rate per Night (up to maxOccupancy persons)
+          singleRoomRate: 0, // 1 Adult occupying the room alone, per night
           price1Adult: 0, // Single Room (1 Adult - Per Person)
           price2Adults: 0, // Per Person Sharing (PPS - 2+ Adults Sharing)
           price3PlusAdults: 0, // Extra Adult (3+ Adults Sharing)
@@ -514,8 +576,8 @@ export const LibraryItems = () => {
       if (item.tempId === tempId) {
         const updated = (item.childAgeRanges || []).map((b, idx) => {
           if (idx === bandIdx) {
-            const parsedVal = (field === 'ageFrom' || field === 'ageTo') 
-              ? Math.max(0, parseInt(val) || 0) 
+            const parsedVal = (field === 'ageFrom' || field === 'ageTo')
+              ? Math.max(0, parseInt(val) || 0)
               : val;
             return { ...b, [field]: parsedVal };
           }
@@ -639,8 +701,19 @@ export const LibraryItems = () => {
               tieredPricing: rateCols.includes('tiered_pricing'),
               transferType: libCols.includes('transfer_type'),
               tourType: libCols.includes('tour_type'),
-              feeType: libCols.includes('fee_type') && rateCols.includes('entrance_fee_per_person') && rateCols.includes('conservation_levy_per_adult'),
-              driverOption: libCols.includes('driver_required') && libCols.includes('driver_meals') && libCols.includes('driver_accommodation')
+              // conservation_levy_basis is written on the same payload as
+              // fee_type, so it has to be part of the same gate: a database
+              // missing it rejects the whole insert, not just the field.
+              feeType: libCols.includes('fee_type') && libCols.includes('conservation_levy_basis') && rateCols.includes('entrance_fee_per_person') && rateCols.includes('conservation_levy_per_adult'),
+              driverOption: libCols.includes('driver_required') && libCols.includes('driver_meals') && libCols.includes('driver_accommodation'),
+              /* Surcharge Fees as independent items. All five columns are written
+                 on one payload, so they gate together: a database missing any
+                 one of them rejects the whole insert. */
+              surchargeFees: libCols.includes('surcharge_type')
+                && libCols.includes('surcharge_charge_basis')
+                && libCols.includes('surcharge_unit_basis')
+                && libCols.includes('surcharge_chargeable')
+                && libCols.includes('linked_item_id')
             });
           }
         }
@@ -1110,19 +1183,24 @@ export const LibraryItems = () => {
 
     setUploadingContract(tempId);
 
-    let folder = 'contracts';
+    let companyId = null;
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
-        const cid = await resolveCompanyId(user);
-        if (cid) folder = `contracts/${cid}`;
+        companyId = await resolveCompanyId(user);
       }
     } catch {
-      // Fall back to the shared contracts folder.
+      // The upload below will report a clear error if the tenant cannot resolve.
+    }
+
+    if (!companyId) {
+      showToast('Your tenant workspace could not be resolved. Please sign in again.', 'error');
+      setUploadingContract(null);
+      return;
     }
 
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const path = `${folder}/${Date.now()}_${safeName}`;
+    const path = `${companyId}/${Date.now()}_${safeName}`;
 
     const { error: upErr } = await supabase.storage.from('contracts').upload(path, file, { upsert: true, cacheControl: '3600' });
     if (upErr) {
@@ -1166,6 +1244,7 @@ export const LibraryItems = () => {
               validFrom: '',
               validTo: '',
               roomRate: 0,
+              singleRoomRate: 0,
               price1Adult: 0,
               price2Adults: 0,
               price3PlusAdults: 0,
@@ -1240,7 +1319,10 @@ adultRate: 0,
       } else {
         if (['per_vehicle', 'tiered'].includes(pricingModel)) pricingModel = 'per_person';
       }
-      const feeType = (category === 'Accommodation' || category === 'Transfers') ? (item.feeType || 'none') : 'none';
+      /* Switching category drops the legacy bundled-fee switch: entrance fees
+         and conservation levies live in their own items now, so a base item
+         never carries one. */
+      const feeType = 'none';
       const driverEligible = isDriverEligibleCategory(category) && getVehiclePax(item.maxOccupancy) >= 14;
       return {
         ...item,
@@ -1327,11 +1409,49 @@ adultRate: 0,
       }
       return item;
     }));
+    /* Keep the carousel on a row that still exists. */
+    setActiveSeasonByItem(prev => {
+      const current = Number.isInteger(prev[tempId]) ? prev[tempId] : 0;
+      const total = Math.max(1, (itemsToSave.find(i => i.tempId === tempId)?.seasons?.length || 2) - 1);
+      const next = Math.min(current > seasonIdx ? current - 1 : current, total - 1);
+      return { ...prev, [tempId]: Math.max(0, next) };
+    });
+  };
+
+  /* Which season of an item the Seasonal Rates Matrix is showing. Kept per item
+     so editing several items in one batch never fights over the same index. */
+  const activeSeasonIndexOf = (tempId, seasons) => {
+    const total = (seasons || []).length;
+    if (total <= 1) return 0;
+    const raw = activeSeasonByItem[tempId];
+    return Number.isInteger(raw) && raw >= 0 && raw < total ? raw : 0;
+  };
+
+  const stepActiveSeason = (tempId, seasons, delta) => {
+    const total = (seasons || []).length;
+    if (total <= 1) return;
+    setActiveSeasonByItem(prev => {
+      const current = activeSeasonIndexOf(tempId, seasons);
+      return { ...prev, [tempId]: (current + delta + total) % total };
+    });
   };
 
   // Submit All Batch Items (along with new Supplier if supplierMode === 'new' or if supplier not yet saved)
   const handleSubmitAllItems = async (e) => {
     e.preventDefault();
+
+    const missingDestination = itemsToSave.find((item) => !String(item.destinationRegion || '').trim());
+    if (missingDestination) {
+      showToast('Destination or Region is required for every Library Item', 'warning');
+      return;
+    }
+    const missingAccommodationArea = itemsToSave.find(
+      (item) => /accommodation/i.test(String(item.category || '')) && !String(item.destinationArea || '').trim()
+    );
+    if (missingAccommodationArea) {
+      showToast('Parent Destination / Region is required for every accommodation Library Item', 'warning');
+      return;
+    }
 
     setSaving(true);
     try {
@@ -1456,6 +1576,10 @@ adultRate: 0,
           company_id: companyId,
           supplier_id: targetSupplierId,
           name: itemData.name,
+          destination_region: String(itemData.destinationRegion || '').trim(),
+          destination_area: /accommodation/i.test(String(itemData.category || ''))
+            ? String(itemData.destinationArea || '').trim()
+            : null,
           category: itemData.category,
           sub_category: isFlight ? itemData.category : (isTourStyle ? (itemData.vehicleType || itemData.category) : itemData.category),
           transfer_type: itemData.category === 'Transfers' && dbFeatures.transferType ? (itemData.transferType || null) : null,
@@ -1514,8 +1638,24 @@ adultRate: 0,
             : {}),
           ...(dbFeatures.feeType
             ? {
-                fee_type: (itemData.category === 'Accommodation' || itemData.category === 'Transfers') ? (itemData.feeType || 'none') : 'none',
-                conservation_levy_basis: itemData.feeType === 'conservation' ? (itemData.levyBasis || 'per_night') : 'per_night'
+                /* Base categories no longer carry a bundled fee: entrance fees
+                   and conservation levies are separate Surcharge Fees items, so
+                   the legacy switch is pinned off for everything else. */
+                fee_type: 'none',
+                conservation_levy_basis: 'per_night'
+              }
+            : {}),
+          ...(dbFeatures.surchargeFees && itemData.category === SURCHARGE_CATEGORY
+            ? {
+                surcharge_type: itemData.surchargeType || 'entrance_fee',
+                surcharge_charge_basis: CHARGE_BASIS.some((b) => b.id === itemData.surchargeChargeBasis)
+                  ? itemData.surchargeChargeBasis
+                  : 'once_off',
+                surcharge_unit_basis: UNIT_BASES.some((b) => b.id === itemData.surchargeUnitBasis)
+                  ? itemData.surchargeUnitBasis
+                  : 'per_person',
+                surcharge_chargeable: itemData.surchargeChargeable !== false,
+                linked_item_id: itemData.linkedItemId || null
               }
             : {}),
           ...(dbFeatures.contracts && (itemData.contractUrl || itemData.contractName)
@@ -1680,10 +1820,10 @@ adultRate: 0,
                 ...(dbFeatures.tieredPricing && isTiered ? { tiered_pricing: tiers } : {}),
                 ...(dbFeatures.feeType
                   ? {
-                      entrance_fee_per_person: itemData.feeType === 'entrance' ? (parseFloat(s.entranceFeePerson) || 0) : 0,
-                      entrance_fee_per_vehicle: itemData.feeType === 'entrance' ? (parseFloat(s.entranceFeeVehicle) || 0) : 0,
-                      conservation_levy_per_adult: itemData.feeType === 'conservation' ? (parseFloat(s.levyAdultRate) || 0) : 0,
-                      conservation_levy_per_child: itemData.feeType === 'conservation' ? (parseFloat(s.levyChildRate) || 0) : 0
+                      /* Only a Surcharge Fees item writes the fee columns, and only the
+                      columns its own rate basis needs. Base categories no longer carry a
+                      bundled fee at all. */
+                      ...(surchargeRateFees(itemData, s))
                     }
                   : {}),
                 ...(isFlight
@@ -1725,7 +1865,13 @@ adultRate: 0,
             }
             const isFlatRoom = pricingModel === 'per_room';
             const roomRate = parseFloat(s.roomRate) || 0;
-            const p1Adult = isFlatRoom ? roomRate : (parseFloat(s.price1Adult) || 0);
+            /* A flat rate is quoted for the room, so it covers everyone who
+               sleeps in it up to its occupancy. A party of one still occupies
+               the whole room, which is why the flat mode needs a second figure:
+               what one adult pays for the room to themselves. Older rows never
+               had one, so they fall back to the room rate. */
+            const flatSingleRate = parseFloat(s.singleRoomRate) || roomRate;
+            const p1Adult = isFlatRoom ? flatSingleRate : (parseFloat(s.price1Adult) || 0);
             const p2Adults = isFlatRoom ? roomRate : (parseFloat(s.price2Adults) || 0);
             const p3PlusAdults = isFlatRoom ? roomRate : (parseFloat(s.price3PlusAdults) || p2Adults);
             const childRatesMap = isFlatRoom ? {} : (s.childRates || {});
@@ -1758,12 +1904,7 @@ adultRate: 0,
                 ? { guide_meal_plan: s.guideMealPlan || itemData.mealPlan, driver_meal_plan: s.driverMealPlan || itemData.mealPlan }
                 : {}),
               ...(dbFeatures.feeType
-                ? {
-                    entrance_fee_per_person: itemData.feeType === 'entrance' ? (parseFloat(s.entranceFeePerson) || 0) : 0,
-                    entrance_fee_per_vehicle: itemData.feeType === 'entrance' ? (parseFloat(s.entranceFeeVehicle) || 0) : 0,
-                    conservation_levy_per_adult: itemData.feeType === 'conservation' ? (parseFloat(s.levyAdultRate) || 0) : 0,
-                    conservation_levy_per_child: itemData.feeType === 'conservation' ? (parseFloat(s.levyChildRate) || 0) : 0
-                  }
+                ? surchargeRateFees(itemData, s)
                 : {})
             };
           });
@@ -1957,7 +2098,8 @@ adultRate: 0,
         seasonName: r.season_name || r.option_name || 'Base Season',
         validFrom: r.valid_from || '',
         validTo: r.valid_to || '',
-        roomRate: isFlat ? (parseFloat(r.unit_price) || parseFloat(r.price_1_adult) || parseFloat(r.single_room_rate) || 0) : (parseFloat(r.single_room_rate) || 0),
+        roomRate: isFlat ? (parseFloat(r.unit_price) || parseFloat(r.price_2_adults) || parseFloat(r.double_twin_rate) || 0) : (parseFloat(r.single_room_rate) || 0),
+        singleRoomRate: isFlat ? (parseFloat(r.single_room_rate) || parseFloat(r.effective_single_rate) || parseFloat(r.price_1_adult) || 0) : 0,
         price1Adult: parseFloat(r.price_1_adult || r.single_room_rate) || 0,
         price2Adults: parseFloat(r.price_2_adults || r.double_twin_rate) || 0,
         price3PlusAdults: parseFloat(r.price_3_plus_adults) || 0,
@@ -1979,6 +2121,7 @@ adultRate: 0,
       validFrom: '',
       validTo: '',
       roomRate: 0,
+      singleRoomRate: 0,
       price1Adult: 0,
       price2Adults: 0,
       price3PlusAdults: 0,
@@ -2044,6 +2187,10 @@ adultRate: 0,
       tempId: Date.now() + Math.random(),
       itemIndex: 1,
       name: item.name || '',
+      destinationRegion: item.destination_region || item.location || '',
+      destinationArea: item.destination_area || '',
+      identifierCode: item.identifier_code || '',
+      identifierDestinationRegion: item.destination_region || item.location || '',
       category: item.category || 'Accommodation',
       currency: item.currency || 'ZAR',
       mealPlan: rates.find(r => r.meal_plan)?.meal_plan || 'Bed & Breakfast',
@@ -2061,8 +2208,13 @@ adultRate: 0,
       mealType: item.meal_type || 'Breakfast',
       menuType: item.menu_type || 'a_la_carte',
       mealGratuityPercent: parseFloat(item.meal_gratuity_percent) || 0,
-      feeType: (item.category === 'Accommodation' || item.category === 'Transfers') ? (item.fee_type || 'none') : 'none',
-      levyBasis: item.conservation_levy_basis || 'per_night',
+      feeType: 'none',
+      levyBasis: 'per_night',
+      surchargeType: item.surcharge_type || 'entrance_fee',
+      surchargeChargeBasis: ['once_off', 'per_night'].includes(item.surcharge_charge_basis) ? item.surcharge_charge_basis : 'once_off',
+      surchargeUnitBasis: UNIT_BASES.some((b) => b.id === item.surcharge_unit_basis) ? item.surcharge_unit_basis : 'per_person',
+      surchargeChargeable: item.surcharge_chargeable !== false,
+      linkedItemId: item.linked_item_id || '',
       childAge: isTourStyle ? (parseInt(childBands[0]?.ageTo) || 12) : 12,
       pricingModel,
       maxOccupancy: maxOcc,
@@ -2106,26 +2258,25 @@ adultRate: 0,
 
   return (
     <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
-      
+
       {/* Top Bar Header & Category Filters */}
       <header className="page-header" style={{ marginBottom: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: '1rem' }}>
-          
+
           {/* Search Box */}
           <div className="search-box" style={{ width: '380px', margin: 0 }}>
             <Search size={18} />
-            <input 
-              type="text" 
-              placeholder="Search library items by name or supplier..." 
+            <input
+              type="text"
+              placeholder="Search library items by name or supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-
           {/* Filter Dropdowns on Header Bar */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
             <div style={{ position: 'relative' }}>
-              <select 
+              <SearchableSelect
                 className="pricing-select"
                 value={categoryFilter}
                 onChange={(e) => setCategoryFilter(e.target.value)}
@@ -2142,12 +2293,12 @@ adultRate: 0,
                 {categories.map(cat => (
                   <option key={cat.id} value={cat.id}>{cat.label}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </div>
 
             {/* Supplier Filter Dropdown on Header Bar */}
             <div style={{ position: 'relative' }}>
-              <select 
+              <SearchableSelect
                 className="pricing-select"
                 value={supplierFilter}
                 onChange={(e) => setSupplierFilter(e.target.value)}
@@ -2164,12 +2315,12 @@ adultRate: 0,
                 {suppliers.map(s => (
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </div>
 
             {/* Toggle Add Library Item Inline Form */}
-            <button 
-              className="primary-btn" 
+            <button
+              className="primary-btn"
               style={{ width: 'auto', padding: '0.625rem 1.25rem', height: '42px', background: '#0d7478' }}
               onClick={() => setShowInlineForm(!showInlineForm)}
             >
@@ -2191,14 +2342,14 @@ adultRate: 0,
           marginBottom: '2.5rem',
           scrollMarginTop: '1rem'
         }}>
-          
+
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Package size={22} color="#0d7478" />
               {Object.keys(editingItems).length > 0 ? `Edit Library Item: ${itemsToSave[0]?.name || ''}` : 'Add New Library Item'}
             </h2>
-            <button 
-              onClick={() => { setShowInlineForm(false); setEditingItems({}); }} 
+            <button
+              onClick={() => { setShowInlineForm(false); setEditingItems({}); }}
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}
             >
               <X size={24} />
@@ -2206,7 +2357,7 @@ adultRate: 0,
           </div>
 
           <form onSubmit={handleSubmitAllItems}>
-            
+
             {/* INLINE SUPPLIER SELECTION / CREATION SECTION */}
             <div style={{
               background: '#f8fafc',
@@ -2215,7 +2366,7 @@ adultRate: 0,
               border: '1px solid #e2e8f0',
               marginBottom: '2rem'
             }}>
-              
+
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
                 <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <Building2 size={20} color="#0d7478" /> Supplier
@@ -2223,17 +2374,17 @@ adultRate: 0,
 
                 {/* Right Top Action Link */}
                 {supplierMode === 'new' ? (
-                  <button 
-                    type="button" 
-                    onClick={() => setSupplierMode('existing')} 
+                  <button
+                    type="button"
+                    onClick={() => setSupplierMode('existing')}
                     style={{ color: '#0d7478', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
                   >
                     Select Existing
                   </button>
                 ) : (
-                  <button 
-                    type="button" 
-                    onClick={() => setSupplierMode('new')} 
+                  <button
+                    type="button"
+                    onClick={() => setSupplierMode('new')}
                     style={{ color: '#0d7478', background: 'none', border: 'none', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
                   >
 <Plus size={14} /> Add New Supplier
@@ -2247,7 +2398,7 @@ adultRate: 0,
                   <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
                     Select Supplier *
                   </label>
-                  <select 
+                  <SearchableSelect
                     className="pricing-select"
                     value={selectedSupplierId}
                     onChange={(e) => setSelectedSupplierId(e.target.value)}
@@ -2257,27 +2408,27 @@ adultRate: 0,
                     {suppliers.map(s => (
                       <option key={s.id} value={s.id}>{s.name} ({s.category || 'Supplier'})</option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                 </div>
               )}
 
               {/* MODE 2: Full Inline New Supplier Form (Matching Screenshot) */}
               {supplierMode === 'new' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                  
+
                   {/* Basic Information */}
                   <div>
                     <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', marginBottom: '0.75rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.35rem' }}>
                       Basic Information
                     </h4>
-                    
+
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                       <div>
                         <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                           Supplier Name *
                         </label>
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           className="pricing-select"
                           placeholder="e.g., Safari Lodge Group"
                           required={supplierMode === 'new'}
@@ -2290,8 +2441,8 @@ adultRate: 0,
                         <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                           Contact Person
                         </label>
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           className="pricing-select"
                           placeholder="e.g., John Doe"
                           value={supplierForm.contactPerson}
@@ -2304,8 +2455,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Email
                           </label>
-                          <input 
-                            type="email" 
+                          <input
+                            type="email"
                             className="pricing-select"
                             placeholder="supplier@example.com"
                             value={supplierForm.email}
@@ -2317,8 +2468,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Phone
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="+27 123 456 789"
                             value={supplierForm.phone}
@@ -2331,8 +2482,8 @@ adultRate: 0,
                         <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                           Website
                         </label>
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           className="pricing-select"
                           placeholder="https://www.example.com"
                           value={supplierForm.website}
@@ -2353,8 +2504,8 @@ adultRate: 0,
                         <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                           Address
                         </label>
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           className="pricing-select"
                           placeholder="123 Main Street"
                           value={supplierForm.address}
@@ -2367,7 +2518,7 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Country
                           </label>
-                          <select 
+                          <SearchableSelect
                             className="pricing-select"
                             value={supplierForm.country}
                             onChange={(e) => setSupplierForm({ ...supplierForm, country: e.target.value })}
@@ -2375,15 +2526,15 @@ adultRate: 0,
                             {countryOptions.map(c => (
                               <option key={c} value={c}>{c}</option>
                             ))}
-                          </select>
+                          </SearchableSelect>
                         </div>
 
                         <div>
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Province/State
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="Western Cape"
                             value={supplierForm.provinceState}
@@ -2395,8 +2546,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             City
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="Cape Town"
                             value={supplierForm.city}
@@ -2419,8 +2570,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Bank Name
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="Standard Bank"
                             value={supplierForm.bankName}
@@ -2432,8 +2583,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Account Holder Name
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="Full name"
                             value={supplierForm.accountHolderName}
@@ -2447,8 +2598,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Bank Account Number
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="123456789"
                             value={supplierForm.bankAccountNumber}
@@ -2460,8 +2611,8 @@ adultRate: 0,
                           <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Bank/Branch Code
                           </label>
-                          <input 
-                            type="text" 
+                          <input
+                            type="text"
                             className="pricing-select"
                             placeholder="051001"
                             value={supplierForm.branchCode}
@@ -2474,8 +2625,8 @@ adultRate: 0,
                         <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                           SWIFT/BIC/IBAN Code
                         </label>
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           className="pricing-select"
                           placeholder="SBZA ZA JJ"
                           value={supplierForm.swiftCode}
@@ -2490,19 +2641,19 @@ adultRate: 0,
                     <span style={{ fontSize: '0.8rem', color: '#64748b', marginRight: 'auto' }}>
                       (Saving supplier enables library item creation below)
                     </span>
-                    <button 
-                      type="button" 
-                      className="secondary-btn" 
+                    <button
+                      type="button"
+                      className="secondary-btn"
                       style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
                       onClick={handleCancelSupplierForm}
                     >
                       Cancel
                     </button>
-                    <button 
-                      type="button" 
-                      className="primary-btn" 
+                    <button
+                      type="button"
+                      className="primary-btn"
                       style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }}
-                      onClick={handleSaveSupplierOnly} 
+                      onClick={handleSaveSupplierOnly}
                       disabled={savingSupplier}
                     >
                       <Check size={16} /> {savingSupplier ? 'Saving Supplier...' : 'Save Supplier'}
@@ -2553,10 +2704,10 @@ adultRate: 0,
                 alignItems: 'center',
                 gap: '0.5rem'
               }}>
-                <input 
-                  type="checkbox" 
-                  id="addMultiple" 
-                  checked={addMultiple} 
+                <input
+                  type="checkbox"
+                  id="addMultiple"
+                  checked={addMultiple}
                   onChange={(e) => setAddMultiple(e.target.checked)}
                   style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: '#2563eb' }}
                 />
@@ -2569,8 +2720,8 @@ adultRate: 0,
               {itemsToSave.map((item, itemIdx) => {
                 const isTourStyle = isTourStyleCategory(item.category);
                 return (
-                <div 
-                  key={item.tempId} 
+                <div
+                  key={item.tempId}
                   style={{
                     background: '#fff',
                     borderRadius: '12px',
@@ -2587,8 +2738,8 @@ adultRate: 0,
                       Library Item {itemIdx + 1}
                     </h3>
                     {itemsToSave.length > 1 && (
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         onClick={() => handleRemoveItemCard(item.tempId)}
                         style={{ color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.85rem' }}
                       >
@@ -2603,7 +2754,7 @@ adultRate: 0,
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                         Category *
                       </label>
-                      <select 
+                      <SearchableSelect
                         className="pricing-select"
                         value={item.category}
                         onChange={(e) => handleCategoryChange(item.tempId, e.target.value)}
@@ -2611,14 +2762,14 @@ adultRate: 0,
                         {categories.map(cat => (
                           <option key={cat.id} value={cat.id}>{cat.label}</option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </div>
 
                     <div>
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                         Currency *
                       </label>
-                      <select 
+                      <SearchableSelect
                         className="pricing-select"
                         value={item.currency}
                         onChange={(e) => handleItemFieldChange(item.tempId, 'currency', e.target.value)}
@@ -2631,9 +2782,56 @@ adultRate: 0,
                             {c.code} – {c.name} ({c.symbol})
                           </option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </div>
                   </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.25rem', marginBottom: '1.25rem' }}>
+                    <div>
+                      <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+                        Destination or Region *
+                      </label>
+                      <input
+                        type="text"
+                        className="pricing-select"
+                        placeholder="e.g. Windhoek / Etosha National Park"
+                        required
+                        value={item.destinationRegion || ''}
+                        onChange={(e) => handleItemFieldChange(item.tempId, 'destinationRegion', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+                        Identifier Code
+                      </label>
+                      <input
+                        type="text"
+                        className="pricing-select"
+                        value={item.identifierCode && item.destinationRegion === item.identifierDestinationRegion ? item.identifierCode : 'Generated when saved'}
+                        readOnly
+                        aria-readonly="true"
+                      />
+                    </div>
+                  </div>
+
+                  {/accommodation/i.test(String(item.category || '')) && (
+                    <div style={{ marginBottom: '1.25rem' }}>
+                      <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+                        Parent Destination / Region *
+                      </label>
+                      <input
+                        type="text"
+                        className="pricing-select"
+                        placeholder="e.g. Cape Town (use the same parent area for nearby places)"
+                        required
+                        value={item.destinationArea || ''}
+                        onChange={(e) => handleItemFieldChange(item.tempId, 'destinationArea', e.target.value)}
+                      />
+                      <small style={{ display: 'block', marginTop: '0.3rem', color: '#64748b' }}>
+                        Used to validate accommodation alternatives and group splits. Keep the specific locality in Destination or Region above.
+                      </small>
+                    </div>
+                  )}
 
                   {/* Name & Meal Plan / Vehicle Type Row */}
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.25rem', marginBottom: '1.25rem' }}>
@@ -2641,8 +2839,8 @@ adultRate: 0,
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                         Library Item Name *
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder={item.category === 'Transfers'
                           ? 'e.g., Airport Transfer / Safari Transfer'
@@ -2674,8 +2872,8 @@ adultRate: 0,
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Vehicle Type *
                         </label>
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           className="pricing-select"
                           placeholder={item.category === 'Transfers' ? 'e.g. Land Cruiser / Safari Minivan' : 'e.g. Safari Vehicle / Boat / Van'}
                           value={item.vehicleType}
@@ -2687,7 +2885,7 @@ adultRate: 0,
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Meal Plan
                         </label>
-                        <select 
+                        <SearchableSelect
                           className="pricing-select"
                           value={item.mealPlan}
                           onChange={(e) => handleItemFieldChange(item.tempId, 'mealPlan', e.target.value)}
@@ -2695,7 +2893,7 @@ adultRate: 0,
                           {mealPlanOptions.map(mp => (
                             <option key={mp} value={mp}>{mp}</option>
                           ))}
-                        </select>
+                        </SearchableSelect>
                       </div>
                     ) : null}
 
@@ -3012,7 +3210,7 @@ adultRate: 0,
                           <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Type of Meal
                           </label>
-                          <select
+                          <SearchableSelect
                             className="pricing-select"
                             style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                             value={item.mealType || 'Breakfast'}
@@ -3021,13 +3219,13 @@ adultRate: 0,
                             <option value="Breakfast">Breakfast</option>
                             <option value="Lunch">Lunch</option>
                             <option value="Dinner">Dinner</option>
-                          </select>
+                          </SearchableSelect>
                         </div>
                         <div>
                           <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                             Menu Type
                           </label>
-                          <select
+                          <SearchableSelect
                             className="pricing-select"
                             style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                             value={item.menuType || 'a_la_carte'}
@@ -3035,7 +3233,7 @@ adultRate: 0,
                           >
                             <option value="a_la_carte">À La Carte</option>
                             <option value="buffet">Buffet</option>
-                          </select>
+                          </SearchableSelect>
                         </div>
                         <div>
                           <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
@@ -3248,7 +3446,7 @@ adultRate: 0,
 
                     {/* Overall Capacity Ceilings Grid */}
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.25rem' }}>
-                      
+
                       {/* Max Total Capacity */}
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                         <div style={{ marginBottom: '0.4rem' }}>
@@ -3715,67 +3913,108 @@ adultRate: 0,
                   </div>
                   )}
 
-                  {/* SURCHARGE FEES SELECTOR (Accommodation + Transfers) */}
-                  {dbFeatures.feeType && (item.category === 'Accommodation' || item.category === 'Transfers') ? (
+                  {/* SURCHARGES ARE THEIR OWN ITEMS, NOT A SWITCH ON A BASE ITEM.
+                      An entrance fee or conservation levy used to be a toggle on
+                      Accommodation / Transfers, which put the price on the base
+                      item's seasonal matrix where the itinerary never read it.
+                      Each fee is now a library item in its own right, so it gets
+                      its own supplier, its own price and its own line. */}
+                  {item.category === SURCHARGE_CATEGORY ? (
                     <div style={{
-                      background: '#f8fafc',
-                      border: '1px solid #e2e8f0',
+                      background: '#fff7ed',
+                      border: '1px solid #fed7aa',
                       borderRadius: '10px',
                       padding: '0.85rem 1.15rem',
                       marginBottom: '1.5rem'
                     }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#9a3412', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <Tag size={16} color="#ea580c" /> Surcharge fee setup
+                      </span>
+                      <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.2rem' }}>
+                        This item is a surcharge, so it becomes its own line on the itinerary with its own price. Link it to the accommodation
+                        it belongs to and it is added automatically with that property.
+                      </span>
+
+                      <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '0.75rem' }}>
                         <div>
-                          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                            <Tag size={16} color="#0d9488" /> Surcharge Fees:
-                          </span>
-                          <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
-                            {item.feeType === 'entrance'
-                              ? 'Entrance fees are charged per person and/or per vehicle — set the relevant rate(s) for each season below.'
-                              : (item.feeType === 'conservation'
-                                ? 'Conservation levies are charged per adult and per child — set the relevant rate(s) for each season below.'
-                                : 'Optionally add entrance fees or a conservation levy on top of the base rates.')}
-                          </span>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.3rem' }}>Fee type</span>
+                          <SearchableSelect
+                            className="pricing-select"
+                            style={{ padding: '0.4rem 0.6rem', border: '1px solid #fdba74', borderRadius: '6px', width: '100%' }}
+                            value={item.surchargeType || 'entrance_fee'}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'surchargeType', e.target.value)}
+                          >
+                            {SURCHARGE_TYPES.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                          </SearchableSelect>
                         </div>
-                        <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
-                          {(feeTypeOptions[item.category === 'Transfers' ? 'transfers' : 'accommodation'] || []).map(opt => (
-                            <button
-                              key={opt.id}
-                              type="button"
-                              onClick={() => handleItemFieldChange(item.tempId, 'feeType', opt.id)}
-                              style={{
-                                padding: '0.4rem 0.9rem', fontSize: '0.8rem', fontWeight: 700, borderRadius: '6px', border: 'none', cursor: 'pointer', transition: 'all 0.15s ease',
-                                background: (item.feeType || 'none') === opt.id ? '#ffffff' : 'transparent',
-                                color: (item.feeType || 'none') === opt.id ? '#0f766e' : '#64748b',
-                                boxShadow: (item.feeType || 'none') === opt.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
-                              }}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
+                        <div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.3rem' }}>Charged</span>
+                          <SearchableSelect
+                            className="pricing-select"
+                            style={{ padding: '0.4rem 0.6rem', border: '1px solid #fdba74', borderRadius: '6px', width: '100%' }}
+                            value={item.surchargeChargeBasis || 'once_off'}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'surchargeChargeBasis', e.target.value)}
+                          >
+                            {CHARGE_BASIS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                          </SearchableSelect>
+                        </div>
+                        <div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.3rem' }}>Rate is per</span>
+                          <SearchableSelect
+                            className="pricing-select"
+                            style={{ padding: '0.4rem 0.6rem', border: '1px solid #fdba74', borderRadius: '6px', width: '100%' }}
+                            value={item.surchargeUnitBasis || 'per_person'}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'surchargeUnitBasis', e.target.value)}
+                          >
+                            {unitBasesFor({ surcharge_type: item.surchargeType || 'entrance_fee' }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                          </SearchableSelect>
+                          {/* An entrance fee has no per-child figure to store, so
+                              leaving "per child" selected after switching type
+                              would save a basis that always prices as zero. */}
+                          {!isValidUnitBasis({ surcharge_type: item.surchargeType || 'entrance_fee' }, item.surchargeUnitBasis || 'per_person')
+                            && (
+                              <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.7rem', color: '#b45309' }}>
+                                Not available for this fee type — pick another basis above.
+                              </span>
+                            )}
+                        </div>
+                        <div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.3rem' }}>Linked accommodation</span>
+                          <SearchableSelect
+                            className="pricing-select"
+                            style={{ padding: '0.4rem 0.6rem', border: '1px solid #fdba74', borderRadius: '6px', width: '100%' }}
+                            value={item.linkedItemId || ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'linkedItemId', e.target.value)}
+                          >
+                            <option value="">Not linked</option>
+                            {accommodationLinkOptions.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                          </SearchableSelect>
                         </div>
                       </div>
 
-                      {item.feeType === 'conservation' && (
-                        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '0.85rem', flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569' }}>Levy Charged:</span>
-                          <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px' }}>
-                            {levyBasisOptions.map(opt => (
-                              <button
-                                key={opt.id}
-                                type="button"
-                                onClick={() => handleItemFieldChange(item.tempId, 'levyBasis', opt.id)}
-                                style={{
-                                  padding: '0.35rem 0.85rem', fontSize: '0.78rem', fontWeight: 700, borderRadius: '6px', border: 'none', cursor: 'pointer', transition: 'all 0.15s ease',
-                                  background: (item.levyBasis || 'per_night') === opt.id ? '#ffffff' : 'transparent',
-                                  color: (item.levyBasis || 'per_night') === opt.id ? '#0f766e' : '#64748b',
-                                  boxShadow: (item.levyBasis || 'per_night') === opt.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
-                                }}
-                              >
-                                {opt.label}
-                              </button>
-                            ))}
-                          </div>
+                      <div style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid #fed7aa' }}>
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.45rem', fontSize: '0.8rem', fontWeight: 600, color: '#7c2d12', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={item.surchargeChargeable !== false}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'surchargeChargeable', e.target.checked)}
+                            style={{ width: '16px', height: '16px', accentColor: '#ea580c', cursor: 'pointer', marginTop: '1px' }}
+                          />
+                          Chargeable — add this fee to the client's total with markup
+                        </label>
+                        <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.3rem', paddingLeft: '1.7rem' }}>
+                          {item.surchargeChargeable === false
+                            ? 'Not chargeable: the line is still shown so the client can see what the supplier charges, but nothing is added to the total and no markup is applied.'
+                            : 'Chargeable: the fee is marked up like any other bought service and added to the total.'}
+                        </span>
+                      </div>
+
+                      {(item.surchargeChargeBasis || 'once_off') === 'per_night' && !item.linkedItemId && (
+                        <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.75rem', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px' }}>
+                          <span style={{ fontSize: '0.76rem', color: '#92400e' }}>
+                            This fee repeats per night but is not linked to an accommodation, so the operator is asked how many nights it
+                            applies to when it is added to an itinerary. Linking it to an accommodation removes that question.
+                          </span>
                         </div>
                       )}
                     </div>
@@ -4190,24 +4429,26 @@ adultRate: 0,
                         </div>
                       </div>
                     )}
-                    {item.feeType === 'entrance' && (
-                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🎟️ Entrance Fee Rates:</div>
-                        <div>• <strong>Per Person:</strong> charged for each visitor entering.</div>
-                        <div>• <strong>Per Vehicle:</strong> charged once per vehicle/departure (e.g. park entry per car).</div>
-                        <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.25rem' }}>
-                          Both can be set at once — the itinerary builder can apply either one or both together.
+                    {item.category === SURCHARGE_CATEGORY && (
+                      <div style={{ background: '#ffffff', border: '1px solid #fed7aa', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#7c2d12', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#c2410c', marginBottom: '0.2rem' }}>
+                          {(item.surchargeType || 'entrance_fee') === 'entrance_fee' ? 'Entrance Fee Rates' : 'Conservation Levy Rates'}
                         </div>
-                      </div>
-                    )}
-                    {item.feeType === 'conservation' && (
-                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
-                        <div style={{ fontWeight: 700, color: '#0d9488', marginBottom: '0.2rem' }}>🌿 Conservation Levy Rates:</div>
-                        <div>• <strong>Adult Rate:</strong> charged per adult{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}.</div>
-                        <div>• <strong>Child Rate:</strong> charged per child (up to the child age set below){item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}.</div>
-                        <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.25rem' }}>
-                          Levies are applied {item.levyBasis === 'per_stay' ? 'once for the stay' : 'nightly for the duration of the stay'}.
-                        </div>
+                        {((item.surchargeType || 'entrance_fee') === 'entrance_fee' ? (
+                          <>
+                            <div>• <strong>Per Person:</strong> charged for each visitor entering.</div>
+                            <div>• <strong>Per Vehicle:</strong> charged once per vehicle/departure (e.g. park entry per car).</div>
+                            <div style={{ color: '#9a3412', fontWeight: 600, marginTop: '0.25rem' }}>Pick one in &quot;Rate is per&quot; above; the season matrix collects the figure that basis needs.</div>
+                          </>
+                        ) : (
+                          <>
+                            <div>• <strong>Per Adult:</strong> charged for each adult on the booking.</div>
+                            <div>• <strong>Per Child:</strong> charged for each child (up to the child age set below).</div>
+                            <div style={{ color: '#9a3412', fontWeight: 600, marginTop: '0.25rem' }}>
+                              Charged {item.surchargeChargeBasis === 'per_night' ? 'nightly for the duration of the stay' : 'once off for the whole booking'}.
+                            </div>
+                          </>
+                        ))}
                       </div>
                     )}
                     {isTourStyle && !isFlightCategory(item.category) ? (
@@ -4258,22 +4499,59 @@ adultRate: 0,
                     ))}
 
                     {item.seasons.map((season, seasonIdx) => {
+                      /* Seasonal Rates Matrix shows one season at a time; the
+                         arrows below move between them. */
+                      if (seasonIdx !== activeSeasonIndexOf(item.tempId, item.seasons)) return null;
                       const bands = item.childAgeRanges || [];
                       const isFlatRoom = item.pricingModel === 'per_room';
 
                       return (
                         <div key={seasonIdx} style={{ background: '#fff', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1rem' }}>
 
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                            <span style={{ fontWeight: 700, fontSize: '0.85rem', color: '#475569' }}>
-                              Season {seasonIdx + 1} <span style={{ fontWeight: 400, color: '#94a3b8' }}>({season.seasonName})</span>
-                            </span>
-                            {item.seasons.length > 1 && (
-                              <button type="button" onClick={() => handleRemoveSeasonRow(item.tempId, seasonIdx)}
-                                style={{ color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem' }}>
-                                <Trash2 size={14} /> Remove Season
-                              </button>
-                            )}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              {item.seasons.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => stepActiveSeason(item.tempId, item.seasons, -1)}
+                                  title="Previous season"
+                                  aria-label="Previous season"
+                                  style={seasonNavBtnStyle}
+                                >
+                                  <ChevronLeft size={16} />
+                                </button>
+                              )}
+                              <span style={{ fontWeight: 700, fontSize: '0.85rem', color: '#475569' }}>
+                                Season {seasonIdx + 1}{' '}
+                                <span style={{ fontWeight: 400, color: '#94a3b8' }}>
+                                  of {item.seasons.length} ({season.seasonName})
+                                </span>
+                              </span>
+                              {item.seasons.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => stepActiveSeason(item.tempId, item.seasons, 1)}
+                                  title="Next season"
+                                  aria-label="Next season"
+                                  style={seasonNavBtnStyle}
+                                >
+                                  <ChevronRight size={16} />
+                                </button>
+                              )}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                              {item.seasons.length > 1 && (
+                                <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                                  Use the arrows to move between seasons
+                                </span>
+                              )}
+                              {item.seasons.length > 1 && (
+                                <button type="button" onClick={() => handleRemoveSeasonRow(item.tempId, seasonIdx)}
+                                  style={{ color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                  <Trash2 size={14} /> Remove Season
+                                </button>
+                              )}
+                            </div>
                           </div>
 
                           {/* Season Name & Dates */}
@@ -4773,8 +5051,8 @@ adultRate: 0,
                                 {isTrainCategory(item.category) ? 'Cabin / Unit Rate per Night' : 'Room / Unit Rate per Night'} ({item.currency})
                               </label>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '320px' }}>
-                                <input 
-                                  type="number" 
+                                <input
+                                  type="number"
                                   className="pricing-select"
                                   style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700 }}
                                   placeholder={`e.g. 5000`}
@@ -4784,7 +5062,26 @@ adultRate: 0,
                                 <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ {isTrainCategory(item.category) ? 'Cabin' : 'Room'} / Night</span>
                               </div>
                               <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
-                                Flat price for up to <strong>{item.maxOccupancy || 2} Persons</strong>. In quotes, rate per person is: <code>{item.currency} {parseFloat(season.roomRate) || 0} ÷ (Occupants)</code>.
+                                Flat price for the whole {isTrainCategory(item.category) ? 'cabin' : 'room'} for up to <strong>{item.maxOccupancy || 2} persons</strong>. In quotes, rate per person is <code>{item.currency} {parseFloat(season.roomRate) || 0} ÷ (Occupants)</code>.
+                              </div>
+                              <div style={{ marginTop: '1rem', paddingTop: '0.85rem', borderTop: '1px dashed #cbd5e1' }}>
+                                <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
+                                  1 Adult ({isTrainCategory(item.category) ? 'Single Cabin' : 'Single Room'}) ({item.currency})
+                                </label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '320px' }}>
+                                  <input
+                                    type="number"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700 }}
+                                    placeholder={`e.g. ${Math.round((parseFloat(season.roomRate) || 0) * 1.35) || 6500}`}
+                                    value={season.singleRoomRate !== undefined ? season.singleRoomRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'singleRoomRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'singleRoomRate')}
+                                  />
+                                  <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ {isTrainCategory(item.category) ? 'Cabin' : 'Room'} / Night</span>
+                                </div>
+                                <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
+                                  What one adult pays for the {isTrainCategory(item.category) ? 'cabin' : 'room'} to themselves, since they are not sharing. Leave blank to charge the flat {isTrainCategory(item.category) ? 'cabin' : 'room'} rate.
+                                </div>
                               </div>
                             </div>
                           ) : (
@@ -4797,8 +5094,8 @@ adultRate: 0,
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                   <div>
                                     <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>1 Adult ({isTrainCategory(item.category) ? 'Single Cabin' : 'Single Room'})</span>
-                                    <input 
-                                      type="number" 
+                                    <input
+                                      type="number"
                                       className="pricing-select"
                                       style={{ padding: '0.35rem' }}
                                       placeholder={`Price (${item.currency})`}
@@ -4809,8 +5106,8 @@ adultRate: 0,
                                   </div>
                                   <div>
                                     <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>2 Adults (Double/Twin)</span>
-                                    <input 
-                                      type="number" 
+                                    <input
+                                      type="number"
                                       className="pricing-select"
                                       style={{ padding: '0.35rem' }}
                                       placeholder={`Price (${item.currency})`}
@@ -4821,8 +5118,8 @@ adultRate: 0,
                                   </div>
                                   <div>
                                     <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>3+ Adults (Per Person)</span>
-                                    <input 
-                                      type="number" 
+                                    <input
+                                      type="number"
                                       className="pricing-select"
                                       style={{ padding: '0.35rem' }}
                                       placeholder={`Price (${item.currency})`}
@@ -4846,8 +5143,8 @@ adultRate: 0,
                                         <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
                                           {band.name} ({band.ageFrom}–{band.ageTo} yrs)
                                         </span>
-                                        <input 
-                                          type="number" 
+                                        <input
+                                          type="number"
                                           className="pricing-select"
                                           style={{ padding: '0.35rem' }}
                                           placeholder={`Price (${item.currency})`}
@@ -4866,8 +5163,8 @@ adultRate: 0,
                                 <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                                   Child Discount (%) (Optional)
                                 </label>
-                                <input 
-                                  type="number" 
+                                <input
+                                  type="number"
                                   className="pricing-select"
                                   style={{ padding: '0.35rem' }}
                                   placeholder="e.g. 10%"
@@ -4878,104 +5175,62 @@ adultRate: 0,
                             </>
                           ))}
 
-                          {/* Surcharge Fee Inputs (per season) */}
-                          {item.feeType === 'entrance' && (
-                            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
-                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#166534', display: 'block', marginBottom: '0.5rem' }}>
-                                🎟️ Entrance Fee Rates ({item.currency})
-                              </label>
-                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '480px' }}>
-                                <div>
-                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    Per Person Rate ({item.currency})
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder="e.g. 850"
-                                    value={season.entranceFeePerson !== undefined ? season.entranceFeePerson : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'entranceFeePerson', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'entranceFeePerson')}
-                                  />
-                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per visitor</span>
+                          {/* Surcharge Fee Inputs (per season). Only a Surcharge Fees item has these; the
+                              unit basis decides which single figure is collected. */}
+                          {item.category === SURCHARGE_CATEGORY && (() => {
+                            const basis = item.surchargeChargeBasis || 'once_off';
+                            const unit = item.surchargeUnitBasis || 'per_person';
+                            const isEntrance = (item.surchargeType || 'entrance_fee') === 'entrance_fee';
+                            const when = basis === 'per_night' ? 'per night' : 'once off';
+                            const moneyField = (
+                              field, label, hint, placeholder
+                            ) => (
+                              <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                  {label} ({item.currency})
+                                </label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  className="pricing-select"
+                                  style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                  placeholder={placeholder}
+                                  value={season[field] !== undefined ? season[field] : ''}
+                                  onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, field, e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, field)}
+                                />
+                                <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>{hint}</span>
+                              </div>
+                            );
+                            /* A per_vehicle entrance fee is the only basis that reads the
+                               per-vehicle column; per_child is the only one that reads the
+                               per-child column. Anything else uses the per-person figure. */
+                            let fields;
+                            if (isEntrance) {
+                              fields = unit === 'per_vehicle'
+                                ? [moneyField('entranceFeeVehicle', `Per Vehicle Rate`, `Charged once per vehicle, ${when}`, 'e.g. 1200')]
+                                : [moneyField('entranceFeePerson', `Per Person Rate`, `Charged per visitor, ${when}`, 'e.g. 850')];
+                            } else {
+                              fields = unit === 'per_child'
+                                ? [moneyField('levyChildRate', `Child Rate`, `Charged per child, ${when}`, 'e.g. 60')]
+                                : [moneyField('levyAdultRate', `Adult Rate`, `Charged per adult, ${when}`, 'e.g. 120')];
+                            }
+                            return (
+                              <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
+                                <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#9a3412', display: 'block', marginBottom: '0.5rem' }}>
+                                  {(isEntrance ? 'Entrance Fee' : 'Conservation Levy') + ' Rates (' + item.currency + ') — ' + when}
+                                </label>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '480px' }}>
+                                  {fields}
                                 </div>
-                                <div>
-                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    Per Vehicle Rate ({item.currency})
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder="e.g. 1200"
-                                    value={season.entranceFeeVehicle !== undefined ? season.entranceFeeVehicle : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'entranceFeeVehicle', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'entranceFeeVehicle')}
-                                  />
-                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged once per vehicle</span>
+                                <div style={{ fontSize: '0.74rem', color: '#7c2d12', marginTop: '0.45rem' }}>
+                                  This fee is charged on its own line in the itinerary, not folded into the accommodation's price.
+                                  {item.surchargeChargeable === false
+                                    ? ' It is marked not chargeable, so it will be shown for reference and excluded from the total.'
+                                    : ''}
                                 </div>
                               </div>
-                              <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.45rem' }}>
-                                Set either rate, or both — the itinerary builder applies whichever rate(s) match the booking.
-                              </div>
-                            </div>
-                          )}
-                          {item.feeType === 'conservation' && (
-                            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
-                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#166534', display: 'block', marginBottom: '0.5rem' }}>
-                                🌿 Conservation Levy Rates ({item.currency}) — {item.levyBasis === 'per_stay' ? 'Per Stay' : 'Per Night'}
-                              </label>
-                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '480px' }}>
-                                <div>
-                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    Adult Rate ({item.currency})
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder="e.g. 120"
-                                    value={season.levyAdultRate !== undefined ? season.levyAdultRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'levyAdultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'levyAdultRate')}
-                                  />
-                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}</span>
-                                </div>
-                                <div>
-                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    Child Rate ({item.currency})
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder="e.g. 60"
-                                    value={season.levyChildRate !== undefined ? season.levyChildRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'levyChildRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'levyChildRate')}
-                                  />
-                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child{item.levyBasis === 'per_stay' ? ' per stay' : ' per night'}</span>
-                                </div>
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.75rem', marginTop: '1rem', flexWrap: 'wrap' }}>
-                                <div style={{ maxWidth: '200px', flex: '1' }}>
-                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    Child Age Limit (yrs)
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="1"
-                                    max="17"
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
-                                    value={item.childAge || 12}
-                                    onChange={(e) => handleItemFieldChange(item.tempId, 'childAge', e.target.value)}
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          )}
+                            );
+                          })()}
 
                           {/* Guide & Driver Room Rates (Accommodation, offered hotels only) */}
                           {item.category === 'Accommodation' && item.guideDriverOffered && dbFeatures.guideDriver && (
@@ -4999,7 +5254,7 @@ adultRate: 0,
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
                                     Guide Meal Plan (same as clients)
                                   </span>
-                                  <select
+                                  <SearchableSelect
                                     className="pricing-select"
                                     style={{ padding: '0.35rem' }}
                                     value={season.guideMealPlan || item.mealPlan}
@@ -5008,7 +5263,7 @@ adultRate: 0,
                                     {mealPlanOptions.map(mp => (
                                       <option key={mp} value={mp}>{mp}</option>
                                     ))}
-                                  </select>
+                                  </SearchableSelect>
                                 </div>
                                 <div>
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Driver Room Rate</span>
@@ -5025,7 +5280,7 @@ adultRate: 0,
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
                                     Driver Meal Plan (same as clients)
                                   </span>
-                                  <select
+                                  <SearchableSelect
                                     className="pricing-select"
                                     style={{ padding: '0.35rem' }}
                                     value={season.driverMealPlan || item.mealPlan}
@@ -5034,7 +5289,7 @@ adultRate: 0,
                                     {mealPlanOptions.map(mp => (
                                       <option key={mp} value={mp}>{mp}</option>
                                     ))}
-                                  </select>
+                                  </SearchableSelect>
                                 </div>
                               </div>
                             </div>
@@ -5044,9 +5299,9 @@ adultRate: 0,
                       );
                     })}
 
-                    <button 
-                      type="button" 
-                      className="secondary-btn" 
+                    <button
+                      type="button"
+                      className="secondary-btn"
                       style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                       onClick={() => handleAddSeasonRow(item.tempId)}
                     >
@@ -5060,7 +5315,7 @@ adultRate: 0,
                     <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                       Description
                     </label>
-                    <textarea 
+                    <textarea
                       className="pricing-select"
                       style={{ minHeight: '80px', fontFamily: 'inherit', padding: '0.75rem' }}
                       placeholder="Detailed description of the library item..."
@@ -5074,11 +5329,11 @@ adultRate: 0,
                     <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
                       Gallery Images (Max 10)
                     </label>
-                    
-                    <input 
-                      type="file" 
+
+                    <input
+                      type="file"
                       id={`file-input-${item.tempId}`}
-                      multiple 
+                      multiple
                       accept=".jpg,.jpeg,.png,image/jpeg,image/png"
                       style={{ display: 'none' }}
                       onChange={(e) => {
@@ -5087,7 +5342,7 @@ adultRate: 0,
                       }}
                     />
 
-                    <div 
+                    <div
                       onClick={() => {
                         if (item.imageUrls.length >= 10) {
                           showToast('Maximum 10 images reached', 'warning');
@@ -5142,15 +5397,15 @@ adultRate: 0,
                         {item.imageUrls.map((imgUrl, imgIdx) => (
                           <div key={imgIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.3rem' }}>
                             <div style={{ position: 'relative', width: '84px', height: '84px', borderRadius: '8px', overflow: 'hidden', border: '1px solid #cbd5e1', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
-                              <img 
-                                src={imgUrl} 
-                                alt={`Gallery ${imgIdx + 1}`} 
+                              <img
+                                src={imgUrl}
+                                alt={`Gallery ${imgIdx + 1}`}
                                 onClick={() => setLightbox({ images: item.imageUrls, index: imgIdx })}
                                 title="Click to enlarge"
-                                style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} 
+                                style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
                               />
-                              <button 
-                                type="button" 
+                              <button
+                                type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleRemoveImage(item.tempId, imgIdx);
@@ -5252,8 +5507,8 @@ adultRate: 0,
               {/* Centered Add Another Item Button */}
               {addMultiple && (
                 <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.5rem', marginBottom: '1.5rem' }}>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     onClick={handleAddAnotherItem}
                     style={{
                       background: '#ffffff',
@@ -5277,17 +5532,17 @@ adultRate: 0,
 
               {/* Bottom Right Actions */}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', alignItems: 'center', borderTop: '1px solid #f1f5f9', paddingTop: '1.25rem' }}>
-                <button 
-                  type="button" 
-                  className="secondary-btn" 
+                <button
+                  type="button"
+                  className="secondary-btn"
                   style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
                   onClick={() => { setShowInlineForm(false); setEditingItems({}); }}
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
-                  className="primary-btn" 
+                <button
+                  type="submit"
+                  className="primary-btn"
                   style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }}
                   disabled={saving}
                 >
@@ -5346,12 +5601,12 @@ adultRate: 0,
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                       {hasImages ? (
-                        <img 
-                          src={item.images[0]} 
-                          alt={item.name} 
+                        <img
+                          src={item.images[0]}
+                          alt={item.name}
                           onClick={() => setLightbox({ images: item.images, index: 0 })}
                           title={`View ${item.images.length} image${item.images.length > 1 ? 's' : ''}`}
-                          style={{ width: '48px', height: '48px', borderRadius: '8px', objectFit: 'cover', border: '1px solid #e2e8f0', cursor: 'pointer' }} 
+                          style={{ width: '48px', height: '48px', borderRadius: '8px', objectFit: 'cover', border: '1px solid #e2e8f0', cursor: 'pointer' }}
                         />
                       ) : (
                         <div style={{ background: '#f1f5f9', color: catObj?.color || '#334155', width: '48px', height: '48px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -5359,7 +5614,10 @@ adultRate: 0,
                         </div>
                       )}
                       <div>
-                        <span style={{ fontWeight: 700, color: '#0f172a', display: 'block' }}>{item.name}</span>
+                        {item.destination_region && <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0d7478', display: 'block', marginBottom: '0.15rem' }}>{item.destination_region}{item.destination_area ? ` · ${item.destination_area}` : ''}</span>}
+                        <span style={{ fontWeight: 700, color: '#0f172a', display: 'block' }}>
+                          {item.name}{item.identifier_code && <span style={{ color: '#0d7478' }}> - {item.identifier_code}</span>}
+                        </span>
                         {isTourStyle && item.sub_category && item.sub_category !== 'Transfers' && (
                             <span style={{ display: 'inline-block', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
                               🚐 {item.sub_category} · {item.max_occupancy || 4} pax
@@ -5398,7 +5656,7 @@ adultRate: 0,
                           </span>
                         )}
                         {item.description && (
-                          <span 
+                          <span
                             onClick={() => setDescriptionPopup(item.description)}
                             title="Click to view full description"
                             style={{ fontSize: '0.8rem', color: '#64748b', display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden', cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: '3px' }}
@@ -5461,14 +5719,11 @@ adultRate: 0,
                   <td>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
                       {/* Pricing model badge */}
-                      {item.fee_type === 'entrance' && (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdf4', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🎟️ Entrance Fees
-                        </span>
-                      )}
-                      {item.fee_type === 'conservation' && (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0f766e', background: '#f0fdf4', border: '1px solid #99f6e4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🌿 Conservation Levy {item.conservation_levy_basis === 'per_stay' ? '(Per Stay)' : '(Per Night)'}
+                      {item.category === SURCHARGE_CATEGORY && (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                          {(item.surcharge_type || 'entrance_fee') === 'entrance_fee' ? 'Entrance Fees' : 'Conservation Levy'}
+                          {item.surcharge_charge_basis === 'per_night' ? ' (Per Night)' : ''}
+                          {item.surcharge_chargeable === false ? ' · Not chargeable' : ''}
                         </span>
                       )}
                       {item.category === 'Flights / Charter' ? (
@@ -5697,8 +5952,10 @@ adultRate: 0,
                                   )}
                                 </div>
                               )}
-                              {item.fee_type === 'entrance' && ((parseFloat(rate.entrance_fee_per_person) || 0) > 0 || (parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0) && (
-                                <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.15rem' }}>
+                              {/* A Surcharge Fees item shows its fee figures here, on its own rate
+                                  rows, keyed off the surcharge type rather than a legacy flag. */}
+                              {item.category === SURCHARGE_CATEGORY && (item.surcharge_type || 'entrance_fee') === 'entrance_fee' && ((parseFloat(rate.entrance_fee_per_person) || 0) > 0 || (parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0) && (
+                                <div style={{ color: '#c2410c', fontWeight: 600, marginTop: '0.15rem' }}>
                                   {(parseFloat(rate.entrance_fee_per_person) || 0) > 0 && (
                                     <span><strong>Entrance / Person:</strong> {item.currency} {(parseFloat(rate.entrance_fee_per_person) || 0).toLocaleString()}</span>
                                   )}
@@ -5708,14 +5965,14 @@ adultRate: 0,
                                   )}
                                 </div>
                               )}
-                              {item.fee_type === 'conservation' && ((parseFloat(rate.conservation_levy_per_adult) || 0) > 0 || (parseFloat(rate.conservation_levy_per_child) || 0) > 0) && (
-                                <div style={{ color: '#0f766e', fontWeight: 600, marginTop: '0.15rem' }}>
+                              {item.category === SURCHARGE_CATEGORY && (item.surcharge_type || 'entrance_fee') !== 'entrance_fee' && ((parseFloat(rate.conservation_levy_per_adult) || 0) > 0 || (parseFloat(rate.conservation_levy_per_child) || 0) > 0) && (
+                                <div style={{ color: '#c2410c', fontWeight: 600, marginTop: '0.15rem' }}>
                                   {(parseFloat(rate.conservation_levy_per_adult) || 0) > 0 && (
-                                    <span><strong>Levy Adult{item.conservation_levy_basis === 'per_stay' ? ' / Stay' : ' / Night'}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_adult) || 0).toLocaleString()}</span>
+                                    <span><strong>Levy Adult{item.surcharge_charge_basis === 'per_night' ? ' / Night' : ''}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_adult) || 0).toLocaleString()}</span>
                                   )}
                                   {(parseFloat(rate.conservation_levy_per_adult) || 0) > 0 && (parseFloat(rate.conservation_levy_per_child) || 0) > 0 && <span style={{ margin: '0 0.3rem' }}>|</span>}
                                   {(parseFloat(rate.conservation_levy_per_child) || 0) > 0 && (
-                                    <span><strong>Levy Child{item.conservation_levy_basis === 'per_stay' ? ' / Stay' : ' / Night'}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_child) || 0).toLocaleString()}</span>
+                                    <span><strong>Levy Child{item.surcharge_charge_basis === 'per_night' ? ' / Night' : ''}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_child) || 0).toLocaleString()}</span>
                                   )}
                                 </div>
                               )}

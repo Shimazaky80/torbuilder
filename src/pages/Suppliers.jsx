@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -6,18 +7,18 @@ import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConfirm } from '../hooks/useConfirm';
-import { 
-  Building2, 
-  Search, 
-  Plus, 
-  Edit3, 
-  Trash2, 
-  X, 
-  Mail, 
-  Phone, 
-  Globe, 
-  MapPin, 
-  User, 
+import {
+  Building2,
+  Search,
+  Plus,
+  Edit3,
+  Trash2,
+  X,
+  Mail,
+  Phone,
+  Globe,
+  MapPin,
+  User,
   Package,
   CheckCircle2,
   XCircle,
@@ -38,7 +39,7 @@ export const Suppliers = () => {
 
   const searchTimeoutRef = useRef(null);
   const { limit: pageSize } = useListRowLimit();
-  
+
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState(null);
 
@@ -309,8 +310,8 @@ export const Suppliers = () => {
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Building2 size={22} color="#0d7478" /> {editingSupplier ? `Edit Supplier: ${editingSupplier.name}` : 'Add New Supplier'}
             </h2>
-            <button 
-              onClick={() => { setShowInlineForm(false); setEditingSupplier(null); }} 
+            <button
+              onClick={() => { setShowInlineForm(false); setEditingSupplier(null); }}
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}
             >
               <X size={24} />
@@ -319,21 +320,21 @@ export const Suppliers = () => {
 
           <form onSubmit={handleSubmit}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
-              
+
               {/* Basic Information */}
               <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
                 <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', marginBottom: '1rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.35rem' }}>
                   Basic Information
                 </h4>
-                
+
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1rem' }}>
                     <div>
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Supplier Name *
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="e.g., Safari Lodge Group"
                         required
@@ -346,7 +347,7 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Primary Category
                       </label>
-                      <select 
+                      <SearchableSelect
                         className="pricing-select"
                         value={form.category}
                         onChange={(e) => setForm({ ...form, category: e.target.value })}
@@ -354,7 +355,7 @@ export const Suppliers = () => {
                         {categories.filter(c => c !== 'All').map(cat => (
                           <option key={cat} value={cat}>{cat}</option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </div>
                   </div>
 
@@ -362,8 +363,8 @@ export const Suppliers = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Contact Person
                     </label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       className="pricing-select"
                       placeholder="e.g., John Doe"
                       value={form.contactPerson}
@@ -376,8 +377,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Email
                       </label>
-                      <input 
-                        type="email" 
+                      <input
+                        type="email"
                         className="pricing-select"
                         placeholder="supplier@example.com"
                         value={form.email}
@@ -389,8 +390,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Phone
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="+27 123 456 789"
                         value={form.phone}
@@ -403,8 +404,8 @@ export const Suppliers = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Website
                     </label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       className="pricing-select"
                       placeholder="https://www.example.com"
                       value={form.website}
@@ -425,8 +426,8 @@ export const Suppliers = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Address
                     </label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       className="pricing-select"
                       placeholder="123 Main Street"
                       value={form.address}
@@ -439,7 +440,7 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Country
                       </label>
-                      <select 
+                      <SearchableSelect
                         className="pricing-select"
                         value={form.country}
                         onChange={(e) => setForm({ ...form, country: e.target.value })}
@@ -447,15 +448,15 @@ export const Suppliers = () => {
                         {countryOptions.map(c => (
                           <option key={c} value={c}>{c}</option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </div>
 
                     <div>
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Province/State
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="Western Cape"
                         value={form.provinceState}
@@ -467,8 +468,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         City
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="Cape Town"
                         value={form.city}
@@ -491,8 +492,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Bank Name
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="Standard Bank"
                         value={form.bankName}
@@ -504,8 +505,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Account Holder Name
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="Full name"
                         value={form.accountHolderName}
@@ -519,8 +520,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Bank Account Number
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="123456789"
                         value={form.bankAccountNumber}
@@ -532,8 +533,8 @@ export const Suppliers = () => {
                       <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                         Bank/Branch Code
                       </label>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         className="pricing-select"
                         placeholder="051001"
                         value={form.branchCode}
@@ -546,8 +547,8 @@ export const Suppliers = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       SWIFT/BIC/IBAN Code
                     </label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       className="pricing-select"
                       placeholder="SBZA ZA JJ"
                       value={form.swiftCode}
@@ -561,9 +562,9 @@ export const Suppliers = () => {
 
             {/* Form Actions */}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.75rem' }}>
-              <button 
-                type="button" 
-                className="secondary-btn" 
+              <button
+                type="button"
+                className="secondary-btn"
                 style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
                 onClick={() => { setShowInlineForm(false); setEditingSupplier(null); }}
               >
@@ -585,18 +586,18 @@ export const Suppliers = () => {
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flex: 1 }}>
             <div className="search-box">
               <Search size={18} />
-              <input 
-                type="text" 
-                placeholder="Search by supplier name, location, contact..." 
+              <input
+                type="text"
+                placeholder="Search by supplier name, location, contact..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            
+
             {/* Category Filter */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Filter size={16} color="#64748b" />
-              <select 
+              <SearchableSelect
                 className="pricing-select"
                 value={categoryFilter}
                 onChange={(e) => setCategoryFilter(e.target.value)}
@@ -605,14 +606,14 @@ export const Suppliers = () => {
                 {categories.map(cat => (
                   <option key={cat} value={cat}>{cat}</option>
                 ))}
-              </select>
+              </SearchableSelect>
             </div>
           </div>
 
           <div className="action-buttons">
-            <button 
-              className="primary-btn" 
-              style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478' }} 
+            <button
+              className="primary-btn"
+              style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478' }}
               onClick={handleOpenAddForm}
             >
               <Plus size={18} /> Add New Supplier
@@ -699,23 +700,23 @@ export const Suppliers = () => {
                 </td>
                 <td>
                   <div className="action-buttons">
-                    <button 
-                      className="action-btn" 
+                    <button
+                      className="action-btn"
                       onClick={() => navigate('/library-items', { state: { supplierId: supplier.id } })}
                       title="View & Add Library Items"
                       style={{ color: '#863bff', borderColor: '#e9d8fd' }}
                     >
                       <Package size={16} /> Library Items
                     </button>
-                    <button 
-                      className="action-btn" 
-                      onClick={() => handleOpenEditForm(supplier)} 
+                    <button
+                      className="action-btn"
+                      onClick={() => handleOpenEditForm(supplier)}
                       title="Edit Supplier Details"
                     >
                       <Edit3 size={16} />
                     </button>
-                    <button 
-                      className="action-btn delete" 
+                    <button
+                      className="action-btn delete"
                         onClick={() => handleDelete(supplier)}
                       title="Delete Supplier"
                     >

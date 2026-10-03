@@ -52,8 +52,14 @@ export const Sidebar = () => {
           .from('profiles')
           .select('first_name, last_name, user_role, is_super_admin')
           .eq('id', user.id)
-          .single();
-        setProfile(data);
+          .maybeSingle();
+        const fullName = user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || '';
+        const [metadataFirstName, ...metadataLastName] = fullName.split(' ');
+        setProfile({
+          ...data,
+          first_name: data?.first_name || metadataFirstName,
+          last_name: data?.last_name || metadataLastName.join(' ')
+        });
       }
     };
     fetchProfile();
@@ -82,7 +88,7 @@ export const Sidebar = () => {
 
       <nav className="sidebar-menu">
         {navItems
-          .filter(item => !item.adminOnly || profile?.is_super_admin)
+          .filter(item => !item.adminOnly || profile?.is_super_admin || profile?.user_role === 'super_admin')
           .map((item) => (
           <NavLink
             key={item.id}
@@ -107,7 +113,9 @@ export const Sidebar = () => {
           {!isCollapsed && (
             <div className="user-info">
               <div style={{ fontSize: '0.9rem', fontWeight: 'bold' }}>{profile?.first_name} {profile?.last_name}</div>
-              <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>{profile?.user_role || 'Admin'}</div>
+              <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>
+                {profile?.is_super_admin || profile?.user_role === 'super_admin' ? 'Platform Admin' : profile?.user_role || 'Admin'}
+              </div>
             </div>
           )}
         </div>

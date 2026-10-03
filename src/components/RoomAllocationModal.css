@@ -393,12 +393,39 @@
   font-size: 0.8rem;
 }
 
+.placement-validation-error {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #f5b8b8;
+  border-left: 4px solid #c62828;
+  border-radius: 10px;
+  background: #fff5f5;
+  color: #7f1d1d;
+}
+
+.placement-validation-error strong {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.9rem;
+}
+
+.placement-validation-error p {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 .placement-option-card {
   margin-bottom: 0.85rem;
   padding: 0.9rem 1rem;
   border: 1px solid #dbe5ec;
   border-radius: 11px;
   background: #f8fafc;
+}
+
+.placement-destination-split-card {
+  border-color: #f6c982;
+  background: #fffbeb;
 }
 
 .placement-check-row {

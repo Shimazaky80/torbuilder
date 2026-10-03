@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import SearchableSelect from './SearchableSelect';
 import {
   Users,
   BedDouble,
@@ -23,12 +24,14 @@ export default function RoomAllocationModal({
   onSave,
   item,
   itineraryTravellers = [],
+  beddedElsewhere = [],
   currencyCode = 'ZAR',
   markupPct = 0
 }) {
-  if (!isOpen || !item) return null;
-
-  const maxOccupancy = Math.max(1, parseInt(item.maxOccupancy ?? item.max_occupancy, 10) || 2);
+  /* Hooks first, early return last: bailing out before them would change the
+     hook count between renders. The caller also mounts this only while open. */
+  const open = !!isOpen && !!item;
+  const maxOccupancy = Math.max(1, parseInt(item?.maxOccupancy ?? item?.max_occupancy, 10) || 2);
   
   const travellersList = useMemo(() => {
     if (Array.isArray(itineraryTravellers) && itineraryTravellers.length > 0) {
@@ -43,11 +46,37 @@ export default function RoomAllocationModal({
     return [{ id: 'trav_default_1', name: 'Lead Traveller', surname: '', age: 30, type: 'Adult' }];
   }, [itineraryTravellers]);
 
+  /* Guests already holding a bed in another included property on this night.
+     A party split across two properties only has to be bedded here once, so
+     these travellers are neither demanded nor allowed to be added twice. */
+  const allocatedElsewhereIds = useMemo(() => {
+    const set = new Set();
+    (Array.isArray(beddedElsewhere) ? beddedElsewhere : []).forEach((t) => {
+      const id = t?.id || `trav_${t?.name || ''}`;
+      set.add(id);
+      set.add(`${t?.name || ''}|${t?.surname || ''}`);
+    });
+    return set;
+  }, [beddedElsewhere]);
+
+  const isBeddedElsewhere = useMemo(() => {
+    const set = new Set();
+    travellersList.forEach((t) => {
+      if (allocatedElsewhereIds.has(t.id) || allocatedElsewhereIds.has(`${t.name}|${t.surname}`)) set.add(t.id);
+    });
+    return set;
+  }, [travellersList, allocatedElsewhereIds]);
+
+  const requiredTravellers = useMemo(
+    () => travellersList.filter((t) => !isBeddedElsewhere.has(t.id)),
+    [travellersList, isBeddedElsewhere]
+  );
+
   const [rooms, setRooms] = useState([]);
 
   // Initialize rooms on open or item change
   useEffect(() => {
-    if (item.roomAllocations && Array.isArray(item.roomAllocations) && item.roomAllocations.length > 0) {
+    if (item?.roomAllocations && Array.isArray(item.roomAllocations) && item.roomAllocations.length > 0) {
       const existingRooms = item.roomAllocations.map((rm, idx) => {
         const occs = (rm.allocatedTravellers || []).map((t) => {
           const matched = travellersList.find(
@@ -75,16 +104,45 @@ export default function RoomAllocationModal({
     return set;
   }, [rooms]);
 
+  /* Only guests not already allocated to another included property can be
+     assigned here. This drives the traveller list and room selectors. */
   const unallocatedTravellers = useMemo(() => {
-    return travellersList.filter((t) => !allocatedIds.has(t.id));
-  }, [travellersList, allocatedIds]);
+    return travellersList.filter(
+      (t) => !allocatedIds.has(t.id) && !isBeddedElsewhere.has(t.id)
+    );
+  }, [travellersList, allocatedIds, isBeddedElsewhere]);
+
+  /* This property is responsible only for the travelers not bedded elsewhere. */
+  const outstandingRequired = useMemo(() => {
+    return requiredTravellers.filter((t) => !allocatedIds.has(t.id));
+  }, [requiredTravellers, allocatedIds]);
+
+  // Travellers double-booked: held here and in another included property.
+  const doubleBooked = useMemo(() => {
+    return travellersList.filter((t) => allocatedIds.has(t.id) && isBeddedElsewhere.has(t.id));
+  }, [travellersList, allocatedIds, isBeddedElsewhere]);
 
   // Check over capacity rooms
   const overCapacityRooms = useMemo(() => {
     return rooms.filter((rm) => (rm.allocatedTravellers || []).length > maxOccupancy);
   }, [rooms, maxOccupancy]);
 
-  const isValid = unallocatedTravellers.length === 0 && overCapacityRooms.length === 0;
+  /* A group split starts here: the operator deliberately houses only part of
+     the party in this property and adds the next property for the remainder.
+     Until that second property exists the night is legitimately incomplete,
+     so a partial allocation has to be confirmable — otherwise the split can
+     never be started, because a full allocation leaves nobody to split off. */
+  const [splittingGroup, setSplittingGroup] = useState(false);
+  const splitPending = !item?.isOptional && splittingGroup && outstandingRequired.length > 0;
+
+  const isValid = useMemo(() => {
+    const problemsOnly = overCapacityRooms.length > 0 || doubleBooked.length > 0;
+    if (splitPending) return !problemsOnly && rooms.length > 0;
+    /* Judged on what THIS property owes, not on the whole assign pool: a split
+       never has to re-house a sibling's beds, and an option never has to house
+       anything at all beyond what it was asked to quote. */
+    return !problemsOnly && outstandingRequired.length === 0;
+  }, [splitPending, overCapacityRooms, doubleBooked, outstandingRequired, rooms]);
 
   // Financial calculations
   const financialSummary = useMemo(() => {
@@ -132,6 +190,8 @@ export default function RoomAllocationModal({
     );
   };
 
+  const occupantSummary = `${rooms.length} Room(s), ${requiredTravellers.length} Pax`;
+
   const handleConfirm = () => {
     if (!isValid) return;
     onSave({
@@ -139,10 +199,13 @@ export default function RoomAllocationModal({
       calculatedBuy: financialSummary.totalBuy,
       calculatedSell: financialSummary.totalSell,
       numRooms: rooms.length,
-      occupantSummary: `${rooms.length} Room(s), ${travellersList.length} Pax`
+      occupantSummary,
+      splitPending
     });
     onClose();
   };
+
+  if (!open) return null;
 
   return (
     <div className="room-allocation-modal-overlay">
@@ -164,6 +227,16 @@ export default function RoomAllocationModal({
               <p className="text-xs text-slate-500 font-medium mt-0.5">
                 {item.name || item.title || 'Accommodation Service'} {(item.roomType || item.room_type) ? `(${item.roomType || item.room_type})` : ''}
               </p>
+              {/* Which matrix the figures below came from. The travel dates pick
+                  the season, so an operator can tell at a glance that the room
+                  rate matches the trip rather than reconciling it by hand. */}
+              {item._seasonName && (
+                <p className="text-[11px] text-[#0d7478] font-semibold mt-0.5">
+                  Season: {item._seasonName}
+                  {item._seasonFrom && item._seasonTo ? ` (${item._seasonFrom} – ${item._seasonTo})` : ''}
+                  {item._seasonStatus === 'protected' ? ' — closest prior season, Pricing Protection applied' : ''}
+                </p>
+              )}
             </div>
           </div>
           <button
@@ -184,13 +257,25 @@ export default function RoomAllocationModal({
                 <Users size={16} className="text-[#0d7478]" />
                 <span>Itinerary Travellers: <strong className="text-slate-900 font-bold">{travellersList.length} Pax</strong></span>
               </div>
+              {isBeddedElsewhere.size > 0 && (
+                <>
+                  <div className="h-4 w-px bg-slate-300" />
+                  <div>
+                    Bedded Elsewhere: <strong className="text-slate-900 font-bold">{isBeddedElsewhere.size} Pax</strong>
+                  </div>
+                  <div className="h-4 w-px bg-slate-300" />
+                  <div>
+                    To Allocate Here: <strong className="text-slate-900 font-bold">{requiredTravellers.length} Pax</strong>
+                  </div>
+                </>
+              )}
               <div className="h-4 w-px bg-slate-300" />
               <div>
                 Rooms Allocated: <strong className="text-slate-900 font-bold">{rooms.length} Room(s)</strong>
               </div>
-              {unallocatedTravellers.length > 0 && (
+              {outstandingRequired.length > 0 && (
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                  {unallocatedTravellers.length} Unallocated
+                  {outstandingRequired.length} Unallocated
                 </span>
               )}
             </div>
@@ -214,7 +299,7 @@ export default function RoomAllocationModal({
               <div className="flex items-center justify-between pb-3 border-b border-slate-200">
                 <h3 className="font-bold text-xs uppercase tracking-wider text-slate-600 flex items-center gap-2">
                   <UserX size={15} className={unallocatedTravellers.length > 0 ? 'text-amber-600' : 'text-emerald-600'} />
-                  Unallocated Travellers ({unallocatedTravellers.length})
+                  {unallocatedTravellers.length === 0 ? 'No Travellers Available' : 'Travellers To Allocate'} ({unallocatedTravellers.length})
                 </h3>
               </div>
 
@@ -222,7 +307,11 @@ export default function RoomAllocationModal({
                 {unallocatedTravellers.length === 0 ? (
                   <div className="py-8 px-3 text-center text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl flex flex-col items-center gap-1.5">
                     <CheckCircle2 size={24} className="text-emerald-600" />
-                    <span className="font-semibold">All travellers assigned to rooms!</span>
+                    <span className="font-semibold">
+                      {requiredTravellers.length === 0 && outstandingRequired.length === 0
+                        ? 'Every traveller already has a bed elsewhere on this night.'
+                        : 'All travellers assigned to rooms!'}
+                    </span>
                   </div>
                 ) : (
                   unallocatedTravellers.map((tr) => (
@@ -246,10 +335,12 @@ export default function RoomAllocationModal({
                         </span>
                       </div>
 
+                      {/* A bed held by a sibling of this split: free to move
+                          here, so say so rather than showing it as homeless. */}
                       {/* Quick Assign Buttons / Select */}
                       <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-100">
                         <span className="text-[10px] text-slate-500 font-medium">Assign:</span>
-                        <select
+                        <SearchableSelect
                           className="flex-1 bg-slate-50 border border-slate-300 rounded-md text-xs font-medium text-slate-800 px-2 py-1 focus:outline-none focus:border-[#0d7478]"
                           defaultValue=""
                           onChange={(e) => {
@@ -264,7 +355,7 @@ export default function RoomAllocationModal({
                               Room {rm.roomId} ({(rm.allocatedTravellers || []).length}/{maxOccupancy})
                             </option>
                           ))}
-                        </select>
+                        </SearchableSelect>
                       </div>
                     </div>
                   ))
@@ -386,14 +477,20 @@ export default function RoomAllocationModal({
             </div>
           </div>
 
-          {/* Guardrail Warning Banner */}
+{/* Guardrail Warning Banner */}
           {!isValid && (
             <div className="bg-amber-50 border border-amber-300 p-3.5 rounded-xl text-amber-900 text-xs flex items-start gap-3">
               <AlertTriangle size={20} className="text-amber-600 shrink-0 mt-0.5" />
               <div className="space-y-0.5">
                 <strong className="font-bold text-amber-950">Room Allocation Alert:</strong>
-                {unallocatedTravellers.length > 0 && (
-                  <div>• {unallocatedTravellers.length} traveller(s) must still be allocated to a room.</div>
+                {outstandingRequired.length > 0 && !splitPending && (
+                  <div>&bull; {outstandingRequired.length} traveller(s) must still be allocated to a room.</div>
+                )}
+                {splitPending && (
+                  <div>&bull; {outstandingRequired.length} traveller(s) are left for another property &mdash; tick &ldquo;Group split&rdquo; to continue.</div>
+                )}
+                {doubleBooked.length > 0 && (
+                  <div>• {doubleBooked.length} traveller(s) already have a bed in another property on this night — remove them here.</div>
                 )}
                 {overCapacityRooms.length > 0 && (
                   <div>• {overCapacityRooms.length} room(s) exceed maximum contract capacity ({maxOccupancy} pax). Please add another room or redistribute travellers.</div>
@@ -405,8 +502,30 @@ export default function RoomAllocationModal({
           {isValid && (
             <div className="bg-emerald-50 border border-emerald-300 p-3 rounded-xl text-emerald-900 text-xs flex items-center gap-2">
               <CheckCircle2 size={18} className="text-emerald-600 shrink-0" />
-              <span className="font-semibold">All travellers are validly allocated without exceeding room capacity limits.</span>
+              <span className="font-semibold">
+                {splitPending
+                  ? 'Partial allocation saved — add the next property for the remaining travellers and tick "Group split".'
+                  : 'All travellers are validly allocated without exceeding room capacity limits.'}
+              </span>
             </div>
+          )}
+
+          {!item?.isOptional && outstandingRequired.length > 0 && !doubleBooked.length && !overCapacityRooms.length && (
+            <label className="flex items-start gap-3 bg-indigo-50 border border-indigo-200 p-3.5 rounded-xl text-xs text-indigo-900 cursor-pointer hover:bg-indigo-100/70 transition">
+              <input
+                type="checkbox"
+                checked={splittingGroup}
+                onChange={(e) => setSplittingGroup(e.target.checked)}
+                className="mt-0.5"
+                style={{ accentColor: '#4f46e5', cursor: 'pointer' }}
+              />
+              <span className="font-semibold leading-relaxed">
+                Group split &mdash; another property will house the remaining {outstandingRequired.length} traveller(s) on this night.
+                <span className="block font-normal text-indigo-700 mt-0.5">
+                  Leave them unallocated here, then add the next property and tick &ldquo;Group split&rdquo; on it. Every property in the split is priced into the itinerary.
+                </span>
+              </span>
+            </label>
           )}
 
         </div>

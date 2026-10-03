@@ -1,19 +1,20 @@
 import { useState, useEffect } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
-import { 
-  Building2, 
-  Users, 
-  ShieldCheck, 
-  Search, 
-  Check, 
-  X, 
-  AlertCircle, 
-  Mail, 
-  Plus, 
-  Trash2, 
-  Key, 
-  DollarSign, 
-  TrendingUp, 
+import {
+  Building2,
+  Users,
+  ShieldCheck,
+  Search,
+  Check,
+  X,
+  AlertCircle,
+  Mail,
+  Plus,
+  Trash2,
+  Key,
+  DollarSign,
+  TrendingUp,
   Activity,
   CreditCard,
   ExternalLink,
@@ -34,6 +35,7 @@ export const SuperAdmin = () => {
   const [search, setSearch] = useState('');
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const [deleteCompanyId, setDeleteCompanyId] = useState('');
   const { showToast } = useToast();
 
   // Form states
@@ -74,17 +76,19 @@ export const SuperAdmin = () => {
       setStats(statsData);
 
       if (activeTab === 'companies') {
-        // Fetch companies with profile details
-        const { data: companiesData, error } = await supabase
-          .from('companies')
-          .select(`
-            *,
-            profiles:profiles(first_name, last_name, id)
-          `)
-          .order('created_at', { ascending: false });
+        const { data: companiesData, error } = await supabase.rpc('get_platform_companies');
 
         if (error) throw error;
-        setCompanies(companiesData);
+        const companyRows = Array.isArray(companiesData)
+          ? companiesData.map((row) => row?.jsonb || row)
+          : companiesData ? [companiesData.jsonb || companiesData] : [];
+        setCompanies(companyRows);
+        if (companyRows.length === 0 && Number(statsData?.total_companies || 0) > 0) {
+          showToast(
+            `Supabase reports ${statsData.total_companies} companies, but the admin list returned none.`,
+            'error'
+          );
+        }
       } else if (activeTab === 'invitations') {
         const { data: invData, error } = await supabase
           .from('invitations')
@@ -110,7 +114,7 @@ export const SuperAdmin = () => {
       if (error) throw error;
       setCompanies(prev => prev.map(c => c.id === companyId ? { ...c, status: newStatus } : c));
       showToast(`Company ${newStatus} successfully`, 'success');
-      
+
       // Refresh stats as pending approvals might change
       const { data: statsData } = await supabase.rpc('get_platform_stats');
       setStats(statsData);
@@ -150,19 +154,31 @@ export const SuperAdmin = () => {
   };
 
   const handleDeleteCompany = async (company) => {
+    const companyId = typeof company === 'string' ? company : company.id;
+    const companyName = typeof company === 'string' ? 'this company' : company.name;
+    const normalizedId = companyId.trim();
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidPattern.test(normalizedId)) {
+      showToast('Enter a valid company UUID.', 'error');
+      return;
+    }
+
     const ok = await confirm({
       title: 'Delete company?',
-      message: `"${company.name}" and ALL of its data will be permanently deleted, including users, clients, suppliers, itineraries, invoices and documents.`,
-      detail: 'This cannot be undone.',
+      message: `Company ${companyName} (${normalizedId}) and ALL of its data will be permanently deleted, including users, clients, suppliers, itineraries, invoices and documents.`,
+      detail: 'This cannot be undone. Verify the UUID before continuing.',
       confirmLabel: 'Delete company',
       destructive: true
     });
     if (!ok) return;
     try {
-      const { error } = await supabase.rpc('admin_delete_company', { target_company_id: company.id });
+      const { data, error } = await supabase.rpc('admin_delete_company', { target_company_id: normalizedId });
       if (error) throw error;
-      setCompanies(prev => prev.filter(c => c.id !== company.id));
-      showToast('Company deleted', 'success');
+      if (data !== true) throw new Error('Supabase did not confirm that the company was deleted.');
+      setCompanies(prev => prev.filter(c => c.id !== normalizedId));
+      setDeleteCompanyId('');
+      showToast(`Company ${normalizedId} deleted`, 'success');
+      fetchData();
     } catch (err) {
       showToast(err.message, 'error');
     }
@@ -182,7 +198,7 @@ export const SuperAdmin = () => {
       // For now we manually copy to clipboard
       navigator.clipboard.writeText(code);
       showToast('Code copied to clipboard', 'info');
-      
+
       setShowInviteModal(false);
       setInviteEmail('');
       if (activeTab === 'invitations') fetchData();
@@ -203,7 +219,7 @@ export const SuperAdmin = () => {
     }
   };
 
-  const filteredCompanies = companies.filter(c => 
+  const filteredCompanies = companies.filter(c =>
     c.name.toLowerCase().includes(search.toLowerCase()) ||
     c.id.includes(search)
   );
@@ -254,19 +270,19 @@ export const SuperAdmin = () => {
 
       {/* Tab Navigation */}
       <div className="admin-tabs">
-        <button 
+        <button
           className={`tab-btn ${activeTab === 'companies' ? 'active' : ''}`}
           onClick={() => setActiveTab('companies')}
         >
           <Building2 size={18} /> Companies
         </button>
-        <button 
+        <button
           className={`tab-btn ${activeTab === 'invitations' ? 'active' : ''}`}
           onClick={() => setActiveTab('invitations')}
         >
           <Mail size={18} /> Invitations
         </button>
-        <button 
+        <button
           className={`tab-btn ${activeTab === 'vitals' ? 'active' : ''}`}
           onClick={() => setActiveTab('vitals')}
         >
@@ -278,14 +294,35 @@ export const SuperAdmin = () => {
         <div className="table-header-actions">
           <div className="search-box">
             <Search size={18} />
-            <input 
-              type="text" 
-              placeholder="Search..." 
+            <input
+              type="text"
+              placeholder="Search..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
           <div className="action-buttons">
+            {activeTab === 'companies' && (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleDeleteCompany(deleteCompanyId);
+                }}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+              >
+                <input
+                  aria-label="Company UUID to delete"
+                  type="text"
+                  placeholder="Company UUID"
+                  value={deleteCompanyId}
+                  onChange={(event) => setDeleteCompanyId(event.target.value)}
+                  style={{ width: '260px' }}
+                />
+                <button className="action-btn delete" type="submit" disabled={!deleteCompanyId.trim()}>
+                  <Trash2 size={16} /> Delete by ID
+                </button>
+              </form>
+            )}
             <button className="primary-btn" style={{ width: 'auto', padding: '0.625rem 1.25rem' }} onClick={() => setShowInviteModal(true)}>
               <Plus size={18} /> New Invitation
             </button>
@@ -346,7 +383,7 @@ export const SuperAdmin = () => {
                     </div>
                   </td>
                   <td>
-                    <select 
+                    <SearchableSelect
                       className="pricing-select"
                       value={company.pricing_plan || 'Basic'}
                       onChange={(e) => handleUpdatePricing(company.id, e.target.value)}
@@ -354,7 +391,7 @@ export const SuperAdmin = () => {
                       <option value="Basic">Basic (Free)</option>
                       <option value="Standard">Standard ($49/mo)</option>
                       <option value="Premium">Premium ($99/mo)</option>
-                    </select>
+                    </SearchableSelect>
                   </td>
                   <td>
                     <span className={`status-badge ${company.payment_status}`}>
@@ -416,8 +453,8 @@ export const SuperAdmin = () => {
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       <code style={{ background: '#f1f5f9', padding: '0.25rem 0.5rem', borderRadius: '4px', fontWeight: 'bold' }}>{inv.code}</code>
-                      <button 
-                        className="action-btn" 
+                      <button
+                        className="action-btn"
                         onClick={() => {
                           navigator.clipboard.writeText(inv.code);
                           showToast('Code copied', 'info');
@@ -436,8 +473,8 @@ export const SuperAdmin = () => {
                   <td>{new Date(inv.created_at).toLocaleDateString()}</td>
                   <td>
                     <div className="action-buttons">
-                      <button 
-                        className="action-btn" 
+                      <button
+                        className="action-btn"
                         onClick={() => {
                           const subject = encodeURIComponent('Your Invitation to torbuilder');
                           const body = encodeURIComponent(`Hello,\n\nYou have been invited to join torbuilder.\n\nYour registration code is: ${inv.code}\n\nPlease register at: ${window.location.origin}/login\n\nBest regards,\ntorbuilder Team`);
@@ -505,10 +542,10 @@ export const SuperAdmin = () => {
                 <label>Company Admin Email</label>
                 <div className="input-with-icon">
                   <Mail size={18} color="#94a3b8" />
-                  <input 
-                    type="email" 
-                    placeholder="email@company.com" 
-                    required 
+                  <input
+                    type="email"
+                    placeholder="email@company.com"
+                    required
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                   />
@@ -544,11 +581,11 @@ export const SuperAdmin = () => {
                 </div>
                 <div className="form-group">
                   <label>Pricing Plan</label>
-                  <select className="pricing-select" value={registerForm.pricing} onChange={(e) => setRegisterForm({...registerForm, pricing: e.target.value})}>
+                  <SearchableSelect className="pricing-select" value={registerForm.pricing} onChange={(e) => setRegisterForm({...registerForm, pricing: e.target.value})}>
                     <option value="Basic">Basic</option>
                     <option value="Standard">Standard</option>
                     <option value="Premium">Premium</option>
-                  </select>
+                  </SearchableSelect>
                 </div>
                 <div className="form-group">
                   <label>Admin Full Name</label>

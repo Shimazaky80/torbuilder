@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import {
@@ -329,7 +330,7 @@ export const Analytics = () => {
               />
             </div>
             {/* Tour type filter */}
-            <select
+            <SearchableSelect
               className="pricing-select"
               style={{ width: 'auto', minWidth: '140px', padding: '0.55rem 0.75rem', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#334155', background: '#f8fafc' }}
               value={tourTypeFilter}
@@ -338,9 +339,11 @@ export const Analytics = () => {
               <option value="">All tour types</option>
               <option value="FIT">FIT</option>
               <option value="Series Departure">Series Departure</option>
-            </select>
+              <option value="Groups">Groups</option>
+              <option value="Incentives">Incentives</option>
+            </SearchableSelect>
             {/* Status filter */}
-            <select
+            <SearchableSelect
               className="pricing-select"
               style={{ width: 'auto', minWidth: '140px', padding: '0.55rem 0.75rem', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#334155', background: '#f8fafc' }}
               value={statusFilter}
@@ -353,7 +356,7 @@ export const Analytics = () => {
               <option value="in_progress">In Progress</option>
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>
-            </select>
+            </SearchableSelect>
           </div>
         </div>
 

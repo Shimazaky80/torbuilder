@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
@@ -119,7 +120,7 @@ const COUNTRY_OPTIONS = [
   'Other'
 ];
 
-/* Searchable combobox for the Country field (instead of the native <select>). */
+/* Searchable combobox for the Country field (instead of the native <SearchableSelect>). */
 function SearchableCountryInput({ value, onChange }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -233,6 +234,7 @@ export const Settings = () => {
     show_supplier_in_description: true,
     pricing_breakdown_mode: 'daily',
     pricing_breakdown_accommodation: 'one',
+    price_protection_percent: 0,
     show_meal_plan_on_accommodation: true,
     logo_position: 'left',
     billing_address_position: 'left',
@@ -306,6 +308,7 @@ export const Settings = () => {
         show_supplier_in_description: data.show_supplier_in_description !== false,
         pricing_breakdown_mode: ['daily', 'per_person'].includes(data.pricing_breakdown_mode) ? data.pricing_breakdown_mode : 'daily',
         pricing_breakdown_accommodation: ['one', 'rooms'].includes(data.pricing_breakdown_accommodation) ? data.pricing_breakdown_accommodation : 'one',
+        price_protection_percent: Math.min(100, Math.max(0, Number(data.price_protection_percent) || 0)),
         show_meal_plan_on_accommodation: data.show_meal_plan_on_accommodation !== false,
         logo_position: ['left', 'center', 'right'].includes(data.logo_position) ? data.logo_position : 'left',
         billing_address_position: ['left', 'center', 'right'].includes(data.billing_address_position) ? data.billing_address_position : 'left',
@@ -401,7 +404,7 @@ export const Settings = () => {
     setSaving(true);
     try {
       const base = {
-        company_id: companyId,
+        company_id: cid,
         name,
         code: form.code.trim() || 'VAT',
         rate,
@@ -415,7 +418,7 @@ export const Settings = () => {
         await supabase
           .from('tax_rates')
           .update({ is_default: false })
-          .eq('company_id', companyId);
+          .eq('company_id', cid);
       }
 
       if (editingId) {
@@ -430,7 +433,7 @@ export const Settings = () => {
           .insert([{ ...base, is_default: form.isDefault }]);
         if (error) throw error;
       }
-      await fetchTaxRates(companyId);
+      await fetchTaxRates(cid);
       setModalOpen(false);
       showToast('Tax saved', 'success');
     } catch (err) {
@@ -632,6 +635,22 @@ export const Settings = () => {
     }
   };
 
+  /* Pricing Protection: the uplift added to a stale season price when no season
+   covers the itinerary's travel dates. Validated on blur and on the button,
+   because an out-of-range value here silently changes every quote. */
+const handleSavePriceProtection = async () => {
+    const pct = Number(billing.price_protection_percent);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      showToast('Pricing Protection must be between 0 and 100', 'warning');
+      return;
+    }
+    const ok = await saveBillingFields({ price_protection_percent: pct });
+    if (ok) {
+      setBilling({ ...billing, price_protection_percent: pct });
+      showToast('Pricing Protection saved', 'success');
+    }
+  };
+
   const handleSavePresentationSettings = async () => {
     const ok = await saveBillingFields({
       show_supplier_in_description: billing.show_supplier_in_description !== false,
@@ -701,7 +720,7 @@ export const Settings = () => {
     setSaving(true);
     try {
       const base = {
-        company_id: companyId,
+        company_id: cid,
         label: bankForm.label.trim(),
         currency_code: bankForm.currency_code || 'ZAR',
         bank_name: bankForm.bank_name.trim(),
@@ -715,7 +734,7 @@ export const Settings = () => {
         await supabase
           .from('company_bank_accounts')
           .update({ is_default: false })
-          .eq('company_id', companyId);
+          .eq('company_id', cid);
       }
       if (editingBankId) {
         const { error } = await supabase
@@ -729,7 +748,7 @@ export const Settings = () => {
           .insert([{ ...base, is_default: bankForm.is_default }]);
         if (error) throw error;
       }
-      await fetchBankAccounts(companyId);
+      await fetchBankAccounts(cid);
       setBankModalOpen(false);
       showToast('Bank account saved', 'success');
     } catch (err) {
@@ -916,11 +935,11 @@ export const Settings = () => {
                 <Upload size={14} /> Upload Logo
               </button>
             )}
-            <select className="sidebar-select" style={{ ...fieldStyle, width: '180px' }} value={billing.logo_size} onChange={(e) => setBilling({ ...billing, logo_size: e.target.value })} title="Display size on documents">
+            <SearchableSelect className="sidebar-select" style={{ ...fieldStyle, width: '180px' }} value={billing.logo_size} onChange={(e) => setBilling({ ...billing, logo_size: e.target.value })} title="Display size on documents">
               <option value="sm">Small (110px)</option>
               <option value="md">Medium (160px)</option>
               <option value="lg">Large (220px)</option>
-            </select>
+            </SearchableSelect>
             <input id="company-logo-input" type="file" accept=".jpg,.jpeg,.png,.bmp,image/jpeg,image/png,image/bmp" style={{ display: 'none' }} onChange={(e) => { handleLogoFile(e.target.files?.[0]); e.target.value = ''; }} />
           </div>
           <p style={{ margin: '0.6rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
@@ -990,22 +1009,22 @@ export const Settings = () => {
           </div>
           <div className="sidebar-field">
             <label>Round input amounts</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.input_rounding_mode} onChange={(e) => setBilling({ ...billing, input_rounding_mode: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.input_rounding_mode} onChange={(e) => setBilling({ ...billing, input_rounding_mode: e.target.value })}>
               <option value="none">No rounding</option>
               <option value="up">Round up</option>
               <option value="down">Round down</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Snaps typed money values to whole numbers when you leave the field.
             </p>
           </div>
           <div className="sidebar-field">
             <label>Round output amounts</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.output_rounding_mode} onChange={(e) => setBilling({ ...billing, output_rounding_mode: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.output_rounding_mode} onChange={(e) => setBilling({ ...billing, output_rounding_mode: e.target.value })}>
               <option value="none">No rounding</option>
               <option value="up">Round up</option>
               <option value="down">Round down</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Rounds calculated amounts (sell price, line totals) to whole numbers.
             </p>
@@ -1080,20 +1099,44 @@ export const Settings = () => {
           </div>
           <div className="sidebar-field">
             <label>Price breakdown</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_mode} onChange={(e) => setBilling({ ...billing, pricing_breakdown_mode: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_mode} onChange={(e) => setBilling({ ...billing, pricing_breakdown_mode: e.target.value })}>
               <option value="daily">Service per day (detailed)</option>
               <option value="per_person">Total per person (summary)</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Daily shows every service across the days. Per person shows the price per person sharing, adds a single supplement when a traveller occupies a single room, and a per-child figure when children travel.
             </p>
           </div>
           <div className="sidebar-field">
+            <label>Pricing Protection (%)</label>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.5"
+              value={billing.price_protection_percent}
+              onChange={(e) => setBilling({ ...billing, price_protection_percent: e.target.value })}
+              onBlur={() => handleSavePriceProtection()}
+              style={{ ...fieldStyle, padding: '0.45rem 0.6rem', border: '1px solid #cbd5e1', borderRadius: '6px', width: '100%' }}
+            />
+            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+              Uplift applied when no season in a library item's pricing matrix covers the itinerary's travel dates. The closest earlier season covering the same period of the year is used and this percentage is added to it, so a quote is never built on a price the supplier has already superseded. A season dated ahead of the trip is a future season, not an outdated one, so it is never used as protection. Set 0 to keep the older season price without an uplift. An item with no price at all cannot be added either way.
+            </p>
+            <button
+              type="button"
+              onClick={handleSavePriceProtection}
+              disabled={saving}
+              style={{ marginTop: '0.5rem', padding: '0.4rem 0.85rem', borderRadius: '6px', border: 'none', background: '#0d7478', color: '#fff', cursor: saving ? 'default' : 'pointer', fontSize: '0.8rem', fontWeight: 600 }}
+            >
+              Save protection
+            </button>
+          </div>
+          <div className="sidebar-field">
             <label>Accommodation lines</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_accommodation} onChange={(e) => setBilling({ ...billing, pricing_breakdown_accommodation: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_accommodation} onChange={(e) => setBilling({ ...billing, pricing_breakdown_accommodation: e.target.value })}>
               <option value="one">One line for all travellers</option>
               <option value="rooms">One line per room (occupancy split)</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Applies to the daily breakdown. One line shows the whole accommodation with the total per person. Room split puts each occupied room on its own line — e.g. one line for 2 travellers, one for 1 traveller, one for 2A, 1C — with the number of adults and children in the Qty column. All other services stay on their own lines as usual.
             </p>
@@ -1114,55 +1157,55 @@ export const Settings = () => {
           </div>
           <div className="sidebar-field">
             <label>Logo position</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.logo_position} onChange={(e) => setBilling({ ...billing, logo_position: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.logo_position} onChange={(e) => setBilling({ ...billing, logo_position: e.target.value })}>
               <option value="left">Left</option>
               <option value="center">Center</option>
               <option value="right">Right</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Horizontal position of the company logo on exported documents.
             </p>
           </div>
           <div className="sidebar-field">
             <label>Billing address position</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.billing_address_position} onChange={(e) => setBilling({ ...billing, billing_address_position: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.billing_address_position} onChange={(e) => setBilling({ ...billing, billing_address_position: e.target.value })}>
               <option value="left">Left</option>
               <option value="center">Center</option>
               <option value="right">Right</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Horizontal position of the billing address on exported documents.
             </p>
           </div>
           <div className="sidebar-field">
             <label>Client logo size</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.client_logo_size} onChange={(e) => setBilling({ ...billing, client_logo_size: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.client_logo_size} onChange={(e) => setBilling({ ...billing, client_logo_size: e.target.value })}>
               <option value="sm">Small</option>
               <option value="md">Medium</option>
               <option value="lg">Large</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Display size of the client&apos;s logo (set per client) on exported documents and invoices.
             </p>
           </div>
           <div className="sidebar-field">
             <label>Client logo position</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.client_logo_position} onChange={(e) => setBilling({ ...billing, client_logo_position: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.client_logo_position} onChange={(e) => setBilling({ ...billing, client_logo_position: e.target.value })}>
               <option value="left">Left</option>
               <option value="center">Center</option>
               <option value="right">Right</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Horizontal position of the client logo inside the Bill To block.
             </p>
           </div>
           <div className="sidebar-field">
             <label>Client billing address position</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.client_billing_address_position} onChange={(e) => setBilling({ ...billing, client_billing_address_position: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.client_billing_address_position} onChange={(e) => setBilling({ ...billing, client_billing_address_position: e.target.value })}>
               <option value="left">Left</option>
               <option value="center">Center</option>
               <option value="right">Right</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Horizontal position of the client&apos;s Bill To block on exported documents and invoices.
             </p>
@@ -1188,10 +1231,10 @@ export const Settings = () => {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
           <div className="sidebar-field">
             <label>Pricing breakdown position</label>
-            <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_pricing_position} onChange={(e) => setBilling({ ...billing, itinerary_pricing_position: e.target.value })}>
+            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.itinerary_pricing_position} onChange={(e) => setBilling({ ...billing, itinerary_pricing_position: e.target.value })}>
               <option value="above">Above the day-by-day routing</option>
               <option value="below">Below the day-by-day routing</option>
-            </select>
+            </SearchableSelect>
             <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
               Where the pricing breakdown sits. The day-by-day routing always appears on the itinerary.
             </p>
@@ -1213,11 +1256,11 @@ export const Settings = () => {
         </div>
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
           <label>Terms position</label>
-          <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_terms_position} onChange={(e) => setBilling({ ...billing, itinerary_terms_position: e.target.value })}>
+          <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.itinerary_terms_position} onChange={(e) => setBilling({ ...billing, itinerary_terms_position: e.target.value })}>
             <option value="under_day_by_day">Under the day-by-day routing</option>
             <option value="before_pricing">Before the pricing breakdown</option>
             <option value="after_pricing">After the pricing breakdown</option>
-          </select>
+          </SearchableSelect>
         </div>
 
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
@@ -1249,11 +1292,11 @@ export const Settings = () => {
         </div>
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
           <label>Inclusions position</label>
-          <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_inclusions_position} onChange={(e) => setBilling({ ...billing, itinerary_inclusions_position: e.target.value })}>
+          <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.itinerary_inclusions_position} onChange={(e) => setBilling({ ...billing, itinerary_inclusions_position: e.target.value })}>
             <option value="under_day_by_day">Under the day-by-day routing</option>
             <option value="before_pricing">Before the pricing breakdown</option>
             <option value="after_pricing">After the pricing breakdown</option>
-          </select>
+          </SearchableSelect>
         </div>
 
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
@@ -1268,11 +1311,11 @@ export const Settings = () => {
         </div>
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
           <label>Exclusions position</label>
-          <select className="sidebar-select" style={fieldStyle} value={billing.itinerary_exclusions_position} onChange={(e) => setBilling({ ...billing, itinerary_exclusions_position: e.target.value })}>
+          <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.itinerary_exclusions_position} onChange={(e) => setBilling({ ...billing, itinerary_exclusions_position: e.target.value })}>
             <option value="under_day_by_day">Under the day-by-day routing</option>
             <option value="before_pricing">Before the pricing breakdown</option>
             <option value="after_pricing">After the pricing breakdown</option>
-          </select>
+          </SearchableSelect>
           <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
             Blocks keep a fixed order (Terms &amp; Conditions, Inclusions, Exclusions). Blocks sharing the same position appear in that order. Where no position fits, a block falls back to under the day-by-day routing.
           </p>
@@ -1556,11 +1599,11 @@ export const Settings = () => {
                 </div>
                 <div className="sidebar-field">
                   <label>Applies To</label>
-                  <select className="sidebar-select" style={fieldStyle} value={form.appliesTo} onChange={(e) => setForm({ ...form, appliesTo: e.target.value })}>
+                  <SearchableSelect className="sidebar-select" style={fieldStyle} value={form.appliesTo} onChange={(e) => setForm({ ...form, appliesTo: e.target.value })}>
                     {APPLIES_TO_OPTIONS.map((opt) => (
                       <option key={opt} value={opt}>{opt === 'all' ? 'All services' : opt.replace(/^\w/, (c) => c.toUpperCase())}</option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                 </div>
                 <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem', cursor: 'pointer' }}>
@@ -1601,11 +1644,11 @@ export const Settings = () => {
                   </div>
                   <div className="sidebar-field">
                     <label>Currency</label>
-                    <select className="sidebar-select" style={fieldStyle} value={bankForm.currency_code} onChange={(e) => setBankForm({ ...bankForm, currency_code: e.target.value })}>
+                    <SearchableSelect className="sidebar-select" style={fieldStyle} value={bankForm.currency_code} onChange={(e) => setBankForm({ ...bankForm, currency_code: e.target.value })}>
                       {(currencies.length ? currencies : [{ code: 'ZAR', name: 'South African Rand' }]).map((c) => (
                         <option key={c.code} value={c.code}>{c.code}{c.name ? ` — ${c.name}` : ''}</option>
                       ))}
-                    </select>
+                    </SearchableSelect>
                   </div>
                 </div>
                 <div className="sidebar-field">

@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
-import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, diffAgainstBilledLines, decideReissue, lineKey, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
+import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, diffAgainstBilledLines, decideReissue, lineKey, scaleInvoiceLines, num, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
+import { invoiceBalance, settledStatus, receivedTotal, netReceivedTotal, refundedTotal, refundableTotal, creditedTotal, netBilled, canBill, sameCurrency, parseGuardRejection, guardMessage } from '../lib/settlement';
 import { ReceiptsPanel, JournalPanel, TenantCostOfSalesPanel, AccountingPanel } from '../components/finance/FinanceTenantViews';
 import {
   round2,
@@ -39,6 +41,7 @@ import {
 } from '../lib/invoiceDoc';
 import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
+import { rateForTravel } from '../lib/priceValidity';
 import {
   Receipt,
   Plus,
@@ -55,9 +58,10 @@ import {
   Landmark,
   FileText,
   RefreshCw,
-  FileCheck2,
-  FileSpreadsheet
-} from 'lucide-react';
+    FileCheck2,
+    FileSpreadsheet,
+    Undo2
+  } from 'lucide-react';
 
 export const Finance = () => {
   const { showToast } = useToast();
@@ -80,6 +84,7 @@ export const Finance = () => {
   const [activeTab, setActiveTab] = useState('invoices');
   const [journalEntries, setJournalEntries] = useState([]);
   const [allReceipts, setAllReceipts] = useState([]);
+  const [allCreditNotes, setAllCreditNotes] = useState([]);
   const [tenancyRows, setTenancyRows] = useState([]);
   const [tenancyItineraries, setTenancyItineraries] = useState([]);
   const [connections, setConnections] = useState([]);
@@ -92,6 +97,10 @@ export const Finance = () => {
   const [receiptPromptFor, setReceiptPromptFor] = useState(null);
   const [receiptForm, setReceiptForm] = useState({ payment_method: 'EFT', payment_reference: '', received_date: '' });
   const [issuingReceipt, setIssuingReceipt] = useState(false);
+  const receiptSubmissionRef = useRef(false);
+  const [refundPromptFor, setRefundPromptFor] = useState(null);
+  const [refundForm, setRefundForm] = useState({ amount: '', reason: '', refunded_date: '', payment_method: 'EFT' });
+  const [issuingRefund, setIssuingRefund] = useState(false);
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
@@ -154,6 +163,11 @@ export const Finance = () => {
     setBilling(data || null);
   }, []);
 
+  /* Pricing Protection, as the builder applies it when it prices the line.
+     Invoice-side breakdowns must uplift a stale season by the same amount or
+     the document disagrees with the itinerary it bills. */
+  const priceProtectionPercent = Math.max(0, Number(billing?.price_protection_percent) || 0);
+
   const fetchBanks = useCallback(async (cid) => {
     const { data, error } = await supabase.from('company_bank_accounts').select('*').eq('company_id', cid).order('is_default', { ascending: false });
     if (error) throw error;
@@ -198,14 +212,15 @@ export const Finance = () => {
     });
   }, [invoices, statusFilter, typeFilter]);
 
-  /* ── Tenant-wide ledger, receipts, cost of sales and connections ────────── */
+  /* -- Tenant-wide ledger, receipts, cost of sales and connections ---------- */
   const loadTenantFinance = useCallback(async (cid) => {
     const id = cid || companyId;
     if (!id) return;
 
-    const [entriesRes, receiptsRes, itinsRes, connRes] = await Promise.all([
+    const [entriesRes, receiptsRes, creditsRes, itinsRes, connRes] = await Promise.all([
       supabase.from('journal_entries').select('*').eq('company_id', id).order('entry_date', { ascending: false }).order('created_at', { ascending: false }),
       supabase.from('invoice_receipts').select('*').eq('company_id', id).order('received_date', { ascending: false }),
+      supabase.from('credit_notes').select('*').eq('company_id', id).order('issued_date', { ascending: false }),
       supabase.from('itineraries').select('id, reference_number, reference, status, client_id, clients(name)').eq('company_id', id),
       // Columns listed explicitly to keep `credentials` out of the browser. The
       // Accounting tab only ever renders status and last-sync metadata, and
@@ -229,6 +244,7 @@ export const Finance = () => {
       setJournalEntries([]);
     }
     setAllReceipts(receiptsRes.data || []);
+    setAllCreditNotes(creditsRes.data || []);
     setConnections(connRes.data || []);
 
     const itins = (itinsRes.data || []).map((i) => ({ ...i, client_name: i.clients?.name || '' }));
@@ -363,7 +379,7 @@ export const Finance = () => {
     }
   };
 
-  /* ── Wizard: load qualified itineraries (provisional → deposit, confirmed → final) */
+  /* -- Wizard: load qualified itineraries (provisional ? deposit, confirmed ? final) */
   const openWizard = async () => {
     setWizardOpen(true);
     setWizardStep(1);
@@ -430,25 +446,45 @@ export const Finance = () => {
     }
   };
 
-  /* Payments actually received, per currency, for this itinerary. A deposit
-     invoice only ever counts its deposit_amount (the full total_incl is not
-     paid), and a paid final counts the balance it billed. */
+  /* Payments actually received, per currency, for this itinerary. Every invoice
+     bills what it says it bills, so a paid invoice contributes its own total
+     and nothing needs to be read out of its type. */
+  /* What each currency on this booking has been billed, net of credit notes.
+     This is the figure `outstanding` is measured against: it is what the client
+     has been charged for, not what they happen to have paid, so a credit note
+     properly opens up room to bill again. */
   const paidByCurrency = useMemo(() => {
     const map = new Map();
-    invoices.forEach((inv) => {
-      if (inv.itinerary_id !== selectedItinerary?.id || inv.status !== 'paid') return;
+    const mine = invoices.filter((inv) => inv.itinerary_id === selectedItinerary?.id);
+    for (const inv of mine) {
       const code = (inv.currency_code || '').toUpperCase();
-      if (!map.has(code)) map.set(code, { deposit: 0, final: 0 });
-      const rec = map.get(code);
-      if (inv.invoice_type === 'final') rec.final += round2(Number(inv.total_incl) - (Number(inv.credited_amount) || 0));
-      else rec.deposit += Number(inv.deposit_amount) || Number(inv.total_incl) || 0;
-    });
+      if (!map.has(code)) map.set(code, { paid: 0, billed: 0 });
+      map.get(code).paid += Number(inv.total_incl) || 0;
+    }
+    for (const cn of allCreditNotes) {
+      const owner = mine.find((i) => i.id === cn.invoice_id);
+      if (!owner) continue;
+      const code = (owner.currency_code || '').toUpperCase();
+      if (map.has(code)) map.get(code).billed -= Number(cn.total_incl) || 0;
+    }
+    for (const rec of map.values()) {
+      rec.billed = round2(rec.billed);
+      /* Money received against the booking, from the receipts themselves. A
+         part payment counts for what it was, not for the whole invoice. */
+      rec.received = round2(
+        allReceipts
+          .filter((r) => {
+            const owner = mine.find((i) => i.id === r.invoice_id);
+            return owner && (owner.status || '') !== 'void';
+          })
+          .reduce((a, r) => a + (Number(r.amount) || 0), 0)
+      );
+    }
     return map;
-  }, [invoices, selectedItinerary]);
+  }, [invoices, allReceipts, allCreditNotes, selectedItinerary]);
 
   /* A currency can be invoiced whenever it still has an outstanding balance.
-     Once the deposit is paid the next invoice is the final one (it credits the
-     deposit); while nothing is paid yet it is the deposit request. */
+     Anything already received simply reduces what is left to bill. */
   const currencyGroups = useMemo(() => {
     if (!selectedItinerary) return [];
     const paxCount = (Number(selectedItinerary.num_adults) || 0) + (Number(selectedItinerary.num_children) || 0) || 1;
@@ -460,14 +496,17 @@ export const Finance = () => {
       });
     });
     return [...codes].sort().map((code) => {
-      const agg = buildCurrencyLines(selectedItinerary, code, paxCount);
-      const paid = paidByCurrency.get(code) || { deposit: 0, final: 0 };
-      const paidTotal = round2(paid.deposit + paid.final);
-      const outstanding = round2(agg.totalIncl - paidTotal);
-      const hasPaidDeposit = paid.deposit > 0;
-      const liveDeposit = invoices.some((inv) => inv.itinerary_id === selectedItinerary.id
-        && (inv.currency_code || '').toUpperCase() === code && inv.invoice_type === 'deposit' && inv.status !== 'void' && inv.status !== 'paid');
-
+    const agg = buildCurrencyLines(selectedItinerary, code, paxCount);
+    const rec = paidByCurrency.get(code) || { billed: 0, received: 0, paid: 0 };
+    /* Outstanding is what the trip costs less what has already been billed. A
+       credit note reduces what was billed, so it opens the trip up to be
+       invoiced again, and money received does not reduce it a second time —
+       billing is about the trip's value, not the client's payment. */
+    const netBilledAmount = round2(rec.billed);
+    const received = round2(rec.received);
+    const outstanding = round2(Math.max(0, agg.totalIncl - netBilledAmount));
+    const hasPaidAnything = received > 0;
+    const overpaid = round2(Math.max(0, received - netBilledAmount));
       /* Per-person breakdown (Per person sharing / Single supplement / Per
          child) for this currency, from the itinerary's room allocations and
          contracted Library rates. Stored on the invoice as an immutable
@@ -496,7 +535,18 @@ export const Finance = () => {
       const rateBy = (itemId) => {
         if (!itemId) return null;
         const arr = itineraryRates.get(String(itemId)) || [];
-        const rate = arr.find((r) => (r.currency || '').toUpperCase() === code) || arr[0] || null;
+        /* Season-aware: a library item holds one row per season, and taking the
+           first row for the currency priced the invoice's per-person and
+           per-room breakdowns from whichever season came back first — the same
+           winter-rate bug the room-allocation dialog had. Resolve against this
+           itinerary's travel window instead. */
+        const rate = rateForTravel({
+          rates: arr,
+          currencyCode: code,
+          startDate: selectedItinerary?.travel_start_date,
+          endDate: selectedItinerary?.travel_end_date,
+          protectionPercent: priceProtectionPercent
+        });
         return rate ? { ...rate, _ageRanges: itineraryAgeRanges.get(String(itemId)) || [] } : null;
       };
       const perPersonBreakdown = breakdownSnapshot(computePerPersonRows({ services, travellers, rateBy }));
@@ -610,6 +660,9 @@ export const Finance = () => {
       const settledDiff = settledInvoice
         ? diffAgainstBilledLines(settledInvoice.accounting_export.lines, agg.lines)
         : { changed: [], increase: 0, decrease: 0, unchanged: true };
+      /* "Settled" here means the trip has been billed in full, which is what
+         `outstanding` now measures. Whether the money has arrived is a separate
+         question, answered by `received`. */
       const reissue = decideReissue({
         outstanding,
         diff: settledDiff,
@@ -624,21 +677,23 @@ export const Finance = () => {
       } else if (reissue.settled) {
         /* Settled, but something changed: issue only the movement. */
         issueType = 'invoice';
+      } else if (overpaid > 0.009) {
+        blockReason = `${fmtMoney(overpaid, symOf(code))} more has been received than invoiced. This is a credit to the client, not an amount to bill.`;
       } else if (outstanding <= 0.009) {
-        blockReason = 'Paid in full';
-      } else if (liveDeposit) {
-        blockReason = 'Deposit invoice issued';
+        blockReason = 'Already invoiced in full';
       } else {
-        issueType = 'deposit';
+        issueType = 'invoice';
       }
       return {
         code,
         ...agg,
         perPersonBreakdown,
         expandedLines,
-        paidTotal,
+        netBilled: netBilledAmount,
+        received,
+        overpaid,
         outstanding,
-        hasPaidDeposit,
+        hasPaidAnything,
         issueType,
         invoiced: !issueType,
         blockReason,
@@ -647,13 +702,17 @@ export const Finance = () => {
         reissue
       };
     });
-  }, [selectedItinerary, invoices, paidByCurrency, itineraryRates, itineraryAgeRanges, billing]);
+  }, [selectedItinerary, invoices, paidByCurrency, itineraryRates, itineraryAgeRanges, billing, symOf, priceProtectionPercent]);
 
   const selectedGroup = useMemo(
     () => currencyGroups.find((g) => g.code === selectedCurrency) || null,
     [currencyGroups, selectedCurrency]
   );
 
+  /* The deposit percentage is a commercial term, not an invoice type: it says
+     what share of the trip is normally asked for up front, and it drives the
+     cancellation notice's retained amount. Here it only pre-suggests the size
+     of the first invoice — whatever gets issued is an ordinary invoice. */
   const depositPct = useMemo(() => {
     const fromClient = selectedItinerary?.clients?.deposit_percentage;
     if (fromClient !== null && fromClient !== undefined && fromClient !== '') return Number(fromClient);
@@ -661,14 +720,15 @@ export const Finance = () => {
     return 30;
   }, [selectedItinerary, billing]);
 
-  const depositCreditPreview = useMemo(() => {
-    if (!selectedItinerary || !selectedCurrency) return { amount: 0, number: '' };
-    const rows = invoices.filter((inv) => inv.itinerary_id === selectedItinerary.id
-      && (inv.currency_code || '').toUpperCase() === selectedCurrency.toUpperCase()
-      && inv.invoice_type === 'deposit' && inv.status === 'paid');
-    const amount = round2(rows.reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0));
-    return { amount, number: rows[0]?.invoice_number || '' };
-  }, [invoices, selectedItinerary, selectedCurrency]);
+  /* The amount still to ask for on the first invoice of this booking. Once
+     anything has been received this is simply what the trip costs less what has
+     come in, which is the same outstanding figure the guard checks. */
+  const suggestedFirstInvoice = useMemo(() => {
+    const group = currencyGroups.find((g) => g.code === selectedCurrency);
+    if (!group || group.outstanding <= 0.009) return 0;
+    if (group.paidTotal > 0) return round2(group.outstanding);
+    return round2(group.totalIncl * (depositPct / 100));
+  }, [currencyGroups, selectedCurrency, depositPct]);
 
   const availableBanks = useMemo(
     () => bankAccounts.filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === (selectedCurrency || '').toUpperCase()),
@@ -680,58 +740,101 @@ export const Finance = () => {
     [availableBanks, selectedBankId]
   );
 
+  /* -- Over-billing guard ---------------------------------------------------
+     The invoice list on screen is one page, so it cannot be trusted to say what
+     a booking has already been billed. This re-reads the booking's whole
+     financial history straight from the database, and the document is measured
+     against that. Cheap, and it means the guard cannot be defeated by a
+     long invoice list or a stale screen. */
+  const fetchBookingBilled = useCallback(async (itineraryId, currency) => {
+    if (!itineraryId) return { billed: 0, limit: 0 };
+    const { data: invs, error: invErr } = await supabase
+      .from('invoices')
+      .select('id, total_incl, status, currency_code')
+      .eq('company_id', companyId)
+      .eq('itinerary_id', itineraryId);
+    if (invErr) throw invErr;
+    const mine = (invs || []).filter((i) => sameCurrency(i.currency_code, currency));
+    const live = mine.filter((i) => (i.status || '') !== 'void');
+    if (!live.length) return { billed: 0, limit: 0, invoices: mine };
+
+    const ids = live.map((i) => i.id);
+    const { data: cns, error: cnErr } = await supabase
+      .from('credit_notes')
+      .select('invoice_id, total_incl, status, currency_code, accounting_export')
+      .eq('company_id', companyId)
+      .in('invoice_id', ids);
+    if (cnErr) throw cnErr;
+
+    return {
+      billed: netBilled(mine, cns || [], currency),
+      invoices: mine,
+      creditNotes: cns || []
+    };
+  }, [companyId]);
+
   const handleIssue = async () => {
     if (!selectedGroup) return;
     if (!selectedGroup.issueType) {
-      showToast(selectedGroup.blockReason || `${TYPE_LABEL.deposit} already exists for ${selectedGroup.code}`, 'warning');
+      showToast(selectedGroup.blockReason || `An invoice already exists for ${selectedGroup.code}`, 'warning');
       return;
     }
     setIssuing(true);
     try {
       /* A settled booking with a change bills ONLY what moved. Re-billing the
          unchanged part is the double-count the guard exists to prevent, so the
-         delta becomes the whole document: header totals and line items alike. */
+         movement becomes the whole document: header totals and line items alike.
+         On an unsettled booking the invoice is for the part not yet received,
+         which is what makes the two documents together cover the trip once. */
       const settledDelta = selectedGroup.reissue?.settled
         ? (selectedGroup.reissue.options.find((o) => o.kind === 'invoice')?.amount || 0)
         : 0;
       const isDelta = settledDelta > 0.009;
-      const gross = isDelta ? settledDelta : selectedGroup.totalIncl;
-      /* Apportion the group's net share onto the movement, so a delta document
-         carries a believable VAT figure rather than the whole trip's tax. */
+      /* Nothing has been charged yet, so this is the first request on the trip:
+         bill the configured opening percentage rather than the whole thing. Once
+         the trip has been charged, every later document bills what is actually
+         outstanding. */
+      const firstRequest = !isDelta && selectedGroup.received <= 0.009;
+      const gross = isDelta
+        ? settledDelta
+        : round2(firstRequest ? suggestedFirstInvoice : selectedGroup.outstanding);
+
+      /* The guard. An invoice may only bill the part of the trip that has not
+         been billed yet. It runs against the booking's real history read fresh
+         from the database, not whatever happens to be on screen, so a long
+         invoice list or a stale tab cannot let a booking be billed twice.
+
+         A settled change needs no special case: its movement is exactly what the
+         new trip total has risen above what was already billed. */
+      const history = await fetchBookingBilled(selectedItinerary?.id, selectedGroup.code);
+      const guard = canBill(
+        gross,
+        selectedGroup.totalIncl,
+        history.invoices || [],
+        history.creditNotes || [],
+        selectedGroup.code
+      );
+      if (!guard.ok) {
+        showToast(
+          guardMessage({ reason: guard.reason, limit: guard.limit, proposed: gross }, symOf(selectedGroup.code)),
+          guard.reason === 'nothing' ? 'warning' : 'error'
+        );
+        return;
+      }
+
+      /* Apportion the group's net share onto what is being billed, so the
+         document carries a believable tax figure rather than the whole trip's. */
       const groupTotal = round2(selectedGroup.totalIncl);
       const netRatio = groupTotal > 0 ? round2(selectedGroup.subtotalExcl) / groupTotal : 1;
-      const deltaNet = isDelta ? round2(gross * netRatio) : round2(selectedGroup.subtotalExcl);
-      const pct = depositPct;
-      const isFinal = selectedGroup.issueType === 'final';
-
-      let creditedAmount = 0;
-      let creditedInvoiceId = null;
-      let creditedInvoiceNumber = '';
-      let depositAmount = 0;
-
-      if (isFinal) {
-        const { data: depositRows } = await supabase
-          .from('invoices')
-          .select('id, invoice_number, deposit_amount, total_incl, status')
-          .eq('itinerary_id', selectedItinerary.id)
-          .eq('currency_code', selectedGroup.code)
-          .eq('invoice_type', 'deposit')
-          .neq('status', 'void')
-          .order('created_at', { ascending: false });
-        const paid = (depositRows || []).filter((r) => r.status === 'paid');
-        creditedAmount = round2(paid.reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0));
-        if (paid[0]) {
-          creditedInvoiceId = paid[0].id;
-          creditedInvoiceNumber = paid[0].invoice_number;
-        }
-        depositAmount = creditedAmount;
-      } else {
-        depositAmount = round2(gross * (pct / 100));
-      }
-      const balance = round2(gross - creditedAmount);
-
-      const { data: number, error: numErr } = await supabase.rpc('get_next_invoice_reference', { p_company_id: companyId });
-      if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate invoice number');
+      const net = round2(gross * netRatio);
+      const balance = round2(gross);
+      /* The first request on an untouched booking bills only part of the trip,
+         so it goes out as a proforma: a request for money, not yet an invoice
+         for the supply. Once the trip has been charged — in full, or as a later
+         change — the document bills a real amount and is validated. Decided by
+         the amount, because that is what it actually turns on. */
+      const firstPartRequest = firstRequest
+        && gross < round2(selectedGroup.totalIncl) - 0.009;
 
       const client = selectedItinerary.clients || {};
       const bankDetails = chosenBank ? {
@@ -743,29 +846,21 @@ export const Finance = () => {
       } : {};
 
       const header = {
-        company_id: companyId,
-        itinerary_id: selectedItinerary.id,
         client_id: selectedItinerary.client_id || null,
-        invoice_number: number,
-        /* A delta is a neutral supplementary invoice, not a deposit request and
-           not a fresh final. 'invoice' is the type the lifecycle migration
-           already allows for exactly this. */
-        invoice_type: isDelta ? 'invoice' : selectedGroup.issueType,
-        status: isDelta ? 'validated' : (isFinal ? 'validated' : 'proforma'),
+        /* One document type. An invoice bills what it bills and carries its own
+           balance; whether it is the first request or a later movement is
+           history, not a property of the document. */
+        invoice_type: 'invoice',
+        status: firstPartRequest ? 'proforma' : 'validated',
         currency_code: selectedGroup.code,
-        /* On a delta the tax is apportioned off the movement, with net as the
+        /* Tax is apportioned onto what is being billed, with net as the
            balancing figure so the document's own totals add up exactly. */
-        subtotal_excl: deltaNet,
-        tax_total: round2(gross - deltaNet),
+        subtotal_excl: net,
+        tax_total: round2(gross - net),
         total_incl: gross,
         tax_label: selectedGroup.taxEntries[0]?.label || 'Tax',
         tax_rate: selectedGroup.taxEntries[0]?.rate ?? 0,
-        deposit_percentage: pct,
-        deposit_amount: depositAmount,
         balance_due: balance,
-        credited_invoice_id: creditedInvoiceId,
-        credited_invoice_number: creditedInvoiceNumber,
-        credited_amount: creditedAmount,
         issued_date: new Date().toISOString().slice(0, 10),
         due_date: dueDate || null,
         bill_to_name: client.name || '',
@@ -793,33 +888,48 @@ export const Finance = () => {
         : selectedGroup.lines;
 
       const accounting = accountingPayload({ ...header, bank_details: bankDetails }, issueLines);
-      const { data: created, error: invErr } = await supabase
-        .from('invoices')
-        .insert([{ ...header, accounting_export: accounting }])
-        .select('*')
-        .single();
+      /* Issued through the server so the guard and the write share one
+         transaction, and so the header and its lines cannot end up out of step
+         with each other. */
+      const billedLines = isDelta ? issueLines : scaleInvoiceLines(issueLines, gross);
+      const { data: issued, error: invErr } = await supabase.rpc('issue_booking_invoice', {
+        p_company_id: companyId,
+        p_itinerary_id: selectedItinerary.id,
+        p_currency: selectedGroup.code,
+        p_trip_total: selectedGroup.totalIncl,
+        p_invoice: { ...header, accounting_export: accounting },
+        p_lines: billedLines
+      });
       if (invErr) throw invErr;
 
-      const lineRows = issueLines.map((l) => ({ ...l, invoice_id: created.id, company_id: companyId }));
-      const { error: lineErr } = await supabase.from('invoice_line_items').insert(lineRows);
-      if (lineErr) {
-        await supabase.from('invoices').delete().eq('id', created.id);
-        throw lineErr;
-      }
+      const { data: created, error: readErr } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('id', issued.id)
+        .single();
+      if (readErr || !created) throw new Error(readErr?.message || 'Invoice was not created');
+      const number = created.invoice_number;
 
       await fetchInvoices(companyId);
       setWizardOpen(false);
-      /* A deposit is created as a proforma draft and posts nothing until it is
-         validated; a final invoice is created validated and posts now. */
+      /* A first part-request goes out as a proforma draft and posts nothing
+         until it is validated; a document billing a settled amount is created
+         validated and posts now. */
       if (created.status && created.status !== 'proforma') {
         await postInvoice(companyId, created);
       }
-      showToast(`${TYPE_LABEL[selectedGroup.issueType]} ${number} issued`, 'success');
+      showToast(`${number} issued`, 'success');
     } catch (err) {
-      const msg = /duplicate key|unique/i.test(err.message || '')
+      /* The database guard carries its reason in the exception detail, so a
+         refusal reads in the same words whether it was caught before the insert
+         or by the locked insert itself. */
+      const rejection = parseGuardRejection(err);
+      const msg = rejection
+        ? guardMessage(rejection, symOf(selectedGroup.code))
+        : /duplicate key|unique/i.test(err.message || '')
         ? `A ${selectedGroup.issueType} invoice already exists for ${selectedGroup.code}`
         : (err.message || 'Failed to issue invoice');
-      showToast(msg, 'error');
+      showToast(msg, rejection?.reason === 'nothing' ? 'warning' : 'error');
     } finally {
       setIssuing(false);
     }
@@ -900,11 +1010,29 @@ export const Finance = () => {
     return data;
   };
 
+  /* An invoice's balance comes from its receipts and credit notes, not from the
+     cached column, so a part-paid invoice never reads as settled. */
+  const balanceOf = useCallback(
+    (inv) => invoiceBalance(inv, allReceipts, allCreditNotes),
+    [allReceipts, allCreditNotes]
+  );
+
+  /* Settling an invoice by hand rather than by receipt, for money already banked
+     outside the system. The status is derived so it cannot claim to be paid while
+     a balance is genuinely still outstanding. */
   const markPaid = async (inv) => {
     try {
+      const balance = balanceOf(inv);
+      if (balance > 0.009) {
+        showToast(
+          `${inv.invoice_number} still has ${fmtMoney(balance, symOf(inv.currency_code))} outstanding. Record a receipt for it instead.`,
+          'warning'
+        );
+        return;
+      }
       const { error } = await supabase
         .from('invoices')
-        .update({ status: 'paid', paid_at: new Date().toISOString() })
+        .update({ status: 'paid', paid_at: new Date().toISOString(), balance_due: 0 })
         .eq('id', inv.id);
       if (error) throw error;
       await fetchInvoices(companyId);
@@ -915,34 +1043,124 @@ export const Finance = () => {
     }
   };
 
-  const receiptDefaults = (inv) => {
-    const amount = inv.invoice_type === 'deposit'
-      ? round2(Number(inv.deposit_amount) || 0)
-      : round2(Number(inv.balance_due) || 0);
-    const balanceRemaining = inv.invoice_type === 'deposit'
-      ? round2(Number(inv.balance_due) || 0)
-      : 0;
-    return { amount, balanceRemaining };
-  };
-
+  /* A receipt defaults to clearing the invoice's balance, but any smaller amount
+     is valid: the client may be paying it off in instalments. What remains is
+     derived, not stored, so it stays right however many receipts arrive. */
   const openReceiptPrompt = (inv) => {
-    setReceiptPromptFor(inv);
+    const balance = balanceOf(inv);
+    setReceiptPromptFor({ ...inv, derivedBalance: balance, submissionKey: crypto.randomUUID() });
     setReceiptForm({
       payment_method: 'EFT',
       payment_reference: inv.payment_reference || '',
-      received_date: new Date().toISOString().slice(0, 10)
+      received_date: new Date().toISOString().slice(0, 10),
+      amount: balance > 0 ? String(balance) : ''
     });
+  };
+
+  /* Hand money back to the client. Only money actually held against the invoice
+     can be returned, so the form opens at that ceiling and cannot go above it.
+     The reason is kept on the document because a refund is the kind of entry an
+     auditor asks about. */
+  const openRefundPrompt = (inv) => {
+    const cap = refundableTotal(inv.id, allReceipts);
+    setRefundPromptFor({ ...inv, refundCap: cap });
+    setRefundForm({
+      amount: cap > 0 ? String(cap) : '',
+      reason: '',
+      refunded_date: new Date().toISOString().slice(0, 10),
+      payment_method: 'EFT'
+    });
+  };
+
+  const submitRefund = async () => {
+    const inv = refundPromptFor;
+    if (!inv) return;
+    setIssuingRefund(true);
+    try {
+      const amount = round2(num(refundForm.amount));
+      const reason = (refundForm.reason || '').trim();
+      if (!(amount > 0.009)) throw new Error('Enter the amount to refund');
+      if (!reason) throw new Error('Give a reason for the refund');
+
+      /* Guarded here for a clear message, enforced on the server for the truth:
+         the cap is checked under a lock, so a stale tab cannot hand out more
+         cash than came in. */
+      if (amount > inv.refundCap + 0.009) {
+        throw new Error(`Only ${fmtMoney(inv.refundCap, symOf(inv.currency_code))} is held against ${inv.invoice_number} and can be refunded`);
+      }
+
+      const { data, error } = await supabase.rpc('issue_invoice_refund', {
+        p_company_id: companyId,
+        p_invoice_id: inv.id,
+        p_amount: amount,
+        p_reason: reason
+      });
+      if (error) throw error;
+      const done = Array.isArray(data) ? data[0] : data;
+      if (!done) throw new Error('The refund was not recorded');
+
+      /* The journal is the mirror of a receipt: money out of the bank, back on
+         the receivable. The client owes it again, which is what the balance now
+         says. */
+      await postReceipt(companyId, {
+        id: done.id,
+        direction: 'out',
+        amount: done.amount,
+        receipt_number: done.number,
+        invoice_id: inv.id,
+        invoice_number: done.invoice_number,
+        currency_code: done.currency,
+        bill_to_name: inv.bill_to_name || '',
+        payment_method: refundForm.payment_method || 'REFUND',
+        itinerary_id: inv.itinerary_id || null,
+        client_id: inv.client_id || null
+      });
+
+      await loadData();
+      setRefundPromptFor(null);
+      showToast(
+        `Refund ${done.number} issued — ${fmtMoney(done.amount, symOf(inv.currency_code))} returned to the client`,
+        'success'
+      );
+    } catch (err) {
+      showToast(err.message || 'Failed to record refund', 'error');
+    } finally {
+      setIssuingRefund(false);
+    }
+  };
+
+  /* What an invoice would still owe once a further amount is taken off it,
+     whether that is money received or a credit note. Derived from the documents
+     rather than read off the cached column, so it cannot drift. */
+  const balanceAfterReceipt = (inv, amount, credit = 0) => {
+    /* Net, not gross: money already refunded has left, so it must not be
+       counted towards what has settled the invoice. */
+    const settled = netReceivedTotal(inv.id, allReceipts)
+      + creditedTotal(inv.id, allCreditNotes)
+      + round2(amount)
+      + round2(credit);
+    return round2(Math.max(0, round2(num(inv.total_incl)) - settled));
   };
 
   const submitReceipt = async () => {
     const inv = receiptPromptFor;
-    if (!inv) return;
+    if (!inv || receiptSubmissionRef.current) return;
+    receiptSubmissionRef.current = true;
     setIssuingReceipt(true);
     try {
+      /* The amount may be less than the balance: an invoice can be paid off in
+         instalments, and the remainder is then still owed. */
+      const amount = round2(Number(receiptForm.amount));
+      if (!(amount > 0.009)) throw new Error('Enter the amount received');
+      const currentBalance = balanceOf(inv);
+      if (amount > currentBalance + 0.009) {
+        setReceiptForm((current) => ({ ...current, amount: currentBalance > 0 ? currentBalance.toFixed(2) : '' }));
+        throw new Error(`Only ${fmtMoney(currentBalance, symOf(inv.currency_code))} remains outstanding on ${inv.invoice_number}`);
+      }
+
       const { data: number, error: numErr } = await supabase.rpc('get_next_receipt_reference', { p_company_id: companyId });
       if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate receipt number');
-
-      const { amount, balanceRemaining } = receiptDefaults(inv);
+      const balanceRemaining = balanceAfterReceipt(inv, amount);
       const receivedDate = receiptForm.received_date || new Date().toISOString().slice(0, 10);
       const row = {
         company_id: companyId,
@@ -956,6 +1174,7 @@ export const Finance = () => {
         received_date: receivedDate,
         payment_method: receiptForm.payment_method || '',
         payment_reference: receiptForm.payment_reference || '',
+        client_submission_key: inv.submissionKey,
         bill_to_name: inv.bill_to_name || '',
         bill_to_email: inv.bill_to_email || '',
         bill_to_tel: inv.bill_to_tel || '',
@@ -981,7 +1200,8 @@ export const Finance = () => {
         amount,
         balance_remaining: balanceRemaining,
         method: row.payment_method,
-        reference: row.payment_reference
+        reference: row.payment_reference,
+        idempotency_key: inv.submissionKey
       };
 
       const { data: created, error } = await supabase
@@ -991,18 +1211,27 @@ export const Finance = () => {
         .single();
       if (error) throw error;
 
-      const paidUpdate = { status: 'paid', paid_at: new Date().toISOString(), payment_reference: row.payment_reference };
-      if (inv.invoice_type === 'final') paidUpdate.balance_due = 0;
+      /* A part payment leaves the invoice live and still owing, so the status is
+         derived from the documents rather than stamped paid. The invoice is only
+         closed out once nothing is outstanding against it. */
+      const nowSettled = balanceRemaining <= 0.009;
+      const paidUpdate = {
+        status: nowSettled ? 'paid' : 'validated',
+        balance_due: balanceRemaining,
+        payment_reference: row.payment_reference
+      };
+      if (nowSettled) paidUpdate.paid_at = new Date().toISOString();
+      else paidUpdate.paid_at = null;
       const { error: paidErr } = await supabase
         .from('invoices')
         .update(paidUpdate)
         .eq('id', inv.id);
       if (paidErr) throw paidErr;
 
-      /* A proforma deposit becomes a real document on payment, so its sale is
-         recognised here. postInvoice is idempotent per invoice. */
-      if (inv.status === 'proforma' || inv.status === 'draft') {
-        await postInvoice(companyId, { ...inv, status: 'paid' });
+      /* A proforma request becomes a real document once money arrives, so its
+         sale is recognised here. postInvoice is idempotent per invoice. */
+      if (nowSettled && (inv.status === 'proforma' || inv.status === 'draft')) {
+        await postInvoice(companyId, { ...inv, status: 'paid', total_incl: inv.total_incl });
       }
       /* A receipt row only links to its invoice, so the itinerary and client
          are carried across here — without them the journal cannot attribute
@@ -1016,13 +1245,47 @@ export const Finance = () => {
       });
 
       await fetchInvoices(companyId);
+      await loadTenantFinance(companyId);
       await reloadViewing(inv.id);
       setReceiptPromptFor(null);
-      showToast(`Receipt ${number} issued`, 'success');
+      showToast(
+        nowSettled
+          ? `Receipt ${number} issued`
+          : `Receipt ${number} issued. ${fmtMoney(balanceRemaining, symOf(inv.currency_code))} still outstanding on ${inv.invoice_number}`,
+        'success'
+      );
       if (created) setTimeout(() => printReceipt(created), 250);
     } catch (err) {
-      showToast(err.message || 'Failed to issue receipt', 'error');
+      if (err.code === '23505' && /submission_key/i.test(err.message || '')) {
+        await fetchInvoices(companyId);
+        await loadTenantFinance(companyId);
+        await reloadViewing(inv.id);
+        setReceiptPromptFor(null);
+        showToast('This payment request was already recorded. The invoice balances have been refreshed.', 'warning');
+      } else if ((err.code === '23514' || err.code === 'check_violation') && (err.details || err.detail)) {
+        let detail = null;
+        try {
+          detail = JSON.parse(err.details || err.detail);
+        } catch {
+          detail = null;
+        }
+        if (detail?.reason === 'receipt_limit') {
+          const allowed = Number(detail.allowed) || 0;
+          setReceiptForm((current) => ({ ...current, amount: allowed > 0 ? allowed.toFixed(2) : '' }));
+          setReceiptPromptFor((current) => current
+            ? { ...current, derivedBalance: Math.min(current.derivedBalance, allowed) }
+            : current);
+          await fetchInvoices(companyId);
+          await loadTenantFinance(companyId);
+          showToast(`Only ${fmtMoney(allowed, symOf(inv.currency_code))} remains available across this invoice and itinerary. The amount has been updated.`, 'warning');
+        } else {
+          showToast(err.message || 'Payment exceeds the remaining itinerary balance', 'error');
+        }
+      } else {
+        showToast(err.message || 'Failed to issue receipt', 'error');
+      }
     } finally {
+      receiptSubmissionRef.current = false;
       setIssuingReceipt(false);
     }
   };
@@ -1091,42 +1354,6 @@ export const Finance = () => {
   const [creditAmount, setCreditAmount] = useState('');
   const [creditReason, setCreditReason] = useState('');
 
-  /* What a document actually collected, which is what a sibling invoice would
-     have recorded as money already covered. A deposit invoice carries the whole
-     trip value in total_incl but only ever collected its deposit, so using
-     total_incl here would release far more credit than was ever given. */
-  const collectedAmount = (inv) => round2(
-    inv.invoice_type === 'deposit'
-      ? (Number(inv.deposit_amount) || 0)
-      : (Number(inv.total_incl) || 0)
-  );
-
-  /* A voided document stops crediting. A later final invoice for the same
-     booking records the deposit as money already covered and subtracts it when
-     it posts, so voiding the deposit has to release that credit too — otherwise
-     the final bills less than the trip is worth, by exactly the amount that was
-     withdrawn. The cash is untouched: if the client paid a deposit that is then
-     voided, the payment stands and the booking correctly shows a credit. */
-  const releaseCreditToFinals = async (inv) => {
-    const by = collectedAmount(inv);
-    if (by <= 0 || !inv.itinerary_id) return;
-    const { data: finals } = await supabase
-      .from('invoices')
-      .select('id, invoice_number, credited_amount')
-      .eq('itinerary_id', inv.itinerary_id)
-      .eq('currency_code', inv.currency_code)
-      .eq('invoice_type', 'final')
-      .neq('status', 'void')
-      .gt('credited_amount', 0);
-
-    for (const f of finals || []) {
-      const was = round2(f.credited_amount);
-      const next = Math.max(0, round2(was - by));
-      if (next === was) continue;
-      await supabase.from('invoices').update({ credited_amount: next }).eq('id', f.id);
-    }
-  };
-
   const voidInvoice = async (inv, lines) => {
     const trimmed = voidReason.trim();
     if (!trimmed) return;
@@ -1188,13 +1415,6 @@ export const Finance = () => {
           .from('invoices')
           .update({ credit_note_id: createdCn.id, credit_note_number: createdCn.credit_note_number })
           .eq('id', inv.id);
-        /* A void stops crediting, so any later final that was relying on this
-           document for its credit has to give that credit up. */
-        await releaseCreditToFinals(inv);
-        /* A void stops crediting, so any later final that was relying on this
-           document for its credit has to give that credit up. Unconditional
-           here: this path always reverses the invoice in full. */
-        await releaseCreditToFinals(inv);
 
         /* The credit note is the reversing document, so the ledger reverses
            with it. Idempotent per credit note. */
@@ -1225,22 +1445,32 @@ export const Finance = () => {
     const why = reason.trim();
     if (!inv || gross <= 0 || !why) return;
 
-    const total = round2(inv.total_incl || 0);
-    const alreadyCredited = round2(inv.credited_amount || 0);
-    const remaining = round2(total - alreadyCredited);
-    if (gross > remaining + 0.009) {
-      showToast(`That is more than the ${fmtMoney(remaining, symOf(inv.currency_code))} still outstanding on ${inv.invoice_number}`, 'error');
+    /* The ceiling is what is still owed, not what the invoice billed. Money
+       already received cannot be credited back as though it had never arrived:
+       that is a refund, and it needs its own document. */
+    const owed = balanceOf(inv);
+    if (gross > owed + 0.009) {
+      const paid = netReceivedTotal(inv.id, allReceipts);
+      showToast(
+        paid > 0.009
+          ? `Only ${fmtMoney(owed, symOf(inv.currency_code))} is still outstanding on ${inv.invoice_number}. The ${fmtMoney(paid, symOf(inv.currency_code))} already received has to be refunded, not credited.`
+          : `That is more than the ${fmtMoney(owed, symOf(inv.currency_code))} still outstanding on ${inv.invoice_number}`,
+        'error'
+      );
       return;
     }
     /* Voiding the invoice is only correct when the credit clears everything.
        A part credit leaves a live invoice the client still owes, so voiding it
        would cancel a document that is still valid. */
-    const voidsInvoice = gross >= remaining - 0.009;
+    const voidsInvoice = gross >= owed - 0.009;
 
     try {
       const { data: cnNumber, error: cnErr } = await supabase.rpc('get_next_credit_note_reference', { p_company_id: companyId });
       if (cnErr || !cnNumber) throw new Error(cnErr?.message || 'Could not allocate credit note number');
 
+      /* Net and tax in proportion to the amount credited, against the invoice's
+         own total, with tax as the remainder so the three reconcile. */
+      const total = round2(num(inv.total_incl));
       const ratio = total > 0 ? gross / total : 0;
       const cnRow = {
         company_id: companyId,
@@ -1278,15 +1508,23 @@ export const Finance = () => {
         .single();
       if (cnErr2) throw cnErr2;
 
-      /* Record the credit against the invoice. credited_amount is what the final
-         invoice subtracts when it posts, so without this the credited amount
-         would be billed a second time. */
-      const invPatch = { credited_amount: round2(alreadyCredited + gross) };
+      /* Record the credit against the invoice and bring the balance down with
+         it. A part credit leaves the invoice live and owing the rest; a full one
+         clears it and voids the document. */
+      const alreadyCredited = creditedTotal(inv.id, allCreditNotes);
+      const afterCredit = balanceAfterReceipt(inv, 0, gross);
+      const invPatch = {
+        credited_amount: round2(alreadyCredited + gross),
+        balance_due: afterCredit
+      };
       if (voidsInvoice) {
         invPatch.status = 'void';
         invPatch.void_reason = why;
         invPatch.credit_note_id = createdCn.id;
         invPatch.credit_note_number = createdCn.credit_note_number;
+      } else {
+        /* Still owed money, so it is a live invoice, not a paid one. */
+        invPatch.status = settledStatus({ ...inv, status: 'validated' }, allReceipts, [createdCn, ...allCreditNotes]);
       }
       const { error: invErr } = await supabase.from('invoices').update(invPatch).eq('id', inv.id);
       if (invErr) {
@@ -1314,8 +1552,9 @@ export const Finance = () => {
   };
 
   const requestCreditNote = (inv, suggestedAmount) => {
-    const total = round2(inv.total_incl || 0);
-    const remaining = round2(total - round2(inv.credited_amount || 0));
+    /* The ceiling is what is still owed, so the field never offers to credit
+       money that has already been received. */
+    const remaining = balanceOf(inv);
     const amount = suggestedAmount > 0 ? Math.min(suggestedAmount, remaining) : remaining;
     setCreditDraft({ inv, remaining });
     setCreditAmount(amount > 0 ? String(round2(amount)) : '');
@@ -1422,18 +1661,18 @@ export const Finance = () => {
             <Search size={15} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
             <input className="sidebar-select" style={{ width: '100%', padding: '0.55rem 0.75rem 0.55rem 2rem', fontSize: '0.9rem' }} placeholder="Search number, client or itinerary…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
-          <select className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <SearchableSelect className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
             <option value="all">All types</option>
             <option value="deposit">Deposit</option>
             <option value="final">Final</option>
-          </select>
-          <select className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          </SearchableSelect>
+          <SearchableSelect className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="all">All statuses</option>
             <option value="proforma">Proforma</option>
             <option value="validated">Validated</option>
             <option value="paid">Paid</option>
             <option value="void">Void</option>
-          </select>
+          </SearchableSelect>
           <button type="button" className="icon-btn outline" title="Refresh" onClick={() => companyId && fetchInvoices(companyId)}>
             <RefreshCw size={15} />
           </button>
@@ -1567,6 +1806,19 @@ export const Finance = () => {
                     <FileCheck2 size={15} /> Issue Receipt
                   </button>
                 )}
+                {/* Only where money is actually held. A refund hands back cash
+                    that has to have arrived, so an invoice with nothing
+                    received against it has nothing to refund. */}
+                {viewing.status !== 'void' && refundableTotal(viewing.id, allReceipts) > 0.009 && (
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                    onClick={() => openRefundPrompt(viewing)}
+                  >
+                    <Undo2 size={15} /> Refund
+                  </button>
+                )}
                 {viewing.status !== 'void' && (
                   <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: '#b91c1c' }}                 onClick={() => requestVoidInvoice(viewing)}>
                     <Ban size={15} /> Void
@@ -1641,18 +1893,10 @@ export const Finance = () => {
                       <td colSpan="6" style={{ textAlign: 'right', fontWeight: 900 }}>{viewing.currency_code} TOTAL DUE ({isZar(viewing.currency_code) ? `INCL TAX ${viewing.tax_label}` : 'INCL TAX'})</td>
                       <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(viewing.total_incl, symOf(viewing.currency_code))}</td>
                     </tr>
-                    {viewing.invoice_type === 'final' && Number(viewing.credited_amount) > 0 && (
-                      <tr style={{ background: '#ecfdf5' }}>
-                        <td colSpan="6" style={{ textAlign: 'right', fontWeight: 700, color: '#047857' }}>
-                          Less deposit received{viewing.credited_invoice_number ? ` (${viewing.credited_invoice_number})` : ''}
-                        </td>
-                        <td style={{ textAlign: 'right', fontWeight: 800, color: '#047857' }}>-{fmtMoney(viewing.credited_amount, symOf(viewing.currency_code))}</td>
-                      </tr>
-                    )}
                     <tr style={{ background: '#eff6ff' }}>
                       <td colSpan="6" style={{ textAlign: 'right', fontWeight: 900 }}>
-                        {viewing.invoice_type === 'final' ? 'BALANCE TO BE PAID' : 'BALANCE REMAINING AFTER DEPOSIT'}
-                        {viewing.invoice_type === 'final' && viewing.status === 'paid' ? ' (settled)' : ''}
+                        AMOUNT DUE
+                        {viewing.status === 'paid' ? ' (settled)' : ''}
                       </td>
                       <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</td>
                     </tr>
@@ -1660,17 +1904,8 @@ export const Finance = () => {
                 </table>
 
                 <div style={{ marginTop: '0.85rem', display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
-                  {viewing.invoice_type === 'deposit' ? (
-                    <>
-                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Deposit requested ({Number(viewing.deposit_percentage)}%)</div><div style={{ fontWeight: 800 }}>{fmtMoney(viewing.deposit_amount, symOf(viewing.currency_code))}</div></div>
-                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Balance remaining after deposit</div><div style={{ fontWeight: 800 }}>{fmtMoney(viewing.balance_due, symOf(viewing.currency_code))}</div></div>
-                    </>
-                  ) : (
-                    <>
-                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Less deposit received{viewing.credited_invoice_number ? ` (${viewing.credited_invoice_number})` : ''}</div><div style={{ fontWeight: 800, color: '#047857' }}>{fmtMoney(viewing.credited_amount, symOf(viewing.currency_code))}</div></div>
-                      <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Balance to be paid</div><div style={{ fontWeight: 800 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</div></div>
-                    </>
-                  )}
+                  <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Invoice total</div><div style={{ fontWeight: 800 }}>{fmtMoney(viewing.total_incl, symOf(viewing.currency_code))}</div></div>
+                  <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Amount due</div><div style={{ fontWeight: 800 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</div></div>
                 </div>
 
                 <div style={{ marginTop: '0.85rem' }}>
@@ -1683,7 +1918,7 @@ export const Finance = () => {
                         <div key={k}><span style={{ color: '#64748b' }}>{k.replace(/_/g, ' ')}:</span> {v}</div>
                       ))}
                     </div>
-                  ) : <div style={{ fontSize: '0.9rem', color: '#94a3b8' }}>No bank account set for {viewing.currency_code}. Add one in Settings → Bank Accounts.</div>}
+                  ) : <div style={{ fontSize: '0.9rem', color: '#94a3b8' }}>No bank account set for {viewing.currency_code}. Add one in Settings ? Bank Accounts.</div>}
                 </div>
 
                 {viewing.status === 'void' && (
@@ -1781,7 +2016,7 @@ export const Finance = () => {
               <button className="close-btn" onClick={() => setReceiptPromptFor(null)}><X size={20} /></button>
             </div>
             <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: 0 }}>
-              Recording payment for <b>{receiptPromptFor.invoice_number}</b>. A receipt number will be allocated and the invoice marked paid.
+              Recording payment for <b>{receiptPromptFor.invoice_number}</b>. Leave the amount short to pay it off in instalments; the remainder stays outstanding.
             </p>
             <div style={{ display: 'grid', gap: '0.85rem' }}>
               <div className="sidebar-field">
@@ -1789,14 +2024,30 @@ export const Finance = () => {
                 <input className="sidebar-select" style={fieldStyle} type="date" value={receiptForm.received_date} onChange={(e) => setReceiptForm({ ...receiptForm, received_date: e.target.value })} />
               </div>
               <div className="sidebar-field">
+                <label>Amount Received</label>
+                <input
+                  className="sidebar-select"
+                  style={fieldStyle}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  max={receiptPromptFor.derivedBalance}
+                  value={receiptForm.amount ?? ''}
+                  onChange={(e) => setReceiptForm({ ...receiptForm, amount: e.target.value })}
+                />
+                <small style={{ color: '#64748b' }}>
+                  Outstanding on this invoice: {fmtMoney(balanceOf(receiptPromptFor), symOf(receiptPromptFor.currency_code))}
+                </small>
+              </div>
+              <div className="sidebar-field">
                 <label>Payment Method</label>
-                <select className="sidebar-select" style={fieldStyle} value={receiptForm.payment_method} onChange={(e) => setReceiptForm({ ...receiptForm, payment_method: e.target.value })}>
+                <SearchableSelect className="sidebar-select" style={fieldStyle} value={receiptForm.payment_method} onChange={(e) => setReceiptForm({ ...receiptForm, payment_method: e.target.value })}>
                   <option value="EFT">EFT / Bank transfer</option>
                   <option value="Card">Card</option>
                   <option value="Cash">Cash</option>
                   <option value="Online">Online</option>
                   <option value="Other">Other</option>
-                </select>
+                </SearchableSelect>
               </div>
               <div className="sidebar-field">
                 <label>Payment Reference</label>
@@ -1804,19 +2055,92 @@ export const Finance = () => {
               </div>
               <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.9rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span>Amount received</span>
-                  <b>{fmtMoney(receiptDefaults(receiptPromptFor).amount, symOf(receiptPromptFor.currency_code))}</b>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span>Balance remaining</span>
-                  <b>{fmtMoney(receiptDefaults(receiptPromptFor).balanceRemaining, symOf(receiptPromptFor.currency_code))}</b>
+                  <span>Balance remaining after this receipt</span>
+                  <b>{fmtMoney(balanceAfterReceipt(receiptPromptFor, Number(receiptForm.amount)), symOf(receiptPromptFor.currency_code))}</b>
                 </div>
               </div>
             </div>
             <div className="form-actions">
               <button type="button" className="secondary-btn" onClick={() => setReceiptPromptFor(null)}>Cancel</button>
-              <button type="button" className="primary-btn" style={{ flex: 1 }} disabled={issuingReceipt} onClick={submitReceipt}>
+              <button type="button" className="primary-btn" style={{ flex: 1 }} disabled={issuingReceipt || !(Number(receiptForm.amount) > 0.009) || Number(receiptForm.amount) > balanceOf(receiptPromptFor) + 0.009} onClick={submitReceipt}>
                 {issuingReceipt ? 'Issuing…' : 'Issue Receipt'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Refund: money leaving the business. Only money actually held against
+          the invoice can go back, so the cap is shown rather than left to be
+          discovered as a server error. */}
+      {refundPromptFor && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '520px' }}>
+            <div className="modal-header">
+              <h2>Refund {refundPromptFor.invoice_number}</h2>
+              <button className="close-btn" onClick={() => setRefundPromptFor(null)}><X size={20} /></button>
+            </div>
+            <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: 0 }}>
+              Returning money received against this invoice. The charge stands, so the amount handed
+              back goes back on to what the client owes.
+            </p>
+            <div style={{ display: 'grid', gap: '0.85rem' }}>
+              <div className="sidebar-field">
+                <label>Date</label>
+                <input className="sidebar-select" style={fieldStyle} type="date" value={refundForm.refunded_date} onChange={(e) => setRefundForm({ ...refundForm, refunded_date: e.target.value })} />
+              </div>
+              <div className="sidebar-field">
+                <label>Amount to Refund</label>
+                <input
+                  className="sidebar-select"
+                  style={fieldStyle}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  max={refundPromptFor.refundCap}
+                  value={refundForm.amount ?? ''}
+                  onChange={(e) => setRefundForm({ ...refundForm, amount: e.target.value })}
+                />
+                <small style={{ color: '#64748b' }}>
+                  Held against this invoice: {fmtMoney(refundPromptFor.refundCap, symOf(refundPromptFor.currency_code))}. No more than that can be returned.
+                </small>
+              </div>
+              <div className="sidebar-field">
+                <label>Reason</label>
+                <textarea
+                  className="sidebar-select"
+                  style={{ ...fieldStyle, minHeight: '70px' }}
+                  placeholder="Why is this money being returned?"
+                  value={refundForm.reason}
+                  onChange={(e) => setRefundForm({ ...refundForm, reason: e.target.value })}
+                />
+              </div>
+              <div className="sidebar-field">
+                <label>Refund Method</label>
+                <SearchableSelect className="sidebar-select" style={fieldStyle} value={refundForm.payment_method} onChange={(e) => setRefundForm({ ...refundForm, payment_method: e.target.value })}>
+                  <option value="EFT">EFT / Bank transfer</option>
+                  <option value="Card">Card</option>
+                  <option value="Cash">Cash</option>
+                  <option value="Other">Other</option>
+                </SearchableSelect>
+              </div>
+              <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.9rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Outstanding after this refund</span>
+                  <b>{fmtMoney(balanceOf(refundPromptFor) + (num(refundForm.amount) || 0), symOf(refundPromptFor.currency_code))}</b>
+                </div>
+              </div>
+            </div>
+            <div className="form-actions">
+              <button type="button" className="secondary-btn" onClick={() => setRefundPromptFor(null)}>Cancel</button>
+              <button
+                type="button"
+                className="primary-btn"
+                style={{ flex: 1 }}
+                disabled={issuingRefund || !(num(refundForm.amount) > 0.009) || !(refundForm.reason || '').trim()}
+                onClick={submitRefund}
+              >
+                {issuingRefund ? 'Recording…' : 'Record Refund'}
               </button>
             </div>
           </div>
@@ -1907,7 +2231,7 @@ export const Finance = () => {
                 <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
                   {selectedGroup.reissue?.settled
                     ? <>Change invoice for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. This booking is already settled, so only the movement below can be billed.</>
-                    : <>{selectedGroup.issueType === 'deposit' ? 'Proforma Deposit Invoice' : TYPE_LABEL[selectedGroup.issueType]} for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. Review the breakdown and confirm.</>}
+                    : <>Invoice for <b>{selectedItinerary.reference_number}</b> in <b>{selectedGroup.code}</b>. Review the breakdown and confirm.</>}
                 </p>
 
                 {selectedGroup.reissue?.settled && (
@@ -2004,21 +2328,13 @@ export const Finance = () => {
                     <span>{fmtMoney(selectedGroup.totalIncl, symOf(selectedGroup.code))}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.4rem', color: '#64748b' }}>
-                    {selectedGroup.issueType === 'deposit' ? (
-                      <><span>Deposit requested ({depositPct}%)</span><b>{fmtMoney(round2(selectedGroup.totalIncl * depositPct / 100), symOf(selectedGroup.code))}</b></>
-                    ) : (
-                      <>
-                        <span>Less deposit received{depositCreditPreview.number ? ` (${depositCreditPreview.number})` : ''}</span>
-                        <b style={{ color: '#047857' }}>-{fmtMoney(depositCreditPreview.amount, symOf(selectedGroup.code))}</b>
-                      </>
-                    )}
+                    {selectedGroup.paidTotal > 0
+                      ? (<><span>Already received</span><b style={{ color: '#047857' }}>{fmtMoney(selectedGroup.paidTotal, symOf(selectedGroup.code))}</b></>)
+                      : (<><span>Trip value</span><b>{fmtMoney(selectedGroup.totalIncl, symOf(selectedGroup.code))}</b></>)}
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.35rem', fontWeight: 700 }}>
-                    {selectedGroup.issueType === 'deposit' ? (
-                      <><span>Balance remaining after deposit</span><b>{fmtMoney(round2(selectedGroup.totalIncl * (1 - depositPct / 100)), symOf(selectedGroup.code))}</b></>
-                    ) : (
-                      <><span>Balance to be paid</span><b>{fmtMoney(selectedGroup.outstanding, symOf(selectedGroup.code))}</b></>
-                    )}
+                    <span>{selectedGroup.paidTotal > 0 ? 'Outstanding' : 'Suggested first request'}</span>
+                    <b>{fmtMoney(suggestedFirstInvoice, symOf(selectedGroup.code))}</b>
                   </div>
                 </div>
                 )}
@@ -2026,12 +2342,12 @@ export const Finance = () => {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
                   <div className="sidebar-field">
                     <label>Bank Account ({selectedGroup.code})</label>
-                    <select className="sidebar-select" style={fieldStyle} value={chosenBank?.id || ''} onChange={(e) => setSelectedBankId(e.target.value)}>
+                    <SearchableSelect className="sidebar-select" style={fieldStyle} value={chosenBank?.id || ''} onChange={(e) => setSelectedBankId(e.target.value)}>
                       {availableBanks.length === 0 && <option value="">No {selectedGroup.code} account — add one in Settings</option>}
                       {availableBanks.map((b) => (
                         <option key={b.id} value={b.id}>{b.label || b.bank_name || b.currency_code}{b.is_default ? ' (default)' : ''}</option>
                       ))}
-                    </select>
+                    </SearchableSelect>
                   </div>
                   <div className="sidebar-field">
                     <label>Due Date</label>
@@ -2040,15 +2356,15 @@ export const Finance = () => {
                 </div>
 
                 <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.75rem', display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
-                  <FileText size={13} /> {selectedGroup.issueType === 'deposit'
-                    ? 'This proforma is numbered and locked once payment is confirmed and a receipt is issued. Further money received on the same itinerary is captured automatically.'
+                  <FileText size={13} /> {suggestedFirstInvoice < selectedGroup.totalIncl - 0.009
+                    ? 'This goes out as a proforma: a request for this part of the trip, not yet an invoice for the whole. It is numbered and locked once payment is confirmed and a receipt is issued.'
                     : 'Once validated, the invoice is numbered and locked. It cannot be edited — only voided.'}
                 </p>
 
                 <div className="form-actions" style={{ marginTop: '0.5rem' }}>
                   <button type="button" className="secondary-btn" onClick={() => setWizardStep(2)}>Back</button>
                   <button type="button" className="primary-btn" style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem' }} disabled={issuing} onClick={handleIssue}>
-                    <Check size={16} /> {issuing ? 'Issuing…' : (selectedGroup.reissue?.settled ? 'Issue Change Invoice' : (selectedGroup.issueType === 'deposit' ? 'Issue Proforma' : 'Validate Final Invoice'))}
+                    <Check size={16} /> {issuing ? 'Issuing…' : (selectedGroup.reissue?.settled ? 'Issue Change Invoice' : 'Issue Invoice')}
                   </button>
                 </div>
               </div>

@@ -1,18 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useListRowLimit } from '../hooks/useListRowLimit';
+import { useCountries } from '../hooks/useCountries';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConfirm } from '../hooks/useConfirm';
-import { 
-  Users, 
-  Search, 
-  Plus, 
-  Edit3, 
-  Trash2, 
-  X, 
-  Mail, 
-  Phone, 
+import {
+  Users,
+  Search,
+  Plus,
+  Edit3,
+  Trash2,
+  X,
+  Mail,
+  Phone,
   MapPin,
   User,
   Building2,
@@ -133,7 +135,7 @@ const CountrySelect = ({ value, onChange, countries, placeholder }) => {
 export const Clients = () => {
   const [clients, setClients] = useState([]);
   const [confirmDialog, confirm] = useConfirm();
-  const [countries, setCountries] = useState([]);
+  const countries = useCountries();
   const [salesTotals, setSalesTotals] = useState({});
   const [loading, setLoading] = useState(true);
   const [fetchingClients, setFetchingClients] = useState(false);
@@ -163,23 +165,6 @@ export const Clients = () => {
       contact_website: '',
       logo_data_url: ''
     });
-
-  const fetchCountries = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('app_countries')
-        .select('name')
-        .eq('is_active', true)
-        .order('name', { ascending: true });
-
-      if (error) throw error;
-      setCountries((data || []).map(c => c.name));
-    } catch (err) {
-      console.error('Failed to load countries:', err.message);
-      // Fallback to a common list if the lookup table isn't available yet
-      setCountries(['South Africa', 'Tanzania', 'Kenya', 'Namibia', 'Botswana', 'United States', 'United Kingdom', 'France', 'Germany', 'Netherlands']);
-    }
-  }, []);
 
   const fetchClients = useCallback(async ({ offset = 0, append = false } = {}) => {
     setFetchingClients(true);
@@ -250,15 +235,9 @@ export const Clients = () => {
     }
   }, []);
 
-  useEffect(() => {
-  let cancelled = false;
-  (async () => {
-    await fetchCountries();
-    await fetchSalesTotals();
-    if (cancelled) return;
-  })();
-  return () => { cancelled = true; };
-}, [fetchCountries, fetchSalesTotals]);
+useEffect(() => {
+  fetchSalesTotals();
+}, [fetchSalesTotals]);
 
   useEffect(() => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
@@ -485,9 +464,9 @@ export const Clients = () => {
             <p>Manage direct clients and travel agencies</p>
           </div>
         </div>
-        <button 
-          className="primary-btn" 
-          style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }} 
+        <button
+          className="primary-btn"
+          style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           onClick={handleOpenAddForm}
         >
           <Plus size={18} /> Add Client
@@ -526,8 +505,8 @@ export const Clients = () => {
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Users size={22} color="#0d7478" /> {editingClient ? 'Edit Client' : 'Add New Client'}
             </h2>
-            <button 
-              onClick={closeForm} 
+            <button
+              onClick={closeForm}
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b' }}
               title="Close form"
             >
@@ -545,8 +524,8 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Name *
                     </label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       className="pricing-select"
                       placeholder="Client or company name"
                       required
@@ -558,8 +537,8 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Cell #
                     </label>
-                    <input 
-                      type="tel" 
+                    <input
+                      type="tel"
                       className="pricing-select"
                       placeholder="+27 82 555 0100"
                       value={form.contact_cell}
@@ -570,8 +549,8 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Tel # / Landline
                     </label>
-                    <input 
-                      type="tel" 
+                    <input
+                      type="tel"
                       className="pricing-select"
                       placeholder="+27 21 555 0100"
                       value={form.contact_tel}
@@ -582,8 +561,8 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Website (optional)
                     </label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       className="pricing-select"
                       placeholder="https://www.example.com"
                       value={form.contact_website}
@@ -594,14 +573,14 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Client Type
                     </label>
-                    <select 
+                    <SearchableSelect
                       className="pricing-select"
                       value={form.clientType}
                       onChange={(e) => setForm({ ...form, clientType: e.target.value })}
                     >
                       <option value="Travel Agency">Travel Agency</option>
                       <option value="Direct">Direct</option>
-                    </select>
+                    </SearchableSelect>
                   </div>
                 </div>
 
@@ -611,8 +590,8 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Email *
                     </label>
-                    <input 
-                      type="email" 
+                    <input
+                      type="email"
                       className="pricing-select"
                       placeholder="email@example.com"
                       required
@@ -635,8 +614,8 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Markup Percentage (%) *
                     </label>
-                    <input 
-                      type="number" 
+                    <input
+                      type="number"
                       min="0"
                       step="0.01"
                       className="pricing-select"
@@ -650,7 +629,7 @@ export const Clients = () => {
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                       Deposit Percentage (%)
                     </label>
-                    <input 
+                    <input
                       type="number"
                       min="0"
                       max="100"
@@ -662,7 +641,7 @@ export const Clients = () => {
                     />
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', paddingTop: '0.9rem' }}>
-                    <input 
+                    <input
                       id="client-is-credit"
                       type="checkbox"
                       checked={!!form.isCredit}
@@ -680,8 +659,8 @@ export const Clients = () => {
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Address
                 </label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   className="pricing-select"
                   placeholder="Full Address"
                   value={form.address}
@@ -726,7 +705,7 @@ export const Clients = () => {
                 <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                   Notes
                 </label>
-                <textarea 
+                <textarea
                   className="pricing-select"
                   rows={4}
                   placeholder="Additional notes about this client"
@@ -737,9 +716,9 @@ export const Clients = () => {
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '0.5rem' }}>
-                <button 
-                  type="button" 
-                  className="secondary-btn" 
+                <button
+                  type="button"
+                  className="secondary-btn"
                   style={{ flex: '0 0 auto', padding: '0.625rem 1.5rem' }}
                   onClick={closeForm}
                 >
@@ -761,8 +740,8 @@ export const Clients = () => {
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flex: 1 }}>
             <div className="search-box" style={{ flex: 1, width: 'auto', maxWidth: '520px' }}>
               <Search size={18} />
-              <input 
-                type="text" 
+              <input
+                type="text"
                 placeholder="Search clients by name or email..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -820,8 +799,8 @@ export const Clients = () => {
                   <p style={{ marginBottom: '1.25rem', maxWidth: '380px', margin: '0 auto 1.25rem' }}>
                     Create your first client to start building tailored itineraries.
                   </p>
-                  <button 
-                    className="primary-btn" 
+                  <button
+                    className="primary-btn"
                     style={{ width: 'auto', padding: '0.625rem 1.5rem', background: '#0d7478' }}
                     onClick={handleOpenAddForm}
                   >
@@ -926,16 +905,16 @@ export const Clients = () => {
                 </td>
                 <td>
                   <div className="action-buttons">
-                    <button 
-                      className="action-btn" 
-                      onClick={() => handleOpenEditForm(client)} 
+                    <button
+                      className="action-btn"
+                      onClick={() => handleOpenEditForm(client)}
                       title="Edit Client"
                     >
                       <Edit3 size={16} />
                     </button>
-                    <button 
-                      className="action-btn delete" 
-                      onClick={() => handleDelete(client)} 
+                    <button
+                      className="action-btn delete"
+                      onClick={() => handleDelete(client)}
                       title="Delete Client"
                     >
                       <Trash2 size={16} />

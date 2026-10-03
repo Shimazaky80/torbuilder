@@ -7,8 +7,24 @@ const parseF = (v) => parseFloat(v) || 0;
    mirror the field conventions used by contractPaxRate and calculateRoomCharges.
    Children are resolved age-aware (band keys in child_rates_breakdown matched
    against rate._ageRanges, or a flat `child` key / price_child / child_rate /
-   child_discount) by childRateForAge — a configured 0 is a free child. */
+   child_discount) by childRateForAge — a configured 0 is a free child.
+
+   Flat room rates are ordered differently. There unit_price is the whole shared
+   room and single_room_rate / effective_single_rate is the whole room occupied by
+   one adult, and neither is a per-person figure. Reading price_1_adult first
+   would make a flat shared room look like a single rate and a flat single room
+   look like it had a separate single supplement, so the flat fields are read
+   first and the per-adult columns are only a last resort. */
 const rateNumbers = (rate) => {
+  const isFlat = String(rate?.rate_basis || '') === 'per_room'
+    || parseF(rate?.unit_price) > 0 && !parseF(rate?.price_2_adults);
+  if (isFlat) {
+    const shared = parseF(rate?.unit_price) || parseF(rate?.price_1_adult) || 0;
+    const single = parseF(rate?.single_room_rate)
+      || parseF(rate?.effective_single_rate)
+      || shared;
+    return { singleBuy: single, sharingBuy: shared };
+  }
   const singleBuy = parseF(rate?.price_1_adult) || parseF(rate?.single_room_rate) || parseF(rate?.unit_price) || 0;
   const sharingBuy = parseF(rate?.price_2_adults) || parseF(rate?.double_twin_rate) || singleBuy || 0;
   return { singleBuy, sharingBuy };
@@ -79,7 +95,11 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
       scale = 1 + markupPct / 100;
     } else if (rooms && sharingBuy > 0) {
       const buy = calculateRoomCharges({ item_rates: [rate], child_age_ranges: ageRanges }, rooms, undefined, 0).totalBuy;
-      scale = buy > 0 ? (pp * T) / buy : (sharingBuy > 0 ? pp / sharingBuy : 1);
+      const allocatedPax = rooms.reduce(
+        (count, room) => count + (Array.isArray(room.allocatedTravellers) ? room.allocatedTravellers.length : 0),
+        0
+      );
+      scale = buy > 0 ? (pp * (allocatedPax || T)) / buy : (sharingBuy > 0 ? pp / sharingBuy : 1);
     } else {
       scale = sharingBuy > 0 ? pp / sharingBuy : 1;
     }

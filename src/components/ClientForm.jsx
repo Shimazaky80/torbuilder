@@ -1,11 +1,13 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import SearchableSelect from './SearchableSelect';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { Users, X } from 'lucide-react';
 import CountrySelect from './CountrySelect';
+import { useCountries } from '../hooks/useCountries';
 
 export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) => {
-  const [countries, setCountries] = useState([]);
+  const countries = useCountries();
   const { showToast } = useToast();
 
   const [form, setForm] = useState({
@@ -20,31 +22,6 @@ export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) =>
     address: '',
     notes: ''
   });
-
-  const fetchCountries = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('app_countries')
-        .select('name')
-        .eq('is_active', true)
-        .order('name', { ascending: true });
-
-      if (error) throw error;
-      setCountries((data || []).map(c => c.name));
-    } catch (err) {
-      console.error('Failed to load countries:', err.message);
-      setCountries(['South Africa', 'Tanzania', 'Kenya', 'Namibia', 'Botswana', 'United States', 'United Kingdom', 'France', 'Germany', 'Netherlands']);
-    }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      await fetchCountries();
-      if (cancelled) return;
-    })();
-    return () => { cancelled = true; };
-  }, [fetchCountries]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -194,14 +171,14 @@ export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) =>
             <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
               Client Type
             </label>
-            <select
+            <SearchableSelect
               className="pricing-select"
               value={form.clientType}
               onChange={(e) => setForm({ ...form, clientType: e.target.value })}
             >
               <option value="Direct">Direct</option>
               <option value="Travel Agency">Travel Agency</option>
-            </select>
+            </SearchableSelect>
           </div>
           <div>
             <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>

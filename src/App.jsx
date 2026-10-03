@@ -12,6 +12,13 @@ import { Finance } from './pages/Finance';
 import { Settings } from './pages/Settings';
 import { LibraryItems } from './pages/LibraryItems';
 import { Analytics } from './pages/Analytics';
+import { Tariffs } from './pages/Tariffs';
+import { Packages } from './pages/Packages';
+import { PackageBuilder } from './pages/PackageBuilder';
+import { PackageView } from './pages/PackageView';
+import { PartnerPortal } from './pages/PartnerPortal';
+import { PartnerRegister } from './pages/PartnerRegister';
+import { PartnerLogin } from './pages/PartnerLogin';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { ToastProvider } from './context/ToastContext';
 import { NavigationGuardProvider } from './context/NavigationGuardContext';
@@ -24,10 +31,14 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/partner-register" element={<PartnerRegister />} />
+          <Route path="/partner/login" element={<PartnerLogin />} />
+          <Route path="/partner-login" element={<Navigate to="/partner/login" replace />} />
+          <Route path="/partner/*" element={<ProtectedRoute accountType="partner"><PartnerPortal /></ProtectedRoute>} />
           <Route
             path="/*"
             element={
-              <ProtectedRoute>
+              <ProtectedRoute accountType="tenant">
                 <NavigationGuardProvider>
                   <div className="app-container">
                     <Sidebar />
@@ -40,13 +51,15 @@ function App() {
                         <Route path="suppliers" element={<Suppliers />} />
                         <Route path="services" element={<Navigate to="/library-items" replace />} />
                         <Route path="library-items" element={<LibraryItems />} />
-                        <Route path="packages" element={<div>Packages (Coming Soon)</div>} />
+                        <Route path="packages" element={<Packages />} />
+                        <Route path="packages/view/:packageId" element={<PackageView />} />
+                        <Route path="packages/builder/:packageId" element={<PackageBuilder />} />
                         <Route path="itineraries" element={<Itineraries />} />
                         <Route path="itineraries/builder" element={<ItineraryBuilder />} />
                         <Route path="finance" element={<Finance />} />
                         {/* The module was renamed Invoices -> Finance; keep old links working. */}
                         <Route path="invoices" element={<Navigate to="/finance" replace />} />
-                        <Route path="tariffs" element={<div>Tariffs (Coming Soon)</div>} />
+                        <Route path="tariffs" element={<Tariffs />} />
                         <Route path="analytics" element={<Analytics />} />
                         <Route path="users" element={<div>Users (Coming Soon)</div>} />
                         <Route path="settings" element={<Settings />} />

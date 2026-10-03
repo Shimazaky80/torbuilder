@@ -18,10 +18,14 @@ const SOURCE_LABEL = {
   manual: 'Manual'
 };
 
+/* Every invoice is an invoice. The type is a leftover from when a booking was
+   billed as a deposit/final pair, and labelling the documents differently is
+   what made a booking's payment history impossible to read at a glance. */
+
 /* One journal entry: every line on its own side of the entry, with the two
    totals side by side so an imbalance would be visible at a glance rather than
    something the reader has to add up. */
-export function JournalEntryCard({ entry, symbol }) {
+export function JournalEntryCard({ entry, symbol, currencyCode = entry.currency_code }) {
   const lines = entry.lines || [];
   const isBalanced = Number(entry.total_debit || 0) === Number(entry.total_credit || 0);
   return (
@@ -31,6 +35,7 @@ export function JournalEntryCard({ entry, symbol }) {
           <BookOpen size={13} />
           {entry.reference || 'Entry'}
           <span style={{ fontWeight: 600, color: '#94a3b8' }}>· {SOURCE_LABEL[entry.source_type] || entry.source_type}</span>
+          {currencyCode && <span style={{ fontWeight: 800, color: '#64748b' }}>· {currencyCode}</span>}
         </span>
         <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 700 }}>{entry.entry_date}</span>
       </div>
@@ -93,10 +98,13 @@ export function InvoiceFinanceRow({ invoice, entries, receipts, symbol, open, on
           <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>{invoice.invoice_number}</strong>
         </span>
         <span style={{ fontSize: '0.74rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#94a3b8' }}>
-          {invoice.invoice_type}
+          Invoice
         </span>
         <span style={{ background: badge.bg, color: badge.fg, fontSize: '0.7rem', fontWeight: 800, padding: '0.15rem 0.5rem', borderRadius: '999px' }}>
           {badge.label}
+        </span>
+        <span style={{ background: '#f1f5f9', color: '#475569', fontSize: '0.7rem', fontWeight: 800, padding: '0.15rem 0.5rem', borderRadius: '999px' }}>
+          {invoice.currency_code || 'Currency unknown'}
         </span>
         <span style={{ marginLeft: 'auto', fontWeight: 900, fontSize: '0.95rem', color: '#1a202c' }}>
           {money(invoice.total_incl, symbol)}
@@ -123,7 +131,7 @@ export function InvoiceFinanceRow({ invoice, entries, receipts, symbol, open, on
               </p>
             ) : (
               <div style={{ display: 'grid', gap: '0.5rem' }}>
-                {entries.map((e) => <JournalEntryCard key={e.id} entry={e} symbol={symbol} />)}
+                {entries.map((e) => <JournalEntryCard key={e.id} entry={e} symbol={symbol} currencyCode={invoice.currency_code || e.currency_code || 'Currency unknown'} />)}
               </div>
             )}
           </div>

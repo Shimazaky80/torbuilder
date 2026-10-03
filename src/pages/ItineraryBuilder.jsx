@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import SearchableSelect from '../components/SearchableSelect';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Map as MapIcon,
@@ -35,7 +36,8 @@ import {
   Plane,
   Ticket,
   Lock,
-  Users
+  Users,
+  AlertTriangle
 } from 'lucide-react';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -43,16 +45,20 @@ import { useCurrencies } from '../hooks/useCurrencies';
 import ClientTourForm from '../components/ClientTourForm';
 import { usePageGuard } from '../context/NavigationGuardContext';
 import RoomAllocationModal from '../components/RoomAllocationModal';
-import { validateRoomAllocation, isAdultTraveller } from '../lib/roomAllocationHelper';
+import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination } from '../lib/roomAllocationHelper';
+import { resolveSeasonForTravel, applyProtectionToRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
+import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
 import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
-import { LIBRARY_ITEM_LIGHT_FIELDS } from '../lib/libraryItemFields';
-import { postInvoice, postReceipt } from '../lib/financeJournal';
+import { LIBRARY_ITEM_LIGHT_FIELDS, LIBRARY_ITEM_BASE_FIELDS } from '../lib/libraryItemFields';
+import { postInvoice, postReceipt, scaleInvoiceLines } from '../lib/financeJournal';
+import { voucherDetailLines } from '../lib/voucherDetails';
+import { netBilled, canBill, billableRemaining, billableAtPercentage, parseGuardRejection, guardMessage, netReceivedTotal, settledTotal, refundableTotal, invoiceBalance, bookingReceivableRemaining, bookingOverpayment } from '../lib/settlement';
 import { InvoiceFinanceRow, JournalEntryCard, CostOfSalesPanel } from '../components/finance/FinanceJournalViews';
+import ConfirmDialog from '../components/ConfirmDialog';
 import {
   buildLinesFromDays,
   accountingPayload,
-  effectiveBalance,
   TYPE_LABEL,
   LOGO_WIDTHS,
   invoiceEmail,
@@ -64,15 +70,54 @@ import {
   taxWordOf,
   taxWordUpper,
   taxAgencyOf,
-  taxDisplayLabel,
-  abbrevMealPlan
+taxDisplayLabel,
+abbrevMealPlan
 } from '../lib/invoiceDoc';
+import {
+  statementFor,
+  statementCurrencies,
+  statementDocHtml,
+  statementEmail,
+  statementCsv,
+  statementExcelHtml
+} from '../lib/statementOfAccount';
 
-/* ─── Pure helpers ─────────────────────────────────────────────────────────── */
+/* --- Pure helpers ----------------------------------------------------------- */
 
 const toISODate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
 const isAccommodationItem = (item) => /accommodation/i.test(item?.category || '');
+
+const paxForService = (service, fallbackPax) => {
+  if (/accommodation/i.test(service?.category || '')) {
+    const allocated = allocatedTravellerCount(service.roomAllocations);
+    if (allocated > 0) return allocated;
+  }
+  return Math.max(0, Number(fallbackPax) || 0);
+};
+
+const storedServicePricing = (row, fallbackPax, markup) => {
+  const originalBuyPP = Number(row.unit_cost) || 0;
+  const roomAllocations = Array.isArray(row.room_allocations) ? row.room_allocations : [];
+  const allocatedPax = /accommodation/i.test(row.category || '')
+    ? allocatedTravellerCount(roomAllocations)
+    : 0;
+  const savedPax = Number(row.pax) || Number(fallbackPax) || 0;
+  const hasLegacyWholePartyPricing = allocatedPax > 0 && savedPax > allocatedPax;
+  const savedTotalBuy = Number(row.total_buy);
+  const savedTotalSell = Number(row.total_sell);
+  const buyPP = hasLegacyWholePartyPricing && savedTotalBuy > 0
+    ? round2(savedTotalBuy / allocatedPax)
+    : originalBuyPP;
+  const sellPP = hasLegacyWholePartyPricing && savedTotalSell > 0
+    ? round2(savedTotalSell / allocatedPax)
+    : round2(buyPP * (1 + markup / 100));
+  return {
+    buyPP,
+    sellPP,
+    pax: allocatedPax || savedPax
+  };
+};
 
 const ymdOf = (iso) => {
   const [y, m, d] = toISODate(iso).split('-').map(Number);
@@ -131,7 +176,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /* VAT split for a VAT-INCLUSIVE amount: the amount already includes tax, so the
    embedded VAT is amount × rate/(100+rate). Used for output VAT (on the sell
    price charged to the client) and input VAT (on the supplier buy price). The
-   margin-only net VAT = output VAT − input VAT. */
+   margin-only net VAT = output VAT - input VAT. */
 const vatOfInclusive = (amount, rate) => {
   const r = Number(rate) || 0;
   if (!r) return 0;
@@ -150,6 +195,19 @@ const rateForItem = (item, code) => {
   return byCurr || rates[0];
 };
 
+/* Season-aware replacement for rateForItem(): the row that actually prices
+   this itinerary, resolved from the travel window instead of taken as the
+   first row for the currency. Shared with Finance so both quote the same
+   season for the same night. Null only when there is no priced row at all. */
+const rateForTravel = (item, code, window, protectionPercent = 0) =>
+  resolveRateForTravel({
+    rates: item?.item_rates || [],
+    currencyCode: code,
+    startDate: window?.start,
+    endDate: window?.end,
+    protectionPercent
+  }) || rateForItem(item, code);
+
 const effectiveAdultRate = (rate) =>
   rate ? parseFloat(rate.price_1_adult) || parseFloat(rate.unit_price) || 0 : 0;
 
@@ -165,6 +223,14 @@ const basisOfItem = (item, code) => {
 };
 
 const isFlatBasis = (basis) => FLAT_BASIS.has(basis);
+
+/* True when a rate row is a flat room rate: the figure is the price of the
+   room itself, not a per-person price, so it is not multiplied by occupancy. */
+const isFlatRoomRate = (rate) => String(rate?.rate_basis || '') === 'per_room';
+
+/* Every money column a pricing-matrix rate can hold. Pricing Protection has to
+   move them all together — the list and the uplift live in priceValidity.js
+   so Finance applies the identical transform to the identical row. */
 
 const basisLabelOf = (basis) => {
   switch (basis) {
@@ -204,6 +270,15 @@ const tierRateForPax = (rate, pax) => {
 const accommodationPaxRate = (rate, pax) => {
   const p = Number(pax) || 0;
   const num = (v) => parseFloat(v) || 0;
+  if (isFlatRoomRate(rate)) {
+    /* A flat rate is the price of the room, so the contract total is the room
+       rate no matter how many sleep in it. A party of one still occupies the
+       whole room but does not share it, so it pays the single-room figure. */
+    const room = num(rate?.unit_price) || num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
+    const single = num(rate?.single_room_rate) || num(rate?.effective_single_rate) || room;
+    const total = p <= 1 ? single : room;
+    return p > 0 ? total / p : total;
+  }
   if (p <= 1) return num(rate?.price_1_adult) || num(rate?.single_room_rate) || num(rate?.unit_price) || 0;
   if (p === 2) return num(rate?.price_2_adults) || num(rate?.double_twin_rate) || 0;
   const sharing = num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
@@ -218,6 +293,28 @@ const accommodationPaxRate = (rate, pax) => {
 //   rate multiplied by pax).
 //   flat / per_vehicle / per_trip / per_room: contract total ÷ travellers,
 //   so the line (perPax × pax) reproduces the contract amount exactly.
+/* Sidebar figure: the price exactly as it is loaded from the contract rate row,
+   with no per-traveller division applied. contractPaxRate is the quote-side
+   figure and deliberately flattens a room or vehicle total across the party,
+   which is not what the contract says - showing it here would advertise a
+   per-person price the supplier never quoted, and it would move every time the
+   party size changes. The raw figure is stable and label it directly instead.
+
+   The field precedence mirrors the Library Items rate matrix exactly, because
+   these two views must never disagree. A flat room rate writes BOTH unit_price
+   (the shared room total) and price_1_adult (the per-adult sharing figure), and
+   Library Items reads the room total from unit_price first. Reading
+   price_1_adult first would show a smaller, unrelated figure. */
+const rawContractPrice = (item, code) => {
+  const rate = rateForItem(item, code);
+  if (!rate) return 0;
+  const f = (v) => parseFloat(v) || 0;
+  if (isFlatRoomRate(rate)) {
+    return f(rate.unit_price) || f(rate.price_2_adults) || f(rate.double_twin_rate) || f(rate.price_1_adult);
+  }
+  return f(rate.price_1_adult) || f(rate.single_room_rate) || f(rate.price_2_adults) || f(rate.double_twin_rate);
+};
+
 const contractPaxRate = (item, code, pax) => {
   const rate = rateForItem(item, code);
   const raw = effectiveAdultRate(rate);
@@ -225,6 +322,10 @@ const contractPaxRate = (item, code, pax) => {
   const p = Number(pax) || 0;
   if (basis === 'tiered') return tierRateForPax(rate, p);
   if (basis === 'per_person_sharing') return accommodationPaxRate(rate, p);
+  /* A flat room rate is the price of the room, so the per-person figure comes
+     from accommodationPaxRate (room rate split across the party) rather than
+     from price_1_adult, which is the single-room figure. */
+  if (isFlatRoomRate(rate)) return accommodationPaxRate(rate, p);
   if (isFlatBasis(basis)) return p > 0 ? raw / p : raw;
   return raw;
 };
@@ -249,7 +350,7 @@ const ppDateRange = (grp) => {
      - Per person sharing: the base an adult pays when sharing accommodation
        plus all non-accommodation services per person.
      - Single supplement: single-occupancy rooms re-priced from the single rate
-       instead of the sharing rate (single − sharing) per night. Omitted when
+       instead of the sharing rate (single - sharing) per night. Omitted when
        every traveller shares.
      - Per child: children sharing with adults charged at the child rate where
        one exists (including an explicit 0 = free child) — the sharing base
@@ -268,15 +369,23 @@ const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) =
         taxRate: numOr(sv.taxRate, defaults.defaultTaxRate),
         itemId: sv.itemId || null,
         roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
-        markup: Number(sv.markup) || 0
+        markup: Number(sv.markup) || 0,
+        /* The season this line was actually priced with, when it is in scope.
+           A reloaded itinerary has no copy (the row is not persisted), so
+           rateBy falls back to resolving the season from the travel window. */
+        item_rates: Array.isArray(sv.item_rates) && sv.item_rates.length ? sv.item_rates : null
       });
     });
   });
-  const rateBy = (itemId) => {
+  const rateBy = (itemId, svcRates) => {
+    if (Array.isArray(svcRates) && svcRates.length) {
+      const own = rateForTravel({ item_rates: svcRates }, code, defaults.travelWindow, defaults.protectionPercent);
+      if (own) return { ...own, _ageRanges: (libraryItems.find((x) => String(x.id) === String(itemId))?.child_age_ranges) || [] };
+    }
     if (!itemId) return null;
     const item = libraryItems.find((x) => String(x.id) === String(itemId));
     if (!item) return null;
-    const rate = rateForItem(item, code);
+    const rate = rateForTravel(item, code, defaults.travelWindow, defaults.protectionPercent);
     return rate ? { ...rate, _ageRanges: item.child_age_ranges || [] } : null;
   };
   const list = Array.isArray(travellers) ? travellers : [];
@@ -322,9 +431,47 @@ const STATUS_MOD = {
   cancelled: 'cancelled'
 };
 
-const statusLabelOf = (v) => STATUS_OPTIONS.find((s) => s.value === v)?.label || v;
+/* Statuses reach the builder from three places: the route state, the saved
+   itineraries row, and older builds that stored the lifecycle in Title Case or
+   in a shortened form ('Quotation', 'Pending', 'Confirmed Booking'). Every
+   stage gate below compares the value against the canonical lowercase keys, so
+   an unrecognised value silently leaks a gated tab — a Quotation would show
+   Finance. Normalise on read instead of trusting the stored string, and treat
+   anything still unknown as Quotation, the stage that gates the most closed. */
+const STATUS_ALIASES = {
+  quote: 'quotation',
+  quoted: 'quotation',
+  quotation: 'quotation',
+  draft: 'quotation',
+  pending: 'pending_confirmation',
+  pending_confirmation: 'pending_confirmation',
+  awaiting_confirmation: 'pending_confirmation',
+  provisional: 'provisional',
+  provisional_booking: 'provisional',
+  booked: 'provisional',
+  confirmed: 'confirmed',
+  confirmed_booking: 'confirmed',
+  in_progress: 'in_progress',
+  travelling: 'in_progress',
+  traveling: 'in_progress',
+  completed: 'completed',
+  complete: 'completed',
+  cancelled: 'cancelled',
+  canceled: 'cancelled'
+};
 
-/* ─── Email tooling (default tenant mail client via mailto) ─────────────────
+const normaliseStatus = (v) => {
+  const key = String(v ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return STATUS_ALIASES[key] || 'quotation';
+};
+
+const statusLabelOf = (v) => STATUS_OPTIONS.find((s) => s.value === normaliseStatus(v))?.label || 'Quotation';
+
+/* --- Email tooling (default tenant mail client via mailto) -----------------
    There is no SMTP backend in this build; the tenant's default email client
    handles sending. We compose fully prefilled mailto: drafts for every
    supplier / service so the user simply presses Send. Vouchers and service
@@ -333,7 +480,7 @@ const statusLabelOf = (v) => STATUS_OPTIONS.find((s) => s.value === v)?.label ||
 const mailTo = (email, subject, body) =>
   `mailto:${(email || '').trim()}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 
-/* ─── Tenant company profile (Bill-from) for the travel documents ───────────
+/* --- Tenant company profile (Bill-from) for the travel documents -----------
    The company profile from Settings — name, billing address and the
    Tel / Email / Web contact lines — is stamped onto every supplier-facing
    travel document (vouchers, daily briefs, reconfirmation drafts) so the
@@ -405,7 +552,7 @@ const companySignOffLines = (billing) => [
 const emailOf = (sup) =>
   (sup && (sup.email || sup.contact_email || sup.email_address || '').trim()) || '';
 
-/* ────────────────────────────────────────────────────────────────────────────
+/* ----------------------------------------------------------------------------
    Text decode guard. Library rows (names/notes) arrive from any era of the
    tenant DB and can carry mojibake from a legacy import (UTF-8 bytes read as
    Latin-1/CP1252, then re-stored). We only fix display, never the DB: replace
@@ -413,12 +560,12 @@ const emailOf = (sup) =>
    returns its input unchanged when nothing needs decoding, so it is a no-op
    on already-clean strings. This forces every day-by-day label back to
    plain English/ASCII while leaving the persisted rows untouched.
-   ──────────────────────────────────────────────────────────────────────────── */
+   ---------------------------------------------------------------------------- */
 
 
 /* Repair classic UTF-8-misread-as-Latin-1 mojibake in text that arrived via a
    legacy-codepage import (U+00C3 U+00A9 -> "é", U+00E2 U+20AC U+2122 -> "’",
-   U+00F0 U+0178 U+0153 U+0178 U+00EF U+00B8 U+008F -> "🎟️").
+   U+00F0 U+0178 U+0153 U+0178 U+00EF U+00B8 U+008F -> "???").
    Pure no-op on clean strings; used only to normalise on-screen day-by-day
    library labels + notes. Never touches the database. */
 const MOJIBAKE_ALIASES = [
@@ -530,9 +677,9 @@ const timeRangeOf = (sv) => {
 
 /* Optional per-service notes override persisted on the row. */
 const svNote = (sv) => (sv.notes !== undefined && sv.notes !== null ? String(sv.notes) : '');
-const svTime = (sv) => `${sv.startTime || ''}${sv.startTime && sv.endTime ? '→' : ''}${sv.endTime || ''}`;
+const svTime = (sv) => `${sv.startTime || ''}${sv.startTime && sv.endTime ? '?' : ''}${sv.endTime || ''}`;
 
-/* ─── Confirmation status codes (service request results) ────────────────────
+/* --- Confirmation status codes (service request results) --------------------
    Recorded per service while provisional. Confirmed bookings always reflect OK
    (the final state), regardless of what was captured on the provisional tab. */
 const CONFIRMATION_OPTIONS = [
@@ -548,53 +695,6 @@ const CONFIRMATION_META = {
   NA: { color: '#dc2626', bg: '#fef2f2', label: 'NA · Not Available' },
   WL: { color: '#6d28d9', bg: '#f5f3ff', label: 'WL · Waitlist' },
   XX: { color: '#475569', bg: '#f1f5f9', label: 'XX · Cancelled' }
-};
-
-/* Per-category confirmation detail lines used on the supplier voucher and the
-   confirmed-stage reconfirmation email. Date is omitted here — the caller
-   already places the (non-editable) service date from the itinerary. */
-const voucherDetailLines = (sv) => {
-  const cat = sv.category || '';
-  const lines = [];
-  lines.push('Confirmation Status: OK');
-  const num = (sv.confirmationNumber || '').trim();
-  if (num) lines.push(`Confirmation Number: ${num}`);
-  if (/transfers?/i.test(cat)) {
-    const flight = (sv.flightNumber || '').trim();
-    if (flight) lines.push(`Flight number: ${flight}`);
-    const time = (sv.time || '').trim();
-    if (time) lines.push(`Time: ${time}`);
-    const veh = (sv.vehicleType || '').trim();
-    if (veh) lines.push(`Vehicle type: ${veh}`);
-    if (sv.capacity !== '' && sv.capacity !== null && sv.capacity !== undefined) lines.push(`Capacity: ${sv.capacity}`);
-  } else if (/accommodation/i.test(cat)) {
-    const room = (sv.roomType || '').trim();
-    if (room) lines.push(`Room type: ${room}`);
-    if (sv.maxOccupancy !== '' && sv.maxOccupancy !== null && sv.maxOccupancy !== undefined) lines.push(`Max occupancy: ${sv.maxOccupancy}`);
-    const meal = (sv.mealPlan || '').trim();
-    if (meal) lines.push(`Meal plan: ${meal}`);
-    const ci = (sv.checkInTime || '').trim();
-    if (ci) lines.push(`Check-in time: ${ci}`);
-    const co = (sv.checkOutTime || '').trim();
-    if (co) lines.push(`Check-out time: ${co}`);
-  } else if (/activities?|tours?|excursions?/i.test(cat)) {
-    const veh = (sv.vehicleType || '').trim();
-    if (veh) lines.push(`Vehicle type: ${veh}`);
-    if (sv.maxOccupancy !== '' && sv.maxOccupancy !== null && sv.maxOccupancy !== undefined) lines.push(`Max occupancy: ${sv.maxOccupancy}`);
-    const st = (sv.startTime || sv.time || '').trim();
-    if (st) lines.push(`Start time: ${st}`);
-    const en = (sv.endTime || '').trim();
-    if (en) lines.push(`End time: ${en}`);
-  } else if (/meals?|dinner|lunch|breakfast/i.test(cat)) {
-    const st = (sv.startTime || sv.time || '').trim();
-    if (st) lines.push(`Start time: ${st}`);
-  } else {
-    const time = (sv.time || '').trim();
-    if (time) lines.push(`Time: ${time}`);
-  }
-  const notes = (sv.notes || '').trim();
-  if (notes) lines.push(`Notes: ${notes}`);
-  return lines;
 };
 
 const servicesBySupplier = (days, libraryItems) => {
@@ -633,19 +733,54 @@ const servicesBySupplier = (days, libraryItems) => {
   return order.map((k) => groups[k]);
 };
 
+/* Money for supplier-facing text, written the way an operator would say it
+   out loud: "R960", "R480.50". Whole amounts stay whole so the arithmetic in a
+   contract rate line stays readable. */
+const contractMoney = (value, symbol) => {
+  const amount = round2(Number(value) || 0);
+  return `${symbol}${Number.isInteger(amount) ? amount.toFixed(0) : amount.toFixed(2)}`;
+};
+
+/* What we owe the supplier: the contracted (buy) rate held on the library item,
+   never our marked-up selling price. The arithmetic is spelled out so the
+   supplier can check it against their own contract — "R960 = R480 x2".
+   Accommodation is contracted per room, so it quotes the room count instead
+   of the head count. */
+const contractRateLine = (sv, paxCount, currencySymbol) => {
+  const pax = paxForService(sv, paxCount);
+  const buyPP = Number(sv?.buyPP) || 0;
+  const total = round2(buyPP * pax);
+  const label = 'Estimated Contract Rate';
+  if (total <= 0) return `${label}: ${contractMoney(0, currencySymbol)}`;
+
+  const occupiedRooms = (Array.isArray(sv?.roomAllocations) ? sv.roomAllocations : [])
+    .filter((rm) => (rm.allocatedTravellers || []).length > 0);
+
+  if (/accommodation/i.test(sv?.category || '') && occupiedRooms.length) {
+    const perRoom = round2(total / occupiedRooms.length);
+    const roomWord = occupiedRooms.length === 1 ? 'Room' : 'Rooms';
+    return `${label}: ${contractMoney(total, currencySymbol)} = ${occupiedRooms.length} ${roomWord} x ${contractMoney(perRoom, currencySymbol)}`;
+  }
+
+  if (pax > 1) {
+    return `${label}: ${contractMoney(total, currencySymbol)} = ${contractMoney(buyPP, currencySymbol)} x ${pax}`;
+  }
+
+  return `${label}: ${contractMoney(total, currencySymbol)}`;
+};
+
 /* One combined mailto body for every service going to a single supplier. */
 const supplierRequestEmail = (group, allDays, meta, currencySymbol, paxCount, billing) => {
   const adults = Number(meta.numAdults) || 0;
   const children = Number(meta.numChildren) || 0;
   const bodies = group.svcs.map(({ sv, day }) => {
-    const totalSell = round2((Number(sv.sellPP) || 0) * paxCount);
     return [
       `Service: ${repairText(sv.name)}`,
       day.date ? `Date: ${formatDateLong(day.date)}` : '',
       timeRangeOf(sv) ? `Time: ${timeRangeOf(sv)}` : '',
       serviceNotes(sv) ? `Notes: ${serviceNotes(sv)}` : '',
       `Guests: ${adults || 0} Adult(s)${children ? ` / ${children} Child(ren)` : ''} (${paxCount} total)`,
-      `Estimated net: ${currencySymbol}${totalSell.toFixed(2)}`
+      contractRateLine(sv, paxCount, currencySymbol)
     ].filter((l) => l !== '').join('\n');
   });
   const body = [
@@ -704,7 +839,7 @@ const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCoun
 
 /* Per-item email line group shared by the single-service draft and the
    combined-per-supplier draft so both styles carry the exact same fields in
-   the exact same order (Service → Dates → Time → Guests → Special Req).      */
+   the exact same order (Service ? Dates ? Time ? Guests ? Special Req).      */
 const serviceItemLines = (sv, day, meta, currencySymbol, paxCount, libraryItems) => {
   const adults = Number(meta.numAdults) || 0;
   const children = Number(meta.numChildren) || 0;
@@ -722,14 +857,14 @@ const serviceItemLines = (sv, day, meta, currencySymbol, paxCount, libraryItems)
 };
 
 /* One mailto draft per item, sent straight to the item's supplier. */
-const serviceItemEmail = (sv, day, amount, meta, currencySymbol, paxCount, billing, libraryItems) => {
+const serviceItemEmail = (sv, day, meta, currencySymbol, paxCount, billing, libraryItems) => {
   const agencyLabel = meta.agencyRef || meta.agency_reference || meta.client?.name || 'Direct Client';
   const body = [
     `We would like to place a provisional request for the following service on behalf of our client:`,
     '',
     serviceItemLines(sv, day, meta, currencySymbol, paxCount, libraryItems),
     '',
-    `Estimated net: ${currencySymbol}${amount.toFixed(2)}`,
+    contractRateLine(sv, paxCount, currencySymbol),
     `Our Reference#: ${meta.referenceNumber || meta.reference || '—'}`,
     `Agency/Direct Client: ${agencyLabel}`,
     `Client Nationality: ${meta.client?.nationality || '—'}`,
@@ -795,7 +930,7 @@ const voucherFor = (group, allDays, meta, currencySymbol, paxCount, billing) => 
        details and carries only the travellers, the supplier and the services —
        never the client's profile. */
     ...companyProfileLines(billing),
-    ...(companyProfileLines(billing).length ? ['', '─'.repeat(34)] : []),
+    ...(companyProfileLines(billing).length ? ['', '-'.repeat(34)] : []),
     `SERVICE VOUCHER`,
     `Supplier: ${group.label}`,
     `Itinerary: ${meta.itineraryName}`,
@@ -901,7 +1036,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
     <div class="meta">
       <table>
         <tr><td class="h">Itinerary</td><td>${esc(meta.itineraryName || '—')}</td><td class="h">Reference</td><td>${esc(meta.referenceNumber || meta.reference || '—')}</td></tr>
-        <tr><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td><td class="h">Dates</td><td>${esc(formatDateLong(meta.travelStart))} → ${esc(formatDateLong(meta.travelEnd))}</td></tr>
+        <tr><td class="h">Guests</td><td>${Number(meta.numAdults) || 0} Adult(s)${Number(meta.numChildren) ? ` / ${Number(meta.numChildren)} Child(ren)` : ''} (${paxCount} total)</td><td class="h">Dates</td><td>${esc(formatDateLong(meta.travelStart))} ? ${esc(formatDateLong(meta.travelEnd))}</td></tr>
         <tr><td class="h">Tour Designer</td><td colspan="3">${esc(meta.consultantName || '—')}</td></tr>
         <tr><td class="h">Travellers</td><td colspan="3">${esc(trav)}</td></tr>
         ${travellerDetailLines(meta.travellers).map((d) => `<tr><td class="h">Traveller details</td><td colspan="3">${esc(d)}</td></tr>`).join('')}
@@ -931,14 +1066,14 @@ const clipboardCopy = async (text) => {
   }
 };
 
-/* ─── Stage-aware document drafts (all strict mailto) ─────────────────────
+/* --- Stage-aware document drafts (all strict mailto) ---------------------
    Each lifecycle stage only unlocks the documents the CSV lifecycle defines:
-     Quotation            → quotation PDF/Word (Export menu)
-     Provisional Booking  → Deposit Invoice / Deposit Request
-     Confirmed Booking    → Final Invoice, Vouchers, Travel Documents
-     In Progress          → keeps confirmed docs, adds daily service briefs
-     Completed            → feedback form + expense reconciliation
-     Cancelled            → cancellation notice + refund statement (docs revoked) */
+     Quotation            ? quotation PDF/Word (Export menu)
+     Provisional Booking  ? Deposit Invoice / Deposit Request
+     Confirmed Booking    ? Final Invoice, Vouchers, Travel Documents
+     In Progress          ? keeps confirmed docs, adds daily service briefs
+     Completed            ? feedback form + expense reconciliation
+     Cancelled            ? cancellation notice + refund statement (docs revoked) */
 
 const DEPOSIT_PCT = 30;
 
@@ -955,7 +1090,8 @@ const invoiceHeaderLines = (meta) => [
 /* Daily service brief for one day — operational handover for guides/suppliers. */
 const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
   const lines = (day.services || []).map((sv) => {
-    const line = round2((Number(sv.sellPP) || 0) * paxCount);
+    const servicePax = paxForService(sv, paxCount);
+    const line = round2((Number(sv.sellPP) || 0) * servicePax);
     return [
       `• ${repairText(sv.name)}`,
       timeRangeOf(sv) ? `  Time: ${timeRangeOf(sv)}` : '',
@@ -968,7 +1104,7 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
   const coTel = [billing?.contact_tel, billing?.contact_cell].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
   return [
     ...companyProfileLines(billing),
-    ...(companyProfileLines(billing).length ? ['', '─'.repeat(34), ''] : []),
+    ...(companyProfileLines(billing).length ? ['', '-'.repeat(34), ''] : []),
     `DAILY SERVICE BRIEF — Day ${day.dayNumber}`,
     day.date ? `Date: ${formatDateLong(day.date)}` : '',
     `Itinerary: ${meta.itineraryName} (${meta.referenceNumber || meta.reference || '—'})`,
@@ -985,6 +1121,83 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
     '',
     'Operational contact: ' + (coTel || companyNameOf(billing) || '—')
   ].join('\n');
+};
+
+/* ----------------------------------------------------------------------------
+   Proof of payment for a single supplier service.
+
+   Ticking "Paid" on the Operations tab is a claim; this is the document that
+   backs it up. It quotes the CONTRACTED rate (never our marked-up selling
+   price), shows the arithmetic behind it, and carries the supplier's invoice /
+   POP reference plus the date the payment was confirmed — the three things an
+   auditor or the supplier will ask for.
+   ---------------------------------------------------------------------------- */
+const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) => {
+  const symbol = currencySymbol || 'R';
+  const supplier = repairText(sv?.supplierName || sv?.supplier_name || 'Supplier');
+  const servicePax = paxForService(sv, paxCount);
+  const total = round2((Number(sv?.buyPP) || 0) * servicePax);
+  const rooms = (Array.isArray(sv?.roomAllocations) ? sv.roomAllocations : [])
+    .filter((rm) => (rm.allocatedTravellers || []).length > 0);
+  const beds = rooms.reduce((n, rm) => n + (rm.allocatedTravellers || []).length, 0);
+  const paidAt = sv?.supplierPaidAt ? formatDateLong(String(sv.supplierPaidAt).slice(0, 10)) : '';
+  const breakdown = /accommodation/i.test(sv?.category || '') && rooms.length
+    ? `${rooms.length} room${rooms.length === 1 ? '' : 's'} \u00d7 ${contractMoney(round2(total / rooms.length), symbol)}`
+    : servicePax > 1
+      ? `${contractMoney(sv?.buyPP, symbol)} \u00d7 ${servicePax} pax`
+      : `${servicePax} pax`;
+
+  const header = [
+    `<h1>Proof of Payment</h1>`,
+    `<p class="muted"><b>Issued by:</b> ${htmlEscape(companyNameOf(billing) || '—')}</p>`,
+    companyAddressOf(billing) ? `<p class="muted">${htmlEscape(companyAddressOf(billing))}</p>` : '',
+    ...companyContactLines(billing).map((l) => `<p class="muted">${htmlEscape(l)}</p>`),
+    `<p class="stamp">PAID</p>`
+  ].join('\n');
+
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Proof of Payment — ${htmlEscape(meta?.referenceNumber || '')}</title><style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:36px;color:#111}
+    h1{margin:0 0 4px;color:#0d7478;font-size:22px}
+    .muted{color:#555;font-size:12px;margin:2px 0}
+    table{border-collapse:collapse;width:100%;margin-top:18px}
+    th,td{border:1px solid #ccc;padding:8px 10px;font-size:13px;text-align:left;vertical-align:top}
+    th{background:#eef2f7;width:34%}
+    td.num{text-align:right;font-weight:700}
+    .total{background:#f0fdfa;font-size:16px}
+    .stamp{display:inline-block;margin-top:10px;border:2px solid #16a34a;color:#16a34a;font-weight:800;
+      letter-spacing:2px;padding:4px 14px;border-radius:4px;transform:rotate(-3deg)}
+    .foot{margin-top:28px;font-size:11px;color:#666;border-top:1px solid #ddd;padding-top:10px}
+    @media print{.noprint{display:none}}
+  </style></head><body>
+  ${header}
+  <table>
+    <tr><th>Itinerary</th><td>${htmlEscape(meta?.itineraryName || '—')}${meta?.referenceNumber ? ` (${htmlEscape(meta.referenceNumber)})` : ''}</td></tr>
+    <tr><th>Client</th><td>${htmlEscape(meta?.client?.name || '—')}</td></tr>
+    <tr><th>Tour dates</th><td>${htmlEscape(formatDateShort(meta?.travelStart) || '—')} &rarr; ${htmlEscape(formatDateShort(meta?.travelEnd) || '—')}</td></tr>
+    <tr><th>Service</th><td>${htmlEscape(repairText(sv?.name || '—'))}</td></tr>
+    <tr><th>Service date</th><td>Day ${day?.dayNumber ?? '—'}${day?.date ? ` — ${htmlEscape(formatDateLong(day.date))}` : ''}${sv?.time ? ` at ${htmlEscape(sv.time)}` : ''}</td></tr>
+    <tr><th>Supplier</th><td>${htmlEscape(supplier)}</td></tr>
+    <tr><th>Confirmation</th><td>${htmlEscape(sv?.confirmationNumber || '—')}${sv?.confirmationStatus ? ` (${htmlEscape(sv.confirmationStatus)})` : ''}</td></tr>
+    <tr><th>Guests</th><td>${beds || paxCount} of ${paxCount} pax &mdash; ${htmlEscape(breakdown)}</td></tr>
+    <tr><th>Supplier invoice / POP ref</th><td>${htmlEscape(sv?.supplierPaidRef || '—')}</td></tr>
+    <tr><th>Payment confirmed</th><td>${htmlEscape(paidAt || '—')}</td></tr>
+    <tr class="total"><th>Amount paid to supplier</th><td class="num">${htmlEscape(contractMoney(total, symbol))}</td></tr>
+  </table>
+  <p class="foot">This document confirms that the amount stated above was paid to ${htmlEscape(supplier)} for the service listed.
+  It was generated from the supplier payment confirmation recorded on the itinerary.</p>
+  <p class="noprint" style="margin-top:18px"><button onclick="window.print()">Print / Save as PDF</button></p>
+  </body></html>`;
+};
+
+/* Filename-safe POP name, e.g. POP-IT-2026-000007-GOLD-Restaurant. */
+const popFileName = (sv, day, meta) => {
+  const parts = [
+    'POP',
+    meta?.referenceNumber || meta?.itineraryName || 'itinerary',
+    day?.dayNumber ? `Day${day.dayNumber}` : '',
+    sv?.name || ''
+  ];
+  return safeNameOf(parts.filter(Boolean).join('-'));
 };
 
 /* Post-tour feedback form (completed stage). */
@@ -1095,7 +1308,44 @@ const cancellationNoticeEmail = (meta, pricingGroups, depositPct = DEPOSIT_PCT, 
 
 
 
-/* ─── Component ────────────────────────────────────────────────────────────── */
+/* One collapsible Finance block. Finance packs four dense panels behind a
+   single tab, so each one folds away behind a summary line that keeps its
+   title and purpose readable without scrolling past everything else. The open
+   state lives in the parent so a section stays open when the user visits
+   another tab and comes back. */
+const FinanceSection = ({ sectionId, title, summary, open, onToggle, children }) => {
+  const headerId = `finance-${sectionId}-header`;
+  const bodyId = `finance-${sectionId}-body`;
+  return (
+    <section className="builder-panel-card finance-section">
+      <h3 className="finance-section-head">
+        <button
+          type="button"
+          className="finance-section-toggle"
+          id={headerId}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={onToggle}
+        >
+          <span className="finance-section-labels">
+            <span className="finance-section-title">{title}</span>
+            {summary ? <span className="finance-section-summary">{summary}</span> : null}
+          </span>
+          <ChevronDown
+            className={`finance-section-chevron ${open ? 'is-open' : ''}`}
+            size={18}
+            aria-hidden="true"
+          />
+        </button>
+      </h3>
+      <div id={bodyId} role="region" aria-labelledby={headerId} hidden={!open} className="finance-section-body">
+        {children}
+      </div>
+    </section>
+  );
+};
+
+/* --- Component -------------------------------------------------------------- */
 
 export const ItineraryBuilder = () => {
   const navigate = useNavigate();
@@ -1115,7 +1365,7 @@ export const ItineraryBuilder = () => {
     numAdults: data?.numAdults || 0,
     numChildren: data?.numChildren || 0,
     agencyRef: data?.agencyRef || null,
-    status: data?.status || 'quotation',
+    status: normaliseStatus(data?.status),
     notes: '',
     tourType: data?.tourType || '',
     consultantName: data?.consultantName || ''
@@ -1129,14 +1379,38 @@ export const ItineraryBuilder = () => {
   const [bankAccounts, setBankAccounts] = useState([]);
   const [itineraryInvoices, setItineraryInvoices] = useState([]);
   const [itineraryReceipts, setItineraryReceipts] = useState([]);
+  const [itineraryCreditNotes, setItineraryCreditNotes] = useState([]);
   const [itineraryJournal, setItineraryJournal] = useState([]);
   const [openInvoiceId, setOpenInvoiceId] = useState(null);
+  /* Which Finance panels are unfolded. The statement and the ledger open
+     first because that is where a booking starts; the invoice and cost of
+     sales stay folded until they are needed. */
+  const [openFinance, setOpenFinance] = useState({
+    statement: true,
+    ledger: true,
+    invoice: false,
+    costOfSales: false
+  });
+  const toggleFinance = useCallback((sectionId) => {
+    setOpenFinance((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }));
+  }, []);
   const [issuingInvoice, setIssuingInvoice] = useState(false);
+  const financeSubmissionRef = useRef(false);
+  const [invoiceIssuePrompt, setInvoiceIssuePrompt] = useState(null);
+  const [overpaymentPrompt, setOverpaymentPrompt] = useState(null);
+  const [overpaymentAmount, setOverpaymentAmount] = useState('');
+  const [overpaymentReason, setOverpaymentReason] = useState('');
+  /* Payment capture. A client can pay an invoice in instalments, so the amount
+     is collected rather than assumed to be the full balance. */
+  const [paymentPrompt, setPaymentPrompt] = useState(null);
+  const [paymentForm, setPaymentForm] = useState({ amount: '', received_date: '', payment_method: 'EFT', payment_reference: '' });
   const [emailFormat, setEmailFormat] = useState('pdf');
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [pickerItems, setPickerItems] = useState([]);
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerPackages, setPickerPackages] = useState([]);
+  const [pickerPackagesLoading, setPickerPackagesLoading] = useState(false);
   const [categoryChips, setCategoryChips] = useState([]);
   const pickerSearchRef = useRef(null);
   const [currencyCode, setCurrencyCode] = useState('ZAR');
@@ -1144,6 +1418,7 @@ export const ItineraryBuilder = () => {
   const [currencySearch, setCurrencySearch] = useState('');
   const [days, setDaysRaw] = useState([]);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [expandedPackageRows, setExpandedPackageRows] = useState({});
   const [activeTab, setActiveTab] = useState('itinerary');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -1173,12 +1448,20 @@ export const ItineraryBuilder = () => {
     service: null
   });
   const [placementDraft, setPlacementDraft] = useState(null);
+  const [placementError, setPlacementError] = useState('');
   const [placementRepeat, setPlacementRepeat] = useState(false);
   const [placementRepeatCount, setPlacementRepeatCount] = useState(2);
   const [placementCopyDays, setPlacementCopyDays] = useState([]);
   const [placementOptional, setPlacementOptional] = useState(false);
+  const [placementSplit, setPlacementSplit] = useState(false);
+  const [placementDestinationSplit, setPlacementDestinationSplit] = useState(false);
   const [roomApplyPrompt, setRoomApplyPrompt] = useState(null);
   const [vehicleDraft, setVehicleDraft] = useState(null);
+  /* A per-night surcharge with nothing to attach to has no way to know how many
+     times it should repeat, so the operator is asked rather than it being
+     guessed at one. */
+  const [surchargeRepeatPrompt, setSurchargeRepeatPrompt] = useState(null);
+  const [surchargeRepeatCount, setSurchargeRepeatCount] = useState(1);
 
   const idSeq = useRef(0);
   const booted = useRef(false);
@@ -1191,6 +1474,14 @@ export const ItineraryBuilder = () => {
   const currencyObj = currencies.find((c) => (c.code || '').toUpperCase() === currencyCode.toUpperCase());
   const currencySymbol = currencyObj?.symbol || currencyCode;
   const paxCount = (Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0);
+  /* The trip's travel window, taken from the days that carry a date. Pricing
+     Protection is decided against these dates, so it has to be the real span
+     rather than the day a service happens to land on. */
+  const travelWindow = useMemo(() => {
+    const dated = days.map((d) => d.date).filter(Boolean).sort();
+    return { start: dated[0] || '', end: dated[dated.length - 1] || '' };
+  }, [days]);
+  const priceProtectionPercent = Math.max(0, Number(billing?.price_protection_percent) || 0);
   /* Company profile options for the supplier-facing travel documents. */
   const voucherOpts = {
     logo: billing?.logo_data_url || '',
@@ -1204,7 +1495,7 @@ export const ItineraryBuilder = () => {
   };
   const markupPct = Number(meta.client?.markup_percentage) || 0;
   const currentDay = days[selectedDayIndex] || null;
-  const stage = meta.status || 'quotation';
+  const stage = normaliseStatus(meta.status);
   const itineraryDocAllowed = stage === 'quotation' || stage === 'provisional';
   const isProvisional = stage === 'provisional';
   const isConfirmed = stage === 'confirmed';
@@ -1258,9 +1549,9 @@ export const ItineraryBuilder = () => {
     completedRef.current = isReadOnly;
   }, [isReadOnly]);
 
-  /* Terminal states only (Completed / Cancelled). Unlike the edit lock these
-     also stop operational work such as raising the stage invoice, which must
-     stay available while a booking is Provisional or Confirmed. */
+  /* Terminal states stop itinerary mutations and operational changes. Invoice
+     issuance is handled separately: completed bookings may still have balances
+     to invoice, while cancelled bookings may not. */
   const isTerminal = isCompleted || isCancelled;
   const terminalRef = useRef(isTerminal);
 
@@ -1304,7 +1595,7 @@ export const ItineraryBuilder = () => {
       (d.services || []).forEach((sv) => {
         /* Optional / alternative services are excluded from the client total. */
         if (sv.isOptional) return;
-        const line = (Number(sv.sellPP) || 0) * paxCount;
+        const line = (Number(sv.sellPP) || 0) * paxForService(sv, paxCount);
         t += line;
       });
     });
@@ -1318,7 +1609,7 @@ export const ItineraryBuilder = () => {
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
         if (sv.isOptional) return;
-        const line = (Number(sv.sellPP) || 0) * paxCount;
+        const line = (Number(sv.sellPP) || 0) * paxForService(sv, paxCount);
         const rate = numOr(sv.taxRate, defaultTaxRate);
         t += vatOfInclusive(line, rate);
       });
@@ -1326,34 +1617,41 @@ export const ItineraryBuilder = () => {
     return round2(t);
   }, [days, paxCount, defaultTaxRate]);
 
+  const selectedCurrencyTotal = useMemo(() => {
+    let total = 0;
+    days.forEach((day) => {
+      (day.services || []).forEach((service) => {
+        if (service.isOptional || (service.currencyCode || 'ZAR').toUpperCase() !== currencyCode.toUpperCase()) return;
+        total += (Number(service.sellPP) || 0) * paxForService(service, paxCount);
+      });
+    });
+    return round2(total);
+  }, [days, paxCount, currencyCode]);
+
   const itineraryCostTotal = useMemo(() => {
     let c = 0;
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
         if (sv.isOptional) return;
-        c += (Number(sv.buyPP) || 0) * paxCount;
+        c += (Number(sv.buyPP) || 0) * paxForService(sv, paxCount);
       });
     });
     return round2(c);
   }, [days, paxCount]);
 
-  /* ── Issued-invoice state for this itinerary + currency ──────────────────
-     A deposit invoice is raised while provisional; a final invoice once the
-     booking is confirmed. Only one live invoice per (type, currency) exists. */
-  const invoiceTypeForStage = isProvisional ? 'deposit' : 'final';
+  /* -- Issued-invoice state for this itinerary + currency ------------------ */
   const invoicesInCurrency = useMemo(
     () => itineraryInvoices.filter((inv) => (inv.currency_code || '').toUpperCase() === currencyCode.toUpperCase()),
     [itineraryInvoices, currencyCode]
   );
-  const depositInvoice = useMemo(
-    () => invoicesInCurrency.find((inv) => inv.invoice_type === 'deposit' && inv.status !== 'void') || null,
+  /* One invoice type now, so there is no deposit/final pair to pick between.
+     The invoice the booking is currently working against is the open one, and
+     the latest paid one is what a receipt would attach to. */
+  const openInvoice = useMemo(
+    () => invoicesInCurrency.find((inv) => inv.status !== 'void' && inv.status !== 'paid') || null,
     [invoicesInCurrency]
   );
-  const finalInvoice = useMemo(
-    () => invoicesInCurrency.find((inv) => inv.invoice_type === 'final' && inv.status !== 'void') || null,
-    [invoicesInCurrency]
-  );
-  const activeInvoice = invoiceTypeForStage === 'final' ? finalInvoice : depositInvoice;
+  const activeInvoice = openInvoice;
   /* Journal entries and receipts keyed by the document they belong to, so the
      Finance tab can hang both off the invoice that produced them instead of
      re-querying per invoice. */
@@ -1375,40 +1673,58 @@ export const ItineraryBuilder = () => {
     }
     return map;
   }, [itineraryReceipts]);
+  /* Net money held against an invoice: receipts less anything refunded back.
+     A refund is money that has left, so it belongs in the balance but is not
+     part of what has been received. */
+  const receivedTotalFor = useCallback(
+    (id) => netReceivedTotal(id, receiptsByInvoice.get(id) || []),
+    [receiptsByInvoice]
+  );
+  /* The most that may still be handed back on an invoice. */
+  const refundableFor = useCallback(
+    (id) => refundableTotal(id, receiptsByInvoice.get(id) || []),
+    [receiptsByInvoice]
+  );
+  const paymentInvoicesByCurrency = useMemo(() => {
+    const byCurrency = new Map();
+    itineraryInvoices.forEach((invoice) => {
+      if ((invoice.status || '') === 'void') return;
+      const invoiceOutstanding = invoiceBalance(invoice, itineraryReceipts);
+      const bookingOutstanding = bookingReceivableRemaining(
+        itineraryInvoices,
+        itineraryReceipts,
+        itineraryCreditNotes,
+        invoice.currency_code
+      );
+      const balance = round2(Math.min(invoiceOutstanding, bookingOutstanding));
+      const code = (invoice.currency_code || '').toUpperCase();
+      if (!code) return;
+      const current = byCurrency.get(code);
+      if (!current || balance > current.derivedBalance) {
+        byCurrency.set(code, { ...invoice, derivedBalance: balance });
+      }
+    });
+    return [...byCurrency.values()];
+  }, [itineraryInvoices, itineraryReceipts, itineraryCreditNotes]);
   /* Every entry for the itinerary that is not tied to one invoice (cost of
      sales), shown as its own group at the bottom of the tab. */
   const standaloneJournal = useMemo(
     () => itineraryJournal.filter((e) => !e.source_id || e.source_type === 'cost_of_sales'),
     [itineraryJournal]
   );
-  const paidDepositTotal = useMemo(
-    () => round2(invoicesInCurrency
-      .filter((inv) => inv.invoice_type === 'deposit' && inv.status === 'paid')
-      .reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0)),
-    [invoicesInCurrency]
-  );
-  const depositRequested = round2(paxBalanceTotal * (depositPct / 100));
-  const balanceAfterDeposit = round2(paxBalanceTotal - depositRequested);
-  const depositPaid = depositInvoice?.status === 'paid' || paidDepositTotal > 0;
-  const finalPaid = finalInvoice?.status === 'paid';
-  const depositBalanceRemaining = depositPaid ? round2(paxBalanceTotal - paidDepositTotal) : balanceAfterDeposit;
-  const finalOutstanding = finalInvoice
-    ? round2(effectiveBalance(finalInvoice))
-    : round2(paxBalanceTotal - paidDepositTotal);
-  const currencyReceipts = useMemo(
-    () => itineraryReceipts.filter((r) => (r.currency_code || '').toUpperCase() === currencyCode.toUpperCase()),
-    [itineraryReceipts, currencyCode]
-  );
+  const outstanding = round2(Math.max(0,
+    selectedCurrencyTotal - netBilled(itineraryInvoices, itineraryCreditNotes, currencyCode)
+  ));
 
-  /* ── Stage-based document unlocks ──────────────────────────────────────
+  /* -- Stage-based document unlocks --------------------------------------
      Each lifecycle stage only shows the tabs the CSV lifecycle defines:
-     quotation / pending → planning tabs only; provisional adds the deposit
+     quotation / pending ? planning tabs only; provisional adds the deposit
      invoice + supplier service request; confirmed (and in progress) release
      the full travel pack; in progress adds operational briefs; completed
      shows post-tour closure; cancelled shows the cancellation module and
      revokes everything else. */
   /* Which tabs exist at the current stage. Itinerary / Travelers / Pricing /
-     Notes are available at every stage; the rest are stage-gated.
+     Notes are available at every stage; Finance and the rest are stage-gated.
      This is the SINGLE source of truth for stage gating — the tab bar, the
      panels and the fallback below all read it, so a gate can never disagree
      with itself.
@@ -1421,18 +1737,15 @@ export const ItineraryBuilder = () => {
   const visibleTabIds = useMemo(() => {
     /* 'itinerary' stays first and is never gated: it holds the day-by-day, and
        every stage must be able to see and edit its days. */
-    const ids = ['itinerary', 'client', 'pricing', 'notes', 'finance'];
-    /* Finance is deliberately NOT status-gated. A deposit invoice is a real
-       financial document at the provisional stage, and recognition follows the
-       invoice rather than the itinerary lifecycle, so its journal has to be
-       visible wherever the invoice can be issued. */
+    const ids = ['itinerary', 'client', 'pricing', 'notes'];
+    if (stage !== 'quotation') ids.push('finance');
     if (isProvisional) ids.push('service-request');
     if (isConfirmed || isInProgress) ids.push('travel-docs', 'vouchers');
     if (isInProgress) ids.push('operations');
     if (isCompleted) ids.push('post-tour');
     if (isCancelled) ids.push('cancellation');
     return ids;
-  }, [isProvisional, isConfirmed, isInProgress, isCompleted, isCancelled]);
+  }, [stage, isProvisional, isConfirmed, isInProgress, isCompleted, isCancelled]);
   const tab = visibleTabIds.includes(activeTab) ? activeTab : 'itinerary';
 
   // Navigation-guard dirty tracking: compare the current serialised working
@@ -1500,17 +1813,38 @@ export const ItineraryBuilder = () => {
     return [...new Set((data || []).map((r) => r.item_id).filter(Boolean))];
   }, []);
 
+  /* PostgREST fails the entire select when any one column in the list is absent
+     from the database, so a column added for a feature whose migration has not
+     been applied would return zero rows rather than an empty result set. The
+     query is retried against the long-standing columns, and the reduced list is
+     remembered so later loads go straight to the working select. Surfaces the
+     message instead of silently rendering an empty list. */
+  const libraryFieldsRef = useRef(LIBRARY_ITEM_LIGHT_FIELDS);
+
+  const selectLibraryItems = useCallback(async (runQuery) => {
+    let res = await runQuery(libraryFieldsRef.current);
+    if (res?.error && libraryFieldsRef.current !== LIBRARY_ITEM_BASE_FIELDS) {
+      libraryFieldsRef.current = LIBRARY_ITEM_BASE_FIELDS;
+      res = await runQuery(LIBRARY_ITEM_BASE_FIELDS);
+    }
+    if (res?.error) {
+      showToast(`Library items could not be loaded: ${res.error.message}`, 'error');
+      return [];
+    }
+    return res?.data || [];
+  }, [showToast]);
+
   const loadLibraryItemsByIds = useCallback(async (cid, ids) => {
     if (!cid || !ids || ids.length === 0) {
       setLibraryItems([]);
       return;
     }
     try {
-      const { data: items } = await supabase
+      const items = await selectLibraryItems((fields) => supabase
         .from('library_items')
-        .select(LIBRARY_ITEM_LIGHT_FIELDS)
-        .in('id', ids);
-      const itemIds = (items || []).map((i) => i.id);
+        .select(fields)
+        .in('id', ids));
+      const itemIds = items.map((i) => i.id);
       const { data: ratesData } = itemIds.length
         ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
         : { data: [] };
@@ -1526,15 +1860,15 @@ export const ItineraryBuilder = () => {
           carRates = [];
         }
       }
-      const supIds = [...new Set((items || []).map((i) => i.supplier_id).filter(Boolean))];
+      const supIds = [...new Set(items.map((i) => i.supplier_id).filter(Boolean))];
       const { data: suppliersData } = supIds.length
         ? await supabase.from('suppliers').select('id, name, email, country, province_state, city, city_location').in('id', supIds)
         : { data: [] };
-      setLibraryItems(buildMergedItems(items || [], ratesData || [], carRates, suppliersData || []));
+      setLibraryItems(buildMergedItems(items, ratesData || [], carRates, suppliersData || []));
     } catch {
       showToast('Failed to load saved library items', 'error');
     }
-  }, [showToast]);
+  }, [selectLibraryItems, showToast]);
 
   // Sidebar picker: on-demand server-side search. Bounded to a page of results
   // so the biggest cost (all rates for a whole company catalogue) never runs.
@@ -1550,16 +1884,18 @@ export const ItineraryBuilder = () => {
     try {
       const safeTerm = term.replace(/[,()]/g, ' ').trim();
       const esc = (s) => s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-      let q = supabase
-        .from('library_items')
-        .select(LIBRARY_ITEM_LIGHT_FIELDS)
-        .eq('company_id', companyId)
-        .order('name', { ascending: true })
-        .limit(30);
-      if (categoryFilter !== '') q = q.eq('category', categoryFilter);
-      if (safeTerm) q = q.or(`name.ilike.%${esc(safeTerm)}%,description.ilike.%${esc(safeTerm)}%`);
-      const { data: items } = await q;
-      const itemIds = (items || []).map((i) => i.id);
+      const items = await selectLibraryItems((fields) => {
+        let q = supabase
+          .from('library_items')
+          .select(fields)
+          .eq('company_id', companyId)
+          .order('name', { ascending: true })
+          .limit(30);
+        if (categoryFilter !== '') q = q.eq('category', categoryFilter);
+        if (safeTerm) q = q.or(`name.ilike.%${esc(safeTerm)}%,description.ilike.%${esc(safeTerm)}%`);
+        return q;
+      });
+      const itemIds = items.map((i) => i.id);
       const { data: ratesData } = itemIds.length
         ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
         : { data: [] };
@@ -1575,11 +1911,11 @@ export const ItineraryBuilder = () => {
           carRates = [];
         }
       }
-      const supIds = [...new Set((items || []).map((i) => i.supplier_id).filter(Boolean))];
+      const supIds = [...new Set(items.map((i) => i.supplier_id).filter(Boolean))];
       const { data: suppliersData } = supIds.length
         ? await supabase.from('suppliers').select('id, name, email, country, province_state, city, city_location').in('id', supIds)
         : { data: [] };
-      const merged = buildMergedItems(items || [], ratesData || [], carRates, suppliersData || []);
+      const merged = buildMergedItems(items, ratesData || [], carRates, suppliersData || []);
       setPickerItems(merged);
       // Keep looked-up items resolvable for drag/drop, room modal and tax checks.
       setLibraryItems((prev) => {
@@ -1592,7 +1928,7 @@ export const ItineraryBuilder = () => {
     } finally {
       setPickerLoading(false);
     }
-  }, [companyId, searchTerm, categoryFilter, showToast]);
+  }, [companyId, searchTerm, categoryFilter, selectLibraryItems, showToast]);
 
   useEffect(() => {
     if (pickerSearchRef.current) clearTimeout(pickerSearchRef.current);
@@ -1601,6 +1937,60 @@ export const ItineraryBuilder = () => {
       if (pickerSearchRef.current) clearTimeout(pickerSearchRef.current);
     };
   }, [searchTerm, categoryFilter, fetchPickerItems]);
+
+  const fetchPickerPackages = useCallback(async () => {
+    if (!companyId || (categoryFilter !== '' && categoryFilter !== 'Packages')) {
+      setPickerPackages([]);
+      return;
+    }
+    setPickerPackagesLoading(true);
+    try {
+      const term = searchTerm.trim().replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+      let query = supabase.from('packages')
+        .select('id, name, description, cover_image_url, default_markup_percentage')
+        .eq('company_id', companyId)
+        .order('name', { ascending: true })
+        .limit(30);
+      if (term) query = query.or(`name.ilike.%${term}%,description.ilike.%${term}%`);
+      const { data, error } = await query;
+      if (error) throw error;
+      const packages = data || [];
+      const packageIds = packages.map((pkg) => pkg.id);
+      const { data: packageDays, error: daysError } = packageIds.length
+        ? await supabase.from('package_days').select('id, package_id, day_number, notes').in('package_id', packageIds).order('day_number')
+        : { data: [], error: null };
+      if (daysError) throw daysError;
+      const dayIds = (packageDays || []).map((day) => day.id);
+      const { data: packageServices, error: servicesError } = dayIds.length
+        ? await supabase.from('package_day_items').select('package_day_id, item_name, category, supplier_name, currency_code, rate_basis, unit_cost, unit_price, quantity, notes, is_included').in('package_day_id', dayIds).order('sort_order')
+        : { data: [], error: null };
+      if (servicesError) throw servicesError;
+      const servicesByDay = new Map();
+      (packageServices || []).forEach((service) => servicesByDay.set(service.package_day_id, [...(servicesByDay.get(service.package_day_id) || []), service]));
+      const daysByPackage = new Map();
+      (packageDays || []).forEach((day) => daysByPackage.set(day.package_id, [...(daysByPackage.get(day.package_id) || []), {
+        day_number: day.day_number, notes: day.notes, services: servicesByDay.get(day.id) || []
+      }]));
+      setPickerPackages(packages.map((pkg) => ({
+        ...pkg,
+        package_snapshot: {
+          id: pkg.id, name: pkg.name, description: pkg.description,
+          default_markup_percentage: pkg.default_markup_percentage,
+          days: daysByPackage.get(pkg.id) || []
+        }
+      })));
+    } catch (error) {
+      setPickerPackages([]);
+      showToast(`Could not load packages for the itinerary builder: ${error.message}`, 'error');
+    } finally {
+      setPickerPackagesLoading(false);
+    }
+  }, [companyId, categoryFilter, searchTerm, showToast]);
+
+  useEffect(() => {
+    const timer = setTimeout(fetchPickerPackages, 300);
+    return () => clearTimeout(timer);
+  }, [fetchPickerPackages]);
 
   const initDaysFromRange = useCallback(() => {
     const count = daysInRange(meta.travelStart, meta.travelEnd);
@@ -1644,7 +2034,7 @@ export const ItineraryBuilder = () => {
           referenceNumber: it.reference_number || prev.referenceNumber,
           travelStart: toISODate(it.travel_start_date) || prev.travelStart,
           travelEnd: toISODate(it.travel_end_date) || prev.travelEnd,
-          status: it.status || prev.status,
+          status: normaliseStatus(it.status),
           notes: it.notes || '',
           /* Travellers must be reloaded from the persisted row too. They are only
              ever entered on the Client form, so they are not in the route state on
@@ -1670,24 +2060,31 @@ export const ItineraryBuilder = () => {
           date: toISODate(rd.day_date) || addDaysToDate(meta.travelStart, di),
           notes: rd.notes || '',
           services: (rd.itinerary_day_items || []).map((ii) => {
-            const buyPP = Number(ii.unit_cost) || 0;
             const mRaw = Number(ii.markup_percentage);
             const m = Number.isFinite(mRaw) ? mRaw : (Number(meta.client?.markup_percentage) || 0);
+            const pricing = storedServicePricing(
+              { ...ii, category: ii.category || '', room_allocations: ii.room_allocations },
+              (Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0),
+              m
+            );
             const ccy = ii.currency_code || 'ZAR';
             const taxed = taxAppliesForCurrency(ccy);
             return {
               key: nextId(),
+              dbId: ii.id || null,
               itemId: ii.item_id || null,
+              packageId: ii.source_package_id || null,
+              packageSnapshot: ii.package_snapshot || null,
               supplierId: ii.supplier_id || null,
               name: ii.item_name || '',
               category: ii.category || '',
               supplierName: ii.supplier_name || '',
               currencyCode: ccy,
               basis: ii.rate_basis || 'per_person',
-              buyPP,
+              buyPP: pricing.buyPP,
               markup: m,
-              sellPP: round2(buyPP * (1 + m / 100)),
-              pax: Number(ii.pax) || ((Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0)),
+              sellPP: pricing.sellPP,
+              pax: pricing.pax,
               quantity: Number(ii.quantity) || 1,
               descOverride: ii.description_override || '',
               taxRate: taxed ? (Number(ii.tax_rate) > 0 ? numOr(ii.tax_rate, defaultTaxRate) : defaultTaxRate) : 0,
@@ -1700,9 +2097,29 @@ export const ItineraryBuilder = () => {
               vehicleType: ii.vehicle_type || '',
               capacity: ii.capacity !== '' && ii.capacity !== null && ii.capacity !== undefined ? Number(ii.capacity) : '',
               roomType: ii.room_type || '',
+              destinationArea: ii.destination_area || '',
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
               roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
-              repeatGroupId: ii.repeat_group_id || null,
+repeatGroupId: ii.repeat_group_id || null,
+              splitGroupId: ii.split_group_id || null,
+              /* Surcharge attributes survive the reload, so a passed-through
+                 fee stays excluded from the total and a per-night fee keeps
+                 its repeat count instead of silently reverting to one. */
+              surchargeType: ii.surcharge_type || '',
+              surchargeChargeBasis: ii.surcharge_charge_basis || '',
+              surchargeUnitBasis: ii.surcharge_unit_basis || '',
+              surchargeChargeable: ii.surcharge_chargeable === null || ii.surcharge_chargeable === undefined
+                ? true
+                : ii.surcharge_chargeable === true,
+              surchargeRepeats: Math.max(1, parseInt(ii.surcharge_repeats, 10) || 1),
+              surchargePassedThrough: ii.surcharge_passed_through === true,
+              surchargeReference: Number(ii.surcharge_reference) || 0,
+              linkedItemId: ii.linked_item_id || null,
+              priceProtectionPercent: Number(ii.price_protection_percent) || 0,
+              protectedSeasonName: '',
+              supplierPaid: ii.supplier_paid === true,
+              supplierPaidAt: ii.supplier_paid_at || '',
+              supplierPaidRef: ii.supplier_paid_ref || '',
               isOptional: ii.is_included === false,
               mealPlan: ii.meal_plan || '',
               checkInTime: ii.check_in_time || '',
@@ -1824,27 +2241,42 @@ export const ItineraryBuilder = () => {
     setItineraryJournal(entryRows.map((e) => ({ ...e, lines: lineRows.filter((l) => l.entry_id === e.id) })));
 
     const ids = rows.map((r) => r.id);
-    if (ids.length === 0) { setItineraryReceipts([]); return; }
-    const { data: receipts } = await supabase
-      .from('invoice_receipts')
-      .select('*')
-      .in('invoice_id', ids)
-      .order('created_at', { ascending: false });
-    setItineraryReceipts(receipts || []);
+    if (ids.length === 0) { setItineraryReceipts([]); setItineraryCreditNotes([]); return; }
+    const [receiptsResult, creditsResult] = await Promise.all([
+      supabase
+        .from('invoice_receipts')
+        .select('*')
+        .in('invoice_id', ids)
+        .order('created_at', { ascending: false }),
+      /* Credit notes are what reduce an invoice without any money moving, so
+         the balance on this tab has to see them. */
+      supabase
+        .from('credit_notes')
+        .select('*')
+        .in('invoice_id', ids)
+        .order('created_at', { ascending: false })
+    ]);
+    if (receiptsResult.error) throw receiptsResult.error;
+    if (creditsResult.error) throw creditsResult.error;
+    setItineraryReceipts(receiptsResult.data || []);
+    setItineraryCreditNotes(creditsResult.data || []);
   }, [companyId, meta.itineraryId]);
 
   useEffect(() => {
     let cancelled = false;
-    loadItineraryInvoices().catch(() => {
-      if (!cancelled) { setItineraryInvoices([]); setItineraryReceipts([]); setItineraryJournal([]); }
+    loadItineraryInvoices().catch((error) => {
+      if (!cancelled) {
+        showToast(`Could not load itinerary finance records: ${error.message}`, 'error');
+      }
     });
     return () => { cancelled = true; };
-  }, [loadItineraryInvoices]);
+  }, [loadItineraryInvoices, showToast]);
 
-  /* ── Derived lists ─────────────────────────────────────────────────────── */
+  /* -- Derived lists ------------------------------------------------------- */
 
   const categoryOptions = useMemo(() => {
     const set = new Set(categoryChips.length ? categoryChips : DEFAULT_CATEGORY_CHIPS);
+    set.add('Packages');
     libraryItems.forEach((it) => {
       if (it.category) set.add(it.category);
     });
@@ -1882,8 +2314,9 @@ export const ItineraryBuilder = () => {
       (d.services || []).forEach((sv) => {
         const code = sv.currencyCode || 'ZAR';
         if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {}, services: [], optBuy: 0, optSell: 0, optTax: 0, optTaxByLabel: {}, optionalServices: [] };
-        const line = (Number(sv.sellPP) || 0) * paxCount;
-        const buyLine = (Number(sv.buyPP) || 0) * paxCount;
+        const servicePax = paxForService(sv, paxCount);
+        const line = (Number(sv.sellPP) || 0) * servicePax;
+        const buyLine = (Number(sv.buyPP) || 0) * servicePax;
         const rate = numOr(sv.taxRate, defaultTaxRate);
         const taxAmt = vatOfInclusive(line, rate);
         const taxInAmt = vatOfInclusive(buyLine, rate);
@@ -1993,7 +2426,7 @@ export const ItineraryBuilder = () => {
     });
   }, [days, paxCount, currencies, defaultTaxRate]);
 
-  /* ── Day / pricing helpers (called from handlers, not render) ─────────── */
+  /* -- Day / pricing helpers (called from handlers, not render) ----------- */
 
   const normalizeDays = useCallback((arr) => arr.map((d, i) => ({
     ...d,
@@ -2019,12 +2452,13 @@ export const ItineraryBuilder = () => {
     let taxOut = 0;
     let taxIn = 0;
     (day.services || []).forEach((sv) => {
-      const mergeLine = (Number(sv.sellPP) || 0) * paxCount;
+      const servicePax = paxForService(sv, paxCount);
+      const mergeLine = (Number(sv.sellPP) || 0) * servicePax;
       const rate = numOr(sv.taxRate, defaultTaxRate);
-      buy += (Number(sv.buyPP) || 0) * paxCount;
+      buy += (Number(sv.buyPP) || 0) * servicePax;
       sell += mergeLine;
       taxOut += vatOfInclusive(mergeLine, rate);
-      taxIn += vatOfInclusive((Number(sv.buyPP) || 0) * paxCount, rate);
+      taxIn += vatOfInclusive((Number(sv.buyPP) || 0) * servicePax, rate);
     });
     return {
       buy: round2(buy),
@@ -2039,12 +2473,59 @@ export const ItineraryBuilder = () => {
 
   const createService = useCallback((dayIndex, item, via, options = {}) => {
     if (completedRef.current) return;
-    const basis = basisOfItem(item, currencyCode);
-    const buyPP = round2(contractPaxRate(item, currencyCode, paxCount));
+
+    /* Pricing Protection: pick the season that actually covers the trip, block
+       an unpriceable item outright, and uplift a stale season by the tenant's
+       protection percentage. Done before anything is written so a blocked item
+       never lands on the day and has to be undone. */
+    const season = resolveSeasonForTravel({
+      rates: item.item_rates || [],
+      currencyCode,
+      startDate: travelWindow.start,
+      endDate: travelWindow.end,
+      protectionPercent: priceProtectionPercent
+    });
+    if (!season.canAdd) {
+      showToast(`"${item.name}" cannot be added: ${season.reason}`, 'error');
+      return;
+    }
+    const protectedPct = season.protectionPercent || 0;
+
+    /* A protected rate is uplifted before the per-person figure is derived, so
+       the markup, tax and totals on the line all build on the protected price
+       rather than needing a separate adjustment later. */
+    const effectiveRates = protectedPct
+      ? (item.item_rates || []).map((r) => (r.id === season.rate?.id ? applyProtectionToRate(r, protectedPct) : r))
+      : item.item_rates || [];
+    /* Narrow to the ONE season that prices this trip.
+
+       contractPaxRate() -> rateForItem() takes the first row matching the
+       currency, so handing it the whole matrix prices the line from whichever
+       season the database returned first. The sidebar avoided this only
+       because it built its own single-row item. Resolving here once means the
+       line total, the room-allocation dialog and anything copied afterwards
+       all read the same season. */
+    const seasonalRates = season.rate
+      ? ([effectiveRates.find((r) => r.id === season.rate.id)
+        || effectiveRates.find((r) => r.season_name && r.season_name === season.rate.season_name)
+        || applyProtectionToRate(season.rate, protectedPct)])
+      : effectiveRates;
+    const pricedItem = { ...item, item_rates: seasonalRates };
+    /* The single protected row, used directly by the surcharge pricing path
+       below. */
+    const pricedRate = seasonalRates[0] || season.rate;
+
+    /* Derived from the RESOLVED season, not the raw item: rate_basis is a
+       property of the rate row, so a matrix that prices summer per-person and
+       winter per-room must bill this trip on the row that actually covers it. */
+    const basis = basisOfItem(pricedItem, currencyCode);
+
+    const buyPP = round2(contractPaxRate(pricedItem, currencyCode, paxCount));
     const markup = Number(markupPct) || 0;
     const cat = item.category || '';
     const tourCat = /transfers?|tours?|activities?|excursions?/i.test(cat) || cat === 'Flights / Charter';
     const accomCat = /accommodation/i.test(cat);
+    const surcharge = isSurchargeItem(item);
     /* Library items keep the vehicle in middle_category (transfers / tours) and
        the pax capacity in max_occupancy; meal plans live on the per-season
        item_rates rows with an accommodation default of "Bed & Breakfast". */
@@ -2080,6 +2561,8 @@ export const ItineraryBuilder = () => {
       vehicleType: item.vehicleType || item.vehicle_type || (tourCat ? item.sub_category : ''),
       capacity: numOrBlank(item.capacity ?? libMaxOcc),
       roomType: item.roomType || item.room_type || '',
+      destinationRegion: item.destination_region || item.destinationRegion || item.location || '',
+      destinationArea: item.destination_area || item.destinationArea || '',
       maxOccupancy: numOrBlank(libMaxOcc),
       mealPlan: item.mealPlan || item.meal_plan || (item.item_rates || []).find((r) => r.meal_plan)?.meal_plan || (accomCat ? 'Bed & Breakfast' : ''),
       checkInTime: item.checkInTime || item.check_in_time || '',
@@ -2087,37 +2570,228 @@ export const ItineraryBuilder = () => {
       startTime: item.startTime || item.start_time || '',
       endTime: item.endTime || item.end_time || '',
       notes: '',
-      item_rates: item.item_rates || [],
+      /* Only the season this trip is priced from. Storing the whole matrix here
+         means every later reader (the room-allocation dialog, the per-room
+         breakdown, a copied line) has to re-resolve the season itself, and the
+         ones that forgot priced the line from whichever row came back first. */
+      item_rates: pricedItem.item_rates,
       isOptional: !!options.isOptional,
-      repeatGroupId: options.repeatGroupId || null
+      repeatGroupId: options.repeatGroupId || null,
+      /* Properties that together house one party on one night. Set from the
+         "group split" choice in the placement prompt; alternatives never get
+         one because they are not part of the party. */
+      splitGroupId: options.splitGroupId || null,
+      /* Kept on the line so the protected price stays explainable after a
+         reload: the raw season, what was applied and why. */
+      priceProtectionPercent: protectedPct,
+      protectedSeasonName: protectedPct ? season.seasonName : '',
+      /* Which matrix priced this line, so a dialog or an export can say so. */
+      seasonName: season.seasonName || '',
+      seasonValidFrom: season.validFrom || '',
+      seasonValidTo: season.validTo || ''
     };
+
+    /* Surcharge Fees are priced on their own terms, not as per-person
+       services: the fee is a per-person / per-adult / per-child / per-unit /
+       per-vehicle figure, repeated for the basis, and a non-chargeable fee is
+       the supplier's figure shown for reference with no markup and no money
+       added. The totals elsewhere are always buyPP x paxCount, so the whole
+       figure is folded into buyPP and the repeat count rides on quantity. */
+    if (surcharge) {
+      const chargeable = isSurchargeChargeable(item);
+      const repeats = Math.max(1, parseInt(options.surchargeRepeats, 10)
+        || surchargeRepeats({ item, nights: options.surchargeNights ?? 1 }));
+      const { unitBasis, total: buyTotal } = surchargeBuyTotal({
+        /* The protected rate, not the raw one: the fee belongs to the same
+           season as the rest of the line, so an outdated season that needed an
+           uplift has to uplift the fee too. */
+        rate: pricedRate,
+        item,
+        paxCount,
+        childCount: Number(meta.numChildren) || 0,
+        nights: options.surchargeNights ?? 1
+      });
+      const priced = surchargePricing({ buyTotal, markupPercent: markup, chargeable });
+      svc.quantity = repeats;
+      svc.basis = unitBasis === 'per_person' ? 'per_person' : unitBasis;
+      svc.buyPP = paxCount > 0 ? round2(priced.buy / paxCount) : round2(priced.buy);
+      svc.sellPP = paxCount > 0 ? round2(priced.sell / paxCount) : round2(priced.sell);
+      svc.surchargeType = surchargeTypeOf(item);
+      svc.surchargeChargeBasis = surchargeBasisOf(item);
+      svc.surchargeUnitBasis = unitBasis;
+      svc.surchargeChargeable = chargeable;
+      svc.surchargePassedThrough = priced.passedThrough;
+      svc.surchargeReference = round2(priced.reference || 0);
+      svc.surchargeRepeats = repeats;
+      svc.linkedItemId = surchargeLinkId(item);
+      svc.notes = priced.passedThrough
+        ? 'Not chargeable — supplier figure shown for reference only, excluded from the total.'
+        : '';
+    }
 
     setDays((prev) => prev.map((d, i) => (
       i === dayIndex ? { ...d, services: [...d.services, svc] } : d
     )));
     const dayLabel = days[dayIndex] ? `Day ${days[dayIndex].dayNumber}` : 'the selected day';
-    showToast(`${via === 'double-click' ? 'Added' : 'Dropped'} "${item.name}" into ${dayLabel}`, 'success');
+    const added = `${via === 'double-click' ? 'Added' : 'Dropped'} "${item.name}" into ${dayLabel}`;
+    if (protectedPct) {
+      /* Protection changes the money on the line, so it is stated rather than
+         left for the operator to infer from a total. */
+      showToast(
+        `${added} — Pricing Protection applied: ${protectedPct}% added to the ${season.seasonName || 'previous'} season because no season covers ${travelWindow.start} - ${travelWindow.end}.`,
+        'warning'
+      );
+    } else if (season.status === 'ok' && season.reason) {
+      showToast(`${added} — ${season.reason}`, 'warning');
+    } else {
+      showToast(added, 'success');
+    }
+
+    /* A surcharged service comes with its accommodation rather than on its own,
+       so the two always land on the same day. A per-night fee that is not
+       linked to anything cannot work out its own repeat count, so ask. */
+    if (surcharge && !options.suppressSurchargeFollowUps) {
+      if (needsRepeatPrompt(item) && !options.surchargeRepeats) {
+        setSurchargeRepeatPrompt({
+          isOpen: true,
+          dayIndex,
+          item,
+          nights: options.surchargeNights ?? 1,
+          via
+        });
+      }
+    }
 
     /* An alternative room is only one of the options being offered, so there is
-       nothing to allocate to it — the traveller allocation modal is skipped. */
+       nothing to allocate to it — the traveller allocation modal is skipped.
+
+       This is the path that fires the moment an item is DROPPED onto a day, and
+       it must hand the dialog the same season-resolved matrix as
+       openRoomAllocationModal does. Passing the raw `item` here gave the dialog
+       every season at once, so getRateRow() priced the room from whichever row
+       the database returned first — a drop quoted Winter while the sidebar and
+       the allocate button both quoted Summer. */
     if (accomCat && !options.suppressRoomModal && !options.isOptional) {
       setRoomModalState({
         isOpen: true,
         dayIndex,
         serviceKey: svc.key,
-        item,
+        item: buildRoomModalItem({ base: item, service: svc, modalRates: seasonalRates, season }),
         service: svc
       });
     }
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays ]);
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow.start, travelWindow.end, priceProtectionPercent, meta.numChildren, setSurchargeRepeatPrompt]);
+
+  /* The unlinked per-night fee was added optimistically at a repeat count of 1
+     because nothing was known at the time; once the operator answers, the line
+     that was just added is re-priced rather than a second line being added, so
+     the day never ends up with the fee counted twice. */
+  const applySurchargeRepeatCount = useCallback(() => {
+    const prompt = surchargeRepeatPrompt;
+    const repeats = Math.max(1, surchargeRepeatCount);
+    setSurchargeRepeatPrompt(null);
+    setSurchargeRepeatCount(1);
+    if (!prompt) return;
+
+    const dayIndex = prompt.dayIndex;
+    const day = days[dayIndex];
+    if (!day) return;
+    /* The last line on the day is the one just created. */
+    const target = [...day.services].reverse().find((s) => s.itemId === prompt.item.id);
+    if (!target) return;
+
+    const item = libraryItems.find((li) => li.id === prompt.item.id) || prompt.item;
+    const season = resolveSeasonForTravel({
+      rates: item.item_rates || [],
+      currencyCode,
+      startDate: travelWindow.start,
+      endDate: travelWindow.end,
+      protectionPercent: priceProtectionPercent
+    });
+    const markup = Number(markupPct) || 0;
+    const chargeable = isSurchargeChargeable(item);
+    const { total: buyTotal } = surchargeBuyTotal({
+      rate: applyProtectionToRate(season.rate, season.protectionPercent || 0),
+      item,
+      paxCount,
+      childCount: Number(meta.numChildren) || 0,
+      nights: repeats
+    });
+    const priced = surchargePricing({ buyTotal, markupPercent: markup, chargeable });
+
+    setDays((prev) => prev.map((d, i) => (
+      i === dayIndex
+        ? {
+          ...d,
+          services: d.services.map((s) => (s.key === target.key
+            ? {
+              ...s,
+              quantity: repeats,
+              buyPP: paxCount > 0 ? round2(priced.buy / paxCount) : round2(priced.buy),
+              sellPP: paxCount > 0 ? round2(priced.sell / paxCount) : round2(priced.sell),
+              surchargeRepeats: repeats,
+              surchargePassedThrough: priced.passedThrough
+            }
+            : s))
+        }
+        : d
+    )));
+    showToast(
+      `"${item.name}" priced for ${repeats} night${repeats === 1 ? '' : 's'}${priced.passedThrough ? ' — not chargeable, excluded from the total' : ''}.`,
+      'success'
+    );
+  }, [surchargeRepeatPrompt, surchargeRepeatCount, days, libraryItems, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, markupPct, paxCount, meta.numChildren, setDays, showToast]);
+
+  /* Every surcharge linked to this accommodation, added as its own service line.
+     Each occurrence is one line priced for exactly one charge, and the number of
+     occurrences is what decides the total:
+       - a once-off fee appears once, on the first night the property is booked,
+         because the supplier charges it once for the whole booking;
+       - a per-night fee appears on every night, one charge each.
+     Carrying the full night count on every one of the nights instead would bill
+     N nights twice over (N lines x N charges), and adding the once-off fee to
+     each night would bill it N times. */
+  const addLinkedSurcharges = useCallback((accommodationItem, dayIndices = []) => {
+    const linked = libraryItems.filter((li) => isSurchargeItem(li) && surchargeLinkId(li) === accommodationItem?.id);
+    if (!linked.length || !dayIndices.length) return;
+    const summary = [];
+    linked.forEach((feeItem) => {
+      const perNight = surchargeBasisOf(feeItem) === 'per_night';
+      const occurrenceDays = perNight ? dayIndices : [dayIndices[0]];
+      occurrenceDays.forEach((dayIndex) => {
+        createService(dayIndex, feeItem, 'copy', {
+          suppressRoomModal: true,
+          suppressSurchargeFollowUps: true,
+          /* Every line is a single occurrence, so the per-night count is carried
+             by the number of lines rather than by a multiplier on each of them.
+             The operator is never prompted: a linked fee knows its own count. */
+          surchargeRepeats: 1,
+          surchargeNights: 1
+        });
+      });
+      summary.push(`${feeItem.name}${perNight ? ` x${occurrenceDays.length}` : ''}`);
+    });
+    if (summary.length) {
+      showToast(
+        `Added with ${accommodationItem?.name || 'the accommodation'}: ${summary.join(', ')}.`,
+        'success'
+      );
+    }
+  }, [libraryItems, createService, showToast]);
 
   const openPlacementPrompt = useCallback((dayIndex, item, via) => {
     setPlacementDraft({ dayIndex, item, via });
+    setPlacementError('');
+    setPlacementDestinationSplit(false);
     setPlacementRepeat(false);
     setPlacementRepeatCount(Math.min(2, Math.max(1, days.length - dayIndex)));
     setPlacementCopyDays([]);
-    setPlacementOptional(false);
-  }, [days.length]);
+    const alreadyHasIncludedAccommodation = (days[dayIndex]?.services || []).some(
+      (service) => /accommodation/i.test(service.category || '') && !service.isOptional
+    );
+    setPlacementOptional(isAccommodationItem(item) && alreadyHasIncludedAccommodation);
+    setPlacementSplit(false);
+  }, [days]);
 
   const isVehicleServiceItem = useCallback((item) => {
     const category = item?.category || '';
@@ -2179,6 +2853,83 @@ export const ItineraryBuilder = () => {
     createService(dayIndex, item, via);
   }, [createService, isVehicleServiceItem, openPlacementPrompt, openVehiclePrompt]);
 
+  const addPackageToDay = useCallback((dayIndex, pkg) => {
+    if (completedRef.current || isReadOnly || !days[dayIndex]) return;
+    const taxApplies = taxAppliesForCurrency(currencyCode);
+    // The itinerary owns a detached copy of the reusable package contents.
+    // Editing this copy must never mutate the saved package in the Packages menu.
+    const packageSnapshot = pkg.package_snapshot
+      ? JSON.parse(JSON.stringify(pkg.package_snapshot))
+      : { id: pkg.id, name: pkg.name, description: pkg.description || '', days: [] };
+    const snapshotServices = (packageSnapshot.days || []).flatMap((day) => day.services || []);
+    const includedServices = snapshotServices.filter((service) => service.is_included !== false);
+    const packageCurrencies = [...new Set(includedServices.map((service) => service.currency_code || 'ZAR'))];
+    const packageCurrency = packageCurrencies.includes(currencyCode) ? currencyCode : packageCurrencies[0] || currencyCode;
+    const packageCost = round2(snapshotServices
+      .filter((service) => service.is_included !== false && (service.currency_code || 'ZAR') === packageCurrency)
+      .reduce((sum, service) => {
+        const qty = Number(service.quantity) || 1;
+        const cost = Number(service.unit_cost) || 0;
+        return sum + (isFlatBasis(service.rate_basis) ? cost * qty / Math.max(1, paxCount) : cost * qty);
+      }, 0));
+    // The itinerary client markup overrides the reusable package and its saved
+    // service markups when a package is copied into this quote.
+    const packageMarkup = Number(markupPct) || 0;
+    const service = {
+      key: nextId(), itemId: null, packageId: pkg.id, packageSnapshot,
+      supplierId: null, name: pkg.name, category: 'Package',
+      supplierName: '', currencyCode: packageCurrency, basis: 'per_person', buyPP: packageCost,
+      markup: packageMarkup, sellPP: round2(packageCost * (1 + packageMarkup / 100)), pax: paxCount, quantity: 1,
+      descOverride: pkg.description || '', taxRate: taxApplies ? defaultTaxRate : 0,
+      taxLabel: taxApplies ? defaultTaxLabel : 'No VAT', time: '', confirmationStatus: 'RQ',
+      confirmationNumber: '', notes: '', item_rates: [], isOptional: false, repeatGroupId: null
+    };
+    setDays((prev) => prev.map((day, index) => index === dayIndex
+      ? { ...day, services: [...day.services, service] }
+      : day));
+    const mixedCurrencies = packageCurrencies.length > 1;
+    showToast(`Added ${pkg.name} to Day ${days[dayIndex].dayNumber}.${mixedCurrencies ? ` Its main price uses ${packageCurrency}; review other currencies in the expanded details.` : ''}`, mixedCurrencies ? 'warning' : 'success');
+  }, [isReadOnly, days, currencyCode, taxAppliesForCurrency, nextId, paxCount, markupPct, defaultTaxRate, defaultTaxLabel, setDays, showToast]);
+
+  const removePackageService = useCallback((dayIndex, packageRowKey, packageDayIndex, serviceIndex) => {
+    if (completedRef.current || isReadOnly) return;
+    let removedName = '';
+    setDays((previous) => previous.map((day, index) => {
+      if (index !== dayIndex) return day;
+      return {
+        ...day,
+        services: day.services.map((service) => {
+          if (service.key !== packageRowKey || !service.packageSnapshot) return service;
+          const packageDays = (service.packageSnapshot.days || []).map((packageDay, indexInPackage) => {
+            if (indexInPackage !== packageDayIndex) return packageDay;
+            const services = [...(packageDay.services || [])];
+            if (serviceIndex >= 0 && serviceIndex < services.length) {
+              removedName = services[serviceIndex].item_name || 'Package service';
+              services.splice(serviceIndex, 1);
+            }
+            return { ...packageDay, services };
+          });
+          const remainingIncluded = packageDays
+            .flatMap((packageDay) => packageDay.services || [])
+            .filter((item) => item.is_included !== false && (item.currency_code || 'ZAR') === (service.currencyCode || 'ZAR'));
+          const buyPP = round2(remainingIncluded.reduce((sum, item) => {
+            const quantity = Number(item.quantity) || 1;
+            const cost = Number(item.unit_cost) || 0;
+            return sum + (isFlatBasis(item.rate_basis) ? cost * quantity / Math.max(1, paxCount) : cost * quantity);
+          }, 0));
+          const markup = Number(service.markup) || 0;
+          return {
+            ...service,
+            packageSnapshot: { ...service.packageSnapshot, days: packageDays },
+            buyPP,
+            sellPP: round2(buyPP * (1 + markup / 100))
+          };
+        })
+      };
+    }));
+    if (removedName) showToast(`${removedName} removed from the package in this itinerary.`, 'success');
+  }, [isReadOnly, setDays, paxCount, showToast]);
+
   const selectVehicleOption = useCallback((item) => {
     if (!vehicleDraft) return;
     const { dayIndex, via } = vehicleDraft;
@@ -2186,41 +2937,101 @@ export const ItineraryBuilder = () => {
     openPlacementPrompt(dayIndex, item, via);
   }, [vehicleDraft, openPlacementPrompt]);
 
-  /* Every accommodation on a day holds its own room allocation, so the pax
-     already sleeping on that day is the sum of the allocated travellers
-     across all of its accommodation services. */
+  /* Distinct travellers already sleeping on a day. A night counts as full only
+     once every guest holds a bed, which is what leaves room for a split group
+     (e.g. 6 of 10 here, the other 4 in a second property) to be added. */
   const accommodationPaxOnDay = useCallback((dayIndex) => {
     const day = days[dayIndex];
     if (!day) return 0;
-    return (day.services || [])
-      .filter((sv) => /accommodation/i.test(sv.category || ''))
-      .reduce((sum, sv) => {
-        const rooms = Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [];
-        return sum + rooms.reduce((n, rm) => n + ((rm.allocatedTravellers || []).length), 0);
-      }, 0);
+    return beddedTravellerCount(day.services || []);
   }, [days]);
+
+  const placementSelectedDays = useMemo(() => {
+    if (!placementDraft) return [];
+    const baseDay = placementDraft.dayIndex;
+    const repeatCount = placementRepeat
+      ? Math.max(1, Math.min(days.length - baseDay, Number(placementRepeatCount) || 1))
+      : 1;
+    return [...new Set([
+      ...Array.from({ length: repeatCount }, (_, index) => baseDay + index),
+      ...placementCopyDays.map(Number)
+    ])]
+      .filter((index) => index >= 0 && index < days.length)
+      .sort((a, b) => a - b);
+  }, [placementDraft, placementRepeat, placementRepeatCount, placementCopyDays, days.length]);
 
   const confirmPlacement = useCallback(() => {
     if (!placementDraft) return;
-    const isOptional = !!placementOptional;
+    setPlacementError('');
+    /* A group split and an alternative are opposites: one is part of the
+       party's night and is priced into the itinerary, the other is an option
+       the client may or may not take. Never both. */
+    const isSplit = !!placementSplit && !placementOptional;
+    const isOptional = !!placementOptional && !isSplit;
     const baseDay = placementDraft.dayIndex;
-    const repeatCount = placementRepeat ? Math.max(1, Math.min(days.length - baseDay, Number(placementRepeatCount) || 1)) : 1;
-    const repeatDays = Array.from({ length: repeatCount }, (_, index) => baseDay + index);
-    const selectedDays = [...new Set([...repeatDays, ...placementCopyDays.map(Number)])]
-      .filter((index) => index >= 0 && index < days.length)
-      .sort((a, b) => a - b);
+    const selectedDays = placementSelectedDays;
 
-    /* A normal room cannot be added once every traveller already sleeps
-       somewhere that day — the party is fully allocated. An alternative
-       room is allowed, because the client is choosing between options. */
-    if (!isOptional && /accommodation/i.test(placementDraft.item?.category || '')) {
+    if (isAccommodationItem(placementDraft.item)) {
+      const conflicts = selectedDays.flatMap((dayIndex) => {
+        const services = (days[dayIndex]?.services || []).filter(
+          (service) => /accommodation/i.test(service.category || '')
+        );
+        return accommodationRegionConflicts(services, placementDraft.item, libraryItems)
+          .map(({ region }) => ({ region }));
+      });
+      if (conflicts.length) {
+        const hasMissingParentArea = !accommodationRegionOf(placementDraft.item)
+          || conflicts.some(({ region }) => !region);
+        const canJoinExistingDestination = selectedDays.every((dayIndex) => {
+          const services = (days[dayIndex]?.services || []).filter(
+            (service) => /accommodation/i.test(service.category || '')
+          );
+          const dayConflicts = accommodationRegionConflicts(services, placementDraft.item, libraryItems);
+          if (!dayConflicts.length) return true;
+          return canJoinExistingAccommodationDestination(services, placementDraft.item, libraryItems);
+        });
+        const canPlaceAcrossDestinations = isSplit && placementDestinationSplit;
+        const canPlaceInExistingDestination = isSplit && !hasMissingParentArea && canJoinExistingDestination;
+        if (!canPlaceAcrossDestinations && !canPlaceInExistingDestination) {
+          setPlacementError(
+            !accommodationRegionOf(placementDraft.item)
+              ? (placementDestinationSplit
+                ? 'This accommodation has no Parent Destination / Region set. Update it in Library Items so the destination split can be recorded correctly.'
+                : 'Set a Parent Destination / Region for this accommodation in Library Items before adding it to the itinerary.')
+              : 'This accommodation is in a different Parent Destination / Region from the rest of the group. Select “Split travelers across different destinations” to continue, or add accommodation in the same Parent Destination / Region.'
+          );
+          return;
+        }
+      }
+    }
+
+    /* A group split only makes sense while the night still has homeless
+       travellers: this property takes the next batch, and the one after that
+       takes the rest. Once the party is fully bedded, another property on that
+       night is an alternative again. */
+    if (isSplit) {
+      const totalPax = (meta.travellers || []).length || paxCount;
+      const noRoomLeft = selectedDays.filter((dayIndex) => accommodationPaxOnDay(dayIndex) >= totalPax);
+      if (noRoomLeft.length) {
+        const blocked = noRoomLeft.map((dayIndex) => `Day ${days[dayIndex]?.dayNumber ?? dayIndex + 1}`).join(', ');
+        showToast(
+          `All ${totalPax} pax already have a bed on ${blocked}, so there is nobody left to split off. Add it as an Alternative instead.`,
+          'warning'
+        );
+        setPlacementSplit(false);
+        return;
+      }
+    } else if (!isOptional && /accommodation/i.test(placementDraft.item?.category || '')) {
+      /* No split chosen: a normal room still cannot be added to a night where
+         everybody is already bedded, because that is what an alternative is
+         for. */
       const totalPax = (meta.travellers || []).length || paxCount;
       if (totalPax > 0) {
         const fullDays = selectedDays.filter((dayIndex) => accommodationPaxOnDay(dayIndex) >= totalPax);
         if (fullDays.length) {
           const blocked = fullDays.map((dayIndex) => `Day ${days[dayIndex]?.dayNumber ?? dayIndex + 1}`).join(', ');
           showToast(
-            `All ${totalPax} pax already have accommodation on ${blocked}. Mark this as an Alternative to add it anyway.`,
+            `All ${totalPax} pax already have a bed on ${blocked}. Tick "Group split" to house the rest of the party here, or add it as an Alternative.`,
             'warning'
           );
           return;
@@ -2228,31 +3039,97 @@ export const ItineraryBuilder = () => {
       }
     }
 
+    /* Join the properties already housing this party on the first day, or
+       start a new split group. Explicitly selected split properties on this
+       night are linked as siblings, including older entries without an id. */
+    let splitGroupId = null;
+    if (isSplit) {
+      const existing = (days[baseDay]?.services || []).find(
+        (sv) => /accommodation/i.test(sv.category || '') && !sv.isOptional && sv.splitGroupId
+      );
+      splitGroupId = existing?.splitGroupId || nextId();
+      setDays((prev) => prev.map((day, dayIndex) => (
+        selectedDays.includes(dayIndex)
+          ? {
+              ...day,
+              services: joinAccommodationSplitGroup(day.services || [], splitGroupId)
+            }
+          : day
+      )));
+    }
+
     const repeatGroupId = selectedDays.length > 1 ? nextId() : null;
     selectedDays.forEach((dayIndex, index) => {
       createService(dayIndex, placementDraft.item, index === 0 ? placementDraft.via : 'copy', {
         repeatGroupId,
         isOptional,
-        suppressRoomModal: index !== 0
+        splitGroupId,
+        /* A split needs its allocation on every day it lands on — each night
+           only asks for the travellers that are still homeless there. */
+        suppressRoomModal: isSplit ? false : index !== 0
       });
     });
+    /* An entrance fee or conservation levy belongs to its accommodation, so it
+       travels with it onto every day the property lands on. Not for an
+       alternative — the client has not chosen that property, so its fees are
+       not in the quote. */
+    if (!isOptional) addLinkedSurcharges(placementDraft.item, selectedDays);
     setPlacementDraft(null);
+    setPlacementError('');
     setPlacementCopyDays([]);
+    setPlacementSplit(false);
+    setPlacementDestinationSplit(false);
     setPlacementOptional(false);
-  }, [placementDraft, placementOptional, placementRepeat, placementRepeatCount, placementCopyDays, days, meta.travellers, paxCount, accommodationPaxOnDay, showToast, nextId, createService]);
+  }, [placementDraft, placementOptional, placementSplit, placementDestinationSplit, placementSelectedDays, days, libraryItems, meta.travellers, paxCount, accommodationPaxOnDay, showToast, setDays, nextId, createService, addLinkedSurcharges]);
 
   const openRoomAllocationModal = useCallback((dayIndex, sv) => {
     const libraryItem = libraryItems.find((it) => it.id === sv.itemId) || {};
-    const libItem = {
-      ...libraryItem,
-      id: sv.itemId,
-      name: libraryItem.name || sv.name,
-      category: libraryItem.category || sv.category,
-      maxOccupancy: sv.maxOccupancy || libraryItem.maxOccupancy || libraryItem.max_occupancy,
-      roomType: sv.roomType || libraryItem.roomType || libraryItem.room_type,
-      roomAllocations: sv.roomAllocations || [],
-      item_rates: libraryItem.item_rates || sv.item_rates || []
-    };
+    /* The library item carries one row per season, and calculateRoomCharges()
+       reads whichever row getRateRow() finds first for the currency — the same
+       first-match the sidebar would use if it were not resolving a season. Hand
+       the modal the WHOLE matrix and it prices the room from whatever season
+       the database happened to return first (winter, in a summer trip).
+
+       So resolve the season here exactly as the sidebar and createService()
+       do — against this itinerary's travel window — and pass down only that
+       row. This is also what keeps a reloaded itinerary honest: the season is
+       not stored on itinerary_day_items, so it has to be derived from the
+       travel dates every time the dialog opens. */
+    const sourceRates = (Array.isArray(libraryItem.item_rates) && libraryItem.item_rates.length)
+      ? libraryItem.item_rates
+      : (Array.isArray(sv.item_rates) ? sv.item_rates : []);
+    /* A line already carrying Pricing Protection keeps its own percentage: it
+       was priced with it and the dialog's figures overwrite buyPP/sellPP on
+       confirm, so re-deriving it from the tenant's current setting would
+       silently re-price the line. Lines without protection follow the tenant. */
+    const modalProtectionPct = Number(sv.priceProtectionPercent) > 0
+      ? Number(sv.priceProtectionPercent)
+      : priceProtectionPercent;
+    const season = resolveSeasonForTravel({
+      rates: sourceRates,
+      currencyCode,
+      startDate: travelWindow.start,
+      endDate: travelWindow.end,
+      protectionPercent: modalProtectionPct
+    });
+    const modalRates = season.rate
+      ? [applyProtectionToRate(season.rate, season.protectionPercent || 0)]
+      /* Nothing resolved: still hand the dialog ONE row. Falling back to the
+         whole matrix is what let getRateRow() quote a season the trip is not
+         priced from — a multi-season array must never reach this dialog. */
+      : [resolveRateForTravel({
+        rates: sourceRates,
+        currencyCode,
+        startDate: travelWindow.start,
+        endDate: travelWindow.end,
+        protectionPercent: modalProtectionPct
+      })].filter(Boolean);
+    const libItem = buildRoomModalItem({
+      base: libraryItem,
+      service: sv,
+      modalRates,
+      season
+    });
     setRoomModalState({
       isOpen: true,
       dayIndex,
@@ -2260,60 +3137,72 @@ export const ItineraryBuilder = () => {
       item: libItem,
       service: sv
     });
-  }, [libraryItems]);
+  }, [libraryItems, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent]);
 
   const validateAllRoomAllocations = useCallback(() => {
     for (let i = 0; i < (days || []).length; i++) {
       const day = days[i];
-      const services = day.services || [];
-      for (let j = 0; j < services.length; j++) {
-        const sv = services[j];
-        /* Optional / alternative rooms are options the client has not chosen,
-           so they are not required to be fully allocated. */
-        if (sv.isOptional) continue;
-        const check = validateRoomAllocation(sv, meta.travellers || []);
-        if (!check.isValid) {
-          return {
-            isValid: false,
-            dayNumber: day.dayNumber,
-            serviceName: sv.name,
-            reason: check.reason,
-            serviceKey: sv.key,
-            dayIndex: i,
-            service: sv
-          };
-        }
+      /* Completeness is judged per night, not per service: a group split
+         across two included properties is fine as long as the whole party is
+         bedded once, within capacity, and nobody is double-booked. Alternatives
+         are options the client has not chosen, so they are left out. */
+      const check = validateDayAccommodation(day, meta.travellers || []);
+      if (!check.isValid) {
+        return {
+          isValid: false,
+          dayNumber: day.dayNumber,
+          serviceName: check.service?.name || '',
+          reason: check.reason,
+          serviceKey: check.serviceKey,
+          dayIndex: i,
+          service: check.service || (day.services || []).find((sv) => sv.key === check.serviceKey) || null
+        };
       }
     }
     return { isValid: true };
   }, [days, meta.travellers]);
 
-  const handleSaveRoomAllocation = useCallback(({ roomAllocations, calculatedBuy, calculatedSell, numRooms }) => {
+  const handleSaveRoomAllocation = useCallback(({ roomAllocations, calculatedBuy, calculatedSell, numRooms, splitPending }) => {
     if (!roomModalState.serviceKey || roomModalState.dayIndex === null) return;
     const dayIdx = roomModalState.dayIndex;
     const svKey = roomModalState.serviceKey;
-    const currentPax = Math.max(1, paxCount);
+    const currentPax = Math.max(1, allocatedTravellerCount(roomAllocations) || paxCount);
     const newBuyPP = round2(calculatedBuy / currentPax);
     const newSellPP = round2(calculatedSell / currentPax);
 
-    setDays((prev) => prev.map((d, i) => (
-      i === dayIdx
-        ? {
-            ...d,
-            services: d.services.map((s) => (
-              s.key === svKey
-                ? {
-                    ...s,
-                    roomAllocations,
-                    buyPP: newBuyPP,
-                    sellPP: newSellPP,
-                    numRooms
-                  }
-                : s
-            ))
-          }
-        : d
-    )));
+    /* When a partial allocation starts or continues a split, link all included
+       properties on this night. Older or interrupted split flows may have
+       assigned a group id only to the newly-added property. */
+    const splitGroupId = splitPending
+      ? days[dayIdx]?.services?.find(
+        (service) => service.key === svKey && /accommodation/i.test(service.category || '') && !service.isOptional
+      )?.splitGroupId
+        || days[dayIdx]?.services?.find(
+          (service) => /accommodation/i.test(service.category || '') && !service.isOptional && service.splitGroupId
+        )?.splitGroupId
+        || nextId()
+      : null;
+
+    setDays((prev) => prev.map((d, i) => {
+      if (i !== dayIdx) return d;
+      let withSelf = (d.services || []).map((s) => (
+        s.key === svKey
+          ? {
+              ...s,
+              roomAllocations,
+              buyPP: newBuyPP,
+              sellPP: newSellPP,
+              pax: currentPax,
+              numRooms,
+              splitGroupId: splitPending ? splitGroupId : s.splitGroupId
+            }
+          : s
+      ));
+      if (splitPending) {
+        withSelf = joinAccommodationSplitGroup(withSelf, splitGroupId);
+      }
+      return { ...d, services: withSelf };
+    }));
     const sourceService = days[dayIdx]?.services?.find((service) => service.key === svKey);
     const related = sourceService?.repeatGroupId
       ? days.flatMap((day, index) => (day.services || [])
@@ -2325,24 +3214,69 @@ export const ItineraryBuilder = () => {
     } else {
       showToast('Room allocation & rates updated', 'success');
     }
-  }, [roomModalState, paxCount, days, showToast, setDays ]);
 
+    /* A split group is worked through one property at a time: after this bed
+       round, say how many travellers still need a bed that night so the
+       operator knows to add the next property as a group split. */
+    if (/accommodation/i.test(sourceService?.category || '')) {
+      const totalPax = (meta.travellers || []).length || paxCount;
+      if (totalPax > 0) {
+        const bedded = beddedTravellerCount((days[dayIdx]?.services || []).map((service) => (
+          service.key === svKey ? { ...service, roomAllocations } : service
+        )));
+        const stillHomeless = totalPax - bedded;
+        if (stillHomeless > 0) {
+          showToast(
+            `${stillHomeless} traveller(s) still need a bed on Day ${days[dayIdx]?.dayNumber ?? dayIdx + 1} — add another property and tick "Group split".`,
+            'info'
+          );
+        }
+      }
+    }
+  }, [roomModalState, paxCount, days, meta.travellers, showToast, setDays, nextId]);
   const applyRoomAllocationToRelated = useCallback((applyToAll) => {
     if (!roomApplyPrompt) return;
     if (applyToAll) {
-      const currentPax = Math.max(1, paxCount);
+      const currentPax = Math.max(1, allocatedTravellerCount(roomApplyPrompt.roomAllocations) || paxCount);
       const buyPP = round2(roomApplyPrompt.calculatedBuy / currentPax);
       const sellPP = round2(roomApplyPrompt.calculatedSell / currentPax);
       setDays((prev) => prev.map((day) => ({
         ...day,
         services: day.services.map((service) => roomApplyPrompt.related.some((entry) => entry.service.key === service.key)
-          ? { ...service, roomAllocations: roomApplyPrompt.roomAllocations, buyPP, sellPP, numRooms: roomApplyPrompt.numRooms }
+          ? { ...service, roomAllocations: roomApplyPrompt.roomAllocations, buyPP, sellPP, pax: currentPax, numRooms: roomApplyPrompt.numRooms }
           : service)
       })));
     }
     setRoomApplyPrompt(null);
     showToast(applyToAll ? 'Room allocation applied to all repeated days' : 'Room allocation saved for this day only', 'success');
   }, [roomApplyPrompt, paxCount, showToast, setDays ]);
+
+  /* Who already has a bed that night in another included property. Handed to
+     the room modal so a split group only has to bed the travellers who are
+     still homeless, instead of every guest being demanded at every property. */
+  const roomModalBeddedElsewhere = useMemo(() => {
+    const day = days[roomModalState?.dayIndex];
+    if (!day) return [];
+    const self = (day.services || []).find((sv) => sv.key === roomModalState?.serviceKey);
+    /* An alternative is a quote over the SAME party as the confirmed room: the
+       beds it mirrors are exactly the beds it has to be able to take, so
+       nothing counts as "already housed elsewhere". Excluding them handed the
+       dialog an empty traveller pool and made an alternative impossible to
+       allocate — the reported failure. */
+    if (self?.isOptional) return [];
+    const byIdentity = new Map();
+    (day.services || []).forEach((sv) => {
+      if (sv.key === roomModalState?.serviceKey) return;
+      if (!/accommodation/i.test(sv.category || '') || sv.isOptional) return;
+      (Array.isArray(sv.roomAllocations) ? sv.roomAllocations : []).forEach((rm) => {
+        (rm.allocatedTravellers || []).forEach((tr) => {
+          const identity = tr?.id || `${tr?.name || ''}|${tr?.surname || ''}`;
+          if (identity && !byIdentity.has(identity)) byIdentity.set(identity, tr);
+        });
+      });
+    });
+    return [...byIdentity.values()];
+  }, [days, roomModalState?.dayIndex, roomModalState?.serviceKey]);
 
   /* Patch one or more fields of a single service item (used by the Service
      Request / Travel Documents tabs for time, confirmation status, numbers,
@@ -2514,7 +3448,7 @@ return !!sv.time; /* activities / meals / other */
     setKebabFor(null);
   }, [days, normalizeDays, applyDateExtension, showToast, setDays ]);
 
-  /* ── Copy / Export / Save ──────────────────────────────────────────────── */
+  /* -- Copy / Export / Save ------------------------------------------------ */
 
   const openCopy = useCallback(async () => {
     setCopyOpen(true);
@@ -2557,9 +3491,9 @@ return !!sv.time; /* activities / meals / other */
         date: '',
         notes: rd.notes || '',
         services: (rd.itinerary_day_items || []).map((ii) => {
-          const buyPP = Number(ii.unit_cost) || 0;
           const mRaw = Number(ii.markup_percentage);
           const m = Number.isFinite(mRaw) ? mRaw : (Number(markupPct) || 0);
+          const pricing = storedServicePricing(ii, paxCount, m);
           const ccy = ii.currency_code || currencyCode;
           const taxed = taxAppliesForCurrency(ccy);
           return {
@@ -2570,11 +3504,11 @@ return !!sv.time; /* activities / meals / other */
             category: ii.category || '',
             supplierName: ii.supplier_name || '',
             currencyCode: ccy,
-            buyPP,
+            buyPP: pricing.buyPP,
             markup: m,
             basis: ii.rate_basis || 'per_person',
-            sellPP: round2(buyPP * (1 + m / 100)),
-            pax: Number(ii.pax) || paxCount,
+            sellPP: pricing.sellPP,
+            pax: pricing.pax,
             quantity: Number(ii.quantity) || 1,
             descOverride: ii.description_override || '',
             taxRate: taxed ? (Number(ii.tax_rate) > 0 ? numOr(ii.tax_rate, defaultTaxRate) : defaultTaxRate) : 0,
@@ -2587,7 +3521,8 @@ return !!sv.time; /* activities / meals / other */
               vehicleType: ii.vehicle_type || '',
               capacity: ii.capacity !== null && ii.capacity !== undefined ? Number(ii.capacity) : '',
               roomType: ii.room_type || '',
-            maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
+              destinationArea: ii.destination_area || '',
+              maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
             roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
             repeatGroupId: ii.repeat_group_id || null,
             isOptional: ii.is_included === false,
@@ -2669,14 +3604,14 @@ return !!sv.time; /* activities / meals / other */
     const ref = meta.referenceNumber || meta.itineraryName || 'itinerary';
     const safeName = String(ref).replace(/[^\w-]+/g, '_');
     if (format === 'link') {
-      if (!['quotation', 'provisional'].includes(meta.status || 'quotation')) {
+      if (!['quotation', 'provisional'].includes(stage)) {
         showToast('The client itinerary document is only available for Quotation and Provisional bookings', 'warning');
         return;
       }
       showToast('Digital itinerary link sharing is coming soon', 'info');
       return;
     }
-    if ((format === 'word' || format === 'pdf') && !['quotation', 'provisional'].includes(meta.status || 'quotation')) {
+    if ((format === 'word' || format === 'pdf') && !['quotation', 'provisional'].includes(stage)) {
       showToast('The client itinerary document is only available for Quotation and Provisional bookings', 'warning');
       return;
     }
@@ -2735,7 +3670,9 @@ return !!sv.time; /* activities / meals / other */
           const line = Number(sv.sell) || 0;
           const taxRate = numOr(sv.taxRate, defaultTaxRate);
           const item = sv.itemId ? libraryItems.find((x) => String(x.id) === String(sv.itemId)) : null;
-          const baseRate = item && item.item_rates && item.item_rates.length ? rateForItem(item, grp.code) : null;
+          const baseRate = item && item.item_rates && item.item_rates.length
+            ? rateForTravel(item, grp.code, travelWindow, priceProtectionPercent)
+            : null;
           const rate = baseRate ? { ...baseRate, _ageRanges: item.child_age_ranges || [] } : null;
           const bd = accommodationBreakdown({
             mode: 'rooms',
@@ -3034,7 +3971,7 @@ return !!sv.time; /* activities / meals / other */
 
     const ppData = (() => {
       const m = new Map();
-      groups.forEach((g) => m.set(g.code, computePerPerson(days, g.code, meta.travellers || [], libraryItems, { defaultTaxRate, paxCount })));
+      groups.forEach((g) => m.set(g.code, computePerPerson(days, g.code, meta.travellers || [], libraryItems, { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent })));
       return m;
     })();
     const ppRows = (g) => {
@@ -3185,7 +4122,7 @@ return !!sv.time; /* activities / meals / other */
       setTimeout(() => w.print(), 350);
       showToast('Itinerary PDF opened in a new window', 'success');
     }
-  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing]);
+  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent]);
 
   const handleSave = useCallback(async () => {
     if (!companyId) {
@@ -3251,7 +4188,7 @@ return !!sv.time; /* activities / meals / other */
         travellers: travellersToSave,
         agency_reference: meta.agencyRef || null,
         notes: meta.notes || null,
-        status: meta.status || 'quotation',
+        status: normaliseStatus(meta.status),
         itinerary_tour_type: meta.tourType || null,
         consultant_name: finalConsultant
       };
@@ -3309,6 +4246,8 @@ return !!sv.time; /* activities / meals / other */
           itinerary_day_id: newDay.id,
           company_id: companyId,
           item_id: s.itemId || null,
+          source_package_id: s.packageId || null,
+          package_snapshot: s.packageSnapshot || null,
           supplier_id: s.supplierId || s.supplier_id || null,
           item_name: s.name,
           description_override: s.descOverride || null,
@@ -3321,9 +4260,9 @@ return !!sv.time; /* activities / meals / other */
           rate_basis: s.basis || 'per_person',
           item_price_per_person: s.sellPP || 0,
           quantity: s.quantity || 1,
-          pax: s.pax || paxCount,
-          total_buy: round2((s.buyPP || 0) * paxCount),
-          total_sell: round2((s.sellPP || 0) * paxCount),
+          pax: paxForService(s, paxCount),
+          total_buy: round2((s.buyPP || 0) * paxForService(s, paxCount)),
+          total_sell: round2((s.sellPP || 0) * paxForService(s, paxCount)),
           tax_rate: numOr(s.taxRate, 15),
           tax_label: s.taxLabel || 'VAT',
           service_time: s.time || null,
@@ -3334,9 +4273,31 @@ return !!sv.time; /* activities / meals / other */
           vehicle_type: s.vehicleType || null,
           capacity: s.capacity !== '' && s.capacity !== null && s.capacity !== undefined ? Number(s.capacity) : null,
           room_type: s.roomType || null,
+          destination_area: s.destinationArea || null,
           max_occupancy: s.maxOccupancy !== '' && s.maxOccupancy !== null && s.maxOccupancy !== undefined ? Number(s.maxOccupancy) : null,
           room_allocations: Array.isArray(s.roomAllocations) ? s.roomAllocations : [],
           repeat_group_id: s.repeatGroupId || null,
+          split_group_id: s.splitGroupId || null,
+          /* Surcharge attributes, so a reloaded line still knows what kind of
+             fee it is, whether it was chargeable, how many times it repeated
+             and which accommodation it belongs to - all of which change what
+             the line is worth and how it prints. */
+          surcharge_type: s.surchargeType || null,
+          surcharge_charge_basis: s.surchargeChargeBasis || null,
+          surcharge_unit_basis: s.surchargeUnitBasis || null,
+          surcharge_chargeable: s.surchargeChargeable === false ? false : (s.surchargeChargeable === true ? true : null),
+          surcharge_repeats: Math.max(1, parseInt(s.surchargeRepeats, 10) || 1),
+          surcharge_passed_through: !!s.surchargePassedThrough,
+          /* The supplier figure for a fee that is shown but not billed, so the
+             reference is still readable after a reload. */
+          surcharge_reference: Number(s.surchargeReference) || 0,
+          linked_item_id: s.linkedItemId || null,
+          price_protection_percent: Number(s.priceProtectionPercent) || 0,
+          supplier_paid: !!s.supplierPaid,
+          supplier_paid_at: s.supplierPaid ? (s.supplierPaidAt || new Date().toISOString()) : null,
+          /* The POP reference survives unticking "paid": the supplier invoice
+             number stays on file even while the payment is queried. */
+          supplier_paid_ref: s.supplierPaidRef || null,
           meal_plan: s.mealPlan || null,
           check_in_time: s.checkInTime || null,
           check_out_time: s.checkOutTime || null,
@@ -3347,10 +4308,23 @@ return !!sv.time; /* activities / meals / other */
           sort_order: si
         }));
         if (svcRows.length) {
-          const { error: itemsErr } = await supabase
+          const { data: insertedRows, error: itemsErr } = await supabase
             .from('itinerary_day_items')
-            .insert(svcRows);
+            .insert(svcRows)
+            .select('id, sort_order');
           if (itemsErr) throw itemsErr;
+          /* Remember which row each service landed in, so operational flags that
+             change mid-trip (supplier paid + proof of payment) can be written to
+             that one row instead of rewriting the whole itinerary. */
+          if (Array.isArray(insertedRows) && insertedRows.length) {
+            const byOrder = new Map(insertedRows.map((row) => [Number(row.sort_order), row.id]));
+            setDays((prev) => prev.map((d) => ({
+              ...d,
+              services: d.services.map((s, si) => (
+                byOrder.has(si) ? { ...s, dbId: byOrder.get(si) } : s
+              ))
+            })));
+          }
         }
       }
       setSaved(true);
@@ -3365,7 +4339,7 @@ return !!sv.time; /* activities / meals / other */
     }
   }, [companyId, meta, currencyCode, days, paxCount, showToast]);
 
-  /* ── Unsaved-changes guard ────────────────────────────────────────────────
+  /* -- Unsaved-changes guard ------------------------------------------------
      The app ships a NavigationGuardProvider (mounted in App.jsx) that shows a
      "Save & Leave / Discard & Leave / Cancel" modal whenever the page is dirty
      and the user navigates away, and it also warns on browser tab close via
@@ -3375,76 +4349,114 @@ return !!sv.time; /* activities / meals / other */
      navigation may complete. */
   usePageGuard('itinerary-builder', 'this itinerary', dirty, handleSave);
 
-  /* ── Issue the stage invoice (deposit while provisional, final once
-     confirmed) from inside the builder. Persists the itinerary first so the
-     invoice snapshot always matches what is stored, then writes the invoice
-     header + immutable line items and records the accounting export. */
-  const handleIssueInvoiceHere = useCallback(async ({ silent = false } = {}) => {
+  /* -- Issue an invoice from inside the builder. Editable quotations are saved
+     first; locked bookings use their already-persisted itinerary without
+     routing invoice work through the itinerary edit guard. */
+  /* The booking's whole financial history, straight from the database: every
+     invoice in this currency plus the credit notes against them. The over-billing
+     guard is measured against this rather than the loaded state, which can be
+     stale or only partly loaded. */
+  const fetchBookingHistory = useCallback(async (itineraryId, ccy) => {
+    const empty = { invoices: [], creditNotes: [], billed: 0 };
+    if (!itineraryId || !companyId) return empty;
+    const { data: invs, error: invErr } = await supabase
+      .from('invoices')
+      .select('id, invoice_number, total_incl, status, currency_code, paid_at')
+      .eq('company_id', companyId)
+      .eq('itinerary_id', itineraryId);
+    if (invErr) throw invErr;
+    const mine = (invs || []).filter((i) => (i.currency_code || '').toUpperCase() === (ccy || '').toUpperCase());
+    if (!mine.length) return empty;
+
+    const { data: cns, error: cnErr } = await supabase
+      .from('credit_notes')
+      .select('id, invoice_id, total_incl, status, currency_code, accounting_export')
+      .eq('company_id', companyId)
+      .in('invoice_id', mine.map((i) => i.id));
+    if (cnErr) throw cnErr;
+
+    return {
+      invoices: mine,
+      creditNotes: cns || [],
+      billed: netBilled(mine, cns || [], ccy)
+    };
+  }, [companyId]);
+
+  const handleIssueInvoiceHere = useCallback(async ({ silent = false, targetCurrency = currencyCode, requestPercent } = {}) => {
     if (!companyId) { showToast('Company not found', 'error'); return null; }
-    if (terminalRef.current) return null;
-    const type = isProvisional ? 'deposit' : 'final';
-    const label = type === 'deposit' ? 'Deposit' : 'Final';
-    const existing = itineraryInvoices.find((inv) => inv.invoice_type === type
-      && inv.status !== 'void'
-      && (inv.currency_code || '').toUpperCase() === currencyCode.toUpperCase());
-    if (existing) {
-      if (!silent) showToast(`${label} invoice already issued (${existing.invoice_number})`, 'warning');
-      return existing;
-    }
+    if (isCancelled) return null;
+    if (financeSubmissionRef.current) return null;
+    financeSubmissionRef.current = true;
+    const targetSymbol = svcSymbol(targetCurrency);
     setIssuingInvoice(true);
     try {
-      const ok = await handleSave();
-      if (!ok) return null;
+      if (!isReadOnly) {
+        const ok = await handleSave();
+        if (!ok) return null;
+      }
       const iid = lastItineraryIdRef.current || meta.itineraryId;
       if (!iid) throw new Error('Save the itinerary before issuing an invoice');
-      const agg = buildLinesFromDays(days, paxCount, currencyCode);
+      const agg = buildLinesFromDays(days, paxCount, targetCurrency);
       if (!agg.lines.length) { showToast('Add day-by-day services before issuing an invoice', 'warning'); return null; }
+
+      /* The booking's financial history, read fresh. The guard below has to be
+         measured against every invoice and credit note on this booking, not just
+         the ones already loaded into state, so issuing twice in quick
+         succession cannot bill the trip twice. */
+      const history = await fetchBookingHistory(iid, targetCurrency);
       /* An invoice must carry payment details, so it can only be issued when an
          active bank account exists for this currency. Itineraries can still be
          built in any currency; only invoicing is blocked. */
       const activeBank = bankAccounts
-        .filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === currencyCode.toUpperCase())
+        .filter((b) => b.is_active && (b.currency_code || '').toUpperCase() === targetCurrency.toUpperCase())
         .sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0))[0] || null;
       if (!activeBank) {
         const anyActive = bankAccounts.some((b) => b.is_active);
         showToast(anyActive
-          ? `No active bank account for ${currencyCode}. Add or activate one in Settings > Bank Accounts to invoice in this currency.`
+          ? `No active bank account for ${targetCurrency}. Add or activate one in Settings > Bank Accounts to invoice in this currency.`
           : 'All bank accounts are deactivated. Add or activate a bank account in Settings to generate invoices.', 'error');
         return null;
       }
       const perPersonBreakdown = breakdownSnapshot(computePerPerson(
         days,
-        currencyCode,
+        targetCurrency,
         Array.isArray(meta.travellers) ? meta.travellers : [],
         libraryItems,
-        { defaultTaxRate, paxCount }
+        { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent }
       ));
 
-      const isFinal = type === 'final';
-      let creditedAmount = 0;
-      let creditedInvoiceId = null;
-      let creditedInvoiceNumber = '';
-      if (isFinal) {
-        const { data: depositRows } = await supabase
-          .from('invoices')
-          .select('id, invoice_number, deposit_amount, total_incl, status')
-          .eq('itinerary_id', iid)
-          .eq('currency_code', currencyCode)
-          .eq('invoice_type', 'deposit')
-          .neq('status', 'void')
-          .order('created_at', { ascending: false });
-        const paid = (depositRows || []).filter((r) => r.status === 'paid');
-        creditedAmount = round2(paid.reduce((a, r) => a + (Number(r.deposit_amount) || Number(r.total_incl) || 0), 0));
-        if (paid[0]) {
-          creditedInvoiceId = paid[0].id;
-          creditedInvoiceNumber = paid[0].invoice_number;
-        }
-      }
-      const depositAmount = isFinal ? creditedAmount : round2(agg.totalIncl * (depositPct / 100));
-      const balance = round2(agg.totalIncl - creditedAmount);
+      /* The invoice bills what the trip costs less what has already been billed
+         on it, so successive documents cover the trip exactly once. Taken from
+         the fresh history, not the loaded state, for the same reason as the
+         guard: this is the figure the document is actually being measured
+         against, so it cannot be stale. */
+      const alreadyBilled = history.billed;
+      /* Nothing billed yet means this is the first request on the trip, so bill
+         the configured opening percentage rather than the whole thing. */
+      const firstRequest = alreadyBilled <= 0.009;
+      const gross = requestPercent !== undefined
+        ? billableAtPercentage(agg.totalIncl, requestPercent, history.invoices, history.creditNotes, targetCurrency)
+        : firstRequest
+          ? billableAtPercentage(agg.totalIncl, depositPct, history.invoices, history.creditNotes, targetCurrency)
+          : billableRemaining(agg.totalIncl, history.invoices, history.creditNotes, targetCurrency);
 
-      const { data: number, error: numErr } = await supabase.rpc('get_next_invoice_reference', { p_company_id: companyId });
-      if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate invoice number');
+      /* The guard: an invoice may only bill the part of the trip not yet
+         billed. Read fresh from the database rather than from the state on
+         screen, so a booking cannot be invoiced twice by issuing quickly. */
+      const guard = canBill(gross, agg.totalIncl, history.invoices, history.creditNotes, targetCurrency);
+      if (!guard.ok) {
+        if (!silent) {
+          showToast(guardMessage({ reason: guard.reason, limit: guard.limit, proposed: gross }, targetSymbol),
+            guard.reason === 'nothing' ? 'warning' : 'error');
+        }
+        return null;
+      }
+      const netRatio = agg.totalIncl > 0 ? round2(agg.subtotalExcl) / agg.totalIncl : 1;
+      const net = round2(gross * netRatio);
+      /* Billing only part of the trip is a request for money, not yet an invoice
+         for the supply, so it goes out as a proforma. Decided by the amount. */
+      const status = gross < round2(agg.totalIncl) - 0.009 ? 'proforma' : 'validated';
+      const balance = gross;
 
       const bank = activeBank;
       const bankDetails = bank ? {
@@ -3455,25 +4467,21 @@ return !!sv.time; /* activities / meals / other */
         swift_code: bank.swift_code
       } : {};
       const client = meta.client || {};
+      /* The server owns the booking keys and the invoice number: it allocates
+         the number inside the same locked transaction that runs the guard, and
+         stamps it into the accounting snapshot. Anything sent here for those
+         fields is ignored. */
       const header = {
-        company_id: companyId,
-        itinerary_id: iid,
         client_id: client.id || null,
-        invoice_number: number,
-        invoice_type: type,
-        status: isFinal ? 'validated' : 'proforma',
-        currency_code: currencyCode,
-        subtotal_excl: agg.subtotalExcl,
-        tax_total: agg.taxTotal,
-        total_incl: agg.totalIncl,
+        invoice_type: 'invoice',
+        status,
+        currency_code: targetCurrency,
+        subtotal_excl: net,
+        tax_total: round2(gross - net),
+        total_incl: gross,
         tax_label: agg.taxEntries[0]?.label || 'VAT',
         tax_rate: agg.taxEntries[0]?.rate ?? defaultTaxRate,
-        deposit_percentage: depositPct,
-        deposit_amount: depositAmount,
         balance_due: balance,
-        credited_invoice_id: creditedInvoiceId,
-        credited_invoice_number: creditedInvoiceNumber,
-        credited_amount: creditedAmount,
         issued_date: new Date().toISOString().slice(0, 10),
         due_date: null,
         bill_to_name: client.name || '',
@@ -3492,69 +4500,147 @@ return !!sv.time; /* activities / meals / other */
       };
 
       const accounting = accountingPayload(header, agg.lines);
-      const { data: created, error: invErr } = await supabase
-        .from('invoices')
-        .insert([{ ...header, accounting_export: accounting }])
-        .select('*')
-        .single();
+      /* Issued through the server so the guard and the write share one
+         transaction. The check above is still worth doing first — it gives an
+         instant, specific message — but this is the one that cannot be raced,
+         and it also writes the header and its lines together. */
+      const { data: issued, error: invErr } = await supabase.rpc('issue_booking_invoice', {
+        p_company_id: companyId,
+        p_itinerary_id: iid,
+        p_currency: targetCurrency,
+        p_trip_total: agg.totalIncl,
+        p_invoice: { ...header, accounting_export: accounting },
+        p_lines: scaleInvoiceLines(agg.lines, gross)
+      });
       if (invErr) throw invErr;
 
-      const lineRows = agg.lines.map((l) => ({ ...l, invoice_id: created.id, company_id: companyId }));
-      const { error: lineErr } = await supabase.from('invoice_line_items').insert(lineRows);
-      if (lineErr) {
-        await supabase.from('invoices').delete().eq('id', created.id);
-        throw lineErr;
-      }
+      const { data: created, error: readErr } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('id', issued.id)
+        .single();
+      if (readErr || !created) throw new Error(readErr?.message || 'Invoice was not created');
+      const number = created.invoice_number;
 
       await loadItineraryInvoices();
       /* Recognition follows the invoice, not the itinerary stage. A deposit
          invoice is created as a proforma draft, so it posts nothing until it
-         is actually validated (see confirmPayment); a final invoice is
+         is actually validated (see openPaymentPrompt); a final invoice is
          created validated and posts straight away. postInvoice is idempotent
          per invoice, so a repeat call cannot double-post. */
       if (created.status && created.status !== 'proforma') {
         await postInvoice(companyId, created);
       }
-      if (!silent) showToast(`${label} invoice ${number} issued`, 'success');
+      if (!silent) showToast(`Invoice ${number} issued`, 'success');
       return created;
     } catch (err) {
-      const msg = /duplicate key|unique/i.test(err.message || '')
-        ? `A ${type} invoice already exists for ${currencyCode}`
+      /* The server carries its rejection reason in the exception detail, so the
+         user gets the same specific message whether the guard was caught here
+         or by the locked insert. Without this they would see Postgres' wording
+         for what is really a billing problem. */
+      const detail = parseGuardRejection(err);
+      const msg = detail
+        ? guardMessage(detail, targetSymbol)
+        : /duplicate key|unique/i.test(err.message || '')
+        ? `An invoice already exists for ${targetCurrency}`
         : (err.message || 'Failed to issue invoice');
-      showToast(msg, 'error');
+      showToast(msg, detail ? (detail.reason === 'nothing' ? 'warning' : 'error') : 'error');
       return null;
     } finally {
+      financeSubmissionRef.current = false;
       setIssuingInvoice(false);
     }
-  }, [companyId, isProvisional, itineraryInvoices, currencyCode, handleSave, meta.itineraryId, meta.client, meta.travellers, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, libraryItems, loadItineraryInvoices, showToast]);
+  }, [companyId, currencyCode, svcSymbol, fetchBookingHistory, handleSave, isReadOnly, isCancelled, meta.itineraryId, meta.client, meta.travellers, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, libraryItems, loadItineraryInvoices, showToast, travelWindow, priceProtectionPercent]);
 
-  /* ── Raise the payment receipt for the stage invoice and mark it paid. */
-  const confirmPayment = useCallback(async () => {
-    const inv = activeInvoice || await handleIssueInvoiceHere({ silent: true });
+  /* -- Raise a payment receipt against the active invoice.
+     A client can settle an invoice in instalments, so the amount is collected
+     rather than assumed. What remains afterwards is derived from the documents,
+     never from the cached balance_due column, so it stays correct however many
+     receipts land. */
+  const openPaymentPrompt = useCallback(async (targetCurrency = activeInvoice?.currency_code || currencyCode) => {
+    const requestedCode = (targetCurrency || '').toUpperCase();
+    const inv = paymentInvoicesByCurrency.find((candidate) => candidate.currency_code.toUpperCase() === requestedCode)
+      || paymentInvoicesByCurrency[0]
+      || activeInvoice
+      || await handleIssueInvoiceHere({ silent: true, targetCurrency: requestedCode || currencyCode });
     if (!inv) return;
+    const invoiceOutstanding = inv.derivedBalance ?? invoiceBalance(inv, itineraryReceipts);
+    const bookingOutstanding = bookingReceivableRemaining(
+      itineraryInvoices,
+      itineraryReceipts,
+      itineraryCreditNotes,
+      inv.currency_code
+    );
+    const balance = round2(Math.min(invoiceOutstanding, bookingOutstanding));
+    setPaymentPrompt({ ...inv, derivedBalance: balance, submissionKey: crypto.randomUUID() });
+    setPaymentForm({
+      amount: balance > 0.009 ? String(balance) : '',
+      received_date: new Date().toISOString().slice(0, 10),
+      payment_method: 'EFT',
+      payment_reference: inv.payment_reference || ''
+    });
+  }, [activeInvoice, currencyCode, paymentInvoicesByCurrency, itineraryInvoices, itineraryReceipts, itineraryCreditNotes, handleIssueInvoiceHere, showToast]);
+
+  const changePaymentCurrency = useCallback((targetCurrency) => {
+    void openPaymentPrompt(targetCurrency);
+  }, [openPaymentPrompt]);
+
+  /* What the invoice would still owe once this amount is taken off it. */
+  const balanceAfterPayment = useCallback((inv, amount) => round2(Math.max(0,
+    round2(Number(inv.derivedBalance) || 0) - round2(amount))), []);
+
+  const submitPayment = useCallback(async () => {
+    const inv = paymentPrompt;
+    if (!inv || financeSubmissionRef.current) return;
+    financeSubmissionRef.current = true;
     setIssuingInvoice(true);
+    let receiptSaved = false;
     try {
+      const amount = round2(Number(paymentForm.amount));
+      if (!(amount > 0.009)) throw new Error('Enter the amount received');
+
+      /* The dialog can remain open after a network or journal error, and its
+         cached balance may then be stale. Re-read movements before writing so
+         retrying a payment that already settled this invoice cannot create a
+         second receipt. */
+      const { data: currentReceipts, error: receiptReadError } = await supabase
+        .from('invoice_receipts')
+        .select('amount, direction, accounting_export, client_submission_key')
+        .eq('invoice_id', inv.id);
+      if (receiptReadError) throw receiptReadError;
+      if ((currentReceipts || []).some((receipt) =>
+        receipt.client_submission_key === inv.submissionKey
+        || receipt.accounting_export?.idempotency_key === inv.submissionKey
+      )) {
+        await loadItineraryInvoices();
+        setPaymentPrompt(null);
+        showToast(`A receipt for ${inv.invoice_number} was already recorded. No duplicate was created.`, 'warning');
+        return;
+      }
+      const currentOutstanding = round2(Math.max(0,
+        (Number(inv.total_incl) || 0) - settledTotal(inv.id, currentReceipts || [])
+      ));
+
       const { data: number, error: numErr } = await supabase.rpc('get_next_receipt_reference', { p_company_id: companyId });
       if (numErr || !number) throw new Error(numErr?.message || 'Could not allocate receipt number');
 
-      const amount = inv.invoice_type === 'deposit'
-        ? round2(Number(inv.deposit_amount) || 0)
-        : round2(Number(inv.balance_due) || 0);
-      const balanceRemaining = inv.invoice_type === 'deposit' ? round2(Number(inv.balance_due) || 0) : 0;
-      const receivedDate = new Date().toISOString().slice(0, 10);
+      const balanceRemaining = round2(Math.max(0, currentOutstanding - amount));
+      const receivedDate = paymentForm.received_date || new Date().toISOString().slice(0, 10);
       const accounting = {
         schema: 'torbuilder.receipt/v1',
         provider_agnostic: true,
         receipt_number: number,
         invoice_number: inv.invoice_number,
         invoice_type: inv.invoice_type,
-        status: 'paid',
+        status: 'issued',
         date: receivedDate,
         currency: inv.currency_code,
         customer: { name: inv.bill_to_name, email: inv.bill_to_email },
         amount,
         balance_remaining: balanceRemaining,
-        method: 'EFT'
+        method: paymentForm.payment_method || 'EFT',
+        reference: paymentForm.payment_reference || '',
+        idempotency_key: inv.submissionKey
       };
       const row = {
         company_id: companyId,
@@ -3566,8 +4652,8 @@ return !!sv.time; /* activities / meals / other */
         amount,
         balance_remaining: balanceRemaining,
         received_date: receivedDate,
-        payment_method: 'EFT',
-        payment_reference: inv.payment_reference || '',
+        payment_method: paymentForm.payment_method || 'EFT',
+        payment_reference: paymentForm.payment_reference || '',
         bill_to_name: inv.bill_to_name || '',
         bill_to_email: inv.bill_to_email || '',
         supplier_name: inv.supplier_name || '',
@@ -3575,6 +4661,7 @@ return !!sv.time; /* activities / meals / other */
         supplier_address: inv.supplier_address || '',
         bank_details: inv.bank_details || {},
         accounting_export: accounting,
+        client_submission_key: inv.submissionKey,
         notes: null
       };
       const { data: receiptRow, error } = await supabase
@@ -3583,33 +4670,236 @@ return !!sv.time; /* activities / meals / other */
         .select('id')
         .single();
       if (error) throw error;
+      receiptSaved = true;
 
-      const paidUpdate = { status: 'paid', paid_at: new Date().toISOString() };
-      if (inv.invoice_type === 'final') paidUpdate.balance_due = 0;
+      /* A part payment leaves the invoice live and still owing, so the status is
+         derived from the documents rather than stamped paid. Only a receipt that
+         clears the balance closes the invoice out. */
+      const nowSettled = balanceRemaining <= 0.009;
+      const paidUpdate = {
+        status: nowSettled ? 'paid' : 'validated',
+        balance_due: balanceRemaining,
+        payment_reference: paymentForm.payment_reference || ''
+      };
+      if (nowSettled) paidUpdate.paid_at = new Date().toISOString();
+      else paidUpdate.paid_at = null;
       const { error: paidErr } = await supabase
         .from('invoices')
         .update(paidUpdate)
         .eq('id', inv.id);
       if (paidErr) throw paidErr;
 
-      /* Payment is the moment a proforma deposit becomes a real document, so
-         this is where its sale is finally recognised. A deposit that already
-         posted as validated is skipped by the idempotent postInvoice. */
-      if (inv.status === 'proforma' || inv.status === 'draft') {
+      /* Payment is the moment a proforma request becomes a real document, so its
+         sale is recognised here. postInvoice is idempotent per invoice. */
+      if (nowSettled && (inv.status === 'proforma' || inv.status === 'draft')) {
         await postInvoice(companyId, { ...inv, status: 'paid' });
       }
-      await postReceipt(companyId, { ...row, id: receiptRow.id, invoice_id: inv.id });
+      /* A receipt row only links to its invoice, so the itinerary and client are
+         carried across for the journal, which needs them to attribute the cash
+         to the booking it settled. */
+      await postReceipt(companyId, {
+        ...row,
+        id: receiptRow.id,
+        invoice_id: inv.id,
+        itinerary_id: inv.itinerary_id || meta.itineraryId || null,
+        client_id: inv.client_id || meta.client?.id || null
+      });
 
       await loadItineraryInvoices();
-      showToast(`Receipt ${number} issued — payment confirmed`, 'success');
+      setPaymentPrompt(null);
+      showToast(
+        nowSettled
+          ? `Receipt ${number} issued — ${inv.invoice_number} settled in full`
+          : `Receipt ${number} issued — ${svcSymbol(inv.currency_code)}${balanceRemaining.toFixed(2)} still outstanding`,
+        'success'
+      );
     } catch (err) {
-      showToast(err.message || 'Failed to confirm payment', 'error');
+      if (receiptSaved) {
+        await loadItineraryInvoices();
+        setPaymentPrompt(null);
+        showToast(`Receipt was saved, but the follow-up accounting update failed: ${err.message || 'unknown error'}`, 'error');
+      } else if (err.code === '23505' && /submission_key/i.test(err.message || '')) {
+        await loadItineraryInvoices();
+        setPaymentPrompt(null);
+        showToast('This payment request was already recorded. The itinerary balances have been refreshed.', 'warning');
+      } else if ((err.code === '23514' || err.code === 'check_violation') && (err.details || err.detail)) {
+        let detail = null;
+        try {
+          detail = JSON.parse(err.details || err.detail);
+        } catch {
+          detail = null;
+        }
+        if (detail?.reason === 'receipt_limit') {
+          const allowed = Number(detail.allowed) || 0;
+          setPaymentForm((current) => ({ ...current, amount: allowed > 0 ? allowed.toFixed(2) : '' }));
+          setPaymentPrompt((current) => current
+            ? { ...current, derivedBalance: Math.min(current.derivedBalance, allowed) }
+            : current);
+          await loadItineraryInvoices();
+          showToast(`Only ${svcSymbol(inv.currency_code)}${allowed.toFixed(2)} remains available across this invoice and itinerary. The amount has been updated.`, 'warning');
+        } else {
+          showToast(err.message || 'Payment exceeds the remaining itinerary balance', 'error');
+        }
+      } else {
+        showToast(err.message || 'Failed to record payment', 'error');
+      }
     } finally {
+      financeSubmissionRef.current = false;
       setIssuingInvoice(false);
     }
-  }, [activeInvoice, handleIssueInvoiceHere, companyId, loadItineraryInvoices, showToast]);
+  }, [paymentPrompt, paymentForm, companyId, svcSymbol, meta.itineraryId, meta.client, loadItineraryInvoices, showToast]);
 
-  /* ── Email the issued invoice. Produces the chosen format as a downloadable
+  const openOverpaymentPrompt = (targetCurrency, tripTotal) => {
+    const code = targetCurrency.toUpperCase();
+    const amount = bookingOverpayment(
+      tripTotal,
+      itineraryInvoices,
+      itineraryReceipts,
+      itineraryCreditNotes,
+      code
+    );
+    if (amount <= 0.009) {
+      showToast(`There is no unresolved ${code} overpayment to resolve.`, 'warning');
+      return;
+    }
+
+    const candidates = itineraryInvoices
+      .filter((invoice) => (invoice.status || '') !== 'void'
+        && (invoice.currency_code || '').toUpperCase() === code)
+      .map((invoice) => {
+        const heldCash = refundableTotal(invoice.id, itineraryReceipts);
+        const invoiceOverpayment = round2(Math.max(0, heldCash - (Number(invoice.total_incl) || 0)));
+        const refundLimit = round2(Math.min(amount, invoiceOverpayment));
+        const creditLimit = refundLimit;
+        return {
+          invoice,
+          refundLimit,
+          creditLimit,
+          available: Math.max(refundLimit, creditLimit)
+        };
+      })
+      .filter((candidate) => candidate.available > 0.009);
+
+    if (!candidates.length) {
+      showToast(`The ${code} overpayment is not linked to an invoice with refundable excess cash. Review the invoice receipts in Finance.`, 'error');
+      return;
+    }
+    const selected = candidates[0];
+    setOverpaymentPrompt({
+      currency: code,
+      amount,
+      candidates,
+      selectedInvoiceId: selected.invoice.id,
+      submissionKey: crypto.randomUUID()
+    });
+    setOverpaymentAmount(String(Math.min(amount, selected.available).toFixed(2)));
+    setOverpaymentReason('Duplicate payment correction');
+  };
+
+  const resolveOverpayment = async (action) => {
+    const prompt = overpaymentPrompt;
+    if (!prompt || financeSubmissionRef.current) return;
+    const candidate = prompt.candidates.find((entry) => entry.invoice.id === prompt.selectedInvoiceId);
+    const amount = round2(Number(overpaymentAmount));
+    if (!candidate || !(amount > 0.009)) {
+      showToast('Choose a valid invoice and overpayment amount', 'error');
+      return;
+    }
+    const actionLimit = action === 'refund' ? candidate.refundLimit : candidate.creditLimit;
+    if (amount > actionLimit + 0.009) {
+      showToast(`The maximum ${action === 'refund' ? 'refund' : 'credit note'} available on this invoice is ${svcSymbol(prompt.currency)}${actionLimit.toFixed(2)}.`, 'error');
+      return;
+    }
+
+    financeSubmissionRef.current = true;
+    setIssuingInvoice(true);
+    try {
+      const rpcName = action === 'credit_note'
+        ? 'issue_itinerary_overpayment_credit_note_authorized'
+        : 'resolve_itinerary_overpayment';
+      const rpcArgs = action === 'credit_note'
+        ? {
+          p_company_id: companyId,
+          p_invoice_id: candidate.invoice.id,
+          p_amount: amount,
+          p_reason: overpaymentReason.trim(),
+          p_submission_key: prompt.submissionKey
+        }
+        : {
+          p_company_id: companyId,
+          p_invoice_id: candidate.invoice.id,
+          p_amount: amount,
+          p_reason: overpaymentReason.trim(),
+          p_action: action,
+          p_submission_key: prompt.submissionKey,
+          p_lines: []
+        };
+      const { data, error } = await supabase.rpc(rpcName, rpcArgs);
+      if (error) throw error;
+      const result = Array.isArray(data) ? data[0] : data;
+      if (!result) throw new Error('The overpayment resolution was not recorded');
+
+      if (action === 'refund') {
+        await postReceipt(companyId, {
+          id: result.id,
+          direction: 'out',
+          amount: result.amount || amount,
+          receipt_number: result.number,
+          invoice_id: candidate.invoice.id,
+          invoice_number: candidate.invoice.invoice_number,
+          currency_code: prompt.currency,
+          bill_to_name: candidate.invoice.bill_to_name || '',
+          payment_method: 'REFUND',
+          itinerary_id: meta.itineraryId || candidate.invoice.itinerary_id || null,
+          client_id: candidate.invoice.client_id || meta.client?.id || null
+        });
+      } else {
+        /* The receipt already placed excess cash in the client's receivable
+           balance. This adjustment note documents that overpayment; reversing
+           the original invoice posting here would reduce revenue a second time. */
+      }
+
+      await loadItineraryInvoices();
+      setOverpaymentPrompt(null);
+      showToast(
+        action === 'refund'
+          ? `Refund ${result.number} issued for ${svcSymbol(prompt.currency)}${amount.toFixed(2)}`
+          : `Credit note ${result.number} issued for ${svcSymbol(prompt.currency)}${amount.toFixed(2)} and added to the client's credit balance`,
+        'success'
+      );
+    } catch (err) {
+      if (err.code === '23505' && /submission_key/i.test(err.message || '')) {
+        await loadItineraryInvoices();
+        setOverpaymentPrompt(null);
+        showToast('This overpayment resolution was already recorded. The itinerary balances have been refreshed.', 'warning');
+      } else if ((err.code === '23514' || err.code === 'check_violation') && (err.details || err.detail)) {
+        let detail = null;
+        try {
+          detail = JSON.parse(err.details || err.detail);
+        } catch {
+          detail = null;
+        }
+        if (detail?.reason === 'overpayment_limit') {
+          const available = Number(detail.available) || 0;
+          setOverpaymentAmount(available > 0 ? available.toFixed(2) : '');
+          setOverpaymentPrompt((current) => current
+            ? { ...current, amount: available }
+            : current);
+          await loadItineraryInvoices();
+          showToast(`Only ${svcSymbol(prompt.currency)}${available.toFixed(2)} of unresolved overpayment remains. The amount has been updated.`, 'warning');
+        } else {
+          showToast(err.message || 'Could not resolve the itinerary overpayment', 'error');
+        }
+      } else {
+        showToast(err.message || 'Could not resolve the itinerary overpayment', 'error');
+      }
+    } finally {
+      financeSubmissionRef.current = false;
+      setIssuingInvoice(false);
+    }
+  };
+
+  /* -- Email the issued invoice. Produces the chosen format as a downloadable
      / shareable attachment and opens the client's email with a covering note.
      (Browser mailto cannot attach files directly, so the file is shared via the
      Web Share API when available, otherwise downloaded ready to attach.) */
@@ -3667,7 +4957,98 @@ return !!sv.time; /* activities / meals / other */
     if (!w) showToast('Please allow pop-ups to view the receipt', 'warning');
   }, [svcSymbol, showToast, billing]);
 
-  /* ── Edit itinerary details (Client & Tour) ─────────────────────────────── */
+  /* -- Statement of account --------------------------------------------------
+     One document per currency, built from the persisted invoices, receipts and
+     credit notes for this booking. Rebuilt from scratch on each action so it can
+     never show a figure the app has since superseded. */
+  const statementCurrenciesHere = useMemo(
+    () => [...new Set([
+      ...statementCurrencies(
+        itineraryInvoices,
+        itineraryReceipts,
+        itineraryCreditNotes,
+        pricingGroups[0]?.code
+          || itineraryInvoices[0]?.currency_code
+          || itineraryReceipts[0]?.currency_code
+          || itineraryCreditNotes[0]?.currency_code
+          || currencyCode
+      ),
+      ...pricingGroups.map((group) => group.code.toUpperCase())
+    ])].sort(),
+    [itineraryInvoices, itineraryReceipts, itineraryCreditNotes, currencyCode, pricingGroups]
+  );
+  const [statementCcyChoice, setStatementCcyChoice] = useState(currencyCode);
+  const [statementFormat, setStatementFormat] = useState('doc');
+  /* The selected currency can disappear as documents change, so fall back to the
+     booking currency rather than holding a selection that is no longer on offer.
+     Derived during render — storing it in an effect would render a stale
+     selector for a frame. */
+  const statementCcy = statementCurrenciesHere.includes(statementCcyChoice)
+    ? statementCcyChoice
+    : statementCurrenciesHere[0] || currencyCode;
+  const setStatementCcy = setStatementCcyChoice;
+
+  const statementMeta = useCallback(() => ({
+    reference_number: meta.referenceNumber || meta.reference || '',
+    client_name: meta.client?.name || '',
+    start_date: meta.travelStart || meta.start_date || '',
+    end_date: meta.travelEnd || meta.end_date || ''
+  }), [meta]);
+
+  const buildStatement = useCallback((ccy) => statementFor(
+    statementMeta(),
+    ccy,
+    itineraryInvoices,
+    itineraryReceipts,
+    itineraryCreditNotes
+  ), [statementMeta, itineraryInvoices, itineraryReceipts, itineraryCreditNotes]);
+
+  const statementDocOptions = useCallback(() => ({
+    logo: billing?.logo_data_url || '',
+    logoSize: billing?.logo_size || 'md',
+    logoPosition: billing?.logo_position,
+    billingAddressPosition: billing?.billing_address_position,
+    supplierName: billing?.company_name || billing?.legal_name || '',
+    supplierTaxNumber: billing?.tax_number || '',
+    supplierAddress: billing?.company_address || '',
+    companyContactTel: billing?.contact_phone || '',
+    companyContactCell: billing?.contact_cell || '',
+    companyContactEmail: billing?.contact_email || '',
+    companyContactWebsite: billing?.website || ''
+  }), [billing]);
+
+  const viewStatement = useCallback(() => {
+    const st = buildStatement(statementCcy);
+    const w = openPrintWindow(statementDocHtml(statementMeta(), st, statementDocOptions()), 300);
+    if (!w) showToast('Please allow pop-ups to view the statement', 'warning');
+  }, [buildStatement, statementCcy, statementDocOptions, statementMeta, showToast]);
+
+  const downloadStatement = useCallback(() => {
+    const st = buildStatement(statementCcy);
+    const ref = (statementMeta().reference_number || 'itinerary').replace(/[^\w-]+/g, '-');
+    if (statementFormat === 'csv') {
+      downloadBlob(statementCsv(statementMeta(), st), `${ref}-statement-${st.currency}.csv`, 'text/csv;charset=utf-8');
+    } else if (statementFormat === 'xls') {
+      downloadBlob(statementExcelHtml(statementMeta(), st, statementDocOptions()), `${ref}-statement-${st.currency}.xls`, 'application/vnd.ms-excel');
+    } else {
+      downloadBlob(statementDocHtml(statementMeta(), st, statementDocOptions()), `${ref}-statement-${st.currency}.doc`, 'application/msword');
+    }
+  }, [buildStatement, statementCcy, statementFormat, statementDocOptions, statementMeta, downloadBlob]);
+
+  const emailStatement = useCallback(() => {
+    const st = buildStatement(statementCcy);
+    const info = statementMeta();
+    const to = meta.client?.email || meta.client?.contact_email || '';
+    if (!to) { showToast('This client has no email address on file', 'warning'); return; }
+    const subject = `Statement of Account${info.reference_number ? ` — ${info.reference_number}` : ''}`;
+    const body = statementEmail(info, st, {
+      companyContactTel: billing?.contact_phone || '',
+      companyContactEmail: billing?.contact_email || ''
+    });
+    window.open(mailTo(to, subject, body), '_blank');
+  }, [buildStatement, statementCcy, statementMeta, meta, billing, showToast]);
+
+  /* -- Edit itinerary details (Client & Tour) ------------------------------- */
 
   const handleDetailsSave = useCallback(async (payload) => {
     if (completedRef.current) return;
@@ -3735,7 +5116,7 @@ return !!sv.time; /* activities / meals / other */
     }
   }, [meta, showToast, days, setDays, setMeta]);
 
-  /* ── Edit a day service (name + description override) ──────────────────── */
+  /* -- Edit a day service (name + description override) -------------------- */
 
 const openServiceEditor = useCallback((dayIdx, sv) => {
     const li = sv.itemId ? libraryItems.find((x) => x.id === sv.itemId) : null;
@@ -3837,7 +5218,95 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     showToast(`Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`, 'success');
   }, [days, editSvc, nextId, showToast, setDays ]);
 
-  /* ── Render: no data guard ────────────────────────────────────────────── */
+  /* ── Supplier payment confirmation (Operations, in progress) ────────────────
+     One checkbox per service, because suppliers are paid per booking. Ticking
+     it writes straight to that service's itinerary_day_items row, so a payment
+     confirmed mid-trip survives a reload or an accidental navigation — it does
+     not sit in the working copy waiting for the next Save. Services that have
+     never been saved have no row yet, so they fall back to the normal Save. */
+  const persistServicePayment = useCallback(async (dayIndex, serviceKey, patch) => {
+    const day = days[dayIndex];
+    const current = (day?.services || []).find((sv) => sv.key === serviceKey);
+    if (!current) return false;
+
+    const nextDays = days.map((d, i) => (
+      i === dayIndex
+        ? { ...d, services: d.services.map((sv) => (sv.key === serviceKey ? { ...sv, ...patch } : sv)) }
+        : d
+    ));
+    setDays(nextDays);
+
+    if (!current.dbId) {
+      showToast('Saved with the itinerary — press Save to store it', 'info');
+      return false;
+    }
+
+    /* The columns are snake_case, the service object is camelCase. Only send
+       the fields this patch actually touches so unticking "paid" cannot wipe a
+       POP reference that was entered earlier. */
+    const dbPatch = {};
+    if ('supplierPaid' in patch) {
+      dbPatch.supplier_paid = !!patch.supplierPaid;
+      dbPatch.supplier_paid_at = patch.supplierPaid
+        ? patch.supplierPaidAt || new Date().toISOString()
+        : null;
+    }
+    if ('supplierPaidRef' in patch) {
+      dbPatch.supplier_paid_ref = patch.supplierPaidRef ? patch.supplierPaidRef : null;
+    }
+
+    if (!Object.keys(dbPatch).length) return true;
+
+    const { error } = await supabase
+      .from('itinerary_day_items')
+      .update(dbPatch)
+      .eq('id', current.dbId);
+    if (error) {
+      /* Put the checkbox back where it was rather than leaving a tick the
+         database never accepted. */
+      setDays(days);
+      showToast(error.message || 'Could not record the payment confirmation', 'error');
+      return false;
+    }
+    setLastSavedKey(JSON.stringify({ days: nextDays, meta }));
+    return true;
+  }, [days, meta, setDays, showToast]);
+
+  const toggleServicePaid = useCallback((dayIndex, serviceKey, paid) => {
+    void persistServicePayment(dayIndex, serviceKey, {
+      supplierPaid: paid,
+      supplierPaidAt: paid ? new Date().toISOString() : ''
+    }).then((ok) => {
+      if (ok && paid) showToast('Marked as paid to the supplier', 'success');
+    });
+  }, [persistServicePayment, showToast]);
+
+  const savePaidRef = useCallback((dayIndex, serviceKey, ref) => {
+    void persistServicePayment(dayIndex, serviceKey, { supplierPaidRef: ref });
+  }, [persistServicePayment]);
+
+  /* Print / save-as-PDF. The document carries its own print button so the
+     operator can check it before committing paper. */
+  const openProofOfPayment = useCallback((sv, day) => {
+    const w = window.open('', '_blank', 'width=900,height=760');
+    if (!w) {
+      showToast('Please allow pop-ups to open the proof of payment', 'warning');
+      return;
+    }
+    w.document.write(proofOfPaymentHtml(sv, day, meta, currencySymbol, paxCount, billing));
+    w.document.close();
+  }, [meta, currencySymbol, paxCount, billing, showToast]);
+
+  const downloadProofOfPayment = useCallback((sv, day) => {
+    downloadBlob(
+      proofOfPaymentHtml(sv, day, meta, currencySymbol, paxCount, billing),
+      `${popFileName(sv, day, meta)}.html`,
+      'text/html'
+    );
+    showToast('Proof of payment downloaded', 'success');
+  }, [meta, currencySymbol, paxCount, billing, downloadBlob, showToast]);
+
+  /* -- Render: no data guard ---------------------------------------------- */
 
   if (!data) {
     return (
@@ -3885,7 +5354,7 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     const isActivity = /activities?|tours?|excursions?/i.test(cat);
     const isMeal = /meals?|dinner|lunch|breakfast/i.test(cat);
     const canEdit = tab === 'service-request' ? editable && !isTerminal : editable && !isReadOnly;
-    /* Fields sourced from the contract / library item — never editable. */
+    /* Fields sourced from the contract / library item ΓÇö never editable. */
     const contractLocked = isTransfer ? ['vehicleType', 'capacity'] : isAccom ? ['maxOccupancy', 'mealPlan'] : ['vehicleType', 'maxOccupancy'];
     const ro = (field) => !canEdit || contractLocked.includes(field);
     const update = (patch) => updateService(day.key, sv.key, patch);
@@ -3897,19 +5366,19 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
           <strong style={{ fontSize: '0.88rem', color: '#1a202c' }}>{repairText(sv.name)}</strong>
           {sv.isOptional && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem', fontWeight: 800, color: '#b45309', background: '#fffbeb', border: '1px solid #fcd34d', padding: '0.15rem 0.5rem', borderRadius: '999px', whiteSpace: 'nowrap' }}>
-              {isAccom ? 'Alternative' : 'Optional'} · not in final price
+              {isAccom ? 'Alternative' : 'Optional'} ┬╖ not in final price
             </span>
           )}
           {tab === 'travel-documents' ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.72rem', fontWeight: 800, color: ok ? '#15803d' : '#b45309', background: ok ? '#f0fdf4' : '#fffbeb', padding: '0.15rem 0.5rem', borderRadius: '999px' }}>
-              <CheckCircle2 size={12} /> {ok ? 'OK · Confirmed' : 'OK · ' + (sv.confirmationStatus || 'RQ')}
+              <CheckCircle2 size={12} /> {ok ? 'OK ┬╖ Confirmed' : 'OK ┬╖ ' + (sv.confirmationStatus || 'RQ')}
             </span>
           ) : null}
         </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem' }}>
         <div className="sidebar-field">
           <label>Date of service</label>
-            <input className="sidebar-select" value={day.date ? formatDateShort(day.date) : '—'} readOnly style={{ background: '#f8fafc', color: '#64748b' }} />
+            <input className="sidebar-select" value={day.date ? formatDateShort(day.date) : 'ΓÇö'} readOnly style={{ background: '#f8fafc', color: '#64748b' }} />
           </div>
           {!isAccom && (
             <div className="sidebar-field">
@@ -3933,11 +5402,11 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
               </div>
               <div className="sidebar-field">
                 <label>Vehicle type</label>
-                <input className="sidebar-select" placeholder="e.g. Mercedes Vito 8-seater" value={sv.vehicleType || ''} readOnly={true} title="From contract/library — locked" />
+                <input className="sidebar-select" placeholder="e.g. Mercedes Vito 8-seater" value={sv.vehicleType || ''} readOnly={true} title="From contract/library ΓÇö locked" />
               </div>
               <div className="sidebar-field">
                 <label>Capacity</label>
-                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.capacity === '' ? '' : sv.capacity} readOnly={true} title="From contract/library — locked" />
+                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.capacity === '' ? '' : sv.capacity} readOnly={true} title="From contract/library ΓÇö locked" />
               </div>
             </>
           )}
@@ -3949,11 +5418,11 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
               </div>
               <div className="sidebar-field">
                 <label>Max occupancy</label>
-                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.maxOccupancy === '' ? '' : sv.maxOccupancy} readOnly={true} title="From contract/library — locked" />
+                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.maxOccupancy === '' ? '' : sv.maxOccupancy} readOnly={true} title="From contract/library ΓÇö locked" />
               </div>
               <div className="sidebar-field">
                 <label>Meal plan</label>
-                <input className="sidebar-select" placeholder="e.g. Half board" value={sv.mealPlan || ''} readOnly={true} title="From contract/library — locked" />
+                <input className="sidebar-select" placeholder="e.g. Half board" value={sv.mealPlan || ''} readOnly={true} title="From contract/library ΓÇö locked" />
               </div>
               <div className="sidebar-field">
                 <label>Check-in time</label>
@@ -3983,11 +5452,11 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
             <>
               <div className="sidebar-field">
                 <label>Vehicle type</label>
-                <input className="sidebar-select" placeholder="e.g. Safari Landcruiser" value={sv.vehicleType || ''} readOnly={true} title="From contract/library — locked" />
+                <input className="sidebar-select" placeholder="e.g. Safari Landcruiser" value={sv.vehicleType || ''} readOnly={true} title="From contract/library ΓÇö locked" />
               </div>
               <div className="sidebar-field">
                 <label>Max occupancy</label>
-                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.maxOccupancy === '' ? '' : sv.maxOccupancy} readOnly={true} title="From contract/library — locked" />
+                <input className="sidebar-select" type="number" min="1" placeholder="Per contract" value={sv.maxOccupancy === '' ? '' : sv.maxOccupancy} readOnly={true} title="From contract/library ΓÇö locked" />
               </div>
             </>
           )}
@@ -4033,6 +5502,55 @@ const missing = !sv.confirmationNumber ||
             </div>
           </div>
         )}
+        {sv.surchargeType && (
+          /* Surcharge facts belong on the line: which fee it is, whether it is
+             billed, how it repeats and - for a passed-through fee - the supplier
+             figure that is deliberately excluded from the total. */
+          <div className="sidebar-field" style={{ marginTop: '0.5rem' }}>
+            <label>Surcharge</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginBottom: '0.3rem' }}>
+              <span className="basis-tag">
+                {(SURCHARGE_TYPES.find((t) => t.id === sv.surchargeType) || SURCHARGE_TYPES[0]).label}
+              </span>
+              <span className="basis-tag">
+                {(CHARGE_BASIS.find((b) => b.id === sv.surchargeChargeBasis) || CHARGE_BASIS[0]).label}
+              </span>
+              <span className="basis-tag">
+                {(UNIT_BASES.find((u) => u.id === sv.surchargeUnitBasis) || UNIT_BASES[0]).label}
+              </span>
+              {Number(sv.surchargeRepeats) > 1 && (
+                <span className="basis-tag">{sv.surchargeRepeats}x</span>
+              )}
+              <span className="basis-tag" style={{ background: sv.surchargeChargeable === false ? '#f1f5f9' : '#ecfdf5', color: sv.surchargeChargeable === false ? '#64748b' : '#047857', borderColor: sv.surchargeChargeable === false ? '#e2e8f0' : '#a7f3d0' }}>
+                {sv.surchargeChargeable === false ? 'Not chargeable' : 'Chargeable'}
+              </span>
+              {!!sv.linkedItemId && (
+                <span className="basis-tag">Linked to accommodation</span>
+              )}
+            </div>
+            {sv.surchargeChargeable === false && Number(sv.surchargeReference) > 0 && (
+              <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                Supplier figure: <strong>{fmtMoney(sv.surchargeReference, currencySymbol)}</strong> &mdash; shown for reference, excluded from the total.
+              </div>
+            )}
+          </div>
+        )}
+        {/* Pricing Protection is not a surcharge concept: any line can carry it,
+            so it is reported outside the surcharge block above. */}
+        {Number(sv.priceProtectionPercent) > 0 && (
+          <div style={{ fontSize: '0.78rem', color: '#b45309', marginTop: '0.35rem', background: '#fffbeb', border: '1px solid #fde68a', padding: '0.25rem 0.45rem', borderRadius: '5px' }}>
+            Pricing Protection: {sv.priceProtectionPercent}% applied{sv.protectedSeasonName ? ` to the ${sv.protectedSeasonName} season` : ''} because no season covers the travel dates.
+          </div>
+        )}
+        {/* Group split and repeat placement are set on the line but were never
+            surfaced anywhere, so an operator could not tell why a night is split
+            across two properties or which lines move together. */}
+        {(!!sv.splitGroupId || !!sv.repeatGroupId) && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginTop: '0.35rem' }}>
+            {!!sv.splitGroupId && <span className="basis-tag">Split group</span>}
+            {!!sv.repeatGroupId && <span className="basis-tag">Repeats with its group</span>}
+          </div>
+        )}
         <div className="sidebar-field" style={{ marginTop: '0.5rem' }}>
           <label>Notes</label>
           <textarea className="sidebar-select" rows={2} placeholder="Service-specific notes..." value={sv.notes || ''} readOnly={!canEdit} onChange={(e) => update({ notes: e.target.value })} style={{ resize: 'vertical', fontFamily: 'inherit' }} />
@@ -4040,6 +5558,18 @@ const missing = !sv.confirmationNumber ||
       </div>
     );
   };
+
+  /* What the placement prompt needs to know before it can offer a group split:
+     this is accommodation, the target night already houses part of the party in
+     an included property, and there are still travellers without a bed there. */
+  const partyPaxForPlacement = (meta.travellers || []).length || paxCount;
+  const beddedPaxBeforePlacement = placementDraft ? accommodationPaxOnDay(placementDraft.dayIndex) : 0;
+  const placementSplitAvailable = !!placementDraft
+    && isAccommodationItem(placementDraft.item)
+    && partyPaxForPlacement > 0
+    && beddedPaxBeforePlacement > 0
+    && beddedPaxBeforePlacement < partyPaxForPlacement;
+  const placementDestinationSplitAvailable = placementSplitAvailable;
 
   return (
     <div className="super-admin-page" style={{ paddingBottom: '1rem' }}>
@@ -4061,7 +5591,7 @@ const missing = !sv.confirmationNumber ||
       </header>
 
       <div className="builder-layout">
-        {/* ── Builder sidebar: library item picker ─────────────────────── */}
+        {/* -- Builder sidebar: library item picker ----------------------- */}
         <aside className="builder-sidebar">
           <div className="builder-sidebar-header">
             <div className="sidebar-search">
@@ -4151,7 +5681,7 @@ const missing = !sv.confirmationNumber ||
           <div className="builder-items-list">
             {pickerLoading ? (
               <div className="builder-items-empty">Searching library items...</div>
-            ) : pickerItemsToShow.length === 0 ? (
+            ) : pickerItemsToShow.length === 0 && pickerPackages.length === 0 && !pickerPackagesLoading ? (
               <div className="builder-items-empty">
                 <Package size={36} style={{ opacity: 0.5 }} />
                 <div style={{ fontWeight: 700, color: '#64748b' }}>
@@ -4165,8 +5695,53 @@ const missing = !sv.confirmationNumber ||
               </div>
             ) : (
               pickerItemsToShow.map((item) => {
-                const basis = basisOfItem(item, currencyCode);
-                const price = contractPaxRate(item, currencyCode, paxCount);
+                /* Resolve the season that will actually be used when this item
+                   is dropped — the same logic createService() uses. Showing the
+                   correctly-dated price in the sidebar prevents the operator
+                   from being surprised when the line lands with a different
+                   figure than what the sidebar advertised. */
+                const sidebarSeason = resolveSeasonForTravel({
+                  rates: item.item_rates || [],
+                  currencyCode,
+                  startDate: travelWindow.start,
+                  endDate: travelWindow.end,
+                  protectionPercent: 0  // sidebar shows raw price, not uplifted
+                });
+                /* Use the resolved rate row for display; fall back to the first
+                   available rate when no season resolves (will show as 0 or
+                   the raw price, consistent with what would happen on drop). */
+                const sidebarRate = sidebarSeason.rate || rateForItem(item, currencyCode);
+                const sidebarItem = sidebarRate ? { ...item, item_rates: [sidebarRate] } : item;
+                /* Same season as the price below: rate_basis is per row, so a
+                   matrix that prices summer per-person and winter per-room must
+                   label the row this trip actually uses. */
+                const basis = basisOfItem(sidebarItem, currencyCode);
+                /* Use contractPaxRate (pax-aware) rather than rawContractPrice:
+                   - rawContractPrice always reads price_1_adult first, so an
+                     accommodation with 2 travellers was showing the single rate
+                     instead of the per-person sharing rate (price_2_adults).
+                   - contractPaxRate applies the same tier logic that createService()
+                     uses, so what the sidebar displays == what lands on the line. */
+                const price = contractPaxRate(sidebarItem, currencyCode, paxCount);
+                /* Build a human-readable pricing label that reflects the actual
+                   tier being shown, so the operator can immediately tell whether
+                   the figure is a single supplement, a sharing rate, etc. */
+                const isAccomBasis = basis === 'per_person_sharing' || /accommodation/i.test(item.category || '');
+                const isFlat = isFlatBasis(basis) || isFlatRoomRate(sidebarRate);
+                let priceUnit;
+                if (isFlat) {
+                  priceUnit = basisLabelOf(basis);
+                } else if (isAccomBasis) {
+                  /* Show the tier that paxCount resolves to, so the label matches
+                     the number shown: single when 1 pax, sharing when 2+. */
+                  priceUnit = paxCount <= 1 ? 'per person (single)' : 'per person sharing';
+                } else {
+                  priceUnit = basis === 'per_person' ? 'per person' : basisLabelOf(basis).toLowerCase();
+                }
+                /* Warn when no exact season covers the travel dates — the price
+                   shown is the closest prior season (or undated), so the figure
+                   may change once the correct season is loaded. */
+                const noExactSeason = sidebarSeason.status === 'protected' || sidebarSeason.status === 'undated';
                 return (
                   <div
                     key={item.id}
@@ -4182,21 +5757,47 @@ const missing = !sv.confirmationNumber ||
                     </div>
                     <div className="draggable-item-meta">
                       <span className="item-cat-tag">{item.category || 'General'}</span>
-                      <span className="item-price-tag">{fmtMoney(price, currencySymbol)}<span style={{ color: '#94a3b8', fontWeight: 500 }}>/pax</span></span>
+                      <span className="item-price-tag">{fmtMoney(price, currencySymbol)}<span style={{ color: '#94a3b8', fontWeight: 500 }}>{` ${priceUnit}`}</span></span>
                     </div>
                     <div className="draggable-item-supplier">
                       {item.supplier?.name || ''}
                       {isFlatBasis(basis) ? <span className="basis-tag">{basisLabelOf(basis)}</span> : null}
+                      {noExactSeason && sidebarSeason.seasonName && (
+                        <span className="basis-tag" style={{ color: '#b45309', background: '#fffbeb', borderColor: '#fde68a' }} title={`No season covers ${travelWindow.start || 'the travel dates'}; showing ${sidebarSeason.seasonName} season price`}>
+                          ⚠ {sidebarSeason.seasonName}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
               })
+
             )}
+            {pickerPackages.length > 0 && (
+              <div className="builder-package-items">
+                <h3>Packages</h3>
+                {pickerPackages.map((pkg) => (
+                  <article className="draggable-item builder-package-item" key={pkg.id}>
+                    <div className="draggable-item-top"><span className="draggable-item-name">{pkg.name}</span></div>
+                    {pkg.description && <p>{pkg.description}</p>}
+                    <div className="draggable-item-meta">
+                      <span className="item-cat-tag">Reusable package</span>
+                      <span className="item-price-tag">{Number(pkg.default_markup_percentage) || 0}% default markup</span>
+                    </div>
+                    <button type="button" className="secondary-btn" disabled={isReadOnly || !currentDay}
+                      onClick={() => addPackageToDay(selectedDayIndex, pkg)}>
+                      Add to Day {selectedDayIndex + 1}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+            {pickerPackagesLoading && <div className="builder-items-empty">Loading packages...</div>}
           </div>
         </aside>
 
-        {/* ── Main panel ─────────────────────────────────────────────────── */}
-        <div className="builder-main">
+        {/* -- Main panel --------------------------------------------------- */}
+        <div className={`builder-main ${tab === 'finance' ? 'builder-main-finance' : ''}`}>
           {/* Header card */}
           <div className="builder-header-card">
             <div>
@@ -4334,11 +5935,11 @@ const missing = !sv.confirmationNumber ||
             <button type="button" className={`builder-tab ${tab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
               <StickyNote size={15} /> Notes
             </button>
-            {/* Finance is always available — the deposit request, the invoice
-                journal, its receipts and cost of sales all live here. */}
-            <button type="button" className={`builder-tab ${tab === 'finance' ? 'active' : ''}`} onClick={() => setActiveTab('finance')}>
-              <Receipt size={15} /> Finance
-            </button>
+            {visibleTabIds.includes('finance') && (
+              <button type="button" className={`builder-tab ${tab === 'finance' ? 'active' : ''}`} onClick={() => setActiveTab('finance')}>
+                <Receipt size={15} /> Finance
+              </button>
+            )}
             {isProvisional && (
               <button type="button" className={`builder-tab ${tab === 'service-request' ? 'active' : ''}`} onClick={() => setActiveTab('service-request')}>
                 <Mail size={15} /> Service Request
@@ -4464,12 +6065,13 @@ const missing = !sv.confirmationNumber ||
                         <span className="svc-head-buy">Buy /pax</span>
                         <span className="svc-head-markup">Markup</span>
                         <span className="svc-head-sell">Sell /pax</span>
-                        <span className="svc-head-line">Line</span>
+                        <span className="svc-head-line">Total</span>
                         <span />
                       </div>
                     )}
                     {(currentDay.services || []).map((sv) => {
-                      const sellLine = round2((Number(sv.sellPP) || 0) * paxCount);
+                      const servicePax = paxForService(sv, paxCount);
+                      const sellLine = round2((Number(sv.sellPP) || 0) * servicePax);
                       return (
                         <div
                           key={sv.key}
@@ -4497,17 +6099,48 @@ const missing = !sv.confirmationNumber ||
                             <div className="service-row-meta">
                               {sv.category || 'General'}
                               {sv.supplierName ? ` · ${sv.supplierName}` : ''}
-                              {paxCount > 0 ? ` · ${paxCount} pax` : ''}
+                              {servicePax > 0 ? ` · ${servicePax} pax` : ''}
                               {sv.currencyCode ? ` · ${sv.currencyCode}` : ''}
                               <span className={`basis-tag ${isFlatBasis(sv.basis) ? 'flat' : ''}`}>
                                 {basisLabelOf(sv.basis)}
                               </span>
                             </div>
+                            {sv.packageSnapshot && (
+                              <div className="itinerary-package-details">
+                                <button type="button" className="package-snapshot-toggle"
+                                  aria-expanded={!!expandedPackageRows[sv.key]}
+                                  onClick={() => setExpandedPackageRows((prev) => ({ ...prev, [sv.key]: !prev[sv.key] }))}>
+                                  <Layers size={13} /> {expandedPackageRows[sv.key] ? 'Hide package services' : `Show package services (${(sv.packageSnapshot.days || []).reduce((sum, day) => sum + (day.services || []).length, 0)})`}
+                                </button>
+                                {expandedPackageRows[sv.key] && <div className="package-snapshot-services">
+                                  {sv.packageSnapshot.days?.length ? sv.packageSnapshot.days.map((packageDay, dayIndex) => (
+                                    <section key={`${sv.key}-day-${dayIndex}`}>
+                                      <strong>Package Day {packageDay.day_number || dayIndex + 1}</strong>
+                                      {(packageDay.services || []).map((service, serviceIndex) => (
+                                        <div className="package-snapshot-service" key={`${sv.key}-${dayIndex}-${serviceIndex}`}>
+                                          <span>{service.category || 'Service'}: {service.item_name}{service.is_included === false ? ' (optional)' : ''}</span>
+                                          <small>{service.supplier_name || 'Supplier not specified'}{service.currency_code ? ` · ${service.currency_code} ${round2((isFlatBasis(service.rate_basis) ? Number(service.unit_cost || 0) / Math.max(1, paxCount) : Number(service.unit_cost || 0)) * (1 + (Number(sv.markup) || 0) / 100) * (Number(service.quantity) || 1)).toFixed(2)}` : ''}</small>
+                                          {!isReadOnly && <button type="button" className="package-snapshot-remove"
+                                            title={`Remove ${service.item_name || 'service'} from this package`}
+                                            aria-label={`Remove ${service.item_name || 'service'} from this package in the itinerary`}
+                                            onClick={() => removePackageService(selectedDayIndex, sv.key, dayIndex, serviceIndex)}>
+                                            <Trash2 size={13} />
+                                          </button>}
+                                        </div>
+                                      ))}
+                                    </section>
+                                  )) : <span>No services are saved in this package yet.</span>}
+                                </div>}
+                              </div>
+                            )}
                             {/accommodation/i.test(sv.category || '') && (
                               <div style={{ marginTop: '0.35rem' }}>
                                 {(() => {
-                                  const roomCheck = validateRoomAllocation(sv, meta.travellers || []);
+const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.services || [], meta.travellers || []);
                                   const numRooms = sv.roomAllocations?.length || 0;
+                                  const partyPax = (meta.travellers || []).length || paxCount;
+                                  const paxHere = (sv.roomAllocations || [])
+                                    .reduce((n, rm) => n + ((rm.allocatedTravellers || []).length), 0);
                                   if (roomCheck.isValid && numRooms > 0) {
                                     return (
                                       <button
@@ -4527,7 +6160,8 @@ const missing = !sv.confirmationNumber ||
                                           cursor: 'pointer'
                                         }}
                                       >
-                                        ✓ {numRooms} Room(s) Allocated ({meta.travellers?.length || 0} Pax)
+                                        <CheckCircle2 size={13} /> {numRooms} Room(s) Allocated
+                                        {paxHere < partyPax ? ` (${paxHere} of ${partyPax} Pax)` : ` (${paxHere} Pax)`}
                                       </button>
                                     );
                                   }
@@ -4549,7 +6183,9 @@ const missing = !sv.confirmationNumber ||
                                         cursor: 'pointer'
                                       }}
                                     >
-                                      {sv.isOptional ? 'Alternative · Allocate rooms if chosen' : '⚠️ Room Allocation Required'}
+                                      {sv.isOptional
+                                          ? 'Alternative · Allocate rooms if chosen'
+                                          : 'Room Allocation Required'}
                                     </button>
                                   );
                                 })()}
@@ -4751,7 +6387,7 @@ const missing = !sv.confirmationNumber ||
                           <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(g.totalTaxIn, g.symbol)}</td>
                         </tr>
                         <tr style={{ background: '#f8fafc' }}>
-                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Net {taxWordUpper(g.code)} to {taxAgencyOf(g.code, defaultRevenueAgency)} (Output − Input)</td>
+                          <td colSpan="5" style={{ textAlign: 'right', fontWeight: 700 }}>Net {taxWordUpper(g.code)} to {taxAgencyOf(g.code, defaultRevenueAgency)} (Output - Input)</td>
                           <td style={{ color: '#7c3aed', fontWeight: 800 }}>{fmtMoney(g.totalTaxNet, g.symbol)}</td>
                         </tr>
                         <tr style={{ background: '#f0fdfa' }}>
@@ -4832,14 +6468,14 @@ const missing = !sv.confirmationNumber ||
                 </div>
                 <div className="sidebar-field">
                   <label>Copy from</label>
-                  <select className="sidebar-select" value={copySourceId} onChange={(e) => setCopySourceId(e.target.value)}>
+                  <SearchableSelect className="sidebar-select" value={copySourceId} onChange={(e) => setCopySourceId(e.target.value)}>
                     <option value="">Select an itinerary...</option>
                     {availableItineraries.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.itinerary_name}{a.reference_number ? ` (${a.reference_number})` : ''}
                       </option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                   {availableItineraries.length === 0 && (
                     <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.4rem' }}>
                       No other itineraries available to copy from.
@@ -4848,13 +6484,13 @@ const missing = !sv.confirmationNumber ||
                 </div>
                 <div className="sidebar-field">
                   <label>Insert after day</label>
-                  <select className="sidebar-select" value={copyInsertDay} onChange={(e) => setCopyInsertDay(Number(e.target.value))}>
+                  <SearchableSelect className="sidebar-select" value={copyInsertDay} onChange={(e) => setCopyInsertDay(Number(e.target.value))}>
                     {Array.from({ length: days.length + 1 }, (_, i) => (
                       <option key={i} value={i + 1}>
                         {i === days.length ? `After Day ${i} (at the end)` : `After Day ${i + 1}`}
                       </option>
                     ))}
-                  </select>
+                  </SearchableSelect>
                 </div>
                 <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '1rem' }}>
                   The copied days are inserted into this itinerary. If they exceed the current date range, the travel end date is extended automatically.
@@ -4897,7 +6533,7 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Service Request (provisional) ───────────────────────────────────────
+          {/* --- Service Request (provisional) ---------------------------------------
      Booking enquiries for every supplier. Each service carries a confirmation
      status (RQ/OK/NA/WL/XX) recorded here as select buttons — these are the
      provisional enquiry results. Confirmed bookings later always reflect OK.
@@ -4937,7 +6573,7 @@ const missing = !sv.confirmationNumber ||
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
                       <strong style={{ fontSize: '0.92rem', color: '#1a202c' }}>{grp.label}</strong>
                       <span style={{ fontSize: '0.78rem', color: `${emailOf(grp.sup) ? '#16a34a' : '#dc2626'}` }}>
-                        {emailOf(grp.sup) ? `✉ ${emailOf(grp.sup)}` : 'No email on file — add one in Suppliers'}
+                        {emailOf(grp.sup) ? `? ${emailOf(grp.sup)}` : 'No email on file — add one in Suppliers'}
                       </span>
                     </div>
                     <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
@@ -4958,7 +6594,7 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Travel Documents (confirmed / in progress) ───────────────────────────
+          {/* --- Travel Documents (confirmed / in progress) ---------------------------
      Supplier reconfirmations. Every service is grouped under its supplier; each
      supplier gets its own compose button. The bulk button always asks the user
      first (listing the groups and mailto count) before opening the drafts.
@@ -4998,7 +6634,7 @@ const missing = !sv.confirmationNumber ||
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
                       <strong style={{ fontSize: '0.92rem', color: '#1a202c' }}>{grp.label}</strong>
                       <span style={{ fontSize: '0.78rem', color: `${emailOf(grp.sup) ? '#16a34a' : '#dc2626'}` }}>
-                        {emailOf(grp.sup) ? `✉ ${emailOf(grp.sup)}` : 'No email on file — add one in Suppliers'}
+                        {emailOf(grp.sup) ? `? ${emailOf(grp.sup)}` : 'No email on file — add one in Suppliers'}
                       </span>
                     </div>
                     <span style={{ fontSize: '0.75rem', color: '#64748b', whiteSpace: 'nowrap' }}>{grp.svcs.length} service{grp.svcs.length === 1 ? '' : 's'}</span>
@@ -5059,28 +6695,298 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Finance: invoice ledger, journals, receipts, cost of sales ─── */}
+          {/* --- Payment capture: the amount is collected, not assumed --- */}
+          {paymentPrompt && (
+            <div className="modal-overlay" onClick={() => !issuingInvoice && setPaymentPrompt(null)}>
+              <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}>
+                <div className="modal-header">
+                  <h2>Record payment</h2>
+                  <button className="close-btn" onClick={() => !issuingInvoice && setPaymentPrompt(null)}><X size={20} /></button>
+                </div>
+                <div style={{ fontSize: '0.85rem', color: '#334155', marginBottom: '0.9rem' }}>
+                  Record the amount actually received against <strong>{paymentPrompt.invoice_number}</strong>.
+                  Any amount above the outstanding balance is recorded as an unresolved overpayment for later refund or credit.
+                </div>
+
+                {paymentInvoicesByCurrency.length > 1 && (
+                  <>
+                    <label htmlFor="payment-currency" style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '0.3rem', fontWeight: 600 }}>
+                      Currency / invoice
+                    </label>
+                    <select
+                      id="payment-currency"
+                      value={paymentPrompt.currency_code}
+                      onChange={(event) => changePaymentCurrency(event.target.value)}
+                      style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.8rem' }}
+                    >
+                      {paymentInvoicesByCurrency.map((invoice) => (
+                        <option key={invoice.id} value={invoice.currency_code}>
+                          {invoice.currency_code} — {invoice.invoice_number} — {invoice.derivedBalance > 0.009
+                            ? `${svcSymbol(invoice.currency_code)}${invoice.derivedBalance.toFixed(2)} outstanding`
+                            : 'paid; additional payment allowed'}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+
+                <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '0.3rem', fontWeight: 600 }}>
+                  Amount received ({paymentPrompt.currency_code})
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  autoFocus
+                  value={paymentForm.amount}
+                  onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}
+                  style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.8rem' }}
+                />
+
+                <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '0.3rem', fontWeight: 600 }}>
+                  Date received
+                </label>
+                <input
+                  type="date"
+                  value={paymentForm.received_date}
+                  onChange={(e) => setPaymentForm({ ...paymentForm, received_date: e.target.value })}
+                  style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.8rem' }}
+                />
+
+                <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '0.3rem', fontWeight: 600 }}>
+                  Payment method
+                </label>
+                <input
+                  type="text"
+                  value={paymentForm.payment_method}
+                  onChange={(e) => setPaymentForm({ ...paymentForm, payment_method: e.target.value })}
+                  placeholder="EFT, card, cash"
+                  style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.8rem' }}
+                />
+
+                <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '0.3rem', fontWeight: 600 }}>
+                  Bank reference
+                </label>
+                <input
+                  type="text"
+                  value={paymentForm.payment_reference}
+                  onChange={(e) => setPaymentForm({ ...paymentForm, payment_reference: e.target.value })}
+                  placeholder="Transaction ID (optional)"
+                  style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.9rem' }}
+                />
+
+                <div style={{ fontSize: '0.85rem', color: '#334155', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '0.6rem 0.75rem', marginBottom: '0.9rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Invoice balance before payment</span>
+                    <strong>{svcSymbol(paymentPrompt.currency_code)}{paymentPrompt.derivedBalance.toFixed(2)}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.3rem' }}>
+                    <span>Invoice balance after this payment</span>
+                    <strong>{svcSymbol(paymentPrompt.currency_code)}{balanceAfterPayment(paymentPrompt, Number(paymentForm.amount) || 0).toFixed(2)}</strong>
+                  </div>
+                  {Number(paymentForm.amount) > paymentPrompt.derivedBalance + 0.009 && (
+                    <div role="status" style={{ marginTop: '0.45rem', color: '#9a3412', fontWeight: 700 }}>
+                      Unresolved overpayment to record: {svcSymbol(paymentPrompt.currency_code)}{(Number(paymentForm.amount) - paymentPrompt.derivedBalance).toFixed(2)}. You can resolve it later from the itinerary summary.
+                    </div>
+                  )}
+                </div>
+
+                <div className="form-actions">
+                  <button type="button" className="secondary-btn" disabled={issuingInvoice} onClick={() => setPaymentPrompt(null)}>Cancel</button>
+                  <button type="button" className="primary-btn" disabled={issuingInvoice || !(Number(paymentForm.amount) > 0.009)} onClick={submitPayment}>
+                    <CheckCircle2 size={15} /> Raise receipt
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {overpaymentPrompt && (() => {
+            const candidate = overpaymentPrompt.candidates.find((entry) => entry.invoice.id === overpaymentPrompt.selectedInvoiceId);
+            const amount = Number(overpaymentAmount) || 0;
+            return (
+              <div className="modal-overlay" onClick={() => !issuingInvoice && setOverpaymentPrompt(null)}>
+                <div className="modal-content" onClick={(event) => event.stopPropagation()} style={{ maxWidth: '560px' }}>
+                  <div className="modal-header">
+                    <h2>Resolve {overpaymentPrompt.currency} overpayment</h2>
+                    <button className="close-btn" disabled={issuingInvoice} onClick={() => setOverpaymentPrompt(null)}><X size={20} /></button>
+                  </div>
+                  <p style={{ color: '#475569', fontSize: '0.88rem', lineHeight: 1.5 }}>
+                    There is {svcSymbol(overpaymentPrompt.currency)}{overpaymentPrompt.amount.toFixed(2)} of unresolved overpayment. Choose whether to return the excess to the client or issue a credit note that stays in the client's {overpaymentPrompt.currency} credit balance.
+                  </p>
+                  <label htmlFor="overpayment-invoice" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '0.3rem' }}>
+                    Invoice containing the excess payment
+                  </label>
+                  <select
+                    id="overpayment-invoice"
+                    value={overpaymentPrompt.selectedInvoiceId}
+                    disabled={issuingInvoice}
+                    onChange={(event) => {
+                      const selected = overpaymentPrompt.candidates.find((entry) => entry.invoice.id === event.target.value);
+                      if (!selected) return;
+                      setOverpaymentPrompt((current) => current
+                        ? { ...current, selectedInvoiceId: selected.invoice.id }
+                        : current);
+                      setOverpaymentAmount(Math.min(overpaymentPrompt.amount, selected.available).toFixed(2));
+                    }}
+                    style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.8rem' }}
+                  >
+                    {overpaymentPrompt.candidates.map((entry) => (
+                      <option key={entry.invoice.id} value={entry.invoice.id}>
+                        {entry.invoice.invoice_number} — up to {svcSymbol(overpaymentPrompt.currency)}{entry.available.toFixed(2)}
+                      </option>
+                    ))}
+                  </select>
+                  <label htmlFor="overpayment-resolution-amount" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '0.3rem' }}>
+                    Amount to resolve
+                  </label>
+                  <input
+                    id="overpayment-resolution-amount"
+                    type="number"
+                    min="0.01"
+                    max={candidate?.available || 0}
+                    step="0.01"
+                    value={overpaymentAmount}
+                    disabled={issuingInvoice}
+                    onChange={(event) => setOverpaymentAmount(event.target.value)}
+                    style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95rem', marginBottom: '0.8rem' }}
+                  />
+                  <label htmlFor="overpayment-resolution-reason" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '0.3rem' }}>
+                    Reason
+                  </label>
+                  <textarea
+                    id="overpayment-resolution-reason"
+                    value={overpaymentReason}
+                    disabled={issuingInvoice}
+                    onChange={(event) => setOverpaymentReason(event.target.value)}
+                    rows={3}
+                    style={{ width: '100%', padding: '0.55rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.9rem', marginBottom: '1rem', resize: 'vertical', fontFamily: 'inherit' }}
+                  />
+                  <div className="form-actions">
+                    <button type="button" className="secondary-btn" disabled={issuingInvoice} onClick={() => setOverpaymentPrompt(null)}>Cancel</button>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      disabled={issuingInvoice || !candidate || !(amount > 0.009) || amount > candidate.refundLimit + 0.009 || !overpaymentReason.trim()}
+                      onClick={() => resolveOverpayment('refund')}
+                    >
+                      {issuingInvoice ? 'Processing…' : 'Refund to client'}
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-btn"
+                      disabled={issuingInvoice || !candidate || !(amount > 0.009) || amount > candidate.creditLimit + 0.009 || !overpaymentReason.trim()}
+                      onClick={() => resolveOverpayment('credit_note')}
+                    >
+                      {issuingInvoice ? 'Processing…' : 'Issue credit note'}
+                    </button>
+                  </div>
+                  {candidate && candidate.creditLimit <= 0.009 && (
+                    <p style={{ margin: '0.75rem 0 0', color: '#64748b', fontSize: '0.78rem' }}>
+                      This invoice cannot take an additional credit note. A refund is available up to {svcSymbol(overpaymentPrompt.currency)}{candidate.refundLimit.toFixed(2)}.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* --- Finance: invoice ledger, journals, receipts, cost of sales --- */}
           {tab === 'finance' && (
             <>
-              <div className="builder-panel-card">
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
-                  Invoices &amp; journal
-                </h3>
-                <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.75rem', maxWidth: '760px' }}>
-                  Every invoice raised on this itinerary, with the double-entry journal it posted and the
-                  receipts raised against it. Open an invoice to see its journal lines.
-                </p>
-                {invoicesInCurrency.length === 0 ? (
+              <FinanceSection
+                sectionId="statement"
+                title="Statement of account"
+                summary="Charges, payments and the balance in date order — share it with the client"
+                open={openFinance.statement}
+                onToggle={() => toggleFinance('statement')}
+              >
+                <div style={{ display: 'grid', gap: '0.65rem', marginBottom: '1rem' }}>
+                  {statementCurrenciesHere.map((ccy) => {
+                    const st = buildStatement(ccy);
+                    const sym = svcSymbol(ccy);
+                    const settled = Math.abs(st.closing) < 0.009;
+                    return (
+                      <div key={ccy} style={{ background: settled ? '#f0fdf4' : '#fff7ed', border: `1px solid ${settled ? '#bbf7d0' : '#fed7aa'}`, borderRadius: '14px', padding: '1rem 1.25rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1rem', flexWrap: 'wrap' }}>
+                          <div style={{ fontSize: '0.8rem', fontWeight: 800, color: settled ? '#166534' : '#9a3412' }}>
+                            {ccy} · {st.closing > 0.009 ? 'Outstanding balance'
+                              : st.closing < -0.009 ? 'Held in credit'
+                              : 'Account settled in full'}
+                          </div>
+                          <div style={{ fontSize: '1.35rem', fontWeight: 900, color: settled ? '#166534' : '#9a3412' }}>
+                            {sym}{Math.abs(st.closing).toFixed(2)}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem', flexWrap: 'wrap', fontSize: '0.82rem', color: '#334155' }}>
+                          <span>Charged: <strong>{sym}{st.charges.toFixed(2)}</strong></span>
+                          <span>Paid &amp; credited: <strong>{sym}{st.payments.toFixed(2)}</strong></span>
+                          <span>{st.invoiceCount} invoice{st.invoiceCount === 1 ? '' : 's'}{st.voidCount ? `, ${st.voidCount} voided` : ''}</span>
+                          {st.voidCount > 0 && <span style={{ color: '#64748b' }}>{st.voidedAmount === 0 ? 'voids net to nil' : `voids net ${sym}${Math.abs(st.voidedAmount).toFixed(2)}`}</span>}
+                        </div>
+                        {!st.reconciles && (
+                          <p style={{ margin: '0.6rem 0 0', fontSize: '0.78rem', color: '#b91c1c', fontWeight: 700 }}>
+                            This statement does not reconcile to the invoice balances on file. Please check the documents.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#475569' }}>Document currency:</span>
+                  {statementCurrenciesHere.length > 1 ? (
+                    <select
+                      value={statementCcy}
+                      onChange={(e) => setStatementCcy(e.target.value)}
+                      aria-label="Statement currency"
+                      style={{ padding: '0.4rem 0.5rem', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                    >
+                      {statementCurrenciesHere.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  ) : (
+                    <strong style={{ fontSize: '0.82rem', color: '#475569' }}>{statementCcy}</strong>
+                  )}
+                  <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={viewStatement}>
+                    View / print
+                  </button>
+                  <SearchableSelect
+                    value={statementFormat}
+                    onChange={(e) => setStatementFormat(e.target.value)}
+                    aria-label="Statement file format"
+                    style={{ padding: '0.4rem 0.5rem', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.82rem' }}
+                  >
+                    <option value="doc">Word</option>
+                    <option value="xls">Excel</option>
+                    <option value="csv">CSV</option>
+                  </SearchableSelect>
+                  <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={downloadStatement}>
+                    Download
+                  </button>
+                  <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={emailStatement}>
+                    Email to client
+                  </button>
+                </div>
+              </FinanceSection>
+
+              <FinanceSection
+                sectionId="ledger"
+                title="Invoices &amp; journal"
+                summary={`${itineraryInvoices.length} invoice${itineraryInvoices.length === 1 ? '' : 's'} across ${new Set(itineraryInvoices.map((inv) => (inv.currency_code || currencyCode).toUpperCase())).size} currencies, with currency-matched journal entries`}
+                open={openFinance.ledger}
+                onToggle={() => toggleFinance('ledger')}
+              >
+                {itineraryInvoices.length === 0 ? (
                   <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: 0 }}>
-                    No invoice issued for {currencyCode} yet.
+                    No invoice has been issued for this itinerary yet.
                   </p>
                 ) : (
                   <div>
-                    {invoicesInCurrency.map((inv) => (
+                    {itineraryInvoices.map((inv) => (
                       <InvoiceFinanceRow
                         key={inv.id}
                         invoice={inv}
-                        symbol={currencySymbol}
+                        symbol={inv.currency_code ? svcSymbol(inv.currency_code) : ''}
                         open={openInvoiceId === inv.id}
                         onToggle={() => setOpenInvoiceId((cur) => (cur === inv.id ? null : inv.id))}
                         entries={journalBySource.get(`invoice|${inv.id}`) || []}
@@ -5098,21 +7004,31 @@ const missing = !sv.confirmationNumber ||
                     </div>
                     <div style={{ display: 'grid', gap: '0.5rem' }}>
                       {standaloneJournal.map((e) => (
-                        <JournalEntryCard key={e.id} entry={e} symbol={currencySymbol} />
+                        <JournalEntryCard
+                          key={e.id}
+                          entry={e}
+                          symbol={e.currency_code ? svcSymbol(e.currency_code) : ''}
+                          currencyCode={e.currency_code || 'Currency unknown'}
+                        />
                       ))}
                     </div>
                   </div>
                 )}
-              </div>
+              </FinanceSection>
             </>
           )}
 
-          {/* ─── Stage invoice (provisional → deposit request, confirmed+ → final) ── */}
+          {/* --- Stage invoice (provisional ? deposit request, confirmed+ ? final) -- */}
           {tab === 'finance' && (
-            <div className="builder-panel-card">
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
-                Invoice
-              </h3>
+            <FinanceSection
+              sectionId="invoice"
+              title="Invoice"
+              summary={isProvisional
+                ? 'Issue a deposit request separately for each itinerary currency'
+                : 'Issue invoices separately for each itinerary currency'}
+              open={openFinance.invoice}
+              onToggle={() => toggleFinance('invoice')}
+            >
               {isProvisional ? (
                 <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.6rem', maxWidth: '720px' }}>
                   A <strong>provisional booking</strong> only unlocks this deposit invoice — no vouchers or
@@ -5139,123 +7055,147 @@ const missing = !sv.confirmationNumber ||
                 ))}
               </div>
 
-              {isProvisional ? (
-                <div className="invoice-total" style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.15rem' }}>
-                  <div style={{ fontSize: '0.8rem', color: '#1e40af', fontWeight: 700, marginBottom: '0.25rem' }}>Total itinerary price</div>
-                  <div style={{ fontSize: '1.6rem', fontWeight: 900, color: '#1e40af' }}>
-                    {currencySymbol}{paxBalanceTotal.toFixed(2)}
-                  </div>
-                  <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
-                      Deposit requested ({depositPct}%): <strong>{currencySymbol}{depositRequested.toFixed(2)}</strong>
-                    </span>
-                    <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
-                      {depositPaid ? 'Balance remaining:' : 'Balance remaining after deposit:'} <strong>{currencySymbol}{depositBalanceRemaining.toFixed(2)}</strong>
-                    </span>
-                    {depositPaid && (
-                      <span style={{ fontSize: '0.82rem', color: '#15803d', fontWeight: 800 }}>
-                        Deposit received: {currencySymbol}{paidDepositTotal.toFixed(2)}
-                      </span>
-                    )}
-                    {currencyReceipts.length > 0 && (
-                      <div style={{ flexBasis: '100%', borderTop: '1px solid #bfdbfe', paddingTop: '0.5rem', marginTop: '0.2rem' }}>
-                        <div style={{ fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.25rem' }}>Payments received</div>
-                        {currencyReceipts.map((r) => (
-                          <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.82rem', color: '#334155', padding: '0.14rem 0' }}>
-                            <span style={{ fontWeight: 600 }}>
-                              {TYPE_LABEL[r.invoice_type] || r.invoice_type} — received {r.received_date || '—'}
-                            </span>
-                            <span style={{ fontWeight: 700 }}>
-                              <button
-                                type="button"
-                                onClick={() => viewReceipt(r)}
-                                title="View / print receipt"
-                                style={{ background: 'none', border: 'none', padding: 0, color: '#0d7478', fontWeight: 800, cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
-                              >
-                                {r.receipt_number}
-                              </button>
-                              {'  '}{fmtMoney(r.amount, currencySymbol)}
-                            </span>
-                          </div>
-                        ))}
+              <div style={{ display: 'grid', gap: '0.65rem', marginBottom: '1.15rem' }}>
+                {pricingGroups.filter((group) => group.totalSell > 0).map((group) => {
+                  const sym = svcSymbol(group.code);
+                  const billed = netBilled(itineraryInvoices, itineraryCreditNotes, group.code);
+                  const balance = round2(Math.max(0, group.totalSell - billed));
+                  const receivedHere = round2(itineraryInvoices
+                    .filter((invoice) => (invoice.status || '') !== 'void'
+                      && (invoice.currency_code || '').toUpperCase() === group.code.toUpperCase())
+                    .reduce((total, invoice) => total + netReceivedTotal(invoice.id, itineraryReceipts), 0));
+                  const paymentExcess = bookingOverpayment(
+                    group.totalSell,
+                    itineraryInvoices,
+                    itineraryReceipts,
+                    itineraryCreditNotes,
+                    group.code
+                  );
+                  const receiptsHere = itineraryReceipts.filter((receipt) => (receipt.currency_code || '').toUpperCase() === group.code.toUpperCase());
+                  const creditsHere = itineraryCreditNotes.filter((credit) => (credit.currency_code || '').toUpperCase() === group.code.toUpperCase()
+                    && (credit.status || '') !== 'void');
+                  const firstRequest = billed <= 0.009 ? round2(group.totalSell * (depositPct / 100)) : 0;
+                  return (
+                    <div key={group.code} className="invoice-total" style={{ background: balance > 0.009 ? (isProvisional ? '#eff6ff' : '#fff7ed') : '#f0fdf4', border: `1px solid ${balance > 0.009 ? (isProvisional ? '#bfdbfe' : '#fed7aa') : '#bbf7d0'}`, borderRadius: '14px', padding: '1rem 1.25rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: '0.9rem', color: '#1e293b', fontWeight: 800 }}>{group.code} itinerary total</div>
+                        <div style={{ fontSize: '1.45rem', fontWeight: 900, color: balance > 0.009 ? (isProvisional ? '#1e40af' : '#9a3412') : '#15803d' }}>
+                          {sym}{group.totalSell.toFixed(2)}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="invoice-total" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '14px', padding: '1rem 1.25rem', marginBottom: '1.15rem' }}>
-                  <div style={{ fontSize: '0.8rem', color: '#16a34a', fontWeight: 700, marginBottom: '0.25rem' }}>Outstanding balance</div>
-                  <div style={{ fontSize: '1.6rem', fontWeight: 900, color: '#15803d' }}>
-                    {currencySymbol}{finalOutstanding.toFixed(2)}
-                  </div>
-                  <div style={{ display: 'grid', gap: '0.3rem', marginTop: '0.6rem' }}>
-                    <span style={{ fontSize: '0.82rem', color: '#334155', fontWeight: 600 }}>
-                      Total invoice amount: <strong>{currencySymbol}{paxBalanceTotal.toFixed(2)}</strong>
-                    </span>
-                    {currencyReceipts.length > 0 && (
-                      <div style={{ borderTop: '1px solid #bbf7d0', paddingTop: '0.5rem', marginTop: '0.3rem' }}>
-                        <div style={{ fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.25rem' }}>Payments received</div>
-                        {currencyReceipts.map((r) => (
-                          <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.82rem', color: '#334155', padding: '0.14rem 0' }}>
-                            <span style={{ fontWeight: 600 }}>
-                              {TYPE_LABEL[r.invoice_type] || r.invoice_type} — received {r.received_date || '—'}
-                            </span>
-                            <span style={{ fontWeight: 700 }}>
-                              <button
-                                type="button"
-                                onClick={() => viewReceipt(r)}
-                                title="View / print receipt"
-                                style={{ background: 'none', border: 'none', padding: 0, color: '#0d7478', fontWeight: 800, cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
-                              >
-                                {r.receipt_number}
-                              </button>
-                              {'  '}{fmtMoney(r.amount, currencySymbol)}
-                            </span>
-                          </div>
-                        ))}
+                      <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.45rem', flexWrap: 'wrap', fontSize: '0.82rem', color: '#334155' }}>
+                        <span>Balance to invoice: <strong>{sym}{balance.toFixed(2)}</strong></span>
+                        <span>Already invoiced: <strong>{sym}{billed.toFixed(2)}</strong></span>
+                        {receivedHere > 0 && <span>Net payments held: <strong>{sym}{receivedHere.toFixed(2)}</strong></span>}
+                        {firstRequest > 0 && <span>Usual first request ({depositPct}%): <strong>{sym}{firstRequest.toFixed(2)}</strong></span>}
                       </div>
-                    )}
-                    {finalPaid && (
-                      <span style={{ fontSize: '0.82rem', color: '#15803d', fontWeight: 800 }}>
-                        Paid in full — account settled
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
+                      {paymentExcess > 0.009 && (
+                        <div role="alert" style={{ marginTop: '0.65rem', border: '1px solid #fca5a5', borderRadius: '8px', background: '#fef2f2', color: '#991b1b', padding: '0.6rem 0.75rem', fontSize: '0.82rem', fontWeight: 700 }}>
+                          The itinerary has an unresolved {group.code} overpayment of {sym}{paymentExcess.toFixed(2)}. It remains available to refund or issue as a client credit note.
+                          <button type="button" className="secondary-btn" disabled={issuingInvoice} onClick={() => openOverpaymentPrompt(group.code, group.totalSell)} style={{ marginLeft: '0.6rem', padding: '0.25rem 0.55rem', color: '#991b1b', borderColor: '#fca5a5' }}>
+                            Resolve overpayment
+                          </button>
+                        </div>
+                      )}
+                      {receiptsHere.length > 0 && (
+                        <div style={{ borderTop: `1px solid ${balance > 0.009 ? '#cbd5e1' : '#bbf7d0'}`, paddingTop: '0.5rem', marginTop: '0.55rem' }}>
+                          <div style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', marginBottom: '0.25rem' }}>Receipts · {group.code}</div>
+                          {receiptsHere.map((receipt) => (
+                            <div key={receipt.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.82rem', color: '#334155', padding: '0.14rem 0' }}>
+                              <span style={{ fontWeight: 600 }}>
+                                {receipt.direction === 'out'
+                                  ? `Refund for ${receipt.invoice_number || 'invoice'}`
+                                  : receipt.direction === 'apply'
+                                    ? `Credit applied to ${receipt.invoice_number || 'invoice'}`
+                                    : receipt.direction === 'wallet_out'
+                                      ? 'Client credit payout'
+                                      : `${TYPE_LABEL[receipt.invoice_type] || receipt.invoice_type}${receipt.invoice_number ? ` ${receipt.invoice_number}` : ''}`}
+                                {receipt.direction === 'out' || receipt.direction === 'wallet_out'
+                                  ? ` — refunded ${receipt.received_date || '—'}`
+                                  : ` — received ${receipt.received_date || '—'}`}
+                              </span>
+                              <span style={{ fontWeight: 700 }}>
+                                <button type="button" onClick={() => viewReceipt(receipt)} title="View / print receipt" style={{ background: 'none', border: 'none', padding: 0, color: '#0d7478', fontWeight: 800, cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}>
+                                  {receipt.receipt_number}
+                                </button>
+                                {'  '}{receipt.direction === 'out' || receipt.direction === 'wallet_out' ? '-' : ''}
+                                {fmtMoney(receipt.amount, sym)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {creditsHere.length > 0 && (
+                        <div style={{ borderTop: `1px solid ${balance > 0.009 ? '#cbd5e1' : '#bbf7d0'}`, paddingTop: '0.5rem', marginTop: '0.55rem' }}>
+                          <div style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', marginBottom: '0.25rem' }}>Credit notes · {group.code}</div>
+                          {creditsHere.map((credit) => (
+                            <div key={credit.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.82rem', color: '#334155', padding: '0.14rem 0' }}>
+                              <span style={{ fontWeight: 600 }}>
+                                {credit.credit_note_number} — {credit.reason || 'Credit issued'}
+                              </span>
+                              <span style={{ fontWeight: 700 }}>{fmtMoney(credit.total_incl, sym)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {pricingGroups.every((group) => group.totalSell <= 0) && (
+                  <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: 0 }}>Add included services to see itinerary balances by currency.</p>
+                )}
+              </div>
 
               <div className="payment-receipt-box" style={{ border: '1.5px dashed #cbd5e1', borderRadius: '14px', padding: '1rem 1.25rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.3rem' }}>
                   <Receipt size={18} style={{ color: '#475569' }} />
-                  <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Payment receipt</strong>
+                  <strong style={{ fontSize: '0.9rem', color: '#1a202c' }}>Payment receipt — {currencyCode}</strong>
                 </div>
                 <p style={{ fontSize: '0.82rem', color: '#64748b', margin: '0 0 0.7rem 0' }}>
-                  {isProvisional
-                    ? 'Confirm that the client\'s deposit has been received. A receipt is raised and the deposit invoice is marked paid.'
-                    : 'Confirm that the client\'s payment has been received. A receipt is raised, the invoice is marked paid and the outstanding balance clears to R0.00.'}
+                  Record what the client has paid. A receipt is raised for the amount entered, and the invoice is only closed out once nothing is left outstanding on it.
                 </p>
-                {activeInvoice && activeInvoice.status === 'paid' ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#15803d', fontWeight: 700, fontSize: '0.9rem' }}>
-                    <CheckCircle2 size={16} />
-                    {isProvisional
-                      ? `Deposit received${depositBalanceRemaining > 0 ? ` — outstanding balance ${currencySymbol}${depositBalanceRemaining.toFixed(2)}` : ''}`
-                      : 'Payment received & confirmed — outstanding balance R0.00'}
-                  </div>
-                ) : activeInvoice ? (
-                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice} onClick={confirmPayment}>
-                    <CheckCircle2 size={15} /> {isProvisional ? 'Confirm deposit received' : 'Payment received & confirmed'}
+                {paymentInvoicesByCurrency.length > 0 ? (
+                  <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice} onClick={() => openPaymentPrompt()}>
+                    <CheckCircle2 size={15} /> Record payment
+                    {paymentInvoicesByCurrency.length > 1 ? ` (${paymentInvoicesByCurrency.map((invoice) => invoice.currency_code).join(', ')})` : ` (${paymentInvoicesByCurrency[0].currency_code})`}
                   </button>
                 ) : (
                   <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: 0 }}>
-                  Issue the invoice below first — the receipt is raised automatically when you confirm payment.
+                    Issue the invoice below first — the receipt is raised automatically when you confirm payment.
                   </p>
                 )}
               </div>
 
               <div className="invoice-actions" style={{ marginTop: '1.2rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice || !!activeInvoice} onClick={() => handleIssueInvoiceHere()}>
-                  <FileText size={15} />                   {activeInvoice ? (isProvisional ? 'Invoice issued' : 'Invoice issued') : 'Issue Invoice Here'}
-                </button>
+                {pricingGroups.filter((group) => group.totalSell > 0).map((group) => {
+                  const billed = netBilled(itineraryInvoices, itineraryCreditNotes, group.code);
+                  const remaining = round2(Math.max(0, group.totalSell - billed));
+                  const maximumPercent = group.totalSell > 0 ? Math.min(100, (remaining / group.totalSell) * 100) : 0;
+                  const initialPercent = billed <= 0.009
+                    ? Math.min(depositPct, maximumPercent)
+                    : maximumPercent;
+                  return (
+                    <button
+                      key={group.code}
+                      type="button"
+                      className="primary-btn"
+                      style={{ alignItems: 'center', gap: '0.4rem' }}
+                      disabled={issuingInvoice || remaining <= 0.009}
+                      onClick={() => setInvoiceIssuePrompt({
+                        currency: group.code,
+                        total: group.totalSell,
+                        remaining,
+                        percentage: String(round2(Math.max(0, initialPercent)))
+                      })}
+                      title={remaining <= 0.009 ? `The ${group.code} itinerary balance is fully invoiced` : `Choose a percentage of the ${group.code} itinerary total to invoice`}
+                    >
+                      <FileText size={15} />
+                      {remaining <= 0.009
+                        ? `${group.code} invoiced in full`
+                        : `Issue ${group.code} invoice`}
+                    </button>
+                  );
+                })}
                 <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => navigate('/finance')}>
                   <Receipt size={15} /> Issue Invoice in Finance module
                 </button>
@@ -5264,7 +7204,7 @@ const missing = !sv.confirmationNumber ||
               <div style={{ marginTop: '1.2rem', paddingTop: '1.1rem', borderTop: '1px solid #e2e8f0' }}>
                 <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#94a3b8', marginBottom: '0.4rem' }}>Email format</label>
                 <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                  <select
+                  <SearchableSelect
                     className="input-field"
                     style={{ maxWidth: '170px' }}
                     value={emailFormat}
@@ -5273,7 +7213,7 @@ const missing = !sv.confirmationNumber ||
                     <option value="pdf">PDF</option>
                     <option value="word">Word</option>
                     <option value="excel">Excel</option>
-                  </select>
+                  </SearchableSelect>
                   <button type="button" className="primary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} disabled={issuingInvoice} onClick={emailInvoiceToClient}>
                     <Send size={15} /> {isProvisional ? 'Email deposit request to client' : 'Email invoice to client'}
                   </button>
@@ -5284,24 +7224,27 @@ const missing = !sv.confirmationNumber ||
                     : `The ${emailFormat} file downloads (or is shared on supported devices), ready to attach to the email that follows.`}
                 </p>
               </div>
-            </div>
+            </FinanceSection>
           )}
 
-          {/* ─── Cost of sales (per itinerary, per currency) ─────────────────── */}
+          {/* --- Cost of sales (per itinerary, per currency) ------------------- */}
           {tab === 'finance' && (
-            <div className="builder-panel-card">
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
-                Cost of sales
-              </h3>
+            <FinanceSection
+              sectionId="cost-of-sales"
+              title="Cost of sales"
+              summary="What the itinerary earns against what it costs, net of tax"
+              open={openFinance.costOfSales}
+              onToggle={() => toggleFinance('costOfSales')}
+            >
               <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.75rem', maxWidth: '760px' }}>
                 What this itinerary earns against what it costs. The net sale excludes tax, because tax
                 collected is payable to SARS rather than kept as margin. Green is a profit, red is a loss.
               </p>
               <CostOfSalesPanel groups={pricingGroups} />
-            </div>
+            </FinanceSection>
           )}
 
-          {/* ─── Vouchers (confirmed, read-only) ───────────────────────────────── */}
+          {/* --- Vouchers (confirmed, read-only) --------------------------------- */}
           {tab === 'vouchers' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
@@ -5347,7 +7290,7 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Operations (in progress) ─────────────────────────────────────── */}
+          {/* --- Operations (in progress) --------------------------------------- */}
           {tab === 'operations' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
@@ -5357,6 +7300,113 @@ const missing = !sv.confirmationNumber ||
                 The tour is <strong>in progress</strong>. Generate a daily handover brief for each day of the
                 trip — guides and suppliers get their service times, contact details and expected values.
               </p>
+
+              {/* Supplier payment confirmation: one checkbox per service. */}
+              {(() => {
+                const payable = days.flatMap((d, dayIndex) => (d.services || [])
+                  .filter((sv) => !sv.isOptional)
+                  .map((sv) => ({ sv, day: d, dayIndex })));
+                if (!payable.length) return null;
+                const paidCount = payable.filter((entry) => entry.sv.supplierPaid).length;
+                const paidValue = payable.reduce((sum, entry) => sum + (entry.sv.supplierPaid ? round2((Number(entry.sv.buyPP) || 0) * paxForService(entry.sv, paxCount)) : 0), 0);
+                const outstandingValue = payable.reduce((sum, entry) => sum + (entry.sv.supplierPaid ? 0 : round2((Number(entry.sv.buyPP) || 0) * paxForService(entry.sv, paxCount))), 0);
+
+                return (
+                  <div style={{ border: '1px solid #e2e8f0', borderRadius: '14px', marginBottom: '1.15rem', overflow: 'hidden', background: '#ffffff' }}>
+                    <div style={{ padding: '0.9rem 1rem', background: '#f0fdfa', borderBottom: '1px solid #99f6e4', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <CheckCircle2 size={16} style={{ color: '#0f766e' }} />
+                        <strong style={{ fontSize: '0.95rem', color: '#134e4a' }}>Supplier payment confirmation</strong>
+                      </div>
+                      <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
+                        {paidCount} of {payable.length} paid &middot; {currencySymbol}{round2(paidValue).toFixed(2)} paid
+                        {outstandingValue > 0 ? ` · ${currencySymbol}${round2(outstandingValue).toFixed(2)} outstanding` : ''}
+                      </span>
+                    </div>
+
+                    <div style={{ padding: '0.35rem 0' }}>
+                      {payable.map(({ sv, day, dayIndex }) => {
+                        const amount = round2((Number(sv.buyPP) || 0) * paxForService(sv, paxCount));
+                        const paid = !!sv.supplierPaid;
+                        return (
+                          <div
+                            key={`${sv.key}-${day.key}`}
+                            style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.55rem 1rem', borderTop: '1px solid #f1f5f9', flexWrap: 'wrap' }}
+                          >
+                            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', minWidth: '10.5rem' }}>
+                              <input
+                                type="checkbox"
+                                checked={paid}
+                                onChange={(e) => toggleServicePaid(dayIndex, sv.key, e.target.checked)}
+                                style={{ width: '1.05rem', height: '1.05rem', accentColor: '#0d7478', cursor: 'pointer' }}
+                                aria-label={`Confirm ${sv.name} has been paid to ${sv.supplierName || 'the supplier'}`}
+                              />
+                              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: paid ? '#15803d' : '#475569' }}>
+                                {paid ? 'Paid' : 'Not paid'}
+                              </span>
+                            </label>
+
+                            <div style={{ flex: '1 1 14rem', minWidth: '0' }}>
+                              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1a202c' }}>
+                                Day {day.dayNumber} &middot; {repairText(sv.name)}
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                {sv.supplierName || 'Unknown supplier'}
+                                {sv.confirmationNumber ? ` · Conf ${sv.confirmationNumber}` : ''}
+                                {sv.supplierPaidAt ? ` · Confirmed ${formatDateShort(String(sv.supplierPaidAt).slice(0, 10))}` : ''}
+                              </div>
+                            </div>
+
+                            <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#b91c1c', whiteSpace: 'nowrap' }}>
+                              {fmtMoney(amount, svcSymbol(sv.currencyCode))}
+                            </span>
+
+                            <input
+                              type="text"
+                              className="sidebar-select"
+                              style={{ width: '11rem', padding: '0.35rem 0.5rem', fontSize: '0.78rem' }}
+                              placeholder="Supplier invoice / POP ref"
+                              defaultValue={sv.supplierPaidRef || ''}
+                              onBlur={(e) => {
+                                const ref = e.target.value.trim();
+                                if (ref !== (sv.supplierPaidRef || '')) savePaidRef(dayIndex, sv.key, ref);
+                              }}
+                            />
+
+                            <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ alignItems: 'center', gap: '0.3rem', padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
+                                onClick={() => openProofOfPayment(sv, day)}
+                                title="Open a printable proof of payment for this supplier booking"
+                              >
+                                <Printer size={14} /> POP
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ alignItems: 'center', gap: '0.3rem', padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
+                                onClick={() => downloadProofOfPayment(sv, day)}
+                                title="Download the proof of payment"
+                              >
+                                <Download size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={{ padding: '0.6rem 1rem 0.9rem', fontSize: '0.76rem', color: '#64748b', borderTop: '1px solid #f1f5f9' }}>
+                      Tick a box the moment the supplier is paid. Each tick is saved straight away and stamps a
+                      proof of payment (POP) you can print or download for your records. Alternatives are left out —
+                      nothing is owed on an option the client has not taken.
+                    </div>
+                  </div>
+                );
+              })()}
+
               {days.map((d) => {
                 const brief = dailyBriefFor(d, meta, paxCount, currencySymbol, billing);
                 return (
@@ -5378,7 +7428,7 @@ const missing = !sv.confirmationNumber ||
               })}
               <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
                 <button type="button" className="secondary-btn" style={{ alignItems: 'center', gap: '0.4rem' }} onClick={() => {
-                  const all = days.map((d) => dailyBriefFor(d, meta, paxCount, currencySymbol, billing)).join('\n\n══════════════════════════════════════\n\n');
+                  const all = days.map((d) => dailyBriefFor(d, meta, paxCount, currencySymbol, billing)).join('\n\n--------------------------------------\n\n');
                   void clipboardCopy(all);
                   showToast('All daily briefs copied to clipboard', 'success');
                 }}>
@@ -5388,7 +7438,7 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Post-Tour (completed) ────────────────────────────────────────── */}
+          {/* --- Post-Tour (completed) ------------------------------------------ */}
           {tab === 'post-tour' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
@@ -5471,7 +7521,7 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
-          {/* ─── Cancellation (cancelled) ─────────────────────────────────────── */}
+          {/* --- Cancellation (cancelled) --------------------------------------- */}
           {tab === 'cancellation' && (
             <div className="builder-panel-card">
               <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', marginBottom: '0.4rem' }}>
@@ -5608,7 +7658,7 @@ const missing = !sv.confirmationNumber ||
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: '0.75rem', alignItems: 'end' }}>
                     <div>
                       {taxRates.filter((t) => t.is_active).length > 0 && (
-                        <select
+                        <SearchableSelect
                           className="sidebar-select"
                           style={{ width: '100%' }}
                           value=""
@@ -5621,7 +7671,7 @@ const missing = !sv.confirmationNumber ||
                           {taxRates.filter((t) => t.is_active).map((t) => (
                             <option key={t.id} value={t.id}>{t.name} — {Number(t.rate)}%</option>
                           ))}
-                        </select>
+                        </SearchableSelect>
                       )}
                       {taxRates.filter((t) => t.is_active).length === 0 && (
                         <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '0.2rem' }}>
@@ -5761,8 +7811,65 @@ const missing = !sv.confirmationNumber ||
             </div>
           )}
 
+          {surchargeRepeatPrompt && (
+            <div className="modal-overlay service-placement-overlay" onClick={() => setSurchargeRepeatPrompt(null)}>
+              <div className="modal-content service-placement-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <div>
+                    <div className="allocation-eyebrow">Per-night surcharge</div>
+                    <h2>How many nights?</h2>
+                    <p className="placement-subtitle">
+                      "{surchargeRepeatPrompt.item.name}" is charged per night but is not linked to an accommodation, so the number of
+                      nights it applies to cannot be worked out. Enter the count to price it correctly.
+                    </p>
+                  </div>
+                  <button className="close-btn" onClick={() => setSurchargeRepeatPrompt(null)} aria-label="Close"><X size={20} /></button>
+                </div>
+                <div className="placement-option-card">
+                  <label className="surcharge-repeat-field">
+                    <span>Number of nights</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="365"
+                      step="1"
+                      value={surchargeRepeatCount}
+                      onChange={(e) => setSurchargeRepeatCount(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    />
+                  </label>
+                  <span className="placement-help">
+                    The fee will be charged {surchargeRepeatCount} time{surchargeRepeatCount === 1 ? '' : 's'} on this line, and the
+                    total shown in the itinerary will include all {surchargeRepeatCount}.
+                  </span>
+                </div>
+                <div className="form-actions placement-actions">
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => {
+                      setSurchargeRepeatPrompt(null);
+                      setSurchargeRepeatCount(1);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => applySurchargeRepeatCount()}
+                  >
+                    Apply {surchargeRepeatCount} night{surchargeRepeatCount === 1 ? '' : 's'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {placementDraft && (
-            <div className="modal-overlay service-placement-overlay" onClick={() => setPlacementDraft(null)}>
+            <div className="modal-overlay service-placement-overlay" onClick={() => {
+              setPlacementDraft(null);
+              setPlacementError('');
+            }}>
               <div className="modal-content service-placement-modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
                   <div>
@@ -5770,12 +7877,80 @@ const missing = !sv.confirmationNumber ||
                     <h2>{placementDraft.item.name}</h2>
                     <p className="placement-subtitle">Choose where this service should appear in the itinerary.</p>
                   </div>
-                  <button className="close-btn" onClick={() => setPlacementDraft(null)} aria-label="Close"><X size={20} /></button>
+                  <button className="close-btn" onClick={() => {
+                    setPlacementDraft(null);
+                    setPlacementError('');
+                  }} aria-label="Close"><X size={20} /></button>
                 </div>
+
+                {placementError && (
+                  <div className="placement-validation-error" role="alert" aria-live="assertive">
+                    <strong>Cannot add this accommodation yet</strong>
+                    <p>{placementError}</p>
+                  </div>
+                )}
+
+                {placementSplitAvailable && (
+                  <div className="placement-option-card">
+                    <label className="placement-check-row">
+                      <input
+                        type="checkbox"
+                        checked={placementSplit}
+                        onChange={(e) => {
+                          setPlacementError('');
+                          setPlacementDestinationSplit(false);
+                          setPlacementSplit(e.target.checked);
+                          setPlacementOptional(e.target.checked ? false : placementSplitAvailable);
+                        }}
+                      />
+                      <span>
+                        <strong>Group split — the party sleeps here too</strong>
+                        <small>
+                          Day {days[placementDraft.dayIndex]?.dayNumber} already houses {beddedPaxBeforePlacement} of {partyPaxForPlacement} pax, so this property
+                          takes the remaining {Math.max(0, partyPaxForPlacement - beddedPaxBeforePlacement)} in its own room allocation. It is included in the final price.
+                        </small>
+                      </span>
+                    </label>
+                  </div>
+                )}
+
+                {placementDestinationSplitAvailable && (
+                  <div className="placement-option-card placement-destination-split-card">
+                    <label className="placement-check-row">
+                      <input
+                        type="checkbox"
+                        checked={placementDestinationSplit}
+                        onChange={(e) => {
+                          const enabled = e.target.checked;
+                          setPlacementError('');
+                          setPlacementDestinationSplit(enabled);
+                          setPlacementSplit(enabled);
+                          setPlacementOptional(false);
+                        }}
+                      />
+                      <span>
+                        <strong>Split travelers across different destinations</strong>
+                        <small>
+                          This also selects Group split. Use it when part of the group is staying in another Parent Destination / Region. You will allocate the remaining travelers here; travelers already assigned to another property cannot be assigned again.
+                        </small>
+                      </span>
+                    </label>
+                  </div>
+                )}
 
                 <div className="placement-option-card">
                   <label className="placement-check-row">
-                    <input type="checkbox" checked={placementOptional} onChange={(e) => setPlacementOptional(e.target.checked)} />
+                    <input
+                      type="checkbox"
+                      checked={placementOptional}
+                      onChange={(e) => {
+                        setPlacementError('');
+                        setPlacementDestinationSplit(false);
+                        setPlacementOptional(e.target.checked);
+                        if (e.target.checked) setPlacementSplit(false);
+                        else if (placementSplitAvailable) setPlacementSplit(true);
+                      }}
+                    />
                     <span>
                       <strong>{isAccommodationItem(placementDraft.item) ? 'Add as an alternative' : 'Add as optional'}</strong>
                       <small>
@@ -5798,11 +7973,11 @@ const missing = !sv.confirmationNumber ||
                   {placementRepeat && (
                     <div className="placement-inline-field">
                       <label htmlFor="placement-repeat-count">Number of days</label>
-                      <select id="placement-repeat-count" className="sidebar-select" value={placementRepeatCount} onChange={(e) => setPlacementRepeatCount(Number(e.target.value))}>
+                      <SearchableSelect id="placement-repeat-count" className="sidebar-select" value={placementRepeatCount} onChange={(e) => setPlacementRepeatCount(Number(e.target.value))}>
                         {Array.from({ length: Math.max(1, days.length - placementDraft.dayIndex) }, (_, index) => (
                           <option key={index + 1} value={index + 1}>{index + 1} day{index === 0 ? '' : 's'}</option>
                         ))}
-                      </select>
+                      </SearchableSelect>
                     </div>
                   )}
                 </div>
@@ -5827,7 +8002,10 @@ const missing = !sv.confirmationNumber ||
                 </div>
 
                 <div className="form-actions placement-actions">
-                  <button type="button" className="secondary-btn" onClick={() => setPlacementDraft(null)}>Cancel</button>
+                  <button type="button" className="secondary-btn" onClick={() => {
+                    setPlacementDraft(null);
+                    setPlacementError('');
+                  }}>Cancel</button>
                   <button type="button" className="primary-btn" onClick={confirmPlacement}>Add service</button>
                 </div>
               </div>
@@ -5857,15 +8035,88 @@ const missing = !sv.confirmationNumber ||
           )}
 
           {/* Room Allocation Modal */}
+          {roomModalState.isOpen && (
           <RoomAllocationModal
             isOpen={roomModalState.isOpen}
             onClose={() => setRoomModalState({ isOpen: false, dayIndex: null, serviceKey: null, item: null, service: null })}
             onSave={handleSaveRoomAllocation}
             item={roomModalState.item}
             itineraryTravellers={meta.travellers || []}
+            beddedElsewhere={roomModalBeddedElsewhere}
             currencyCode={currencyCode}
             markupPct={markupPct}
           />
+          )}
+          {invoiceIssuePrompt && (() => {
+            const { currency: targetCurrency, total, remaining } = invoiceIssuePrompt;
+            const percentage = Number(invoiceIssuePrompt.percentage);
+            const maxPercentage = total > 0 ? Math.min(100, (remaining / total) * 100) : 0;
+            const amount = billableAtPercentage(total, percentage, itineraryInvoices, itineraryCreditNotes, targetCurrency);
+            const validPercentage = Number.isFinite(percentage)
+              && percentage > 0
+              && percentage <= maxPercentage + 0.000001
+              && amount > 0.009;
+            const symbol = svcSymbol(targetCurrency);
+            return (
+              <ConfirmDialog
+                title={`Issue ${targetCurrency} invoice`}
+                message={`Choose the percentage of the full ${targetCurrency} itinerary total to request. The remaining balance stays available for later invoices and is tracked separately in the statement of account.`}
+                confirmLabel={`Issue invoice · ${symbol}${amount.toFixed(2)}`}
+                cancelLabel="Cancel"
+                busy={issuingInvoice}
+                onCancel={() => setInvoiceIssuePrompt(null)}
+                onConfirm={async () => {
+                  if (!validPercentage) return;
+                  const created = await handleIssueInvoiceHere({
+                    targetCurrency,
+                    requestPercent: percentage
+                  });
+                  if (created) setInvoiceIssuePrompt(null);
+                }}
+              >
+                <div style={{ display: 'grid', gap: '0.7rem' }}>
+                  <label htmlFor="invoice-request-percentage" style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155' }}>
+                    Percentage of itinerary total
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                    <input
+                      id="invoice-request-percentage"
+                      type="number"
+                      min="0.01"
+                      max={maxPercentage}
+                      step="0.01"
+                      autoFocus
+                      value={invoiceIssuePrompt.percentage}
+                      onChange={(event) => setInvoiceIssuePrompt((current) => current
+                        ? { ...current, percentage: event.target.value }
+                        : current)}
+                      style={{ width: '100%', padding: '0.6rem 0.7rem', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '1rem' }}
+                    />
+                    <strong style={{ color: '#475569' }}>%</strong>
+                  </div>
+                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.75rem 0.9rem', display: 'grid', gap: '0.4rem', fontSize: '0.84rem', color: '#475569' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                      <span>{targetCurrency} itinerary total</span>
+                      <strong>{symbol}{total.toFixed(2)}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                      <span>Invoice amount</span>
+                      <strong style={{ color: '#0d7478' }}>{symbol}{amount.toFixed(2)}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                      <span>Balance remaining after invoice</span>
+                      <strong>{symbol}{Math.max(0, round2(remaining - amount)).toFixed(2)}</strong>
+                    </div>
+                  </div>
+                  {percentage > maxPercentage + 0.000001 && (
+                    <p style={{ margin: 0, color: '#b91c1c', fontSize: '0.8rem', fontWeight: 600 }}>
+                      The selected percentage exceeds the unbilled {targetCurrency} balance. Maximum available: {maxPercentage.toFixed(2)}%.
+                    </p>
+                  )}
+                </div>
+              </ConfirmDialog>
+            );
+          })()}
         </div>
       </div>
     </div>

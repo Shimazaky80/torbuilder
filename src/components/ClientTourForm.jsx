@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import SearchableSelect from './SearchableSelect';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { UserPlus, Users, Calendar, User, StickyNote, Compass, UserCheck } from 'lucide-react';
@@ -220,7 +221,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
             <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
               Tour Type
             </label>
-            <select
+            <SearchableSelect
               className="pricing-select"
               value={form.tourType}
               onChange={(e) => setForm({ ...form, tourType: e.target.value })}
@@ -228,7 +229,9 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
               <option value="">Select tour type...</option>
               <option value="FIT">FIT</option>
               <option value="Series Departure">Series Departure</option>
-            </select>
+              <option value="Groups">Groups</option>
+              <option value="Incentives">Incentives</option>
+            </SearchableSelect>
           </div>
           <div>
             <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
@@ -284,7 +287,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
               {loading ? (
                 <div style={{ fontSize: '0.85rem', color: '#64748b' }}>Loading clients...</div>
               ) : (
-                <select
+                <SearchableSelect
                   className="pricing-select"
                   value={form.clientId}
                   onChange={(e) => setForm({ ...form, clientId: e.target.value })}
@@ -296,7 +299,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
                       {c.name} ({c.client_type === 'Travel Agency' ? 'Travel Agency' : 'Direct'})
                     </option>
                   ))}
-                </select>
+                </SearchableSelect>
               )}
               {clients.length === 0 && !loading && (
                 <p style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.5rem' }}>

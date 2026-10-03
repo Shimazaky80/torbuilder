@@ -20,7 +20,8 @@ export const useCurrencies = () => {
           .order('code', { ascending: true });
 
         if (error) throw error;
-        setCurrencies(data || []);
+        if (!data?.length) throw new Error('No active currencies are visible to this session');
+        setCurrencies(data);
       } catch (err) {
         console.error('Failed to load currencies:', err.message);
         // Fallback to common currencies if DB fails

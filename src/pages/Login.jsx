@@ -20,9 +20,11 @@ export const Login = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
+    let cancelled = false;
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) navigate('/dashboard');
+      if (session?.user?.id && !cancelled) navigate('/dashboard', { replace: true });
     });
+    return () => { cancelled = true; };
   }, [navigate]);
 
   const handleLogin = async (e) => {
@@ -34,7 +36,7 @@ export const Login = () => {
 
       const name = data.user?.user_metadata?.full_name || data.user?.email?.split('@')[0] || 'User';
       showToast(`Welcome back, ${name}!`, 'success', 'Login successful.');
-      navigate('/dashboard');
+      navigate('/dashboard', { replace: true });
     } catch (err) {
       showToast(err.message, 'error');
     } finally {

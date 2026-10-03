@@ -33,14 +33,14 @@ const totalCreditedLabel = (cn) => isZar(cn.currency_code)
 
 export const fmtMoney = (n, symbol) => `${symbol || ''}${round2(n).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-/* Balance still owed on an invoice. A final invoice that has been paid is
-   cleared to 0.00 (it showed the amount to pay before the receipt). */
+/* What is still owed on an invoice. An invoice is settled by paying it, so a
+   paid invoice owes nothing and a live one owes its balance - there is no
+   document type to weigh here, only whether the money has arrived. */
 export const effectiveBalance = (inv) => {
   if (!inv) return 0;
-  if (inv.invoice_type === 'final' && inv.status === 'paid') return 0;
+  if (inv.status === 'paid') return 0;
   return Number(inv.balance_due) || 0;
 };
-
 export const htmlEscape = (s) => String(s ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -155,7 +155,7 @@ const showMealPlanOnHelp = (l, opts = {}) => {
   return opts.showMealPlanOnAccommodation !== false;
 };
 
-export const TYPE_LABEL = { deposit: 'Deposit Invoice', final: 'Final Invoice' };
+export const TYPE_LABEL = { deposit: 'Invoice', final: 'Invoice', invoice: 'Invoice' };
 export const STATUS_META = {
   proforma: { label: 'Proforma', color: '#b45309', bg: '#fffbeb' },
   validated: { label: 'Validated', color: '#0d7478', bg: '#ecfeff' },
@@ -167,7 +167,8 @@ export const STATUS_META = {
    industry standard for a header logo on an A4 document. */
 export const LOGO_WIDTHS = { sm: 110, md: 160, lg: 220 };
 
-const logoOf = (opts) => {
+/* Shared by every document template, including the statement of account. */
+export const logoOf = (opts) => {
   const { logo, logoSize, logoPosition } = opts || {};
   if (!logo) return '';
   const width = LOGO_WIDTHS[logoSize] || LOGO_WIDTHS.md;
@@ -176,7 +177,7 @@ const logoOf = (opts) => {
 };
 
 /* text-align style for a document header/footer block given its alignment pref. */
-const alignStyle = (pos) => (pos === 'center' ? 'text-align:center' : (pos === 'right' ? 'text-align:right' : 'text-align:left'));
+export const alignStyle = (pos) => (pos === 'center' ? 'text-align:center' : (pos === 'right' ? 'text-align:right' : 'text-align:left'));
 
 /* Optional client logo inside the Bill To block, sized/positioned per tenant prefs. */
 const clientLogoOf = (record, opts = {}) => {
@@ -191,7 +192,7 @@ const clientLogoOf = (record, opts = {}) => {
 /* Tenant (Bill From) contact lines, shown under the company details on
    invoices, receipts and credit notes. Values come from the company billing
    profile via the shared branding options. */
-const companyContactHtml = (opts = {}) => {
+export const companyContactHtml = (opts = {}) => {
   const tel = String(opts?.companyContactTel || '').trim();
   const cell = String(opts?.companyContactCell || '').trim();
   const email = String(opts?.companyContactEmail || '').trim();
@@ -333,6 +334,22 @@ export const buildCurrencyLines = (itinerary, currencyCode, paxCount) => {
   };
 };
 
+const invoicePaxForService = (service, fallbackPax) => {
+  if (/accommodation/i.test(service?.category || '')) {
+    const allocated = new Set();
+    (Array.isArray(service.roomAllocations) ? service.roomAllocations : []).forEach((room) => {
+      (Array.isArray(room?.allocatedTravellers) ? room.allocatedTravellers : []).forEach((traveller) => {
+        const id = traveller?.id
+          ? `id:${traveller.id}`
+          : `name:${String(traveller?.name || '').trim().toLowerCase()}|${String(traveller?.surname || '').trim().toLowerCase()}`;
+        if (id !== 'name:|') allocated.add(id);
+      });
+    });
+    if (allocated.size > 0) return allocated.size;
+  }
+  return Math.max(0, Number(fallbackPax) || 0);
+};
+
 /* Adapter for the builder's working `days` (services) → invoice line set. */
 export const buildLinesFromDays = (days, paxCount, currencyCode) => buildCurrencyLines({
   currency_code: currencyCode,
@@ -346,8 +363,8 @@ export const buildLinesFromDays = (days, paxCount, currencyCode) => buildCurrenc
       supplier_name: s.supplierName,
       meal_plan: s.mealPlan || '',
       currency_code: s.currencyCode || currencyCode,
-      pax: s.pax || paxCount,
-      total_sell: round2((Number(s.sellPP) || 0) * paxCount),
+      pax: invoicePaxForService(s, paxCount),
+      total_sell: round2((Number(s.sellPP) || 0) * invoicePaxForService(s, paxCount)),
       tax_rate: s.taxRate,
       tax_label: s.taxLabel,
       is_included: !s.isOptional
@@ -394,14 +411,8 @@ export const accountingPayload = (invoice, lines) => ({
     subtotal_excl: invoice.subtotal_excl,
     tax_total: invoice.tax_total,
     total_incl: invoice.total_incl,
-    deposit_percentage: invoice.deposit_percentage,
-    deposit_amount: invoice.deposit_amount,
-    credited_amount: invoice.credited_amount || 0,
     balance_due: invoice.balance_due
   },
-  credits: invoice.credited_invoice_number
-    ? [{ against_invoice: invoice.credited_invoice_number, amount: invoice.credited_amount || 0 }]
-    : [],
   payment: invoice.bank_details
 });
 
@@ -435,11 +446,7 @@ export const creditNotePayload = (cn, lines) => ({
 export const invoiceEmail = (invoice, lines, opts = {}) => {
   const cur = invoice.currency_code;
   const isProforma = invoice.status === 'proforma';
-  const isFinal = invoice.invoice_type === 'final';
   const renderedLines = docLines(invoice, lines, opts);
-  const depositPaidLine = isFinal && Number(invoice.credited_amount) > 0
-    ? `Less deposit received (${invoice.credited_invoice_number || 'prior invoice'}): ${fmtMoney(invoice.credited_amount, cur)}`
-    : `Less deposit received: ${fmtMoney(invoice.deposit_amount || 0, cur)}`;
   const body = [
     `${(isProforma ? 'PROFORMA — ' : '')}${TYPE_LABEL[invoice.invoice_type]?.toUpperCase() || 'INVOICE'} ${invoice.invoice_number}`,
     '',
@@ -458,9 +465,7 @@ export const invoiceEmail = (invoice, lines, opts = {}) => {
     `${taxRowLabel(cur, invoice.tax_label, invoice.tax_rate)}: ${fmtMoney(invoice.tax_total, cur)}`,
     `${totalDueLabel(invoice)}: ${fmtMoney(invoice.total_incl, cur)}`,
     '',
-    isFinal
-      ? `${depositPaidLine}\nBALANCE TO BE PAID: ${fmtMoney(effectiveBalance(invoice), cur)}${invoice.status === 'paid' ? ' (PAID — account settled)' : ''}`
-      : `Deposit requested (${Number(invoice.deposit_percentage)}%): ${fmtMoney(invoice.deposit_amount, cur)}\nBALANCE REMAINING after deposit: ${fmtMoney(invoice.balance_due, cur)}`,
+    `AMOUNT DUE: ${fmtMoney(effectiveBalance(invoice), cur)}${invoice.status === 'paid' ? ' (PAID — account settled)' : ''}`,
     '',
     isProforma ? 'This is a proforma request for payment, not yet a tax invoice.' : '',
     'Banking details:',
@@ -547,14 +552,8 @@ export const docStyles = `
 `;
 
 export const invoiceDocHtml = (inv, lines, sym, opts) => {
-  const isFinal = inv.invoice_type === 'final';
   const renderedLines = docLines(inv, lines, opts || {});
-  const creditLine = isFinal && Number(inv.credited_amount) > 0
-    ? `<tr class="grand"><td colspan="6" class="num">Less deposit received${inv.credited_invoice_number ? ` (${htmlEscape(inv.credited_invoice_number)})` : ''}</td><td class="num">-${fmtMoney(inv.credited_amount, sym)}</td></tr>`
-    : '';
-  const dueLine = isFinal
-    ? `<b>BALANCE TO BE PAID:</b> ${fmtMoney(effectiveBalance(inv), sym)}${inv.status === 'paid' ? ' <span style="color:#047857">(PAID — account settled)</span>' : ''}`
-    : `<b>Deposit requested (${Number(inv.deposit_percentage)}%):</b> ${fmtMoney(inv.deposit_amount, sym)}<br><b>Balance remaining after deposit:</b> ${fmtMoney(inv.balance_due, sym)}`;
+  const dueLine = `<b>AMOUNT DUE:</b> ${fmtMoney(effectiveBalance(inv), sym)}${inv.status === 'paid' ? ' <span style="color:#047857">(PAID — account settled)</span>' : ''}`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(inv.invoice_number)}</title><style>${docStyles}</style></head><body>
     ${logoOf(opts)}
     <div style="${alignStyle(opts?.billingAddressPosition)}">
@@ -573,7 +572,6 @@ export const invoiceDocHtml = (inv, lines, sym, opts) => {
       <tr class="grand"><td colspan="6" class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
       <tr class="grand"><td colspan="6" class="num">${htmlEscape(taxDisplayLabel(inv.currency_code, inv.tax_label, inv.tax_rate))} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
       <tr class="grand"><td colspan="6" class="num">${htmlEscape(totalDueLabel(inv))}</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
-      ${creditLine}
     </table>
     <div class="box">${dueLine}</div>
     <div class="box"><b>Banking Details</b><br>${Object.entries(inv.bank_details || {}).filter(([, v]) => v).map(([k, v]) => `${htmlEscape(k.replace(/_/g, ' '))}: ${htmlEscape(v)}`).join('<br>') || '—'}</div>
@@ -626,12 +624,8 @@ export const creditNoteDocHtml = (cn, sym, opts) => `<!doctype html><html><head>
 
 /* Genuine Excel workbook (HTML-table .xls), mirroring the itinerary export style. */
 export const invoiceExcelHtml = (inv, lines, sym, opts = {}) => {
-  const isFinal = inv.invoice_type === 'final';
   const renderedLines = docLines(inv, lines, opts);
   const rows = renderedLines.map((l) => `<tr><td>${l.day_number}</td><td>${htmlEscape(l.service_date || '')}</td><td>${htmlEscape(l.category || '')}</td><td>${htmlEscape(l.item_name)}${showMealPlanOn(l, opts) ? ` - ${htmlEscape(abbrevMealPlan(l.meal_plan))}` : ''}${showSupplierIn(l, opts) ? ` — ${htmlEscape(l.supplier_name)}` : ''}</td><td>${l.quantity}</td><td>${fmtMoney(l.unit_price, sym)}</td><td>${fmtMoney(l.subtotal_excl, sym)}</td><td>${fmtMoney(l.tax_amount, sym)}</td><td>${fmtMoney(l.line_total, sym)}</td></tr>`).join('');
-  const credit = isFinal && Number(inv.credited_amount) > 0
-    ? `<tr><td colspan="8" class="num">Less deposit received${inv.credited_invoice_number ? ` (${htmlEscape(inv.credited_invoice_number)})` : ''}</td><td class="num">-${fmtMoney(inv.credited_amount, sym)}</td></tr>`
-    : '';
   return `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Invoice</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--><style>
     table{border-collapse:collapse} th,td{border:1px solid #999;padding:4px 8px;font-family:Arial,sans-serif;font-size:12px} th{background:#eee;font-weight:700} .num{text-align:right} .grand{font-weight:700;background:#f5f5f5}
   </style></head><body>
@@ -646,8 +640,7 @@ export const invoiceExcelHtml = (inv, lines, sym, opts = {}) => {
       <tr class="grand"><td colspan="8" class="num">Subtotal (Excl ${taxWordOf(inv.currency_code)})</td><td class="num">${fmtMoney(inv.subtotal_excl, sym)}</td></tr>
       <tr class="grand"><td colspan="8" class="num">${htmlEscape(taxDisplayLabel(inv.currency_code, inv.tax_label, inv.tax_rate))} (${Number(inv.tax_rate)}%)</td><td class="num">${fmtMoney(inv.tax_total, sym)}</td></tr>
       <tr class="grand"><td colspan="8" class="num">${htmlEscape(totalDueLabel(inv))}</td><td class="num">${fmtMoney(inv.total_incl, sym)}</td></tr>
-      ${credit}
-      <tr class="grand"><td colspan="8" class="num">${isFinal ? 'BALANCE TO BE PAID' : 'BALANCE REMAINING AFTER DEPOSIT'}</td><td class="num">${fmtMoney(effectiveBalance(inv), sym)}</td></tr>
+      <tr class="grand"><td colspan="8" class="num">AMOUNT DUE</td><td class="num">${fmtMoney(effectiveBalance(inv), sym)}</td></tr>
     </table>
   </body></html>`;
 };
