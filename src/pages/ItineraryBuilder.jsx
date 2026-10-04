@@ -49,6 +49,7 @@ import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTrav
 import { resolveSeasonForTravel, applyProtectionToRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
 import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
 import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
+import { contractedServiceTotal, contractPaxRate, repriceServicesForPax, sidebarLibraryRate, supplierPaymentDocumentStatus } from '../lib/servicePricing';
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import { LIBRARY_ITEM_LIGHT_FIELDS, LIBRARY_ITEM_BASE_FIELDS } from '../lib/libraryItemFields';
 import { postInvoice, postReceipt, scaleInvoiceLines } from '../lib/financeJournal';
@@ -208,9 +209,6 @@ const rateForTravel = (item, code, window, protectionPercent = 0) =>
     protectionPercent
   }) || rateForItem(item, code);
 
-const effectiveAdultRate = (rate) =>
-  rate ? parseFloat(rate.price_1_adult) || parseFloat(rate.unit_price) || 0 : 0;
-
 // Contract pricing model — drives whether a rate is charged per traveller or
 // once (flat / per vehicle / per trip). A flat-rate item (e.g. a city tour
 // charged per vehicle) must NOT be multiplied by pax: its per-person figure is
@@ -224,13 +222,7 @@ const basisOfItem = (item, code) => {
 
 const isFlatBasis = (basis) => FLAT_BASIS.has(basis);
 
-/* True when a rate row is a flat room rate: the figure is the price of the
-   room itself, not a per-person price, so it is not multiplied by occupancy. */
 const isFlatRoomRate = (rate) => String(rate?.rate_basis || '') === 'per_room';
-
-/* Every money column a pricing-matrix rate can hold. Pricing Protection has to
-   move them all together — the list and the uplift live in priceValidity.js
-   so Finance applies the identical transform to the identical row. */
 
 const basisLabelOf = (basis) => {
   switch (basis) {
@@ -243,91 +235,6 @@ const basisLabelOf = (basis) => {
     case 'flat': return 'Flat rate';
     default: return 'Per person';
   }
-};
-
-const tierRateForPax = (rate, pax) => {
-  const tiers = Array.isArray(rate?.tiered_pricing) ? rate.tiered_pricing : [];
-  if (!tiers.length) return 0;
-  const p = Number(pax) || 0;
-  let chosen = null;
-  for (const t of tiers) {
-    const minP = parseInt(t.min_pax, 10) || 0;
-    const maxP = parseInt(t.max_pax, 10) || 0;
-    if (p >= minP && (maxP === 0 || p <= maxP)) { chosen = t; break; }
-  }
-  if (!chosen) chosen = tiers[tiers.length - 1];
-  const total = parseFloat(chosen?.rate) || 0;
-  return p > 0 ? total / p : total;
-};
-
-// Accommodation rates are quoted per room occupancy, not per traveller:
-//   1 traveller -> single rate (price_1_adult / single_room_rate)
-//   2 travellers -> per-person sharing rate (price_2_adults / double_twin_rate)
-//   3+ travellers -> the first 2 adults share at the sharing rate and each
-//   additional adult adds the extra-adult rate (price_3_plus_adults, falling
-//   back to the sharing rate) — i.e. 2 x sharing + (pax - 2) x extra, divided
-//   by pax for the per-person figure. Contract room cost = perPax x pax.
-const accommodationPaxRate = (rate, pax) => {
-  const p = Number(pax) || 0;
-  const num = (v) => parseFloat(v) || 0;
-  if (isFlatRoomRate(rate)) {
-    /* A flat rate is the price of the room, so the contract total is the room
-       rate no matter how many sleep in it. A party of one still occupies the
-       whole room but does not share it, so it pays the single-room figure. */
-    const room = num(rate?.unit_price) || num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
-    const single = num(rate?.single_room_rate) || num(rate?.effective_single_rate) || room;
-    const total = p <= 1 ? single : room;
-    return p > 0 ? total / p : total;
-  }
-  if (p <= 1) return num(rate?.price_1_adult) || num(rate?.single_room_rate) || num(rate?.unit_price) || 0;
-  if (p === 2) return num(rate?.price_2_adults) || num(rate?.double_twin_rate) || 0;
-  const sharing = num(rate?.price_2_adults) || num(rate?.double_twin_rate) || num(rate?.price_1_adult) || 0;
-  const extra = num(rate?.price_3_plus_adults) > 0 ? num(rate?.price_3_plus_adults) : sharing;
-  return p > 0 ? (2 * sharing + Math.max(0, p - 2) * extra) / p : 0;
-};
-
-// Per-person buy figure implied by a contract, given the traveller count.
-//   per_person items: the rate itself is per person.
-//   per_person_sharing (accommodation): single rate when 1 traveller,
-//   per-person sharing rate when 2+, keyed by occupancy (never the single
-//   rate multiplied by pax).
-//   flat / per_vehicle / per_trip / per_room: contract total ÷ travellers,
-//   so the line (perPax × pax) reproduces the contract amount exactly.
-/* Sidebar figure: the price exactly as it is loaded from the contract rate row,
-   with no per-traveller division applied. contractPaxRate is the quote-side
-   figure and deliberately flattens a room or vehicle total across the party,
-   which is not what the contract says - showing it here would advertise a
-   per-person price the supplier never quoted, and it would move every time the
-   party size changes. The raw figure is stable and label it directly instead.
-
-   The field precedence mirrors the Library Items rate matrix exactly, because
-   these two views must never disagree. A flat room rate writes BOTH unit_price
-   (the shared room total) and price_1_adult (the per-adult sharing figure), and
-   Library Items reads the room total from unit_price first. Reading
-   price_1_adult first would show a smaller, unrelated figure. */
-const rawContractPrice = (item, code) => {
-  const rate = rateForItem(item, code);
-  if (!rate) return 0;
-  const f = (v) => parseFloat(v) || 0;
-  if (isFlatRoomRate(rate)) {
-    return f(rate.unit_price) || f(rate.price_2_adults) || f(rate.double_twin_rate) || f(rate.price_1_adult);
-  }
-  return f(rate.price_1_adult) || f(rate.single_room_rate) || f(rate.price_2_adults) || f(rate.double_twin_rate);
-};
-
-const contractPaxRate = (item, code, pax) => {
-  const rate = rateForItem(item, code);
-  const raw = effectiveAdultRate(rate);
-  const basis = basisOfItem(item, code);
-  const p = Number(pax) || 0;
-  if (basis === 'tiered') return tierRateForPax(rate, p);
-  if (basis === 'per_person_sharing') return accommodationPaxRate(rate, p);
-  /* A flat room rate is the price of the room, so the per-person figure comes
-     from accommodationPaxRate (room rate split across the party) rather than
-     from price_1_adult, which is the single-room figure. */
-  if (isFlatRoomRate(rate)) return accommodationPaxRate(rate, p);
-  if (isFlatBasis(basis)) return p > 0 ? raw / p : raw;
-  return raw;
 };
 
 /* Date span shown in the per-person pricing breakdown. Starts on the first
@@ -1090,8 +997,7 @@ const invoiceHeaderLines = (meta) => [
 /* Daily service brief for one day — operational handover for guides/suppliers. */
 const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
   const lines = (day.services || []).map((sv) => {
-    const servicePax = paxForService(sv, paxCount);
-    const line = round2((Number(sv.sellPP) || 0) * servicePax);
+    const line = contractedServiceTotal(sv, paxCount);
     return [
       `• ${repairText(sv.name)}`,
       timeRangeOf(sv) ? `  Time: ${timeRangeOf(sv)}` : '',
@@ -1134,9 +1040,10 @@ const dailyBriefFor = (day, meta, paxCount, currencySymbol, billing) => {
    ---------------------------------------------------------------------------- */
 const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) => {
   const symbol = currencySymbol || 'R';
+  const paymentStatus = supplierPaymentDocumentStatus(sv?.supplierPaid === true);
   const supplier = repairText(sv?.supplierName || sv?.supplier_name || 'Supplier');
   const servicePax = paxForService(sv, paxCount);
-  const total = round2((Number(sv?.buyPP) || 0) * servicePax);
+  const total = contractedServiceTotal(sv, paxCount);
   const rooms = (Array.isArray(sv?.roomAllocations) ? sv.roomAllocations : [])
     .filter((rm) => (rm.allocatedTravellers || []).length > 0);
   const beds = rooms.reduce((n, rm) => n + (rm.allocatedTravellers || []).length, 0);
@@ -1148,14 +1055,14 @@ const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) =>
       : `${servicePax} pax`;
 
   const header = [
-    `<h1>Proof of Payment</h1>`,
+    `<h1>${paymentStatus.heading}</h1>`,
     `<p class="muted"><b>Issued by:</b> ${htmlEscape(companyNameOf(billing) || '—')}</p>`,
     companyAddressOf(billing) ? `<p class="muted">${htmlEscape(companyAddressOf(billing))}</p>` : '',
     ...companyContactLines(billing).map((l) => `<p class="muted">${htmlEscape(l)}</p>`),
-    `<p class="stamp">PAID</p>`
+    `<p class="stamp ${sv?.supplierPaid === true ? 'stamp-paid' : 'stamp-unpaid'}">${paymentStatus.stamp}</p>`
   ].join('\n');
 
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Proof of Payment — ${htmlEscape(meta?.referenceNumber || '')}</title><style>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(paymentStatus.heading)} — ${htmlEscape(meta?.referenceNumber || '')}</title><style>
     body{font-family:Arial,Helvetica,sans-serif;margin:36px;color:#111}
     h1{margin:0 0 4px;color:#0d7478;font-size:22px}
     .muted{color:#555;font-size:12px;margin:2px 0}
@@ -1164,8 +1071,10 @@ const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) =>
     th{background:#eef2f7;width:34%}
     td.num{text-align:right;font-weight:700}
     .total{background:#f0fdfa;font-size:16px}
-    .stamp{display:inline-block;margin-top:10px;border:2px solid #16a34a;color:#16a34a;font-weight:800;
+    .stamp{display:inline-block;margin-top:10px;border:2px solid;font-weight:800;
       letter-spacing:2px;padding:4px 14px;border-radius:4px;transform:rotate(-3deg)}
+    .stamp-paid{border-color:#16a34a;color:#16a34a}
+    .stamp-unpaid{border-color:#b45309;color:#b45309}
     .foot{margin-top:28px;font-size:11px;color:#666;border-top:1px solid #ddd;padding-top:10px}
     @media print{.noprint{display:none}}
   </style></head><body>
@@ -1181,10 +1090,9 @@ const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) =>
     <tr><th>Guests</th><td>${beds || paxCount} of ${paxCount} pax &mdash; ${htmlEscape(breakdown)}</td></tr>
     <tr><th>Supplier invoice / POP ref</th><td>${htmlEscape(sv?.supplierPaidRef || '—')}</td></tr>
     <tr><th>Payment confirmed</th><td>${htmlEscape(paidAt || '—')}</td></tr>
-    <tr class="total"><th>Amount paid to supplier</th><td class="num">${htmlEscape(contractMoney(total, symbol))}</td></tr>
+    <tr class="total"><th>${paymentStatus.amountLabel}</th><td class="num">${htmlEscape(contractMoney(total, symbol))}</td></tr>
   </table>
-  <p class="foot">This document confirms that the amount stated above was paid to ${htmlEscape(supplier)} for the service listed.
-  It was generated from the supplier payment confirmation recorded on the itinerary.</p>
+  <p class="foot">${htmlEscape(paymentStatus.footnote)} ${sv?.supplierPaid === true ? `Generated from the supplier payment confirmation recorded on the itinerary for ${htmlEscape(supplier)}.` : `Supplier: ${htmlEscape(supplier)}.`}</p>
   <p class="noprint" style="margin-top:18px"><button onclick="window.print()">Print / Save as PDF</button></p>
   </body></html>`;
 };
@@ -1502,12 +1410,10 @@ export const ItineraryBuilder = () => {
   const isInProgress = stage === 'in_progress';
   const isCompleted = stage === 'completed';
   const isCancelled = stage === 'cancelled';
-  /* A booking locks the itinerary: once it is Provisional or Confirmed the
-     commercial content (days, services, pricing, notes, client/traveller
-     details) is frozen so nothing can drift from what was booked. Only the
-     status badge stays live, and moving it back to Quotation re-opens
-     editing. Completed/Cancelled itineraries stay locked permanently. */
-  const isReadOnly = isProvisional || isConfirmed || isCompleted || isCancelled;
+  /* Provisional, Confirmed, In Progress, Completed, and Cancelled itineraries
+     are locked against commercial edits. Only the status badge stays live, so
+     an eligible booking can be returned to Quotation to re-open editing. */
+  const isReadOnly = isProvisional || isConfirmed || isInProgress || isCompleted || isCancelled;
   const editLockedRef = useRef(isReadOnly);
   const hydrateRef = useRef(false);
 
@@ -5089,32 +4995,48 @@ return !!sv.time; /* activities / meals / other */
         tourType: payload.tourType || meta.tourType,
         consultantName: payload.consultantName || meta.consultantName
       };
-      /* Functional update: renumber the days and re-date them from the new
-         travel start WITHOUT rebuilding the list from a captured `days`
-         snapshot. Reading a stale `days` here used to blank every service the
-         moment the user saved the details form, because this callback is not
-         re-created on every `days` change. */
-      setDays((prev) => prev.map((d, i) => ({
-        ...d,
-        dayNumber: i + 1,
-        date: payload.travelStart ? addDaysToDate(payload.travelStart, i) : d.date || ''
-      })));
+      /* Reprice non-accommodation items when the party size changes. Their
+         per-person amounts are stored on the line, so a rate divided by the
+         old pax count otherwise stays stale when travelers are added or removed. */
       const nextDays = days.map((d, i) => ({
         ...d,
         dayNumber: i + 1,
         date: payload.travelStart ? addDaysToDate(payload.travelStart, i) : d.date || ''
       }));
+      const priced = repriceServicesForPax({
+        days: nextDays,
+        libraryItems,
+        paxCount: (Number(payload.numAdults) || 0) + (Number(payload.numChildren) || 0),
+        childCount: Number(payload.numChildren) || 0,
+        travelWindow: {
+          start: payload.travelStart || nextDays[0]?.date || '',
+          end: payload.travelEnd || nextDays[nextDays.length - 1]?.date || ''
+        },
+        protectionPercent: priceProtectionPercent
+      });
+      setDays(priced.days);
       setMeta((prev) => ({ ...prev, ...nextMeta }));
-      setLastSavedKey(JSON.stringify({ days: nextDays, meta: nextMeta }));
+      /* Metadata was persisted above; any changed line prices remain dirty
+         until the user saves the itinerary through its normal save action. */
+      setLastSavedKey(JSON.stringify({ days, meta: nextMeta }));
       setDetailsOpen(false);
-      setSaved(true);
-      showToast('Itinerary details updated', 'success');
+      const dayDataChanged = JSON.stringify(days) !== JSON.stringify(priced.days);
+      setSaved(!dayDataChanged);
+      if (priced.skipped.length) {
+        showToast(`Itinerary details updated, but ${priced.skipped.length} service price(s) could not be refreshed. Check their library rates before saving.`, 'warning');
+      } else if (priced.repriced) {
+        showToast(`Itinerary details updated and ${priced.repriced} service price(s) recalculated. Save the itinerary to store the new prices.`, 'success');
+      } else if (dayDataChanged) {
+        showToast('Itinerary details updated. Save the itinerary to store the updated day dates.', 'success');
+      } else {
+        showToast('Itinerary details updated', 'success');
+      }
     } catch (err) {
       showToast(err.message || 'Failed to update itinerary details', 'error');
     } finally {
       setSaving(false);
     }
-  }, [meta, showToast, days, setDays, setMeta]);
+  }, [meta, showToast, days, libraryItems, priceProtectionPercent, setDays, setMeta]);
 
   /* -- Edit a day service (name + description override) -------------------- */
 
@@ -5225,21 +5147,24 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
      not sit in the working copy waiting for the next Save. Services that have
      never been saved have no row yet, so they fall back to the normal Save. */
   const persistServicePayment = useCallback(async (dayIndex, serviceKey, patch) => {
+    if (terminalRef.current) return false;
     const day = days[dayIndex];
     const current = (day?.services || []).find((sv) => sv.key === serviceKey);
     if (!current) return false;
+    if (!current.dbId) {
+      showToast('Save the itinerary before recording supplier payment details', 'warning');
+      return false;
+    }
 
     const nextDays = days.map((d, i) => (
       i === dayIndex
         ? { ...d, services: d.services.map((sv) => (sv.key === serviceKey ? { ...sv, ...patch } : sv)) }
         : d
     ));
-    setDays(nextDays);
-
-    if (!current.dbId) {
-      showToast('Saved with the itinerary — press Save to store it', 'info');
-      return false;
-    }
+    /* Supplier payment status is an operational record, not an itinerary
+       content edit. Persist it directly so the In Progress read-only guard
+       remains in place for services, prices, and other commercial details. */
+    setDaysRaw(nextDays);
 
     /* The columns are snake_case, the service object is camelCase. Only send
        the fields this patch actually touches so unticking "paid" cannot wipe a
@@ -5264,13 +5189,13 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     if (error) {
       /* Put the checkbox back where it was rather than leaving a tick the
          database never accepted. */
-      setDays(days);
+      setDaysRaw(days);
       showToast(error.message || 'Could not record the payment confirmation', 'error');
       return false;
     }
     setLastSavedKey(JSON.stringify({ days: nextDays, meta }));
     return true;
-  }, [days, meta, setDays, showToast]);
+  }, [days, meta, showToast]);
 
   const toggleServicePaid = useCallback((dayIndex, serviceKey, paid) => {
     void persistServicePayment(dayIndex, serviceKey, {
@@ -5716,13 +5641,10 @@ const missing = !sv.confirmationNumber ||
                    matrix that prices summer per-person and winter per-room must
                    label the row this trip actually uses. */
                 const basis = basisOfItem(sidebarItem, currencyCode);
-                /* Use contractPaxRate (pax-aware) rather than rawContractPrice:
-                   - rawContractPrice always reads price_1_adult first, so an
-                     accommodation with 2 travellers was showing the single rate
-                     instead of the per-person sharing rate (price_2_adults).
-                   - contractPaxRate applies the same tier logic that createService()
-                     uses, so what the sidebar displays == what lands on the line. */
-                const price = contractPaxRate(sidebarItem, currencyCode, paxCount);
+                /* The sidebar mirrors the Library Items contract figure. Flat
+                   rates stay whole here; only createService derives their
+                   per-traveller Buy / pax amount for the itinerary line. */
+                const price = sidebarLibraryRate(sidebarItem, currencyCode, paxCount);
                 /* Build a human-readable pricing label that reflects the actual
                    tier being shown, so the operator can immediately tell whether
                    the figure is a single supplement, a sharing rate, etc. */

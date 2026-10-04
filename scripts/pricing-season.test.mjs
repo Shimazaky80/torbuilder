@@ -13,6 +13,13 @@ import { calculateRoomCharges, getRateRow, buildRoomModalItem } from '../src/lib
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
 import RoomAllocationModal from '../src/components/RoomAllocationModal.jsx';
+import {
+  contractedServiceTotal,
+  contractPaxRate,
+  repriceServicesForPax,
+  sidebarLibraryRate,
+  supplierPaymentDocumentStatus
+} from '../src/lib/servicePricing.js';
 
 const winter = {
   id: 'r-winter', currency: 'ZAR', season_name: 'Winter',
@@ -37,6 +44,163 @@ const check = (label, actual, expected) => {
   if (!ok) failures += 1;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
 };
+
+/* A flat contract amount must be divided by the current traveler count, not
+   the count that happened to be on the itinerary when the service was added. */
+const vehicleRate = {
+  currency: 'ZAR',
+  valid_from: '2026-01-01',
+  valid_to: '2026-12-31',
+  rate_basis: 'per_vehicle',
+  price_1_adult: 1401,
+  unit_price: 1401
+};
+const transferItem = {
+  id: 'transfer-1',
+  category: 'Transfers',
+  pricing_model: 'per_vehicle',
+  item_rates: [vehicleRate]
+};
+const staleTransfer = {
+  itemId: transferItem.id,
+  name: 'Cape Turismo transfer',
+  category: 'Transfers',
+  currencyCode: 'ZAR',
+  basis: 'per_vehicle',
+  buyPP: 700.5,
+  sellPP: 854.61,
+  markup: 22,
+  pax: 2
+};
+const repricedTransfer = repriceServicesForPax({
+  days: [{ services: [staleTransfer] }],
+  libraryItems: [transferItem],
+  paxCount: 3,
+  travelWindow: { start: '2026-10-29', end: '2026-10-30' }
+});
+const transfer = repricedTransfer.days[0].services[0];
+check('R1401 vehicle rate is divided by current 3 pax', transfer.buyPP, 467);
+check('recalculated transfer buy total remains R1401', transfer.buyPP * transfer.pax, 1401);
+check('recalculated transfer sell total includes markup once', transfer.sellPP * transfer.pax, 1709.22);
+check('recalculated transfer stores the current pax count', transfer.pax, 3);
+check('stale transfer price is counted as repriced', repricedTransfer.repriced, 1);
+check('direct contract rate conversion uses all 3 travelers', contractPaxRate(transferItem, 'ZAR', 3), 467);
+check('sidebar shows the full Library per-vehicle rate', sidebarLibraryRate(transferItem, 'ZAR', 3), 1401);
+const largerVehicleRate = {
+  ...transferItem,
+  item_rates: [{ ...vehicleRate, price_1_adult: 1698, unit_price: 1698 }]
+};
+check('sidebar preserves the other Library per-vehicle rate', sidebarLibraryRate(largerVehicleRate, 'ZAR', 3), 1698);
+check('daily brief estimate uses contracted buy total, not marked-up sell', contractedServiceTotal({
+  category: 'Transfers',
+  buyPP: 467,
+  sellPP: 569.74
+}, 3), 1401);
+check('accommodation estimate uses the allocated contract total', contractedServiceTotal({
+  category: 'Accommodation',
+  buyPP: 1200,
+  roomAllocations: [{ allocatedTravellers: [{ id: 'a' }, { id: 'b' }] }]
+}, 3), 2400);
+check('unchecked supplier payment is not represented as paid', supplierPaymentDocumentStatus(false).stamp, 'NOT PAID');
+check('confirmed supplier payment retains paid stamp', supplierPaymentDocumentStatus(true).stamp, 'PAID');
+check('unchecked payment document labels the amount as contracted', supplierPaymentDocumentStatus(false).amountLabel, 'Contracted amount');
+
+const tieredActivity = {
+  id: 'activity-1',
+  category: 'Activities / Tours',
+  pricing_model: 'tiered',
+  item_rates: [{
+    ...vehicleRate,
+    rate_basis: 'tiered',
+    tiered_pricing: [
+      { min_pax: 1, max_pax: 2, rate: 1800 },
+      { min_pax: 3, max_pax: 6, rate: 2100 }
+    ]
+  }]
+};
+check('tiered activity selects the current 3-pax rate', contractPaxRate(tieredActivity, 'ZAR', 3), 700);
+const repricedTieredActivity = repriceServicesForPax({
+  days: [{ services: [{
+    itemId: tieredActivity.id,
+    name: 'Tiered activity',
+    category: tieredActivity.category,
+    currencyCode: 'ZAR',
+    buyPP: 900,
+    sellPP: 1080,
+    markup: 20,
+    pax: 2
+  }] }],
+  libraryItems: [tieredActivity],
+  paxCount: 3,
+  travelWindow: { start: '2026-10-29', end: '2026-10-30' }
+});
+check('tiered activity line is refreshed for the new party size', repricedTieredActivity.days[0].services[0].buyPP, 700);
+
+const perPersonActivity = {
+  id: 'activity-pp',
+  category: 'Activities / Tours',
+  pricing_model: 'per_person',
+  item_rates: [{ ...vehicleRate, rate_basis: 'per_person', price_1_adult: 250, unit_price: 250 }]
+};
+const repricedPerPersonActivity = repriceServicesForPax({
+  days: [{ services: [{
+    itemId: perPersonActivity.id,
+    name: 'Per-person activity',
+    category: perPersonActivity.category,
+    currencyCode: 'ZAR',
+    buyPP: 250,
+    sellPP: 300,
+    markup: 20,
+    pax: 2
+  }] }],
+  libraryItems: [perPersonActivity],
+  paxCount: 3,
+  travelWindow: { start: '2026-10-29', end: '2026-10-30' }
+});
+check('per-person activities retain their library unit price', repricedPerPersonActivity.days[0].services[0].buyPP, 250);
+check('per-person activities update their pax count', repricedPerPersonActivity.days[0].services[0].pax, 3);
+
+const vehicleFee = {
+  id: 'fee-1',
+  category: 'Surcharge Fees',
+  surcharge_type: 'entrance_fee',
+  surcharge_unit_basis: 'per_vehicle',
+  item_rates: [{
+    ...vehicleRate,
+    entrance_fee_per_vehicle: 300
+  }]
+};
+const repricedVehicleFee = repriceServicesForPax({
+  days: [{ services: [{
+    itemId: vehicleFee.id,
+    name: 'Vehicle entrance fee',
+    category: vehicleFee.category,
+    currencyCode: 'ZAR',
+    buyPP: 150,
+    sellPP: 180,
+    markup: 20,
+    pax: 2
+  }] }],
+  libraryItems: [vehicleFee],
+  paxCount: 3,
+  travelWindow: { start: '2026-10-29', end: '2026-10-30' }
+});
+check('vehicle surcharge stays a flat R300 across the group', repricedVehicleFee.days[0].services[0].buyPP * 3, 300);
+const unchangedAccommodation = {
+  itemId: 'hotel-1',
+  name: 'Hotel',
+  category: 'Accommodation',
+  currencyCode: 'ZAR',
+  buyPP: 700.5,
+  pax: 2
+};
+const accommodationResult = repriceServicesForPax({
+  days: [{ services: [unchangedAccommodation] }],
+  libraryItems: [{ ...transferItem, id: 'hotel-1' }],
+  paxCount: 3,
+  travelWindow: { start: '2026-10-29', end: '2026-10-30' }
+});
+check('accommodation is excluded from party-size repricing', accommodationResult.days[0].services[0], unchangedAccommodation);
 
 /* 1. Season resolution picks the matrix covering the travel dates. */
 const season = resolveSeasonForTravel({ rates: item.item_rates, currencyCode: 'ZAR', startDate: travel.start, endDate: travel.end });
