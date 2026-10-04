@@ -186,7 +186,7 @@ export const statementFor = (itinerary, currency, invoices = [], receipts = [], 
     closing: running,
     /* What the screen calls outstanding, which clamps each invoice at zero. The
        two differ when an overpayment is outstanding against an arrear. */
-    screenOutstanding: round2(live.reduce((a, i) => a + invoiceBalance(i, receipts, creditNotes), 0)),
+    screenOutstanding: round2(live.reduce((a, i) => a + invoiceBalance(i, receipts), 0)),
     voidedAmount: round2(rows.filter((r) => r.voided).reduce((a, r) => a + r.debit - r.credit, 0)),
     invoiceCount: live.length,
     voidCount: invoicesHere.filter(isVoid).length,

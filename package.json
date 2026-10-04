@@ -8,6 +8,9 @@
     "build": "vite build",
     "lint": "eslint .",
     "test:pricing": "vite build --ssr scripts/pricing-season.test.mjs --outDir .tmp-test --emptyOutDir --logLevel error && node .tmp-test/pricing-season.test.js",
+    "test:settlement": "vite build --ssr scripts/settlement.test.mjs --outDir .tmp-settlement-test --emptyOutDir --logLevel error && node .tmp-settlement-test/settlement.test.js",
+    "test:finance-cost-of-sales": "vite build --ssr scripts/finance-cost-of-sales.test.mjs --outDir .tmp-finance-cost-of-sales-test --emptyOutDir --logLevel error && node .tmp-finance-cost-of-sales-test/finance-cost-of-sales.test.js",
+    "test:package-pricing": "vite build --ssr scripts/package-pricing.test.mjs --outDir .tmp-package-pricing-test --emptyOutDir --logLevel error && node .tmp-package-pricing-test/package-pricing.test.js",
     "test:room-allocation": "vite build --ssr scripts/room-allocation.test.mjs --outDir .tmp-room-allocation-test --emptyOutDir --logLevel error && node .tmp-room-allocation-test/room-allocation.test.js",
     "audit:schema": "node scripts/audit-schema.mjs",
     "preview": "vite preview"

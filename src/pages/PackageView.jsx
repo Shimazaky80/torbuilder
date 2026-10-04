@@ -66,7 +66,7 @@ export const PackageView = () => {
           {pkg.description && <p>{pkg.description}</p>}
           <div><strong>Validity</strong><span>{periods.length ? periods.map((period) => `${dateLabel(period.valid_from)} – ${dateLabel(period.valid_to)}`).join('; ') : 'Not set'}</span></div>
           <div><strong>Passenger options</strong><span>{paxOptions.length ? paxOptions.map((option) => `${option.adults}A${option.children ? ` + ${option.children}C` : ''}`).join(', ') : 'Not set'}</span></div>
-          <div><strong>Default markup</strong><span>{Number(pkg.default_markup_percentage) || 0}%</span></div>
+          <div><strong>Library availability</strong><span>{pkg.is_available_in_library ? 'Available for itinerary quotes' : 'Private package'}</span></div>
           <div><strong>Currencies</strong><span>{currencies.length ? currencies.join(', ') : 'Not set'}</span></div>
         </div>
         {(pkg.gallery_image_urls || []).length > 0 && <div className="package-view-gallery">{pkg.gallery_image_urls.map((url, index) => <img key={`${url}-${index}`} src={url} alt={`${pkg.name} gallery ${index + 1}`} />)}</div>}
@@ -80,6 +80,14 @@ export const PackageView = () => {
           </div>)}
         </div> : <p className="package-view-empty">No services added to this day.</p>}
       </section>)}
+      {(pkg.inclusions || pkg.exclusions) && <section className="package-view-day">
+        <header><h2>Inclusions &amp; exclusions</h2></header>
+        {pkg.inclusions && <><h3>Inclusions</h3><p>{pkg.inclusions}</p></>}
+        {pkg.exclusions && <><h3>Exclusions</h3><p>{pkg.exclusions}</p></>}
+      </section>}
+      {pkg.terms_and_conditions && <section className="package-view-day">
+        <header><h2>Terms &amp; conditions</h2></header><p>{pkg.terms_and_conditions}</p>
+      </section>}
       {!days.length && <div className="package-view-day package-view-empty">No itinerary days have been added to this package.</div>}
     </>}
   </div>;

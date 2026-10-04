@@ -3,9 +3,9 @@
    The old pair could get away with a stored `balance_due` because every receipt
    settled its invoice outright and nothing else moved the number. That no longer
    holds: an invoice can be paid in instalments, and a credit note reduces what
-   is owed without any money moving at all. So the balance is recomputed from the
-   receipts and credit notes that actually exist, and the stored column is only
-   ever a cache of this.
+   is owed without any money moving at all. Credit notes now create client wallet
+   credit instead, so only cash receipts and credit applied from that wallet
+   settle this invoice. The stored column is only ever a cache of this balance.
 
    Pure functions, no database. Every caller passes the documents it has. */
 
@@ -121,7 +121,7 @@ export const creditApplicableTo = (outstanding, creditBalance) =>
    so a client who has paid too much never shows as being in arrears. A refund
    raises the balance by exactly what went back out, which falls out of netting
    the receipts rather than being special-cased here. */
-export const invoiceBalance = (invoice, receipts = [], creditNotes = []) => {
+export const invoiceBalance = (invoice, receipts = []) => {
   const total = round2(num(invoice.total_incl));
   if ((invoice.status || '') === 'void') return 0;
   /* Credit notes are deliberately not subtracted here. They credit the client's
@@ -133,9 +133,9 @@ export const invoiceBalance = (invoice, receipts = [], creditNotes = []) => {
 
 /* Whether the money is in. Derived, never read off the status, so a part-paid
    invoice stays open instead of being declared settled by a stale flag. */
-export const isInvoiceSettled = (invoice, receipts = [], creditNotes = []) =>
+export const isInvoiceSettled = (invoice, receipts = []) =>
   (invoice.status || '') === 'void'
-  || invoiceBalance(invoice, receipts, creditNotes) <= 0.009;
+  || invoiceBalance(invoice, receipts) <= 0.009;
 
 /* Paid more in cash than the invoice asked for. That difference is now client
    credit: it sits on their wallet to be spent on a future booking, or refunded.
@@ -146,16 +146,39 @@ export const invoiceOverpayment = (invoice, receipts = []) => {
   return round2(Math.max(0, netReceivedTotal(invoice.id, receipts) - round2(num(invoice.total_incl))));
 };
 
+/* Cash that may be returned without reopening the invoice. Wallet credit also
+   settles the invoice, but a refund still cannot exceed the cash held. */
+export const refundableOverpayment = (invoice, receipts = []) => {
+  if ((invoice.status || '') === 'void') return 0;
+  return round2(Math.min(
+    refundableTotal(invoice.id, receipts),
+    Math.max(0, settledTotal(invoice.id, receipts) - round2(num(invoice.total_incl)))
+  ));
+};
+
+/* The balance after returning cash. Returning only the overpayment leaves the
+   inclusive invoice total settled; a larger refund correctly reopens the
+   remaining amount owed. */
+export const invoiceBalanceAfterRefund = (invoice, amount, receipts = []) => {
+  if (!invoice || (invoice.status || '') === 'void') return 0;
+  return round2(Math.max(
+    0,
+    round2(num(invoice.total_incl))
+      - settledTotal(invoice.id, receipts)
+      + round2(num(amount))
+  ));
+};
+
 /* The status an invoice should carry, given what has actually been paid.
    Kept separate from the write so the rule is testable on its own.
 
    A proforma is a request for money rather than an invoice for the supply, so it
    only becomes a real paid invoice once the money actually turns up. A void one
    stays void whatever was attached to it. */
-export const settledStatus = (invoice, receipts = [], creditNotes = []) => {
+export const settledStatus = (invoice, receipts = []) => {
   const status = invoice.status || '';
   if (status === 'void') return 'void';
-  if (isInvoiceSettled(invoice, receipts, creditNotes)) return 'paid';
+  if (isInvoiceSettled(invoice, receipts)) return 'paid';
   return status === 'proforma' ? 'proforma' : 'validated';
 };
 

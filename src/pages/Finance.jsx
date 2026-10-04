@@ -4,15 +4,14 @@ import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
-import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, diffAgainstBilledLines, decideReissue, lineKey, scaleInvoiceLines, num, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
-import { invoiceBalance, settledStatus, receivedTotal, netReceivedTotal, refundedTotal, refundableTotal, creditedTotal, netBilled, canBill, sameCurrency, parseGuardRejection, guardMessage } from '../lib/settlement';
+import { postInvoice, postReceipt, postCreditNote, postCostOfSales, costOfSalesFromDayItems, COST_OF_SALES_STATUSES, diffAgainstBilledLines, decideReissue, lineKey, scaleInvoiceLines, num, CHART_OF_ACCOUNTS } from '../lib/financeJournal';
+import { invoiceBalance, invoiceBalanceAfterRefund, settledStatus, netReceivedTotal, refundableOverpayment, creditAppliedTotal, creditedTotal, netBilled, canBill, sameCurrency, parseGuardRejection, guardMessage } from '../lib/settlement';
 import { ReceiptsPanel, JournalPanel, TenantCostOfSalesPanel, AccountingPanel } from '../components/finance/FinanceTenantViews';
 import {
   round2,
   fmtMoney,
   numOr,
   vatOfInclusive,
-  effectiveBalance,
   TYPE_LABEL,
   STATUS_META,
   LOGO_WIDTHS,
@@ -86,7 +85,14 @@ export const Finance = () => {
   const [allReceipts, setAllReceipts] = useState([]);
   const [allCreditNotes, setAllCreditNotes] = useState([]);
   const [tenancyRows, setTenancyRows] = useState([]);
-  const [tenancyItineraries, setTenancyItineraries] = useState([]);
+  const [tenancyError, setTenancyError] = useState('');
+  const [journalItineraries, setJournalItineraries] = useState([]);
+  const [journalLoading, setJournalLoading] = useState(false);
+  const [journalError, setJournalError] = useState('');
+  const [costOfSalesItineraries, setCostOfSalesItineraries] = useState([]);
+  const [tenancyLoading, setTenancyLoading] = useState(false);
+  const costOfSalesRequestRef = useRef(0);
+  const journalRequestRef = useRef(0);
   const [connections, setConnections] = useState([]);
   const [busyProvider, setBusyProvider] = useState(null);
 
@@ -217,11 +223,9 @@ export const Finance = () => {
     const id = cid || companyId;
     if (!id) return;
 
-    const [entriesRes, receiptsRes, creditsRes, itinsRes, connRes] = await Promise.all([
-      supabase.from('journal_entries').select('*').eq('company_id', id).order('entry_date', { ascending: false }).order('created_at', { ascending: false }),
+    const [receiptsRes, creditsRes, connRes] = await Promise.all([
       supabase.from('invoice_receipts').select('*').eq('company_id', id).order('received_date', { ascending: false }),
       supabase.from('credit_notes').select('*').eq('company_id', id).order('issued_date', { ascending: false }),
-      supabase.from('itineraries').select('id, reference_number, reference, status, client_id, clients(name)').eq('company_id', id),
       // Columns listed explicitly to keep `credentials` out of the browser. The
       // Accounting tab only ever renders status and last-sync metadata, and
       // `select('*')` here would hand OAuth material to the client the moment
@@ -232,45 +236,134 @@ export const Finance = () => {
         .eq('company_id', id)
     ]);
 
-    const entries = entriesRes.data || [];
-    if (entries.length) {
-      const { data: lines } = await supabase
-        .from('journal_lines')
-        .select('*')
-        .in('entry_id', entries.map((e) => e.id))
-        .order('sort_order', { ascending: true });
-      setJournalEntries(entries.map((e) => ({ ...e, lines: (lines || []).filter((l) => l.entry_id === e.id) })));
-    } else {
-      setJournalEntries([]);
-    }
     setAllReceipts(receiptsRes.data || []);
     setAllCreditNotes(creditsRes.data || []);
     setConnections(connRes.data || []);
+  }, [companyId]);
 
-    const itins = (itinsRes.data || []).map((i) => ({ ...i, client_name: i.clients?.name || '' }));
-    setTenancyItineraries(itins);
+  const loadJournalData = useCallback(async ({ status, reference } = {}) => {
+    if (!companyId) return;
+    const requestId = journalRequestRef.current + 1;
+    journalRequestRef.current = requestId;
+    setJournalLoading(true);
+    setJournalError('');
+    setJournalEntries([]);
+    setJournalItineraries([]);
 
-    /* Cost of sales is derived from the persisted day items rather than the
-       live builder state, so it reflects what was actually saved. */
-    const itinIds = itins.map((i) => i.id);
-    if (itinIds.length) {
-      const { data: days } = await supabase
+    try {
+      if (!reference && !COST_OF_SALES_STATUSES.includes(status)) {
+        throw new Error('Choose a booking status or enter an exact itinerary reference.');
+      }
+      let itineraryQuery = supabase
+        .from('itineraries')
+        .select('id, reference_number, status, client_id, clients(name)')
+        .eq('company_id', companyId);
+      itineraryQuery = reference
+        ? itineraryQuery.eq('reference_number', reference.trim())
+        : itineraryQuery.eq('status', status);
+      const { data: itineraries, error: itineraryError } = await itineraryQuery;
+      if (itineraryError) throw itineraryError;
+      if (requestId !== journalRequestRef.current) return;
+      const matchedItineraries = (itineraries || []).map((itinerary) => ({
+        ...itinerary,
+        client_name: itinerary.clients?.name || ''
+      }));
+      setJournalItineraries(matchedItineraries);
+      const itineraryIds = matchedItineraries.map((itinerary) => itinerary.id);
+      if (!itineraryIds.length) return;
+
+      const { data: entries, error: entriesError } = await supabase
+        .from('journal_entries')
+        .select('*')
+        .eq('company_id', companyId)
+        .in('itinerary_id', itineraryIds)
+        .order('entry_date', { ascending: false })
+        .order('created_at', { ascending: false });
+      if (entriesError) throw entriesError;
+      if (requestId !== journalRequestRef.current) return;
+      const matchedEntries = entries || [];
+      if (!matchedEntries.length) return;
+      const { data: lines, error: linesError } = await supabase
+        .from('journal_lines')
+        .select('*')
+        .in('entry_id', matchedEntries.map((entry) => entry.id))
+        .order('sort_order', { ascending: true });
+      if (linesError) throw linesError;
+      if (requestId !== journalRequestRef.current) return;
+      setJournalEntries(matchedEntries.map((entry) => ({
+        ...entry,
+        lines: (lines || []).filter((line) => line.entry_id === entry.id)
+      })));
+    } catch (err) {
+      if (requestId === journalRequestRef.current) {
+        setJournalEntries([]);
+        setJournalItineraries([]);
+        setJournalError(err.message || 'Could not load journal entries');
+      }
+    } finally {
+      if (requestId === journalRequestRef.current) setJournalLoading(false);
+    }
+  }, [companyId]);
+
+  const loadCostOfSalesData = useCallback(async ({ status, reference } = {}) => {
+    if (!companyId) return;
+    const requestId = costOfSalesRequestRef.current + 1;
+    costOfSalesRequestRef.current = requestId;
+    setTenancyLoading(true);
+    setTenancyError('');
+    setTenancyRows([]);
+    setCostOfSalesItineraries([]);
+
+    try {
+      if (!reference && !COST_OF_SALES_STATUSES.includes(status)) {
+        throw new Error('Choose a valid itinerary status or enter an exact itinerary reference.');
+      }
+      let query = supabase
+        .from('itineraries')
+        .select('id, reference_number, status, client_id, clients(name)')
+        .eq('company_id', companyId);
+      query = reference
+        ? query.eq('reference_number', reference.trim()).in('status', COST_OF_SALES_STATUSES)
+        : query.eq('status', status);
+
+      const { data: itineraries, error: itinerariesError } = await query;
+      if (itinerariesError) throw itinerariesError;
+      if (requestId !== costOfSalesRequestRef.current) return;
+      const matchedItineraries = (itineraries || []).map((itinerary) => ({
+        ...itinerary,
+        client_name: itinerary.clients?.name || ''
+      }));
+      setCostOfSalesItineraries(matchedItineraries);
+      const itineraryIds = matchedItineraries.map((itinerary) => itinerary.id);
+      if (!itineraryIds.length) return;
+
+      const { data: days, error: daysError } = await supabase
         .from('itinerary_days')
         .select('id, itinerary_id')
-        .in('itinerary_id', itinIds);
-      const dayIds = (days || []).map((d) => d.id);
-      if (dayIds.length) {
-        const { data: items } = await supabase
-          .from('itinerary_day_items')
-          .select('itinerary_day_id, currency_code, total_buy, total_sell, tax_rate, is_included')
-          .in('itinerary_day_id', dayIds);
-        const itinOfDay = new Map((days || []).map((d) => [d.id, d.itinerary_id]));
-        setTenancyRows(costOfSalesFromDayItems((items || []).map((it) => ({ ...it, itinerary_id: itinOfDay.get(it.itinerary_day_id) }))));
-      } else {
+        .in('itinerary_id', itineraryIds);
+      if (daysError) throw daysError;
+      if (requestId !== costOfSalesRequestRef.current) return;
+      const dayIds = (days || []).map((day) => day.id);
+      if (!dayIds.length) return;
+
+      const { data: items, error: itemsError } = await supabase
+        .from('itinerary_day_items')
+        .select('id, itinerary_day_id, item_name, description_override, category, supplier_name, currency_code, total_buy, total_sell, unit_cost, unit_price, item_price_per_person, pax, tax_rate, is_included')
+        .in('itinerary_day_id', dayIds);
+      if (itemsError) throw itemsError;
+      if (requestId !== costOfSalesRequestRef.current) return;
+      const itineraryOfDay = new Map((days || []).map((day) => [day.id, day.itinerary_id]));
+      setTenancyRows(costOfSalesFromDayItems((items || [])
+        .map((item) => ({ ...item, itinerary_id: itineraryOfDay.get(item.itinerary_day_id) }))
+        .filter((item) => item.itinerary_id)));
+    } catch (err) {
+      if (requestId === costOfSalesRequestRef.current) {
         setTenancyRows([]);
+        setCostOfSalesItineraries([]);
+        setTenancyError(err.message || 'Could not load cost-of-sales data');
       }
-    } else {
-      setTenancyRows([]);
+    } finally {
+      if (requestId === costOfSalesRequestRef.current) setTenancyLoading(false);
     }
   }, [companyId]);
 
@@ -278,11 +371,25 @@ export const Finance = () => {
     if (!companyId) return;
     let cancelled = false;
     (async () => {
-      await loadTenantFinance(companyId);
-      if (cancelled) return;
+      try {
+        await loadTenantFinance(companyId);
+      } catch (err) {
+        if (!cancelled) showToast(err.message || 'Failed to load Finance data', 'error');
+      }
     })();
     return () => { cancelled = true; };
-  }, [companyId, activeTab, loadTenantFinance]);
+  }, [companyId, activeTab, loadTenantFinance, showToast]);
+
+  const handleFinanceTabChange = (tab) => {
+    if (tab !== 'journal') {
+      journalRequestRef.current += 1;
+      setJournalEntries([]);
+      setJournalItineraries([]);
+      setJournalError('');
+      setJournalLoading(false);
+    }
+    setActiveTab(tab);
+  };
 
   /* Push the ledger out as a file the accounts team can import. Provider-
      specific dialects differ, so this emits the provider-agnostic journal plus
@@ -291,13 +398,29 @@ export const Finance = () => {
     if (!companyId) return;
     setBusyProvider(provider);
     try {
+      const { data: entries, error: entriesError } = await supabase
+        .from('journal_entries')
+        .select('*')
+        .eq('company_id', companyId)
+        .order('entry_date', { ascending: false })
+        .order('created_at', { ascending: false });
+      if (entriesError) throw entriesError;
+      const allEntries = entries || [];
+      const { data: lines, error: linesError } = allEntries.length
+        ? await supabase.from('journal_lines').select('*').in('entry_id', allEntries.map((entry) => entry.id)).order('sort_order', { ascending: true })
+        : { data: [], error: null };
+      if (linesError) throw linesError;
+      const entriesWithLines = allEntries.map((entry) => ({
+        ...entry,
+        lines: (lines || []).filter((line) => line.entry_id === entry.id)
+      }));
       const payload = {
         schema: 'torbuilder.ledger/v1',
         provider,
         generated_at: new Date().toISOString(),
         company_id: companyId,
         chart_of_accounts: CHART_OF_ACCOUNTS,
-        entries: journalEntries.map((e) => ({
+        entries: entriesWithLines.map((e) => ({
           entry_date: e.entry_date,
           reference: e.reference,
           source_type: e.source_type,
@@ -318,9 +441,9 @@ export const Finance = () => {
       downloadBlob(JSON.stringify(payload, null, 2), `${provider}-ledger-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
       await supabase.from('accounting_sync_log').insert([{
         company_id: companyId, provider, direction: 'push', status: 'success',
-        records_count: journalEntries.length, message: 'Ledger exported by the user.'
+        records_count: entriesWithLines.length, message: 'Ledger exported by the user.'
       }]).then(() => {}).catch(() => {});
-      showToast(`${journalEntries.length} journal entries exported for ${provider}`, 'success');
+      showToast(`${entriesWithLines.length} journal entries exported for ${provider}`, 'success');
     } catch (err) {
       showToast(err.message || 'Export failed', 'error');
     } finally {
@@ -357,14 +480,21 @@ export const Finance = () => {
 
   const postCostOfSalesRow = async (row) => {
     if (!companyId) return;
-    /* Guard the write, not just the button: recognising cost creates a real
-       supplier liability, and an uncommitted quotation is not an obligation. */
-    const itin = tenancyItineraries.find((i) => i.id === row.itinerary_id);
-    if (itin && !['confirmed', 'in_progress', 'completed'].includes(itin.status)) {
-      showToast(`Cost of sales can only be recognised on a committed booking — ${itin.reference_number || itin.reference || 'this itinerary'} is ${itin.status}.`, 'warning');
-      return;
-    }
     try {
+      /* Recheck the current status before recognising an expense: a stale
+         Finance tab must not post a quotation as cost of sales. */
+      const { data: itin, error: itinErr } = await supabase
+        .from('itineraries')
+        .select('id, reference_number, status')
+        .eq('id', row.itinerary_id)
+        .eq('company_id', companyId)
+        .maybeSingle();
+      if (itinErr) throw itinErr;
+      if (!itin || !COST_OF_SALES_STATUSES.includes(itin.status)) {
+        const status = itin?.status || 'not found';
+        showToast(`Cost of sales can only be recognised on a confirmed, in-progress, or completed itinerary — ${itin?.reference_number || 'this itinerary'} is ${status}.`, 'warning');
+        return;
+      }
       const res = await postCostOfSales(companyId, {
         itineraryId: row.itinerary_id,
         reference: 'COS',
@@ -1010,11 +1140,11 @@ export const Finance = () => {
     return data;
   };
 
-  /* An invoice's balance comes from its receipts and credit notes, not from the
-     cached column, so a part-paid invoice never reads as settled. */
+  /* Derive the balance from cash receipts and applied wallet credit, never from
+     the cached column, so stale net-only amounts cannot omit tax. */
   const balanceOf = useCallback(
-    (inv) => invoiceBalance(inv, allReceipts, allCreditNotes),
-    [allReceipts, allCreditNotes]
+    (inv) => invoiceBalance(inv, allReceipts),
+    [allReceipts]
   );
 
   /* Settling an invoice by hand rather than by receipt, for money already banked
@@ -1062,7 +1192,7 @@ export const Finance = () => {
      The reason is kept on the document because a refund is the kind of entry an
      auditor asks about. */
   const openRefundPrompt = (inv) => {
-    const cap = refundableTotal(inv.id, allReceipts);
+    const cap = refundableOverpayment(inv, allReceipts);
     setRefundPromptFor({ ...inv, refundCap: cap });
     setRefundForm({
       amount: cap > 0 ? String(cap) : '',
@@ -1082,11 +1212,10 @@ export const Finance = () => {
       if (!(amount > 0.009)) throw new Error('Enter the amount to refund');
       if (!reason) throw new Error('Give a reason for the refund');
 
-      /* Guarded here for a clear message, enforced on the server for the truth:
-         the cap is checked under a lock, so a stale tab cannot hand out more
-         cash than came in. */
+      /* Guarded here for a clear message, enforced under a database lock:
+         only excess cash can be returned without reopening the invoice. */
       if (amount > inv.refundCap + 0.009) {
-        throw new Error(`Only ${fmtMoney(inv.refundCap, symOf(inv.currency_code))} is held against ${inv.invoice_number} and can be refunded`);
+        throw new Error(`Only ${fmtMoney(inv.refundCap, symOf(inv.currency_code))} is available to refund without reopening ${inv.invoice_number}`);
       }
 
       const { data, error } = await supabase.rpc('issue_invoice_refund', {
@@ -1099,9 +1228,8 @@ export const Finance = () => {
       const done = Array.isArray(data) ? data[0] : data;
       if (!done) throw new Error('The refund was not recorded');
 
-      /* The journal is the mirror of a receipt: money out of the bank, back on
-         the receivable. The client owes it again, which is what the balance now
-         says. */
+      /* The refund clears the excess cash liability without reopening a fully
+         settled invoice. */
       await postReceipt(companyId, {
         id: done.id,
         direction: 'out',
@@ -1116,7 +1244,9 @@ export const Finance = () => {
         client_id: inv.client_id || null
       });
 
-      await loadData();
+      await fetchInvoices(companyId);
+      await loadTenantFinance(companyId);
+      await reloadViewing(inv.id);
       setRefundPromptFor(null);
       showToast(
         `Refund ${done.number} issued — ${fmtMoney(done.amount, symOf(inv.currency_code))} returned to the client`,
@@ -1129,16 +1259,13 @@ export const Finance = () => {
     }
   };
 
-  /* What an invoice would still owe once a further amount is taken off it,
-     whether that is money received or a credit note. Derived from the documents
-     rather than read off the cached column, so it cannot drift. */
-  const balanceAfterReceipt = (inv, amount, credit = 0) => {
-    /* Net, not gross: money already refunded has left, so it must not be
-       counted towards what has settled the invoice. */
+  /* What an invoice would still owe once a further cash receipt arrives.
+     Credit notes fund the client's wallet; only cash and credit drawn from that
+     wallet settle the invoice. */
+  const balanceAfterReceipt = (inv, amount) => {
     const settled = netReceivedTotal(inv.id, allReceipts)
-      + creditedTotal(inv.id, allCreditNotes)
-      + round2(amount)
-      + round2(credit);
+      + creditAppliedTotal(inv.id, allReceipts)
+      + round2(amount);
     return round2(Math.max(0, round2(num(inv.total_incl)) - settled));
   };
 
@@ -1512,7 +1639,7 @@ export const Finance = () => {
          it. A part credit leaves the invoice live and owing the rest; a full one
          clears it and voids the document. */
       const alreadyCredited = creditedTotal(inv.id, allCreditNotes);
-      const afterCredit = balanceAfterReceipt(inv, 0, gross);
+      const afterCredit = voidsInvoice ? 0 : balanceOf(inv);
       const invPatch = {
         credited_amount: round2(alreadyCredited + gross),
         balance_due: afterCredit
@@ -1524,7 +1651,7 @@ export const Finance = () => {
         invPatch.credit_note_number = createdCn.credit_note_number;
       } else {
         /* Still owed money, so it is a live invoice, not a paid one. */
-        invPatch.status = settledStatus({ ...inv, status: 'validated' }, allReceipts, [createdCn, ...allCreditNotes]);
+        invPatch.status = settledStatus({ ...inv, status: 'validated' }, allReceipts);
       }
       const { error: invErr } = await supabase.from('invoices').update(invPatch).eq('id', inv.id);
       if (invErr) {
@@ -1569,28 +1696,28 @@ export const Finance = () => {
   };
 
   const exportExcel = (inv, lines) => {
-    downloadBlob(invoiceExcelHtml(inv, lines, symOf(inv.currency_code), branding), `${inv.invoice_number}.xls`, 'application/vnd.ms-excel');
+    downloadBlob(invoiceExcelHtml({ ...inv, balance_due: balanceOf(inv) }, lines, symOf(inv.currency_code), branding), `${inv.invoice_number}.xls`, 'application/vnd.ms-excel');
     showToast('Invoice exported as Excel', 'success');
   };
 
   const printInvoice = (inv, lines) => {
-    const w = openPrintWindow(invoiceDocHtml(inv, lines, symOf(inv.currency_code), branding));
+    const w = openPrintWindow(invoiceDocHtml({ ...inv, balance_due: balanceOf(inv) }, lines, symOf(inv.currency_code), branding));
     if (!w) showToast('Please allow pop-ups to print the invoice', 'warning');
   };
 
   const exportInvoiceWord = (inv, lines) => {
-    downloadBlob(invoiceDocHtml(inv, lines, symOf(inv.currency_code), branding), `${inv.invoice_number}.doc`, 'application/msword');
+    downloadBlob(invoiceDocHtml({ ...inv, balance_due: balanceOf(inv) }, lines, symOf(inv.currency_code), branding), `${inv.invoice_number}.doc`, 'application/msword');
     showToast('Invoice exported as Word', 'success');
   };
 
   const emitEmail = (inv, lines) => {
-    const m = invoiceEmail(inv, lines, branding);
+    const m = invoiceEmail({ ...inv, balance_due: balanceOf(inv) }, lines, branding);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
     window.open(mailTo(m.to, m.subject, m.body), '_blank');
   };
 
   const copyInvoice = (inv, lines) => {
-    const m = invoiceEmail(inv, lines, branding);
+    const m = invoiceEmail({ ...inv, balance_due: balanceOf(inv) }, lines, branding);
     void clipboardCopy(`${m.subject}\n\n${m.body}`);
     showToast('Invoice copied to clipboard', 'success');
   };
@@ -1638,8 +1765,8 @@ export const Finance = () => {
         </button>
       </div>
 
-      {/* Tenant-wide tabs. The per-itinerary view of the same data lives on the
-          itinerary's own Finance tab; these are the cross-itinerary rollups. */}
+      {/* Finance tabs provide company-wide summaries, with journal and cost of
+          sales detail loaded only after the user chooses a scope. */}
       <div className="builder-tabs" style={{ marginTop: '1.25rem' }}>
         {[
           ['invoices', 'Invoices'],
@@ -1648,7 +1775,7 @@ export const Finance = () => {
           ['cost-of-sales', 'Cost of Sales'],
           ['accounting', 'Accounting']
         ].map(([id, label]) => (
-          <button key={id} type="button" className={`builder-tab ${activeTab === id ? 'active' : ''}`} onClick={() => setActiveTab(id)}>
+          <button key={id} type="button" className={`builder-tab ${activeTab === id ? 'active' : ''}`} onClick={() => handleFinanceTabChange(id)}>
             {label}
           </button>
         ))}
@@ -1741,7 +1868,11 @@ export const Finance = () => {
       {activeTab === 'journal' && (
         <JournalPanel
           entries={journalEntries}
-          itineraries={tenancyItineraries}
+          itineraries={journalItineraries}
+          loading={journalLoading}
+          error={journalError}
+          onLoadStatus={(status) => loadJournalData({ status })}
+          onSearchReference={(reference) => loadJournalData({ reference })}
           onExport={() => pushLedgerFile('general-ledger')}
         />
       )}
@@ -1749,7 +1880,11 @@ export const Finance = () => {
       {activeTab === 'cost-of-sales' && (
         <TenantCostOfSalesPanel
           rows={tenancyRows}
-          itineraries={tenancyItineraries}
+          itineraries={costOfSalesItineraries}
+          error={tenancyError}
+          loading={tenancyLoading}
+          onLoadStatus={(status) => loadCostOfSalesData({ status })}
+          onSearchReference={(reference) => loadCostOfSalesData({ reference })}
           onPost={postCostOfSalesRow}
         />
       )}
@@ -1806,10 +1941,9 @@ export const Finance = () => {
                     <FileCheck2 size={15} /> Issue Receipt
                   </button>
                 )}
-                {/* Only where money is actually held. A refund hands back cash
-                    that has to have arrived, so an invoice with nothing
-                    received against it has nothing to refund. */}
-                {viewing.status !== 'void' && refundableTotal(viewing.id, allReceipts) > 0.009 && (
+                {/* Only excess settled cash can be refunded here. A refund of
+                    the excess leaves the invoice balance unchanged. */}
+                {viewing.status !== 'void' && refundableOverpayment(viewing, allReceipts) > 0.009 && (
                   <button
                     type="button"
                     className="secondary-btn"
@@ -1898,14 +2032,14 @@ export const Finance = () => {
                         AMOUNT DUE
                         {viewing.status === 'paid' ? ' (settled)' : ''}
                       </td>
-                      <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 900 }}>{fmtMoney(balanceOf(viewing), symOf(viewing.currency_code))}</td>
                     </tr>
                   </tbody>
                 </table>
 
                 <div style={{ marginTop: '0.85rem', display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
                   <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Invoice total</div><div style={{ fontWeight: 800 }}>{fmtMoney(viewing.total_incl, symOf(viewing.currency_code))}</div></div>
-                  <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Amount due</div><div style={{ fontWeight: 800 }}>{fmtMoney(effectiveBalance(viewing), symOf(viewing.currency_code))}</div></div>
+                  <div><div style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700 }}>Amount due</div><div style={{ fontWeight: 800 }}>{fmtMoney(balanceOf(viewing), symOf(viewing.currency_code))}</div></div>
                 </div>
 
                 <div style={{ marginTop: '0.85rem' }}>
@@ -2081,8 +2215,8 @@ export const Finance = () => {
               <button className="close-btn" onClick={() => setRefundPromptFor(null)}><X size={20} /></button>
             </div>
             <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: 0 }}>
-              Returning money received against this invoice. The charge stands, so the amount handed
-              back goes back on to what the client owes.
+              Return only the excess received above the tax-inclusive invoice total. Refunding this
+              amount leaves the invoice fully settled.
             </p>
             <div style={{ display: 'grid', gap: '0.85rem' }}>
               <div className="sidebar-field">
@@ -2102,7 +2236,7 @@ export const Finance = () => {
                   onChange={(e) => setRefundForm({ ...refundForm, amount: e.target.value })}
                 />
                 <small style={{ color: '#64748b' }}>
-                  Held against this invoice: {fmtMoney(refundPromptFor.refundCap, symOf(refundPromptFor.currency_code))}. No more than that can be returned.
+                  Excess received above the total invoice value: {fmtMoney(refundPromptFor.refundCap, symOf(refundPromptFor.currency_code))}.
                 </small>
               </div>
               <div className="sidebar-field">
@@ -2127,7 +2261,7 @@ export const Finance = () => {
               <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '0.75rem 1rem', fontSize: '0.9rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>Outstanding after this refund</span>
-                  <b>{fmtMoney(balanceOf(refundPromptFor) + (num(refundForm.amount) || 0), symOf(refundPromptFor.currency_code))}</b>
+                  <b>{fmtMoney(invoiceBalanceAfterRefund(refundPromptFor, num(refundForm.amount) || 0, allReceipts), symOf(refundPromptFor.currency_code))}</b>
                 </div>
               </div>
             </div>

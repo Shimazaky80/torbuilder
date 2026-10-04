@@ -764,22 +764,41 @@ const vatOfInclusive = (amount, rate) => {
    Optional services (is_included = false) are excluded — the client was not
    charged for them, so they are not sale, and booking them is not a cost of
    this sale. */
+export const COST_OF_SALES_STATUSES = ['confirmed', 'in_progress', 'completed'];
+
 export const costOfSalesFromDayItems = (items) => {
   const byKey = new Map();
   for (const it of items || []) {
     if (it.is_included === false) continue;
-    const itin = it.itinerary_id || 'unknown';
+    if (!it.itinerary_id) continue;
+    const itin = it.itinerary_id;
     const ccy = (it.currency_code || 'ZAR').toUpperCase();
     const key = `${itin}|${ccy}`;
     if (!byKey.has(key)) {
-      byKey.set(key, { itinerary_id: itin, code: ccy, symbol: ccy, cost: 0, grossSale: 0, tax: 0, serviceCount: 0 });
+      byKey.set(key, { itinerary_id: itin, code: ccy, symbol: ccy, cost: 0, grossSale: 0, tax: 0, serviceCount: 0, items: [] });
     }
     const row = byKey.get(key);
-    const sell = num(it.total_sell);
-    row.cost = round2(row.cost + num(it.total_buy));
-    row.grossSale = round2(row.grossSale + sell);
-    row.tax = round2(row.tax + vatOfInclusive(sell, it.tax_rate));
+    const pax = Math.max(1, num(it.pax) || 1);
+    const buy = num(it.total_buy) || round2(num(it.unit_cost) * pax);
+    const grossSale = num(it.total_sell) || round2(num(it.unit_price ?? it.item_price_per_person) * pax);
+    const tax = vatOfInclusive(grossSale, it.tax_rate);
+    const netSale = round2(grossSale - tax);
+    const profit = round2(netSale - buy);
+    row.cost = round2(row.cost + buy);
+    row.grossSale = round2(row.grossSale + grossSale);
+    row.tax = round2(row.tax + tax);
     row.serviceCount += 1;
+    row.items.push({
+      id: it.id || `${row.serviceCount}`,
+      name: it.item_name || it.description_override || 'Contracted item',
+      category: it.category || '',
+      supplier: it.supplier_name || '',
+      cost: buy,
+      grossSale,
+      netSale,
+      profit,
+      profitable: profit >= 0
+    });
   }
   return [...byKey.values()].map((r) => {
     const netSale = round2(r.grossSale - r.tax);

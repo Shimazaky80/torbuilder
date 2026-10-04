@@ -82,7 +82,7 @@ export function JournalEntryCard({ entry, symbol, currencyCode = entry.currency_
 /* An invoice, with the journal it posted and the receipts raised against it.
    Receipts sit under their invoice rather than in a separate list so the
    invoice → journal → receipt chain reads as one record. */
-export function InvoiceFinanceRow({ invoice, entries, receipts, symbol, open, onToggle, onViewReceipt }) {
+export function InvoiceFinanceRow({ invoice, entries, receipts, symbol, open, onToggle, onViewReceipt, balanceDue = invoice.balance_due }) {
   const badge = STATUS_STYLE[invoice.status] || { bg: '#f1f5f9', fg: '#475569', label: invoice.status };
   return (
     <div style={{ border: '1px solid #e2e8f0', borderRadius: '14px', background: '#fff', marginBottom: '0.6rem', overflow: 'hidden' }}>
@@ -118,7 +118,7 @@ export function InvoiceFinanceRow({ invoice, entries, receipts, symbol, open, on
             {Number(invoice.tax_total) > 0 && (
               <span>{invoice.tax_label || 'Tax'}: <strong>{money(invoice.tax_total, symbol)}</strong></span>
             )}
-            <span>Balance due: <strong>{money(invoice.balance_due, symbol)}</strong></span>
+            <span>Balance due: <strong>{money(balanceDue, symbol)}</strong></span>
           </div>
 
           <div>

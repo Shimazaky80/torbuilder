@@ -582,10 +582,6 @@ const timeRangeOf = (sv) => {
   return st || en || '';
 };
 
-/* Optional per-service notes override persisted on the row. */
-const svNote = (sv) => (sv.notes !== undefined && sv.notes !== null ? String(sv.notes) : '');
-const svTime = (sv) => `${sv.startTime || ''}${sv.startTime && sv.endTime ? '?' : ''}${sv.endTime || ''}`;
-
 /* --- Confirmation status codes (service request results) --------------------
    Recorded per service while provisional. Confirmed bookings always reflect OK
    (the final state), regardless of what was captured on the provisional tab. */
@@ -744,47 +740,6 @@ const supplierConfirmationEmail = (group, allDays, meta, currencySymbol, paxCoun
   };
 };
 
-/* Per-item email line group shared by the single-service draft and the
-   combined-per-supplier draft so both styles carry the exact same fields in
-   the exact same order (Service ? Dates ? Time ? Guests ? Special Req).      */
-const serviceItemLines = (sv, day, meta, currencySymbol, paxCount, libraryItems) => {
-  const adults = Number(meta.numAdults) || 0;
-  const children = Number(meta.numChildren) || 0;
-  const dayShot = formatDateShort(day.date);
-  const endDate = dayShot && formatDateShort(meta.travelEnd) && formatDateShort(meta.travelEnd) !== dayShot
-    ? formatDateShort(meta.travelEnd)
-    : dayShot;
-  return [
-    `Service: ${repairText(sv.name)}`,
-    dayShot ? `Dates: Arrival ${dayShot}, Departure ${endDate}` : '',
-    timeRangeOf(sv) ? `Time: ${timeRangeOf(sv)}` : '',
-    `Number of Guests: ${adults || 0} Adult(s)${children ? ` / ${children} Child(ren)` : ''}`,
-    serviceNotes(sv, libraryItems) ? `Special Requirements: ${serviceNotes(sv, libraryItems)}` : 'Special Requirements: None'
-  ].filter((l) => l !== '').join('\n');
-};
-
-/* One mailto draft per item, sent straight to the item's supplier. */
-const serviceItemEmail = (sv, day, meta, currencySymbol, paxCount, billing, libraryItems) => {
-  const agencyLabel = meta.agencyRef || meta.agency_reference || meta.client?.name || 'Direct Client';
-  const body = [
-    `We would like to place a provisional request for the following service on behalf of our client:`,
-    '',
-    serviceItemLines(sv, day, meta, currencySymbol, paxCount, libraryItems),
-    '',
-    contractRateLine(sv, paxCount, currencySymbol),
-    `Our Reference#: ${meta.referenceNumber || meta.reference || '—'}`,
-    `Agency/Direct Client: ${agencyLabel}`,
-    `Client Nationality: ${meta.client?.nationality || '—'}`,
-    '',
-    ...companySignOffLines(billing)
-  ].join('\n');
-  return {
-    to: emailOf(sv.sup || sv.supplierObj) || sv.supplierEmail || '',
-    subject: `Provisional Service Request — ${meta.referenceNumber || meta.reference || ''}`,
-    body
-  };
-};
-
 /* Filename-safe token for a group label — used when the user downloads a
    voucher as Word/PDF. Mirrors the CSV/GDocs naming already used elsewhere. */
 const safeNameOf = (label) => {
@@ -879,7 +834,7 @@ const voucherDocHtml = (group, allDays, meta, currencySymbol, paxCount, opts) =>
         const idx = l.indexOf(':');
         return idx > 0 ? [l.slice(0, idx).trim(), l.slice(idx + 1).trim()] : ['', l];
       })
-    ].filter(([k, v]) => v !== '');
+    ].filter(([, v]) => v !== '');
     const box = rows.map(([k, v]) =>
       k ? `<tr><td class="k">${esc(k)}</td><td class="v">${esc(v)}</td></tr>` : `<tr><td colspan="2" class="v multi">${esc(v)}</td></tr>`
     ).join('');
@@ -1329,6 +1284,7 @@ export const ItineraryBuilder = () => {
   const [expandedPackageRows, setExpandedPackageRows] = useState({});
   const [activeTab, setActiveTab] = useState('itinerary');
   const [saving, setSaving] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
   const [saved, setSaved] = useState(false);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [kebabFor, setKebabFor] = useState(null);
@@ -1374,6 +1330,7 @@ export const ItineraryBuilder = () => {
   const idSeq = useRef(0);
   const booted = useRef(false);
   const lastItineraryIdRef = useRef(data?.itineraryId || null);
+  const lastSavedSnapshotRef = useRef(null);
   const nextId = useCallback(() => {
     idSeq.current += 1;
     return `t${idSeq.current}`;
@@ -1523,17 +1480,6 @@ export const ItineraryBuilder = () => {
     return round2(t);
   }, [days, paxCount, defaultTaxRate]);
 
-  const selectedCurrencyTotal = useMemo(() => {
-    let total = 0;
-    days.forEach((day) => {
-      (day.services || []).forEach((service) => {
-        if (service.isOptional || (service.currencyCode || 'ZAR').toUpperCase() !== currencyCode.toUpperCase()) return;
-        total += (Number(service.sellPP) || 0) * paxForService(service, paxCount);
-      });
-    });
-    return round2(total);
-  }, [days, paxCount, currencyCode]);
-
   const itineraryCostTotal = useMemo(() => {
     let c = 0;
     days.forEach((d) => {
@@ -1579,18 +1525,6 @@ export const ItineraryBuilder = () => {
     }
     return map;
   }, [itineraryReceipts]);
-  /* Net money held against an invoice: receipts less anything refunded back.
-     A refund is money that has left, so it belongs in the balance but is not
-     part of what has been received. */
-  const receivedTotalFor = useCallback(
-    (id) => netReceivedTotal(id, receiptsByInvoice.get(id) || []),
-    [receiptsByInvoice]
-  );
-  /* The most that may still be handed back on an invoice. */
-  const refundableFor = useCallback(
-    (id) => refundableTotal(id, receiptsByInvoice.get(id) || []),
-    [receiptsByInvoice]
-  );
   const paymentInvoicesByCurrency = useMemo(() => {
     const byCurrency = new Map();
     itineraryInvoices.forEach((invoice) => {
@@ -1618,10 +1552,6 @@ export const ItineraryBuilder = () => {
     () => itineraryJournal.filter((e) => !e.source_id || e.source_type === 'cost_of_sales'),
     [itineraryJournal]
   );
-  const outstanding = round2(Math.max(0,
-    selectedCurrencyTotal - netBilled(itineraryInvoices, itineraryCreditNotes, currencyCode)
-  ));
-
   /* -- Stage-based document unlocks --------------------------------------
      Each lifecycle stage only shows the tabs the CSV lifecycle defines:
      quotation / pending ? planning tabs only; provisional adds the deposit
@@ -1666,6 +1596,7 @@ export const ItineraryBuilder = () => {
   useEffect(() => {
     if (!bootedState) return;
     setLastSavedKey(stateKey);
+    lastSavedSnapshotRef.current = { days, meta };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootedState]);
 
@@ -1853,8 +1784,9 @@ export const ItineraryBuilder = () => {
     try {
       const term = searchTerm.trim().replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
       let query = supabase.from('packages')
-        .select('id, name, description, cover_image_url, default_markup_percentage')
+        .select('id, name, description, cover_image_url, inclusions, exclusions, terms_and_conditions')
         .eq('company_id', companyId)
+        .eq('is_available_in_library', true)
         .order('name', { ascending: true })
         .limit(30);
       if (term) query = query.or(`name.ilike.%${term}%,description.ilike.%${term}%`);
@@ -1868,7 +1800,7 @@ export const ItineraryBuilder = () => {
       if (daysError) throw daysError;
       const dayIds = (packageDays || []).map((day) => day.id);
       const { data: packageServices, error: servicesError } = dayIds.length
-        ? await supabase.from('package_day_items').select('package_day_id, item_name, category, supplier_name, currency_code, rate_basis, unit_cost, unit_price, quantity, notes, is_included').in('package_day_id', dayIds).order('sort_order')
+        ? await supabase.from('package_day_items').select('package_day_id, item_name, category, supplier_name, currency_code, rate_basis, unit_cost, unit_price, quantity, notes, is_included, vehicle_capacity').in('package_day_id', dayIds).order('sort_order')
         : { data: [], error: null };
       if (servicesError) throw servicesError;
       const servicesByDay = new Map();
@@ -1881,7 +1813,9 @@ export const ItineraryBuilder = () => {
         ...pkg,
         package_snapshot: {
           id: pkg.id, name: pkg.name, description: pkg.description,
-          default_markup_percentage: pkg.default_markup_percentage,
+          inclusions: pkg.inclusions,
+          exclusions: pkg.exclusions,
+          terms_and_conditions: pkg.terms_and_conditions,
           days: daysByPackage.get(pkg.id) || []
         }
       })));
@@ -2776,7 +2710,11 @@ repeatGroupId: ii.repeat_group_id || null,
       .reduce((sum, service) => {
         const qty = Number(service.quantity) || 1;
         const cost = Number(service.unit_cost) || 0;
-        return sum + (isFlatBasis(service.rate_basis) ? cost * qty / Math.max(1, paxCount) : cost * qty);
+        const basis = String(service.rate_basis || '').toLowerCase();
+        const vehicles = basis === 'per_vehicle'
+          ? Math.ceil(Math.max(1, paxCount) / Math.max(1, Number(service.vehicle_capacity) || paxCount || 1))
+          : 1;
+        return sum + (isFlatBasis(basis) ? cost * qty * vehicles / Math.max(1, paxCount) : cost * qty);
       }, 0));
     // The itinerary client markup overrides the reusable package and its saved
     // service markups when a package is copied into this quote.
@@ -3478,27 +3416,6 @@ return !!sv.time; /* activities / meals / other */
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, []);
 
-  const buildRows = useCallback(() => {
-    const rows = [];
-    days.forEach((d) => {
-      const t = dayTotals(d);
-      rows.push({
-        day: d.dayNumber,
-        date: formatDateLong(d.date),
-        svcCount: t.count,
-        sell: t.sell,
-        tax: t.tax,
-        total: t.total
-      });
-    });
-      const grandSell = round2(rows.reduce((a, r) => a + r.sell, 0));
-      const grandTax = round2(rows.reduce((a, r) => a + r.tax, 0));
-      const grandInTax = round2(rows.reduce((a, r) => a + (r.taxIn || 0), 0));
-      const grandNetTax = round2(rows.reduce((a, r) => a + ((r.tax || 0) - (r.taxIn || 0)), 0));
-      const grandTotal = round2(rows.reduce((a, r) => a + r.total, 0));
-      return { rows, grandSell, grandTax, grandInTax, grandNetTax, grandTotal };
-  }, [days, dayTotals]);
-
   const handleExport = useCallback((format) => {
     setExportOpen(false);
     const allocCheck = validateAllRoomAllocations();
@@ -4030,7 +3947,11 @@ return !!sv.time; /* activities / meals / other */
     }
   }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent]);
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async ({ silent = false } = {}) => {
+    if (isReadOnly && !isProvisional) {
+      showToast(EDIT_LOCK_MESSAGE, 'warning');
+      return false;
+    }
     if (!companyId) {
       showToast('Company not found', 'error');
       return false;
@@ -4134,6 +4055,10 @@ return !!sv.time; /* activities / meals / other */
         .eq('itinerary_id', id);
       if (delErr) throw delErr;
 
+      const persistedDays = days.map((day) => ({
+        ...day,
+        services: [...(day.services || [])]
+      }));
       for (let di = 0; di < days.length; di += 1) {
         const day = days[di];
         const { data: newDay, error: dayErr } = await supabase
@@ -4224,7 +4149,13 @@ return !!sv.time; /* activities / meals / other */
              that one row instead of rewriting the whole itinerary. */
           if (Array.isArray(insertedRows) && insertedRows.length) {
             const byOrder = new Map(insertedRows.map((row) => [Number(row.sort_order), row.id]));
-            setDays((prev) => prev.map((d) => ({
+            persistedDays[di] = {
+              ...day,
+              services: day.services.map((s, si) => (
+                byOrder.has(si) ? { ...s, dbId: byOrder.get(si) } : s
+              ))
+            };
+            setDaysRaw((prev) => prev.map((d) => ({
               ...d,
               services: d.services.map((s, si) => (
                 byOrder.has(si) ? { ...s, dbId: byOrder.get(si) } : s
@@ -4234,8 +4165,9 @@ return !!sv.time; /* activities / meals / other */
         }
       }
       setSaved(true);
-      showToast('Itinerary saved', 'success');
-      setLastSavedKey(JSON.stringify({ days, meta: persistedMeta }));
+      if (!silent) showToast(isProvisional ? 'Supplier confirmations saved' : 'Itinerary saved', 'success');
+      lastSavedSnapshotRef.current = { days: persistedDays, meta: persistedMeta };
+      setLastSavedKey(JSON.stringify(lastSavedSnapshotRef.current));
       return true;
     } catch (err) {
       showToast(err.message || 'Failed to save itinerary', 'error');
@@ -4243,7 +4175,57 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [companyId, meta, currencyCode, days, paxCount, showToast]);
+  }, [companyId, meta, currencyCode, days, paxCount, showToast, isReadOnly, isProvisional, EDIT_LOCK_MESSAGE, setDaysRaw]);
+
+  const handleStatusChange = useCallback(async (nextStatus) => {
+    setStatusMenuOpen(false);
+    if (updatingStatus || nextStatus === normaliseStatus(meta.status)) return;
+    if (nextStatus === 'confirmed' && !canConfirmBooking()) {
+      const count = (days || []).reduce((n, d) => n + (d.services || []).length, 0);
+      showToast(
+        count
+          ? 'All services must be marked OK (Time, Confirmation no. & Flight no. required) before confirming this booking'
+          : 'Add at least one service to this itinerary before confirming the booking',
+        'warning'
+      );
+      return;
+    }
+
+    setUpdatingStatus(true);
+    try {
+      /* Persist editable itinerary content and Provisional supplier updates
+         before changing stage. Locked stages must never use the wholesale
+         itinerary save (which deletes and recreates all saved days). */
+      let savedBeforeStatusChange = false;
+      if (!isReadOnly || isProvisional) {
+        const savedSuccessfully = await handleSave({ silent: true });
+        if (!savedSuccessfully) return;
+        savedBeforeStatusChange = true;
+      }
+      const itineraryId = meta.itineraryId || lastItineraryIdRef.current;
+      if (!itineraryId) throw new Error('Save the itinerary before changing its status');
+      const { error } = await supabase
+        .from('itineraries')
+        .update({ status: nextStatus })
+        .eq('id', itineraryId)
+        .eq('company_id', companyId);
+      if (error) throw error;
+
+      const savedSnapshot = savedBeforeStatusChange ? lastSavedSnapshotRef.current : null;
+      const snapshotMeta = savedSnapshot?.meta || meta;
+      const snapshotDays = savedSnapshot?.days || days;
+      const nextMeta = { ...snapshotMeta, status: nextStatus };
+      const nextSnapshot = { days: snapshotDays, meta: nextMeta };
+      setMeta(nextMeta);
+      lastSavedSnapshotRef.current = nextSnapshot;
+      setLastSavedKey(JSON.stringify(nextSnapshot));
+      showToast(`Itinerary status changed to ${statusLabelOf(nextStatus)}`, 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not change itinerary status', 'error');
+    } finally {
+      setUpdatingStatus(false);
+    }
+  }, [updatingStatus, meta, canConfirmBooking, days, showToast, isReadOnly, isProvisional, handleSave, companyId, setMeta]);
 
   /* -- Unsaved-changes guard ------------------------------------------------
      The app ships a NavigationGuardProvider (mounted in App.jsx) that shows a
@@ -4812,6 +4794,7 @@ return !!sv.time; /* activities / meals / other */
   const emailInvoiceToClient = useCallback(async () => {
     const inv = activeInvoice || await handleIssueInvoiceHere({ silent: true });
     if (!inv) return;
+    const documentInvoice = { ...inv, balance_due: invoiceBalance(inv, itineraryReceipts) };
     const agg = buildLinesFromDays(days, paxCount, currencyCode);
     const docOpts = {
       logo: billing?.logo_data_url || '',
@@ -4829,13 +4812,13 @@ return !!sv.time; /* activities / meals / other */
       companyContactCell: billing?.contact_cell || '',
       companyContactWebsite: billing?.contact_website || ''
     };
-    const m = invoiceEmail(inv, agg.lines, docOpts);
+    const m = invoiceEmail(documentInvoice, agg.lines, docOpts);
     if (!m.to) { showToast('No client email on file', 'warning'); return; }
 
     let attached = false;
     if (emailFormat === 'word' || emailFormat === 'excel') {
       const isExcel = emailFormat === 'excel';
-      const content = isExcel ? invoiceExcelHtml(inv, agg.lines, currencySymbol, docOpts) : invoiceDocHtml(inv, agg.lines, currencySymbol, docOpts);
+      const content = isExcel ? invoiceExcelHtml(documentInvoice, agg.lines, currencySymbol, docOpts) : invoiceDocHtml(documentInvoice, agg.lines, currencySymbol, docOpts);
       const filename = `${inv.invoice_number}.${isExcel ? 'xls' : 'doc'}`;
       const mime = isExcel ? 'application/vnd.ms-excel' : 'application/msword';
       try {
@@ -4850,12 +4833,12 @@ return !!sv.time; /* activities / meals / other */
         showToast('Invoice file downloaded — attach it to the email', 'success');
       }
     } else {
-      const w = openPrintWindow(invoiceDocHtml(inv, agg.lines, currencySymbol, docOpts), 300);
+      const w = openPrintWindow(invoiceDocHtml(documentInvoice, agg.lines, currencySymbol, docOpts), 300);
       if (!w) showToast('Please allow pop-ups to prepare the PDF', 'warning');
       else showToast('Choose "Save as PDF", then attach it to the email', 'success');
     }
     window.open(mailTo(m.to, m.subject, m.body), '_blank');
-  }, [activeInvoice, handleIssueInvoiceHere, days, paxCount, currencyCode, currencySymbol, emailFormat, downloadBlob, showToast, billing]);
+  }, [activeInvoice, handleIssueInvoiceHere, days, paxCount, currencyCode, currencySymbol, emailFormat, downloadBlob, showToast, billing, itineraryReceipts]);
 
   const viewReceipt = useCallback((r) => {
     if (!r) return;
@@ -5704,7 +5687,7 @@ const missing = !sv.confirmationNumber ||
                     {pkg.description && <p>{pkg.description}</p>}
                     <div className="draggable-item-meta">
                       <span className="item-cat-tag">Reusable package</span>
-                      <span className="item-price-tag">{Number(pkg.default_markup_percentage) || 0}% default markup</span>
+                      <span className="item-price-tag">Client markup at quote</span>
                     </div>
                     <button type="button" className="secondary-btn" disabled={isReadOnly || !currentDay}
                       onClick={() => addPackageToDay(selectedDayIndex, pkg)}>
@@ -5742,6 +5725,7 @@ const missing = !sv.confirmationNumber ||
                     type="button"
                     className={`status-badge ${STATUS_MOD[meta.status] || ''}`}
                     style={{ border: '1px solid transparent', cursor: 'pointer' }}
+                    disabled={saving || updatingStatus}
                     onClick={() => setStatusMenuOpen((prev) => !prev)}
                   >
                     {statusLabelOf(meta.status)}
@@ -5756,21 +5740,8 @@ const missing = !sv.confirmationNumber ||
                             key={s.value}
                             className="menu-item"
                             style={{ fontWeight: meta.status === s.value ? 700 : 600, background: meta.status === s.value ? '#f0fdfa' : 'transparent' }}
-                            onClick={() => {
-                              if (s.value === 'confirmed' && !canConfirmBooking()) {
-                                const count = (days || []).reduce((n, d) => n + (d.services || []).length, 0);
-                                showToast(
-                                  count
-                                    ? 'All services must be marked OK (Time, Confirmation no. & Flight no. required) before confirming this booking'
-                                    : 'Add at least one service to this itinerary before confirming the booking',
-                                  'warning'
-                                );
-                                setStatusMenuOpen(false);
-                                return;
-                              }
-                              setMeta((prev) => ({ ...prev, status: s.value }));
-                              setStatusMenuOpen(false);
-                            }}
+                            disabled={saving || updatingStatus}
+                            onClick={() => handleStatusChange(s.value)}
                           >
                             <span className={`status-dot ${s.value}`} /> {s.label}
                           </button>
@@ -5819,8 +5790,14 @@ const missing = !sv.confirmationNumber ||
                 )}
               </div>
             )}
-              <button type="button" className="icon-btn teal" disabled={saving} onClick={handleSave}>
-                <Save size={16} /> {saving ? 'Saving...' : 'Save'}
+              <button
+                type="button"
+                className="icon-btn teal"
+                disabled={saving || (isReadOnly && !isProvisional)}
+                title={isReadOnly && !isProvisional ? 'This itinerary is locked; change its status to Quotation before editing' : undefined}
+                onClick={handleSave}
+              >
+                <Save size={16} /> {saving ? 'Saving...' : isProvisional ? 'Save confirmations' : 'Save'}
               </button>
             </div>
           </div>
@@ -6374,7 +6351,7 @@ const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.
                 readOnly={isReadOnly}
                 onChange={(e) => setMeta((prev) => ({ ...prev, notes: e.target.value }))}
               />
-              <button type="button" className="primary-btn" style={{ width: 'auto', marginTop: '1rem', padding: '0.65rem 1.5rem', fontSize: '0.95rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }} disabled={saving} onClick={handleSave}>
+              <button type="button" className="primary-btn" style={{ width: 'auto', marginTop: '1rem', padding: '0.65rem 1.5rem', fontSize: '0.95rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }} disabled={saving || isReadOnly} onClick={handleSave}>
                 <Save size={16} /> Save Itinerary
               </button>
             </div>
@@ -6908,6 +6885,7 @@ const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.
                       <InvoiceFinanceRow
                         key={inv.id}
                         invoice={inv}
+                        balanceDue={invoiceBalance(inv, itineraryReceipts)}
                         symbol={inv.currency_code ? svcSymbol(inv.currency_code) : ''}
                         open={openInvoiceId === inv.id}
                         onToggle={() => setOpenInvoiceId((cur) => (cur === inv.id ? null : inv.id))}

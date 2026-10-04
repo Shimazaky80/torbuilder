@@ -46,6 +46,8 @@ export const Itineraries = () => {
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [travelDateStart, setTravelDateStart] = useState('');
+  const [travelDateEnd, setTravelDateEnd] = useState('');
 
   const { limit: pageSize } = useListRowLimit();
 
@@ -85,6 +87,9 @@ export const Itineraries = () => {
         const t = esc(term);
         itineraryQuery = itineraryQuery.or(`itinerary_name.ilike.%${t}%,reference_number.ilike.%${t}%,destination_region.ilike.%${t}%,destination_country.ilike.%${t}%,destination_province.ilike.%${t}%`);
       }
+      if (statusFilter) itineraryQuery = itineraryQuery.eq('status', statusFilter);
+      if (travelDateStart) itineraryQuery = itineraryQuery.gte('travel_end_date', travelDateStart);
+      if (travelDateEnd) itineraryQuery = itineraryQuery.lte('travel_start_date', travelDateEnd);
 
       const { data, count, error } = await itineraryQuery
         .order('created_at', { ascending: false })
@@ -104,16 +109,7 @@ export const Itineraries = () => {
       setLoadingItineraries(false);
       setFetchingMore(false);
     }
-  }, [searchQuery, pageSize]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      await fetchItineraries();
-      if (cancelled) return;
-    })();
-    return () => { cancelled = true; };
-  }, [fetchItineraries]);
+  }, [searchQuery, statusFilter, travelDateStart, travelDateEnd, pageSize]);
 
   useEffect(() => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
@@ -121,10 +117,12 @@ export const Itineraries = () => {
     return () => {
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     };
-  }, [searchQuery, fetchItineraries]);
+  }, [searchQuery, statusFilter, travelDateStart, travelDateEnd, fetchItineraries]);
 
   const filteredItineraries = itineraries.filter((it) => {
     if (statusFilter && it.status !== statusFilter) return false;
+    if (travelDateStart && (!it.travel_end_date || it.travel_end_date < travelDateStart)) return false;
+    if (travelDateEnd && (!it.travel_start_date || it.travel_start_date > travelDateEnd)) return false;
     return true;
   });
 
@@ -310,11 +308,6 @@ export const Itineraries = () => {
     return `${children.length} (${children.map(t => t.age).join(', ')})`;
   };
 
-  const formatDestinations = (itinerary) => {
-    const parts = [itinerary.destination_region, itinerary.destination_country, itinerary.destination_province].filter(Boolean);
-    return parts.length > 0 ? parts.join(', ') : '—';
-  };
-
   return (
     <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
       <header className="page-header" style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
@@ -365,7 +358,7 @@ export const Itineraries = () => {
           <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Map size={20} color="#0d7478" /> Recent Itineraries
           </h2>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flex: 1, justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flex: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
             <div className="search-box" style={{ flex: 1, width: 'auto', maxWidth: '380px' }}>
               <Search size={16} />
               <input
@@ -389,6 +382,30 @@ export const Itineraries = () => {
               <option value="cancelled">Cancelled</option>
               <option value="completed">Completed</option>
             </SearchableSelect>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', color: '#64748b' }}>
+              Travel from
+              <input
+                type="date"
+                className="pricing-select"
+                aria-label="Travel dates from"
+                value={travelDateStart}
+                max={travelDateEnd || undefined}
+                onChange={(e) => setTravelDateStart(e.target.value)}
+                style={{ width: 'auto', padding: '0.5rem', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc' }}
+              />
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', color: '#64748b' }}>
+              Travel to
+              <input
+                type="date"
+                className="pricing-select"
+                aria-label="Travel dates to"
+                value={travelDateEnd}
+                min={travelDateStart || undefined}
+                onChange={(e) => setTravelDateEnd(e.target.value)}
+                style={{ width: 'auto', padding: '0.5rem', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc' }}
+              />
+            </label>
           </div>
         </div>
 
@@ -401,7 +418,7 @@ export const Itineraries = () => {
               <th>Travelers</th>
               <th>Children (Ages)</th>
               <th>Travel Dates</th>
-              <th>Destinations</th>
+              <th>Tour Type</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -415,11 +432,11 @@ export const Itineraries = () => {
                 <td colSpan="8" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
                   <Map size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
                   <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>
-                    {searchQuery.trim() ? 'No itineraries match' : 'No itineraries yet'}
+                    {searchQuery.trim() || travelDateStart || travelDateEnd || statusFilter ? 'No itineraries match' : 'No itineraries yet'}
                   </h3>
                   <p>
-                    {searchQuery.trim()
-                      ? 'Try a different search term or clear the search box.'
+                    {searchQuery.trim() || travelDateStart || travelDateEnd || statusFilter
+                      ? 'Try adjusting your search, dates, or filters.'
                       : 'Create your first itinerary to start building tailored tours.'}
                   </p>
                 </td>
@@ -471,9 +488,7 @@ export const Itineraries = () => {
                     <Calendar size={13} /> {it.travel_start_date} → {it.travel_end_date}
                   </span>
                 </td>
-                <td style={{ maxWidth: '220px' }}>
-                  <span style={{ fontSize: '0.85rem', color: '#64748b' }}>{formatDestinations(it)}</span>
-                </td>
+                <td><span style={{ fontSize: '0.85rem', color: '#64748b' }}>{it.itinerary_tour_type || '—'}</span></td>
                 <td>
                   <div className="action-buttons">
                     <button

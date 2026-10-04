@@ -44,6 +44,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
     }));
 
   const [clients, setClients] = useState([]);
+  const [tourTypes, setTourTypes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [clientMode, setClientMode] = useState('existing');
   const [pendingSubmit, setPendingSubmit] = useState(null);
@@ -91,17 +92,28 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
         .single();
       if (!profile?.company_id) {
         setClients([]);
+        setTourTypes([]);
         setLoading(false);
         return;
       }
       setLoading(true);
-      const { data, error } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('company_id', profile.company_id)
-        .order('name', { ascending: true });
+      const [{ data, error }, { data: tourTypeRows, error: tourTypeError }] = await Promise.all([
+        supabase
+          .from('clients')
+          .select('*')
+          .eq('company_id', profile.company_id)
+          .order('name', { ascending: true }),
+        supabase
+          .from('company_tour_types')
+          .select('name')
+          .eq('company_id', profile.company_id)
+          .eq('is_active', true)
+          .order('name', { ascending: true })
+      ]);
       if (error) throw error;
+      if (tourTypeError) throw tourTypeError;
       setClients(data || []);
+      setTourTypes((tourTypeRows || []).map((row) => row.name));
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -227,10 +239,12 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
               onChange={(e) => setForm({ ...form, tourType: e.target.value })}
             >
               <option value="">Select tour type...</option>
-              <option value="FIT">FIT</option>
-              <option value="Series Departure">Series Departure</option>
-              <option value="Groups">Groups</option>
-              <option value="Incentives">Incentives</option>
+              {form.tourType && !tourTypes.includes(form.tourType) && (
+                <option value={form.tourType}>{form.tourType} (inactive)</option>
+              )}
+              {tourTypes.map((tourType) => (
+                <option key={tourType} value={tourType}>{tourType}</option>
+              ))}
             </SearchableSelect>
           </div>
           <div>

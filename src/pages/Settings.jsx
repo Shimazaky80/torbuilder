@@ -24,6 +24,7 @@ import {
   LayoutTemplate,
   Rows3,
   Eye,
+  Compass,
   AlertTriangle
 } from 'lucide-react';
 
@@ -212,6 +213,9 @@ export const Settings = () => {
   const { currencies } = useCurrencies();
   const [companyId, setCompanyId] = useState(null);
   const [taxRates, setTaxRates] = useState([]);
+  const [tourTypes, setTourTypes] = useState([]);
+  const [tourTypeName, setTourTypeName] = useState('');
+  const [editingTourTypeId, setEditingTourTypeId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -342,6 +346,17 @@ export const Settings = () => {
     setBankAccounts(data || []);
   }, []);
 
+  const fetchTourTypes = useCallback(async (cid) => {
+    if (!cid) return;
+    const { data, error } = await supabase
+      .from('company_tour_types')
+      .select('id, name, is_active')
+      .eq('company_id', cid)
+      .order('name', { ascending: true });
+    if (error) throw error;
+    setTourTypes(data || []);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -349,7 +364,7 @@ export const Settings = () => {
         const cid = await fetchCompanyId();
         if (cancelled) return;
         setCompanyId(cid);
-        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid)]);
+        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchTourTypes(cid)]);
       } catch (err) {
         if (!cancelled) showToast(err.message || 'Failed to load settings', 'error');
       } finally {
@@ -357,7 +372,63 @@ export const Settings = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, showToast]);
+  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchTourTypes, showToast]);
+
+  const handleTourTypeSubmit = async (event) => {
+    event.preventDefault();
+    const name = tourTypeName.trim();
+    if (!companyId) {
+      showToast('No active company found', 'error');
+      return;
+    }
+    if (!name) {
+      showToast('Tour type name is required', 'warning');
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = editingTourTypeId
+        ? await supabase
+          .from('company_tour_types')
+          .update({ name, updated_at: new Date().toISOString() })
+          .eq('id', editingTourTypeId)
+          .eq('company_id', companyId)
+        : await supabase
+          .from('company_tour_types')
+          .insert([{ company_id: companyId, name }]);
+      if (result.error) {
+        if (result.error.code === '23505') throw new Error('That tour type already exists.');
+        throw result.error;
+      }
+      await fetchTourTypes(companyId);
+      setTourTypeName('');
+      setEditingTourTypeId(null);
+      showToast(editingTourTypeId ? 'Tour type updated' : 'Tour type added', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not save tour type', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTourTypeToggle = async (tourType) => {
+    if (!companyId) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('company_tour_types')
+        .update({ is_active: !tourType.is_active, updated_at: new Date().toISOString() })
+        .eq('id', tourType.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      await fetchTourTypes(companyId);
+      showToast(tourType.is_active ? 'Tour type deactivated' : 'Tour type activated', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not update tour type', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const openAdd = () => {
     setEditingId(null);
@@ -858,6 +929,80 @@ const handleSavePriceProtection = async () => {
             Tenant configuration — tax rules, defaults and company settings.
           </p>
         </div>
+      </div>
+
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Compass size={18} color="#0d7478" /> Tour Types
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            Manage the options available when creating itineraries. Deactivated types remain on existing itineraries but are hidden from new selections.
+          </p>
+        </div>
+        <form onSubmit={handleTourTypeSubmit} style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
+          <input
+            className="sidebar-select"
+            style={{ ...fieldStyle, width: 'min(100%, 24rem)' }}
+            value={tourTypeName}
+            onChange={(event) => setTourTypeName(event.target.value)}
+            placeholder="e.g. FIT, Series Departure"
+            aria-label="Tour type name"
+            maxLength={80}
+          />
+          <button type="submit" className="primary-btn" disabled={saving}>
+            <Check size={15} /> {saving ? 'Saving...' : editingTourTypeId ? 'Save changes' : 'Add Tour Type'}
+          </button>
+          {editingTourTypeId && (
+            <button
+              type="button"
+              className="secondary-btn"
+              disabled={saving}
+              onClick={() => { setEditingTourTypeId(null); setTourTypeName(''); }}
+            >
+              Cancel
+            </button>
+          )}
+        </form>
+        {loading ? (
+          <div style={{ padding: '1rem 0', color: '#94a3b8' }}>Loading tour types...</div>
+        ) : tourTypes.length === 0 ? (
+          <div style={{ padding: '1rem 0', color: '#64748b' }}>No tour types configured.</div>
+        ) : (
+          <table className="admin-table">
+            <thead><tr><th>Tour type</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+            <tbody>
+              {tourTypes.map((tourType) => (
+                <tr key={tourType.id} style={tourType.is_active ? undefined : { opacity: 0.65 }}>
+                  <td style={{ fontWeight: 700 }}>{tourType.name}</td>
+                  <td>{tourType.is_active ? 'Active' : 'Inactive'}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title="Edit tour type"
+                        disabled={saving}
+                        onClick={() => { setEditingTourTypeId(tourType.id); setTourTypeName(tourType.name); }}
+                      >
+                        <Edit3 size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title={tourType.is_active ? 'Deactivate tour type' : 'Activate tour type'}
+                        disabled={saving}
+                        onClick={() => handleTourTypeToggle(tourType)}
+                      >
+                        <Power size={15} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       {/* Company profile - applies to every document */}

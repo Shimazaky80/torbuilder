@@ -1,286 +1,737 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import SearchableSelect from '../components/SearchableSelect';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Search, Plus, Trash2, Save, Printer, CalendarDays, Users, ImagePlus } from 'lucide-react';
+import {
+  ArrowLeft, Backpack, CalendarDays, Check, ChevronDown, Download, FileText,
+  GripVertical, Plus, Save, Search, Trash2, X
+} from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { usePageGuard } from '../context/NavigationGuardContext';
+import { useCurrencies } from '../hooks/useCurrencies';
+import { calculatePackageTravellerBreakdown, packageItemCapacityError } from '../lib/packagePricing';
 
-const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const money = (n, code) => `${code === 'ZAR' ? 'R' : `${code} `}${round(n).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const flatBasis = (basis) => /per_trip|per_vehicle|per_room|flat/i.test(String(basis || ''));
+const round = (value) => Math.round((Number(value) || 0) * 100) / 100;
+const money = (value, code) => `${code} ${round(value).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const nameOf = (client) => client?.name || 'Unnamed client';
+const currencyMatches = (rate, code) => !code || String(rate?.currency || '').toUpperCase() === String(code).toUpperCase();
+const destinationsOf = (item) => [...new Set([
+  item?.destination_region, item?.destination_area, item?.location
+].map((destination) => String(destination || '').trim()).filter(Boolean))];
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[char]));
+
+const initialForm = {
+  description: '', inclusions: '', exclusions: '', terms: '',
+  isAvailable: false, assignedClientIds: []
+};
+const DEFAULT_CATEGORIES = [
+  'Accommodation', 'Transfers', 'Activities / Tours', 'Flights / Charter',
+  'Meals', 'Guide', 'Trains', 'Tickets', 'Extras', 'Car Rental'
+];
 
 export const PackageBuilder = () => {
   const { state } = useLocation();
-  const { packageId: routePackageId } = useParams();
-  const packageId = state?.packageId || routePackageId;
+  const { packageId } = useParams();
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const [pkg, setPkg] = useState(null);
+  const { currencies } = useCurrencies();
   const [companyId, setCompanyId] = useState(null);
+  const [pkg, setPkg] = useState(null);
+  const [form, setForm] = useState(initialForm);
   const [days, setDays] = useState([]);
+  const [periods, setPeriods] = useState([]);
   const [paxOptions, setPaxOptions] = useState([]);
+  const [clients, setClients] = useState([]);
   const [library, setLibrary] = useState([]);
+  const [destinationCatalog, setDestinationCatalog] = useState([]);
   const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [destinationFilter, setDestinationFilter] = useState('');
+  const [currencyFilter, setCurrencyFilter] = useState('');
+  const [currencyOpen, setCurrencyOpen] = useState(false);
+  const [currencySearch, setCurrencySearch] = useState('');
   const [results, setResults] = useState([]);
   const [selectedRates, setSelectedRates] = useState({});
   const [selectedDay, setSelectedDay] = useState(0);
+  const [tab, setTab] = useState('itinerary');
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [markup, setMarkup] = useState(Number(state?.markup) || 0);
-  const [documentMarkup, setDocumentMarkup] = useState(null);
-  const [terms, setTerms] = useState('');
-  const [validityPeriods, setValidityPeriods] = useState([]);
-  const [lastSavedKey, setLastSavedKey] = useState(null);
-  const stateKey = useMemo(() => JSON.stringify({ days, markup }), [days, markup]);
-  const dirty = Boolean(pkg && lastSavedKey !== null && stateKey !== lastSavedKey);
+  const [lastSaved, setLastSaved] = useState('');
+  const [exportDialog, setExportDialog] = useState(false);
+  const [exportOptions, setExportOptions] = useState({ cover: true, inclusions: true, terms: true });
+  const [exportFormat, setExportFormat] = useState('pdf');
+  const [clientSelectOpen, setClientSelectOpen] = useState(false);
+  const [clientQuery, setClientQuery] = useState('');
+
+  const snapshot = useMemo(() => JSON.stringify({ form, days, periods, paxOptions }), [form, days, periods, paxOptions]);
+  const dirty = Boolean(pkg && lastSaved && snapshot !== lastSaved);
 
   const load = useCallback(async () => {
     if (!packageId) return;
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      const { data: profile } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
-      setCompanyId(profile?.company_id || null);
-      const [pkgRes, dayRes, optionRes, billingRes, periodRes] = await Promise.all([
-        supabase.from('packages').select('*').eq('id', packageId).single(),
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError) throw userError;
+      if (!user) throw new Error('Sign in to edit packages.');
+      const { data: profile, error: profileError } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
+      if (profileError) throw profileError;
+      if (!profile?.company_id) throw new Error('Your account is not linked to a company.');
+      setCompanyId(profile.company_id);
+
+      const [pkgRes, dayRes, periodRes, paxRes, billingRes] = await Promise.all([
+        supabase.from('packages').select('*').eq('id', packageId).eq('company_id', profile.company_id).single(),
         supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number'),
+        supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
         supabase.from('package_pax_options').select('*').eq('package_id', packageId).order('adults'),
-        supabase.from('company_billing_settings').select('*').eq('company_id', profile?.company_id).maybeSingle(),
-        supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from')
+        supabase.from('company_billing_settings').select('itinerary_terms').eq('company_id', profile.company_id).maybeSingle()
       ]);
-      if (pkgRes.error) throw pkgRes.error;
-      if (dayRes.error) throw dayRes.error;
-      if (optionRes.error) throw optionRes.error;
-      if (billingRes.error) throw billingRes.error;
-      if (periodRes.error) throw periodRes.error;
-      const packageDays = dayRes.data || [];
-      const dayIds = packageDays.map((day) => day.id);
-      const dayItemsRes = dayIds.length
+      for (const result of [pkgRes, dayRes, periodRes, paxRes, billingRes]) {
+        if (result.error) throw result.error;
+      }
+      const dayIds = (dayRes.data || []).map((day) => day.id);
+      const itemRes = dayIds.length
         ? await supabase.from('package_day_items').select('*').in('package_day_id', dayIds).order('sort_order')
         : { data: [], error: null };
-      if (dayItemsRes.error) throw dayItemsRes.error;
-      setPkg(pkgRes.data); setMarkup(Number(pkgRes.data.default_markup_percentage) || 0); setDocumentMarkup(null);
+      if (itemRes.error) throw itemRes.error;
       const itemsByDay = new Map();
-      (dayItemsRes.data || []).forEach((row) => itemsByDay.set(row.package_day_id, [...(itemsByDay.get(row.package_day_id) || []), row]));
-      const loadedDays = packageDays.map((d) => ({ ...d, services: itemsByDay.get(d.id) || [] }));
+      (itemRes.data || []).forEach((item) => {
+        itemsByDay.set(item.package_day_id, [...(itemsByDay.get(item.package_day_id) || []), item]);
+      });
+      const loadedDays = (dayRes.data || []).map((day) => ({
+        ...day,
+        services: itemsByDay.get(day.id) || []
+      }));
+      let loadedClients = [];
+      let assignedClientIds = [];
+      const [clientsRes, assignmentsRes] = await Promise.all([
+        supabase.from('clients').select('id, name').eq('company_id', profile.company_id).order('name'),
+        supabase.from('package_client_assignments').select('client_id').eq('company_id', profile.company_id).eq('package_id', packageId)
+      ]);
+      if (clientsRes.error || assignmentsRes.error) {
+        const error = clientsRes.error || assignmentsRes.error;
+        showToast(`Package loaded, but client assignment data could not be loaded: ${error.message}`, 'error');
+      } else {
+        loadedClients = clientsRes.data || [];
+        assignedClientIds = (assignmentsRes.data || []).map((assignment) => assignment.client_id);
+      }
+      const packageForm = {
+        description: pkgRes.data.description || '',
+        inclusions: pkgRes.data.inclusions || '',
+        exclusions: pkgRes.data.exclusions || '',
+        terms: pkgRes.data.terms_and_conditions || billingRes.data?.itinerary_terms || '',
+        isAvailable: Boolean(pkgRes.data.is_available_in_library),
+        assignedClientIds
+      };
+      setPkg(pkgRes.data);
+      setForm(packageForm);
       setDays(loadedDays);
-      setPaxOptions(optionRes.data || []); setTerms(billingRes.data?.itinerary_terms || '');
-      setValidityPeriods(periodRes.data || []);
-      setLastSavedKey(JSON.stringify({ days: loadedDays, markup: Number(pkgRes.data.default_markup_percentage) || 0 }));
-      const usedIds = [...new Set((dayItemsRes.data || []).map((service) => service.item_id).filter(Boolean))];
+      setPeriods((periodRes.data || []).map(({ valid_from, valid_to }) => ({ valid_from, valid_to })));
+      setPaxOptions(paxRes.data || []);
+      setClients(loadedClients);
+      setSelectedDay(0);
+      setLastSaved(JSON.stringify({
+        form: packageForm,
+        days: loadedDays,
+        periods: (periodRes.data || []).map(({ valid_from, valid_to }) => ({ valid_from, valid_to })),
+        paxOptions: paxRes.data || []
+      }));
+
+      const usedIds = [...new Set((itemRes.data || []).map((item) => item.item_id).filter(Boolean))];
       if (usedIds.length) {
         const [itemsRes, ratesRes] = await Promise.all([
-          supabase.from('library_items').select('id,name,category,currency,pricing_model,supplier_id,child_age_ranges').in('id', usedIds),
+          supabase.from('library_items').select('id, name, category, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active').in('id', usedIds),
           supabase.from('item_rates').select('*').in('item_id', usedIds)
         ]);
-        const supplierIds = [...new Set((itemsRes.data || []).map((i) => i.supplier_id).filter(Boolean))];
-        const suppliersRes = supplierIds.length ? await supabase.from('suppliers').select('id,name').in('id', supplierIds) : { data: [] };
-        const supplierNames = new Map((suppliersRes.data || []).map((s) => [s.id, s.name]));
-        setLibrary((itemsRes.data || []).map((item) => ({ ...item, supplier_name: supplierNames.get(item.supplier_id) || '', item_rates: (ratesRes.data || []).filter((r) => r.item_id === item.id) })));
+        if (itemsRes.error) throw itemsRes.error;
+        if (ratesRes.error) throw ratesRes.error;
+        const supplierIds = [...new Set((itemsRes.data || []).map((item) => item.supplier_id).filter(Boolean))];
+        const suppliersRes = supplierIds.length
+          ? await supabase.from('suppliers').select('id, name').in('id', supplierIds)
+          : { data: [], error: null };
+        if (suppliersRes.error) throw suppliersRes.error;
+        const supplierNames = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.name]));
+        setLibrary((itemsRes.data || []).map((item) => ({
+          ...item,
+          supplier_name: supplierNames.get(item.supplier_id) || '',
+          item_rates: (ratesRes.data || []).filter((rate) => rate.item_id === item.id)
+        })));
+      } else {
+        setLibrary([]);
       }
-    } catch (e) { showToast(`Could not load package: ${e.message}`, 'error'); }
+    } catch (error) {
+      showToast(`Could not load package: ${error.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
   }, [packageId, showToast]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = setTimeout(() => { load(); }, 0);
+    return () => clearTimeout(timer);
+  }, [load]);
 
   useEffect(() => {
-    const find = async () => {
-      const term = search.trim();
-      if (!companyId || term.length < 2) { setResults([]); return; }
-      const safe = term.replace(/[,()]/g, ' ').trim();
-      const { data, error } = await supabase.from('library_items').select('id,name,category,description,currency,pricing_model,supplier_id,is_active').eq('company_id', companyId).eq('is_active', true).or(`name.ilike.%${safe}%,description.ilike.%${safe}%`).order('name').limit(20);
-      if (error) { showToast(`Library search failed: ${error.message}`, 'error'); return; }
-      const ids = (data || []).map((x) => x.id);
-      const [ratesRes, suppliersRes] = await Promise.all([
-        ids.length ? supabase.from('item_rates').select('*').in('item_id', ids) : Promise.resolve({ data: [] }),
-        [...new Set((data || []).map((x) => x.supplier_id).filter(Boolean))].length ? supabase.from('suppliers').select('id,name').in('id', [...new Set((data || []).map((x) => x.supplier_id).filter(Boolean))]) : Promise.resolve({ data: [] })
-      ]);
-      const suppliers = new Map((suppliersRes.data || []).map((x) => [x.id, x.name]));
-      const merged = (data || []).map((item) => ({ ...item, supplier_name: suppliers.get(item.supplier_id) || '', item_rates: (ratesRes.data || []).filter((r) => r.item_id === item.id) }));
-      setResults(merged); setLibrary((prev) => [...new Map([...prev, ...merged].map((x) => [x.id, x])).values()]);
+    let active = true;
+    const loadDestinations = async () => {
+      if (!companyId) return;
+      const { data, error } = await supabase.from('library_items')
+        .select('destination_region, destination_area, location')
+        .eq('company_id', companyId)
+        .eq('is_active', true)
+        .limit(1000);
+      if (error) {
+        showToast(`Could not load package destination filters: ${error.message}`, 'error');
+        return;
+      }
+      if (active) setDestinationCatalog((data || []).flatMap(destinationsOf));
     };
-    const timer = setTimeout(find, 280);
-    return () => clearTimeout(timer);
-  }, [search, companyId, showToast]);
+    loadDestinations();
+    return () => { active = false; };
+  }, [companyId, showToast]);
 
-  const persistDays = async (nextDays) => {
-    if (!companyId || !pkg) return;
+  useEffect(() => {
+    let active = true;
+    const timer = setTimeout(async () => {
+      const term = search.trim();
+      if (!companyId || (term.length > 0 && term.length < 2 && !categoryFilter && !currencyFilter)) {
+        if (active) setResults([]);
+        return;
+      }
+      try {
+        const safe = term.replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+        let query = supabase.from('library_items')
+          .select('id, name, category, description, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active')
+          .eq('company_id', companyId).eq('is_active', true)
+          .order('name').limit(50);
+        if (categoryFilter) query = query.eq('category', categoryFilter);
+        if (term.length >= 2) query = query.or(`name.ilike.%${safe}%,description.ilike.%${safe}%,destination_region.ilike.%${safe}%,destination_area.ilike.%${safe}%,location.ilike.%${safe}%`);
+        const { data, error } = await query;
+        if (error) throw error;
+        const ids = (data || []).map((item) => item.id);
+        const suppliers = [...new Set((data || []).map((item) => item.supplier_id).filter(Boolean))];
+        const [ratesRes, suppliersRes] = await Promise.all([
+          ids.length ? supabase.from('item_rates').select('*').in('item_id', ids) : { data: [], error: null },
+          suppliers.length ? supabase.from('suppliers').select('id, name').in('id', suppliers) : { data: [], error: null }
+        ]);
+        if (ratesRes.error) throw ratesRes.error;
+        if (suppliersRes.error) throw suppliersRes.error;
+        const supplierNames = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.name]));
+        const merged = (data || []).map((item) => ({
+          ...item,
+          supplier_name: supplierNames.get(item.supplier_id) || '',
+          item_rates: (ratesRes.data || []).filter((rate) => rate.item_id === item.id)
+        }));
+        if (!active) return;
+        setResults(merged);
+        setLibrary((previous) => [...new Map([...previous, ...merged].map((item) => [item.id, item])).values()]);
+      } catch (error) {
+        if (active) showToast(`Library search failed: ${error.message}`, 'error');
+      }
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [search, categoryFilter, currencyFilter, companyId, showToast]);
+
+  const categoryOptions = useMemo(() => [...new Set([
+    ...DEFAULT_CATEGORIES,
+    ...results.map((item) => item.category).filter(Boolean)
+  ])].sort(), [results]);
+
+  const destinationOptions = useMemo(() => [...new Set([
+    ...destinationCatalog,
+    ...results.flatMap(destinationsOf)
+  ])].sort((a, b) => a.localeCompare(b)), [destinationCatalog, results]);
+
+  const currencyOptions = useMemo(() => {
+    const options = new Map(currencies.map((currency) => [currency.code, currency]));
+    results.flatMap((item) => item.item_rates || []).forEach((rate) => {
+      const code = String(rate.currency || '').toUpperCase();
+      if (code && !options.has(code)) {
+        options.set(code, { code, name: code, symbol: code });
+      }
+    });
+    return [...options.values()].filter((currency) => !currencySearch
+      || `${currency.code} ${currency.name} ${currency.symbol}`.toLowerCase().includes(currencySearch.trim().toLowerCase()));
+  }, [currencies, results, currencySearch]);
+
+  const visibleResults = useMemo(() => results.filter((item) => {
+    if (destinationFilter && !destinationsOf(item).includes(destinationFilter)) return false;
+    if (currencyFilter && !(item.item_rates || []).some((rate) => currencyMatches(rate, currencyFilter))) return false;
+    return true;
+  }), [results, destinationFilter, currencyFilter]);
+
+  const selectedClients = useMemo(() => clients.filter((client) => form.assignedClientIds.includes(client.id)), [clients, form.assignedClientIds]);
+  const visibleClients = useMemo(() => {
+    const term = clientQuery.trim().toLowerCase();
+    return clients.filter((client) => !term || nameOf(client).toLowerCase().includes(term));
+  }, [clients, clientQuery]);
+
+  const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextPax = paxOptions, nextForm = form) => {
+    if (!companyId || !pkg) return false;
+    const validPeriods = nextPeriods.filter((period) => period.valid_from && period.valid_to);
+    if (nextPeriods.some((period) => Boolean(period.valid_from) !== Boolean(period.valid_to))) {
+      showToast('Complete both dates for each validity period, or remove the incomplete row.', 'warning');
+      return false;
+    }
+    if (validPeriods.some((period) => period.valid_to < period.valid_from)) {
+      showToast('Each validity end date must be on or after its start date.', 'warning');
+      return false;
+    }
     setSaving(true);
     try {
-      const { error: delErr } = await supabase.from('package_days').delete().eq('package_id', pkg.id);
-      if (delErr) throw delErr;
-      for (let i = 0; i < nextDays.length; i += 1) {
-        const day = nextDays[i];
-        const { data: dayRow, error } = await supabase.from('package_days').insert({ package_id: pkg.id, company_id: companyId, day_number: i + 1, notes: day.notes || null }).select().single();
-        if (error) throw error;
-        const rows = (day.services || []).map((s, order) => ({
-          package_day_id: dayRow.id, company_id: companyId, item_id: s.item_id || null, rate_id: s.rate_id || null,
-          item_name: s.item_name, category: s.category || '', supplier_name: s.supplier_name || '', currency_code: s.currency_code || 'ZAR',
-          rate_basis: s.rate_basis || 'per_person', unit_cost: Number(s.unit_cost) || 0, unit_price: Number(s.unit_price) || 0,
-          markup_percentage: Number(markup) || 0, quantity: Number(s.quantity) || 1, is_included: s.is_included !== false,
-          notes: s.notes || null, sort_order: order
-        }));
-        if (rows.length) { const { error: itemErr } = await supabase.from('package_day_items').insert(rows); if (itemErr) throw itemErr; }
+      const { error: packageError } = await supabase.from('packages').update({
+        description: nextForm.description,
+        inclusions: nextForm.inclusions,
+        exclusions: nextForm.exclusions,
+        terms_and_conditions: nextForm.terms,
+        is_available_in_library: nextForm.isAvailable,
+        default_markup_percentage: 0
+      }).eq('id', pkg.id).eq('company_id', companyId);
+      if (packageError) throw packageError;
+
+      const { error: assignmentDeleteError } = await supabase.from('package_client_assignments')
+        .delete().eq('package_id', pkg.id).eq('company_id', companyId);
+      if (assignmentDeleteError) throw assignmentDeleteError;
+      if (nextForm.assignedClientIds.length) {
+        const { error: assignmentError } = await supabase.from('package_client_assignments').insert(
+          nextForm.assignedClientIds.map((clientId) => ({
+            package_id: pkg.id, client_id: clientId, company_id: companyId
+          }))
+        );
+        if (assignmentError) throw assignmentError;
       }
-      setDays(nextDays.map((d, i) => ({ ...d, day_number: i + 1 })));
-      setLastSavedKey(JSON.stringify({ days: nextDays.map((d, i) => ({ ...d, day_number: i + 1 })), markup }));
-      showToast('Package itinerary saved', 'success');
-      return true;
-    } catch (e) { showToast(`Could not save package itinerary: ${e.message}`, 'error'); return false; }
-    finally { setSaving(false); }
-  };
 
-  const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persistDays(days));
-
-  const addDay = () => { setDays((prev) => [...prev, { day_number: prev.length + 1, notes: '', services: [] }]); setSelectedDay(days.length); };
-  const addService = (item, rateId) => {
-    const rates = item.item_rates || [];
-    if (!rates.length) { showToast('This library item has no loaded rates. Add a rate in Library Items first.', 'warning'); return; }
-    const rate = rates.find((r) => r.id === rateId) || rates[0];
-    const markupValue = Number(markup) || 0;
-    const service = {
-      item_id: item.id, rate_id: rate.id, item_name: item.name, category: item.category,
-      supplier_name: item.supplier_name, currency_code: rate.currency || item.currency || 'ZAR',
-      rate_basis: rate.rate_basis || item.pricing_model || 'per_person',
-      unit_cost: Number(rate.unit_cost) || 0, unit_price: round((Number(rate.unit_cost) || 0) * (1 + markupValue / 100)),
-      markup_percentage: markupValue, quantity: 1, is_included: true
-    };
-    setDays((prev) => {
-      if (!prev.length) return [{ day_number: 1, notes: '', services: [service] }];
-      return prev.map((d, i) => i === selectedDay ? { ...d, services: [...d.services, service] } : d);
-    });
-    setSelectedRates((prev) => ({ ...prev, [item.id]: rate.id }));
-  };
-
-  const changeService = (dayIndex, serviceIndex, field, value) => setDays((prev) => prev.map((day, di) => {
-    if (di !== dayIndex) return day;
-    return {
-      ...day,
-      services: day.services.map((service, si) => {
-        if (si !== serviceIndex) return service;
-        if (field === 'rate_id') {
-          const item = library.find((x) => x.id === service.item_id);
-          const rate = item?.item_rates?.find((r) => r.id === value);
-          if (!rate) return service;
-          return {
-            ...service,
-            rate_id: rate.id,
-            currency_code: rate.currency || item.currency || 'ZAR',
-            rate_basis: rate.rate_basis || service.rate_basis,
-            unit_cost: Number(rate.unit_cost) || 0,
-            unit_price: round((Number(rate.unit_cost) || 0) * (1 + (Number(service.markup_percentage) || 0) / 100))
-          };
+      const { error: dayDeleteError } = await supabase.from('package_days').delete().eq('package_id', pkg.id);
+      if (dayDeleteError) throw dayDeleteError;
+      for (let dayIndex = 0; dayIndex < nextDays.length; dayIndex += 1) {
+        const day = nextDays[dayIndex];
+        const { data: dayRow, error: dayInsertError } = await supabase.from('package_days').insert({
+          package_id: pkg.id, company_id: companyId, day_number: dayIndex + 1, notes: day.notes || null
+        }).select().single();
+        if (dayInsertError) throw dayInsertError;
+        const rows = (day.services || []).map((service, sortOrder) => ({
+          package_day_id: dayRow.id,
+          company_id: companyId,
+          item_id: service.item_id || null,
+          rate_id: service.rate_id || null,
+          item_name: service.item_name,
+          category: service.category || '',
+          supplier_name: service.supplier_name || '',
+          currency_code: service.currency_code || 'ZAR',
+          rate_basis: service.rate_basis || 'per_person',
+          unit_cost: Number(service.unit_cost) || 0,
+          unit_price: Number(service.unit_cost) || 0,
+          markup_percentage: 0,
+          quantity: Math.max(1, Number(service.quantity) || 1),
+          is_included: service.is_included !== false,
+          notes: service.notes || null,
+          sort_order: sortOrder,
+          vehicle_capacity: Number(service.vehicle_capacity) || null,
+          rate_snapshot: service.rate_snapshot || {}
+        }));
+        if (rows.length) {
+          const { error: itemError } = await supabase.from('package_day_items').insert(rows);
+          if (itemError) throw itemError;
         }
-        return { ...service, [field]: value };
-      })
+      }
+
+      const { error: periodDeleteError } = await supabase.from('package_validity_periods').delete().eq('package_id', pkg.id);
+      if (periodDeleteError) throw periodDeleteError;
+      if (validPeriods.length) {
+        const { error: periodError } = await supabase.from('package_validity_periods').insert(
+          validPeriods.map((period) => ({ package_id: pkg.id, ...period }))
+        );
+        if (periodError) throw periodError;
+      }
+
+      const { error: paxDeleteError } = await supabase.from('package_pax_options').delete().eq('package_id', pkg.id);
+      if (paxDeleteError) throw paxDeleteError;
+      if (nextPax.length) {
+        const { error: paxError } = await supabase.from('package_pax_options').insert(
+          nextPax.map(({ adults, children }) => ({ package_id: pkg.id, adults, children }))
+        );
+        if (paxError) throw paxError;
+      }
+
+      const savedDays = nextDays.map((day, index) => ({ ...day, day_number: index + 1 }));
+      const savedPeriods = validPeriods.map(({ valid_from, valid_to }) => ({ valid_from, valid_to }));
+      setDays(savedDays);
+      setPeriods(savedPeriods);
+      setPaxOptions(nextPax);
+      setLastSaved(JSON.stringify({ form: nextForm, days: savedDays, periods: savedPeriods, paxOptions: nextPax }));
+      showToast('Package saved', 'success');
+      return true;
+    } catch (error) {
+      showToast(`Could not save package: ${error.message}`, 'error');
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [companyId, pkg, days, periods, paxOptions, form, showToast]);
+
+  const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
+
+  const addService = (item, rateId, dayIndex = selectedDay) => {
+    const rate = item.item_rates?.find((entry) => entry.id === rateId && currencyMatches(entry, currencyFilter))
+      || item.item_rates?.find((entry) => currencyMatches(entry, currencyFilter))
+      || item.item_rates?.[0];
+    if (!rate) {
+      showToast(currencyFilter
+        ? `This library item has no contract rate in ${currencyFilter}. Choose another currency or add the rate in Library Items.`
+        : 'This library item has no loaded contract rates. Add a rate in Library Items first.', 'warning');
+      return;
+    }
+    const capacityError = packageItemCapacityError(item, rate, paxOptions);
+    if (capacityError) {
+      showToast(capacityError, 'warning');
+      return;
+    }
+    const unitCost = Number(rate.unit_cost) || Number(rate.price_1_adult) || Number(rate.unit_price) || 0;
+    const service = {
+      item_id: item.id,
+      rate_id: rate.id,
+      item_name: item.name,
+      category: item.category || '',
+      supplier_name: item.supplier_name || '',
+      currency_code: rate.currency || item.currency || 'ZAR',
+      rate_basis: rate.rate_basis || item.pricing_model || 'per_person',
+      unit_cost: unitCost,
+      unit_price: unitCost,
+      markup_percentage: 0,
+      quantity: 1,
+      is_included: true,
+      vehicle_capacity: Number(item.max_occupancy) || Number(rate.max_occupancy) || 0,
+      rate_snapshot: rate
     };
+    setDays((previous) => {
+      if (!previous.length) return [{ day_number: 1, notes: '', services: [service] }];
+      return previous.map((day, index) => index === dayIndex
+        ? { ...day, services: [...day.services, service] }
+        : day);
+    });
+    setSelectedRates((previous) => ({ ...previous, [item.id]: rate.id }));
+  };
+
+  const updateService = (dayIndex, serviceIndex, field, value) => {
+    setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
+      ...day,
+      services: day.services.map((service, indexInDay) => {
+        if (indexInDay !== serviceIndex) return service;
+        if (field !== 'rate_id') return { ...service, [field]: value };
+        const item = library.find((entry) => entry.id === service.item_id);
+        const rate = item?.item_rates?.find((entry) => entry.id === value);
+        if (!rate) return service;
+        const unitCost = Number(rate.unit_cost) || Number(rate.price_1_adult) || Number(rate.unit_price) || 0;
+        return {
+          ...service,
+          rate_id: rate.id,
+          rate_basis: rate.rate_basis || item.pricing_model || service.rate_basis,
+          currency_code: rate.currency || item.currency || service.currency_code,
+          unit_cost: unitCost,
+          unit_price: unitCost,
+          vehicle_capacity: Number(item.max_occupancy) || Number(rate.max_occupancy) || service.vehicle_capacity || 0,
+          rate_snapshot: rate
+        };
+      })
+    }));
+  };
+
+  const removeService = (dayIndex, serviceIndex) => setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
+    ...day,
+    services: day.services.filter((_, itemIndex) => itemIndex !== serviceIndex)
   }));
 
-  const saveMarkup = async (value) => {
-    const n = Number(value) || 0; setMarkup(n);
-    const { error } = await supabase.from('packages').update({ default_markup_percentage: n }).eq('id', pkg.id);
-    if (error) { showToast(error.message, 'error'); setMarkup(Number(pkg.default_markup_percentage) || 0); return; }
-    setPkg((prev) => ({ ...prev, default_markup_percentage: n }));
-    setLastSavedKey((prev) => {
-      try { const baseline = JSON.parse(prev); return JSON.stringify({ ...baseline, markup: n }); }
-      catch { return JSON.stringify({ days: [], markup: n }); }
+  const moveService = (fromDay, fromIndex, toDay) => setDays((previous) => {
+    if (!previous[fromDay] || !previous[toDay]) return previous;
+    const service = previous[fromDay].services[fromIndex];
+    if (!service) return previous;
+    const next = previous.map((day) => ({ ...day, services: [...day.services] }));
+    next[fromDay].services.splice(fromIndex, 1);
+    next[toDay].services.push(service);
+    return next;
+  });
+
+  const addDay = () => {
+    setDays((previous) => {
+      const next = [...previous, { day_number: previous.length + 1, notes: '', services: [] }];
+      setSelectedDay(next.length - 1);
+      return next;
     });
   };
 
-  const addPaxOption = async () => {
-    const adults = Number(document.getElementById('package-pax-adults')?.value) || 0;
-    const children = Number(document.getElementById('package-pax-children')?.value) || 0;
-    if (adults < 1) { showToast('Passenger pattern must include at least one adult', 'warning'); return; }
-    const { data, error } = await supabase.from('package_pax_options').insert({ package_id: pkg.id, adults, children }).select().single();
-    if (error) showToast(error.message, 'error'); else setPaxOptions((prev) => [...prev, data].sort((a, b) => a.adults - b.adults || a.children - b.children));
-  };
-  const removePaxOption = async (id) => { const { error } = await supabase.from('package_pax_options').delete().eq('id', id); if (error) showToast(error.message, 'error'); else setPaxOptions((prev) => prev.filter((x) => x.id !== id)); };
-  const markupFor = useCallback((service) => documentMarkup === null
-    ? (Number(service.markup_percentage) || 0)
-    : (Number(documentMarkup) || 0), [documentMarkup]);
+  const breakdown = useMemo(() => paxOptions.map((pattern) => ({
+    ...pattern,
+    currencies: calculatePackageTravellerBreakdown({ days, pattern, library })
+  })), [paxOptions, days, library]);
 
-  const breakdown = useMemo(() => paxOptions.map((option) => {
-    const totalPax = option.adults + option.children;
-    const currencies = [...new Set(days.flatMap((d) => d.services.filter((s) => s.is_included !== false).map((s) => s.currency_code || 'ZAR')))];
-    const groups = currencies.map((code) => {
-      const services = days.flatMap((d) => d.services).filter((s) => s.is_included !== false && (s.currency_code || 'ZAR') === code);
-      const priceAvailable = services.every((s) => {
-        const item = library.find((x) => x.id === s.item_id);
-        return Boolean(s.item_id && s.rate_id && item?.item_rates?.some((rate) => rate.id === s.rate_id));
-      });
-      const perPaxCharge = (s) => {
-        const item = library.find((x) => x.id === s.item_id);
-        const rate = item?.item_rates?.find((r) => r.id === s.rate_id);
-        if (!rate) return 0;
-        const basis = rate?.rate_basis || s.rate_basis || item?.pricing_model;
-        const qty = Number(s.quantity) || 1;
-        let cost = Number(rate?.price_1_adult) || Number(rate?.unit_cost) || Number(rate?.unit_price) || Number(s.unit_cost) || 0;
-        if (/accommodation/i.test(s.category || '') || basis === 'per_person_sharing') {
-          const singleRate = Number(rate?.price_1_adult) || Number(rate?.single_room_rate) || Number(rate?.effective_single_rate) || 0;
-          const sharingRate = Number(rate?.price_2_adults) || Number(rate?.double_twin_rate) || cost;
-          const extraRate = Number(rate?.price_3_plus_adults) || sharingRate;
-          cost = totalPax <= 1 ? singleRate || sharingRate : totalPax === 2 ? sharingRate : (2 * sharingRate + (totalPax - 2) * extraRate) / totalPax;
-        } else if (basis === 'tiered' && Array.isArray(rate?.tiered_pricing)) {
-          const tier = rate.tiered_pricing.find((t) => totalPax >= (Number(t.min_pax) || 0) && (!Number(t.max_pax) || totalPax <= Number(t.max_pax))) || rate.tiered_pricing[rate.tiered_pricing.length - 1];
-          cost = (Number(tier?.rate) || 0) / Math.max(1, totalPax);
-        } else if (flatBasis(basis)) {
-          cost = (Number(rate?.unit_cost) || Number(rate?.unit_price) || Number(s.unit_cost) || 0) / Math.max(1, totalPax);
-        }
-        return round(cost * (1 + markupFor(s) / 100) * qty);
+  const buildExportHtml = (options) => {
+    const cover = options.cover && pkg.cover_image_url
+      ? `<img class="cover" src="${escapeHtml(pkg.cover_image_url)}" alt="">`
+      : '';
+    const dayMarkup = days.map((day, index) => {
+      const services = day.services.filter((service) => service.is_included !== false)
+        .map((service) => `<li>${escapeHtml(service.item_name)}${service.supplier_name ? ` — ${escapeHtml(service.supplier_name)}` : ''}</li>`).join('');
+      return `<section><h2>Day ${index + 1}</h2>${day.notes ? `<p>${escapeHtml(day.notes)}</p>` : ''}<ul>${services}</ul></section>`;
+    }).join('');
+    const pricingMarkup = breakdown.map((pattern) => `<section><h2>${pattern.adults} adult${pattern.adults === 1 ? '' : 's'}${pattern.children ? ` + ${pattern.children} child${pattern.children === 1 ? '' : 'ren'}` : ''}</h2>${pattern.currencies.map((row) => `<p><b>${escapeHtml(row.currency)}</b> — Unit share per person: ${money(row.unitPerPerson, row.currency)} · Total per person sharing: ${money(row.totalPerPersonSharing, row.currency)} · Single supplement: ${money(row.singleSupplement, row.currency)} · Single total: ${money(row.totalSinglePerPerson, row.currency)} · Child sharing: ${money(row.childPerPerson, row.currency)}</p><ul>${row.accommodationRows.map((item) => `<li>${escapeHtml(item.name)} — sharing: ${money(item.sharingPerAdult, row.currency)} · single supplement: ${money(item.singleSupplement, row.currency)} · child: ${money(item.childPerTraveller, row.currency)} · ${item.roomCount} room(s), max ${item.capacity} per room</li>`).join('')}</ul>`).join('') || '<p>No priced items.</p>'}</section>`).join('');
+    const validity = periods.map((period) => `<li>${escapeHtml(period.valid_from)} – ${escapeHtml(period.valid_to)}</li>`).join('');
+    const inclusionMarkup = options.inclusions
+      ? `${form.inclusions ? `<h3>Inclusions</h3><p>${escapeHtml(form.inclusions).replace(/\n/g, '<br>')}</p>` : ''}${form.exclusions ? `<h3>Exclusions</h3><p>${escapeHtml(form.exclusions).replace(/\n/g, '<br>')}</p>` : ''}`
+      : '';
+    const termsMarkup = options.terms && form.terms
+      ? `<section><h2>Terms &amp; Conditions</h2><p>${escapeHtml(form.terms).replace(/\n/g, '<br>')}</p></section>`
+      : '';
+    const clientNames = selectedClients.map(nameOf).join(', ');
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(form.description)}</p>${validity ? `<h3>Valid dates</h3><ul>${validity}</ul>` : ''}${clientNames ? `<p>Quoted for: ${escapeHtml(clientNames)}</p>` : ''}</header>${dayMarkup}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}<h2>Traveller pattern pricing</h2>${pricingMarkup}${termsMarkup}</body></html>`;
+  };
+
+  const exportDocument = () => {
+    const html = buildExportHtml(exportOptions);
+    if (exportFormat === 'pdf') {
+      const win = window.open('', '_blank');
+      if (!win) {
+        showToast('Allow pop-ups to print or save the package as a PDF.', 'warning');
+        return;
+      }
+      win.document.write(html.replace('</body>', '<script>window.onload=()=>window.print();</script></body>'));
+      win.document.close();
+    } else {
+      const blob = new Blob([html], { type: 'application/msword;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${pkg.name.replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || 'package'}.doc`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
+    setExportDialog(false);
+  };
+
+  const updateForm = (field, value) => setForm((previous) => ({ ...previous, [field]: value }));
+  const addPeriod = () => setPeriods((previous) => [...previous, { valid_from: '', valid_to: '' }]);
+  const changePeriod = (index, field, value) => setPeriods((previous) => previous.map((period, rowIndex) =>
+    rowIndex === index ? { ...period, [field]: value } : period));
+  const addPaxPattern = () => {
+    const adults = Number(document.getElementById('package-adults')?.value) || 0;
+    const children = Number(document.getElementById('package-children')?.value) || 0;
+    if (adults < 1) {
+      showToast('A traveller pattern must include at least one adult.', 'warning');
+      return;
+    }
+    if (paxOptions.some((option) => option.adults === adults && option.children === children)) {
+      showToast('That traveller pattern already exists.', 'warning');
+      return;
+    }
+    const candidate = { adults, children };
+    const oversizedService = days.flatMap((day) => day.services).find((service) => {
+      const savedItem = library.find((entry) => entry.id === service.item_id);
+      const item = {
+        ...(savedItem || {}),
+        category: savedItem?.category || service.category,
+        max_occupancy: savedItem?.max_occupancy || service.vehicle_capacity,
+        name: savedItem?.name || service.item_name
       };
-      const share = round(services.reduce((sum, s) => sum + perPaxCharge(s), 0));
-      const childFields = ['price_child_0_1', 'price_child_0_5', 'price_child_2_11', 'price_child_6_11'];
-      let childAvailable = true;
-      const child = round(services.reduce((sum, s) => {
-        if (!/accommodation/i.test(s.category || '')) return sum + perPaxCharge(s);
-        const item = library.find((x) => x.id === s.item_id);
-        const rate = item?.item_rates?.find((r) => r.id === s.rate_id);
-        const value = childFields.map((field) => Number(rate?.[field]) || 0).find((n) => n > 0);
-        if (!value) { childAvailable = false; return sum; }
-        return sum + round(value * (1 + markupFor(s) / 100)) * (Number(s.quantity) || 1);
-      }, 0));
-      const single = services.filter((s) => s.category?.toLowerCase().includes('accommodation')).reduce((sum, s) => {
-        const item = library.find((x) => x.id === s.item_id); const rate = item?.item_rates?.find((r) => r.id === s.rate_id);
-        const sharing = Number(rate?.price_2_adults) || Number(rate?.double_twin_rate) || Number(rate?.unit_cost) || 0;
-        const singleRate = Number(rate?.price_1_adult) || Number(rate?.single_room_rate) || Number(rate?.effective_single_rate) || 0;
-        const supplement = Number(rate?.single_supplement) || Math.max(0, singleRate - sharing);
-        return sum + supplement * (1 + markupFor(s) / 100) * (Number(s.quantity) || 1);
-      }, 0);
-      return { code, share, child, childAvailable, priceAvailable, single: round(single), total: round(share * totalPax) };
+      const rate = savedItem?.item_rates?.find((entry) => entry.id === service.rate_id) || service.rate_snapshot;
+      return Boolean(packageItemCapacityError(item, rate, [candidate]));
     });
-    return { ...option, groups };
-  }), [paxOptions, days, library, markupFor]);
-
-  const exportPackage = () => {
-    if (!pkg) return;
-    const escape = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const dayHtml = days.map((d, i) => `<section><h3>Day ${i + 1}</h3>${d.notes ? `<p>${escape(d.notes)}</p>` : ''}<ul>${d.services.filter((s) => s.is_included !== false).map((s) => `<li>${escape(s.category || 'Service')}: ${escape(s.item_name)}${s.supplier_name ? ` — ${escape(s.supplier_name)}` : ''}</li>`).join('')}</ul></section>`).join('');
-    const pricingHtml = breakdown.map((p) => `<section><h2>${p.adults} adult${p.adults === 1 ? '' : 's'}${p.children ? ` + ${p.children} child${p.children === 1 ? '' : 'ren'}` : ''}</h2>${p.groups.map((g) => `<p><b>${escape(g.code)}</b> · ${g.priceAvailable ? `Per person sharing inclusive of tax: ${money(g.share, g.code)}${p.children ? ` · Child under 12: ${g.childAvailable ? money(g.child, g.code) : 'Not available: add a loaded child rate'}` : ''} · Single supplement: ${money(g.single, g.code)}` : 'Pricing unavailable: select a current loaded library rate for every service.'}</p>`).join('')}</section>`).join('');
-    const rangesHtml = validityPeriods.map((p) => `<li>${escape(p.valid_from)} – ${escape(p.valid_to)}</li>`).join('');
-    const inclusions = [...new Map(days.flatMap((d) => d.services).filter((s) => s.is_included !== false).map((s) => [`${s.category}:${s.item_name}:${s.supplier_name}`.toLowerCase(), s])).values()];
-    const inclusionsHtml = inclusions.length ? `<section><h2>Inclusions</h2><ul>${inclusions.map((s) => `<li>${escape(s.category || 'Service')}: ${escape(s.item_name)}${s.supplier_name ? ` — ${escape(s.supplier_name)}` : ''}</li>`).join('')}</ul></section>` : '';
-    const galleryHtml = (pkg.gallery_image_urls || []).map((url) => `<img src="${escape(url)}">`).join('');
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escape(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:40px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:24px 0;padding-bottom:14px;border-bottom:1px solid #e2e8f0}.price{background:#f0fdfa;padding:12px;border-radius:8px}img{max-width:100%;max-height:280px;object-fit:cover;margin:4px}</style></head><body><header>${pkg.cover_image_url ? `<img src="${escape(pkg.cover_image_url)}">` : ''}<h1>${escape(pkg.name)}</h1><p>${escape(pkg.description)}</p>${rangesHtml ? `<b>Valid for</b><ul>${rangesHtml}</ul>` : ''}${galleryHtml ? `<div>${galleryHtml}</div>` : ''}</header>${dayHtml}${inclusionsHtml}<h2>Package prices</h2>${pricingHtml}${terms ? `<section><h2>Terms &amp; Conditions</h2><p>${escape(terms).replace(/\n/g, '<br>')}</p></section>` : ''}<script>window.print()</script></body></html>`;
-    const win = window.open('', '_blank'); if (!win) { showToast('Allow pop-ups to print the package document', 'warning'); return; } win.document.write(html); win.document.close();
+    if (oversizedService) {
+      const savedItem = library.find((entry) => entry.id === oversizedService.item_id);
+      const item = {
+        ...(savedItem || {}),
+        category: savedItem?.category || oversizedService.category,
+        max_occupancy: savedItem?.max_occupancy || oversizedService.vehicle_capacity,
+        name: savedItem?.name || oversizedService.item_name
+      };
+      const rate = savedItem?.item_rates?.find((entry) => entry.id === oversizedService.rate_id) || oversizedService.rate_snapshot;
+      showToast(packageItemCapacityError(item, rate, [candidate]), 'warning');
+      return;
+    }
+    setPaxOptions((previous) => [...previous, candidate].sort((a, b) => a.adults - b.adults || a.children - b.children));
   };
 
   if (!packageId) return <div className="super-admin-page"><button className="secondary-btn" onClick={() => navigate('/packages')}><ArrowLeft size={16} /> Packages</button><p>Open a package from the Packages list.</p></div>;
 
+  const tabs = [
+    ['itinerary', 'Itinerary'],
+    ['validity', 'Valid dates'],
+    ['travellers', 'Travellers & pricing'],
+    ['inclusions', 'Inclusions & exclusions'],
+    ['terms', 'Terms & conditions'],
+    ['client', 'Client quote']
+  ];
+
   return <div className="super-admin-page package-builder-page">
-    <header className="page-header"><div className="header-title"><BackpackIcon /><div><h1>{pkg?.name || state.packageName || 'Package Builder'}</h1><p>Build the reusable day-by-day package itinerary</p></div></div><div className="package-builder-actions"><button className="secondary-btn" onClick={() => requestNavigate('/packages')}><ArrowLeft size={16} /> Packages</button><button className="secondary-btn" onClick={exportPackage}><Printer size={16} /> Download client PDF</button><button className="primary-btn" disabled={saving} onClick={() => persistDays(days)}><Save size={16} /> {saving ? 'Saving…' : 'Save package'}</button></div></header>
-    <div className="package-builder-grid">
-      <aside className="package-library-sidebar"><h2>Library Items</h2><div className="packages-search"><Search size={16} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search services…" /></div><div className="package-library-results">{results.map((item) => <article key={item.id} className="package-library-card"><strong>{item.name}</strong><span>{item.category} · {item.supplier_name}</span><SearchableSelect value={selectedRates[item.id] || item.item_rates[0]?.id || ''} onChange={(e) => setSelectedRates((prev) => ({ ...prev, [item.id]: e.target.value }))}>{item.item_rates.map((r) => <option key={r.id} value={r.id}>{r.option_name || r.season_name || 'Loaded rate'} · {r.currency} {Number(r.unit_cost || 0).toFixed(2)} cost</option>)}</SearchableSelect><button className="secondary-btn" onClick={() => addService(item, selectedRates[item.id])}>Add to Day {selectedDay + 1} <Plus size={14} /></button></article>)}</div>{search.length > 0 && search.trim().length < 2 && <small>Enter at least two characters.</small>}</aside>
-      <main className="package-editor-main">
-        <div className="package-editor-settings"><label>Default markup (%)<input type="number" min="0" step="0.01" value={markup} onChange={(e) => setMarkup(e.target.value)} onBlur={(e) => saveMarkup(e.target.value)} /></label><span><CalendarDays size={15} /> Dates are represented by validity periods; itinerary days stay date-free.</span></div>
-        <div className="package-agency-pricing"><label htmlFor="package-document-markup">Client document markup (%)</label><input id="package-document-markup" type="number" min="0" step="0.01" value={documentMarkup ?? markup} onChange={(e) => setDocumentMarkup(e.target.value)} /><span>This markup changes prices in the downloadable client document only. It does not change the saved package.</span></div>
-        <div className="package-active-day"><label htmlFor="package-active-day">Add selected services to</label><SearchableSelect id="package-active-day" value={selectedDay} onChange={(e) => setSelectedDay(Number(e.target.value))}>{days.map((_, i) => <option key={i} value={i}>Day {i + 1}</option>)}</SearchableSelect>{!days.length && <span>Add a day before adding services.</span>}</div>
-        {days.map((day, di) => <section className="package-day-card" key={day.id || di}><header><h2>Day {di + 1}</h2><button title="Remove day" className="package-remove-period" onClick={() => setDays((prev) => prev.filter((_, i) => i !== di).map((d, i) => ({ ...d, day_number: i + 1 })))}><Trash2 size={15} /></button></header><textarea rows={2} placeholder="Day notes (optional)" value={day.notes || ''} onChange={(e) => setDays((prev) => prev.map((d, i) => i === di ? { ...d, notes: e.target.value } : d))} />{day.services.map((s, si) => { const item = library.find((x) => x.id === s.item_id); return <div className="package-service-row" key={`${s.item_id}-${si}`}><div className="package-service-name"><b>{s.item_name}</b><small>{s.category} · {s.supplier_name || 'Supplier not specified'}</small></div><SearchableSelect value={s.rate_id || ''} onChange={(e) => changeService(di, si, 'rate_id', e.target.value)}>{(item?.item_rates || [{ id: s.rate_id, option_name: 'Saved loaded rate', currency: s.currency_code, unit_cost: s.unit_cost }]).map((r) => <option key={r.id} value={r.id}>{r.option_name || r.season_name || 'Loaded rate'} · {r.currency} {Number(r.unit_cost || 0).toFixed(2)}</option>)}</SearchableSelect><span>{s.currency_code} {Number(s.unit_cost).toFixed(2)}</span><label>Markup<input type="number" min="0" step="0.01" value={s.markup_percentage} onChange={(e) => changeService(di, si, 'markup_percentage', e.target.value)} /></label><button title="Remove service" className="package-remove-period" onClick={() => setDays((prev) => prev.map((d, i) => i === di ? { ...d, services: d.services.filter((_, j) => j !== si) } : d))}><Trash2 size={15} /></button></div>; })}{!day.services.length && <p className="package-day-empty">Add services from the Library Items panel.</p>}</section>)}
-        <button className="package-add-period" onClick={addDay}><Plus size={15} /> Add day</button>
-        <div className="package-day-card package-pax-card"><h2><Users size={18} /> Passenger patterns</h2><p>Add the group sizes for which this package should display a price.</p><div className="package-pax-add"><label>Adults<input id="package-pax-adults" type="number" min="1" defaultValue="2" /></label><label>Children under 12<input id="package-pax-children" type="number" min="0" defaultValue="0" /></label><button className="secondary-btn" onClick={addPaxOption}><Plus size={15} /> Add pattern</button></div>{paxOptions.map((option) => { const price = breakdown.find((b) => b.id === option.id); return <article className="package-pax-option" key={option.id}><div><b>{option.adults} adult{option.adults === 1 ? '' : 's'}{option.children ? ` + ${option.children} child${option.children === 1 ? '' : 'ren'}` : ''}</b><div>{(price?.groups || []).map((g) => <span className="package-price-chip" key={g.code}>{g.code}: {money(g.share, g.code)} / adult{option.children ? ` · child ${g.childAvailable ? money(g.child, g.code) : "Unavailable: no loaded child rate"}` : ''} · single supplement ${money(g.single, g.code)}</span>)}</div></div><button className="package-remove-period" onClick={() => removePaxOption(option.id)}><Trash2 size={15} /></button></article>; })}{!paxOptions.length && <p className="package-day-empty">No passenger patterns yet.</p>}</div>
-        <div className="package-day-card"><h2>Terms &amp; Conditions</h2><p>Imported from Settings → Itinerary presentation.</p><div className="package-terms-preview">{terms || 'No default terms are configured.'}</div></div>
-      </main>
-    </div>
+    <header className="page-header">
+      <div className="header-title"><Backpack /><div><h1>{pkg?.name || state?.packageName || 'Package Builder'}</h1><p>Build and quote a reusable package using contract prices</p></div></div>
+      <div className="package-builder-actions">
+        <button className="secondary-btn" onClick={() => requestNavigate('/packages')}><ArrowLeft size={16} /> Packages</button>
+        <button className="secondary-btn" onClick={() => setExportDialog(true)} disabled={!pkg}><Download size={16} /> Export</button>
+        <button className="primary-btn" disabled={saving || loading || !pkg} onClick={() => persist()}><Save size={16} /> {saving ? 'Saving…' : 'Save package'}</button>
+      </div>
+    </header>
+    {loading ? <div className="admin-table-container">Loading package…</div> : !pkg ? <div className="admin-table-container">Package not found.</div> : <>
+      <nav className="package-builder-tabs" aria-label="Package editor sections">
+        {tabs.map(([id, label]) => <button key={id} type="button" className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}
+      </nav>
+      {tab === 'itinerary' && <div className="package-builder-grid">
+        <aside className="package-library-sidebar">
+          <h2>Library Items</h2>
+          <div className="packages-search"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search contracted services…" /></div>
+          <div className="package-filter-section">
+            <strong>Currency availability</strong>
+            <div className="menu-popover currency-popover">
+              <button type="button" className="currency-trigger" onClick={() => { setCurrencyOpen((open) => !open); setCurrencySearch(''); }}>
+                <span className="currency-trigger-code">{currencyFilter || 'ALL'}</span>
+                <span className="currency-trigger-name">{currencyFilter ? 'Rates in this currency' : 'All currencies'}</span>
+                <ChevronDown size={14} className={`currency-chevron ${currencyOpen ? 'open' : ''}`} />
+              </button>
+              {currencyOpen && <>
+                <div className="menu-overlay" onClick={() => setCurrencyOpen(false)} />
+                <div className="menu-panel currency-panel">
+                  <div className="sidebar-search" style={{ margin: 0 }}><Search size={14} /><input autoFocus placeholder="Search currency…" value={currencySearch} onChange={(event) => setCurrencySearch(event.target.value)} /></div>
+                  <div className="currency-list">
+                    <button type="button" className={`menu-item ${currencyFilter === '' ? 'active' : ''}`} onClick={() => { setCurrencyFilter(''); setCurrencyOpen(false); }}>
+                      <span className="currency-opt-code">ALL</span><span className="currency-opt-name">All currencies</span>{currencyFilter === '' && <Check size={14} />}
+                    </button>
+                    {currencyOptions.map((currency) => <button key={currency.code} type="button" className={`menu-item ${currency.code === currencyFilter ? 'active' : ''}`} onClick={() => { setCurrencyFilter(currency.code); setCurrencyOpen(false); }}>
+                      <span className="currency-opt-sym">{currency.symbol}</span><span className="currency-opt-code">{currency.code}</span><span className="currency-opt-name">{currency.name}</span>{currency.code === currencyFilter && <Check size={14} />}
+                    </button>)}
+                    {!currencyOptions.length && <div className="currency-empty">No currency matches “{currencySearch}”</div>}
+                  </div>
+                </div>
+              </>}
+            </div>
+          </div>
+          <div className="package-filter-section">
+            <strong>Item type</strong>
+            <div className="category-filters">{categoryOptions.map((category) => <button key={category} type="button" className={`category-chip ${categoryFilter === category ? 'active' : ''}`} onClick={() => setCategoryFilter((current) => current === category ? '' : category)}>{category}</button>)}</div>
+          </div>
+          <label className="package-filter-section package-destination-filter"><strong>Destination / island</strong><select value={destinationFilter} onChange={(event) => setDestinationFilter(event.target.value)}><option value="">All destinations</option>{destinationOptions.map((destination) => <option key={destination} value={destination}>{destination}</option>)}</select></label>
+          {(categoryFilter || destinationFilter || currencyFilter || search) && <button type="button" className="clear-filters-btn" onClick={() => { setCategoryFilter(''); setDestinationFilter(''); setCurrencyFilter(''); setSearch(''); }}>Clear filters</button>}
+          <p className="package-help">Rates are copied at their contract amount. No package markup is applied.</p>
+          <div className="package-library-results">
+            {visibleResults.map((item) => {
+              const eligibleRates = (item.item_rates || []).filter((entry) => currencyMatches(entry, currencyFilter));
+              const rate = eligibleRates.find((entry) => entry.id === selectedRates[item.id]) || eligibleRates[0];
+              return <article key={item.id} className="package-library-card" draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'library', itemId: item.id, rateId: rate?.id }))}>
+                <strong>{item.name}</strong><span>{item.category || 'Service'}{item.supplier_name ? ` · ${item.supplier_name}` : ''}</span>
+                {eligibleRates.length ? <select aria-label={`Contract rate for ${item.name}`} value={rate?.id || ''} onChange={(event) => setSelectedRates((previous) => ({ ...previous, [item.id]: event.target.value }))}>
+                  {eligibleRates.map((option) => <option key={option.id} value={option.id}>{option.option_name || option.season_name || 'Contract rate'} · {option.currency || item.currency || 'ZAR'} {Number(option.unit_cost || option.price_1_adult || option.unit_price || 0).toFixed(2)}</option>)}
+                </select> : <span>No contract rates</span>}
+                <button type="button" className="secondary-btn" onClick={() => addService(item, rate?.id)} disabled={!rate}>Add to Day {selectedDay + 1} <Plus size={14} /></button>
+              </article>;
+            })}
+            {search.trim().length > 0 && search.trim().length < 2 && <p>Enter at least 2 characters to search.</p>}
+            {(search.trim().length >= 2 || categoryFilter || currencyFilter) && !visibleResults.length && <p>No matching active library items with rates in this currency.</p>}
+          </div>
+        </aside>
+        <main className="package-itinerary-canvas">
+          <div className="package-canvas-header"><div><h2>Day-by-day itinerary</h2><p>Drag library items onto a day, or use the Add button.</p></div><button className="secondary-btn" onClick={addDay}><Plus size={15} /> Add day</button></div>
+          {days.map((day, dayIndex) => <section key={day.id || `day-${dayIndex}`} className={`package-canvas-day ${selectedDay === dayIndex ? 'selected' : ''}`} onClick={() => setSelectedDay(dayIndex)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              try {
+                const payload = JSON.parse(event.dataTransfer.getData('application/json'));
+                if (payload.type === 'library') {
+                  const item = library.find((entry) => entry.id === payload.itemId) || results.find((entry) => entry.id === payload.itemId);
+                  if (item) addService(item, payload.rateId, dayIndex);
+                } else if (payload.type === 'service') moveService(payload.fromDay, payload.fromIndex, dayIndex);
+              } catch (error) {
+                showToast(`Could not add the dragged item: ${error.message}`, 'error');
+              }
+            }}>
+            <header><h3><CalendarDays size={17} /> Day {dayIndex + 1}</h3><span>{day.services.length} item{day.services.length === 1 ? '' : 's'}</span></header>
+            <textarea aria-label={`Day ${dayIndex + 1} notes`} value={day.notes || ''} onChange={(event) => setDays((previous) => previous.map((row, index) => index === dayIndex ? { ...row, notes: event.target.value } : row))} placeholder="Optional day overview or notes" rows={2} />
+            {day.services.map((service, serviceIndex) => {
+              const item = library.find((entry) => entry.id === service.item_id);
+              const capacity = Number(item?.max_occupancy || service.vehicle_capacity) || 0;
+              const maxPatternPax = paxOptions.reduce((max, pattern) => Math.max(max, Number(pattern.adults) + Number(pattern.children)), 0);
+              const isStay = /accommodation/i.test(String(service.category || item?.category || ''));
+              const capacitySummary = capacity
+                ? isStay
+                  ? `Max ${capacity} per room${maxPatternPax ? ` · ${Math.ceil(maxPatternPax / capacity)} room(s) needed for largest pattern` : ''}`
+                  : `Capacity: ${capacity} traveller${capacity === 1 ? '' : 's'}`
+                : '';
+              return <article key={`${service.id || service.item_id}-${serviceIndex}`} className="package-canvas-service" draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: dayIndex, fromIndex: serviceIndex }))}>
+                <GripVertical size={16} className="package-grip" />
+                <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}</small>
+                  {item?.item_rates?.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(dayIndex, serviceIndex, 'rate_id', event.target.value)}>
+                    {item.item_rates.map((rate) => <option key={rate.id} value={rate.id}>{rate.option_name || rate.season_name || 'Contract rate'} · {rate.currency} {Number(rate.unit_cost || rate.price_1_adult || rate.unit_price || 0).toFixed(2)}</option>)}
+                  </select>}
+                </div>
+                <div className="package-service-price"><span>{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)}</span><small>{service.rate_basis || 'per_person'} · no markup</small>{capacitySummary && <small>{capacitySummary}</small>}</div>
+                <label className="package-included-toggle"><input type="checkbox" checked={service.is_included !== false} onChange={(event) => updateService(dayIndex, serviceIndex, 'is_included', event.target.checked)} /> Included</label>
+                <label className="package-quantity">Qty <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(dayIndex, serviceIndex, 'quantity', Number(event.target.value) || 1)} /></label>
+                <button type="button" className="package-icon-button" aria-label={`Remove ${service.item_name}`} onClick={() => removeService(dayIndex, serviceIndex)}><Trash2 size={16} /></button>
+              </article>;
+            })}
+            {!day.services.length && <p className="package-drop-hint">Drop a library item here, or select this day and add from the sidebar.</p>}
+            {days.length > 1 && <button type="button" className="package-remove-day" onClick={() => { setDays((previous) => previous.filter((_, index) => index !== dayIndex)); setSelectedDay(0); }}><Trash2 size={14} /> Remove day</button>}
+          </section>)}
+          {!days.length && <div className="package-canvas-empty">Add a day to start building this package.</div>}
+        </main>
+      </div>}
+      {tab === 'validity' && <section className="package-tab-panel">
+        <h2><CalendarDays size={19} /> Valid from / to dates</h2><p>Leave the list empty if the package has no restricted validity period.</p>
+        {periods.map((period, index) => <div className="package-period" key={`period-${index}`}>
+          <input type="date" aria-label="Valid from" value={period.valid_from || ''} onChange={(event) => changePeriod(index, 'valid_from', event.target.value)} />
+          <span>to</span><input type="date" aria-label="Valid to" value={period.valid_to || ''} onChange={(event) => changePeriod(index, 'valid_to', event.target.value)} />
+          <button type="button" className="package-icon-button" aria-label="Remove validity period" onClick={() => setPeriods((previous) => previous.filter((_, rowIndex) => rowIndex !== index))}><X size={16} /></button>
+        </div>)}
+        <button className="secondary-btn" onClick={addPeriod}><Plus size={15} /> Add validity period</button>
+      </section>}
+      {tab === 'travellers' && <section className="package-tab-panel">
+        <h2>Traveller patterns &amp; contract price breakdown</h2><p>Shared unit charges are totalled and divided by the party size; accommodation is priced separately for adult sharing, single supplement, and children sharing with adults. A child without a contracted child rate is priced at the single rate.</p>
+        <div className="package-pax-add"><label>Adults<input id="package-adults" type="number" min="1" defaultValue="2" /></label><label>Children<input id="package-children" type="number" min="0" defaultValue="0" /></label><button className="secondary-btn" onClick={addPaxPattern}><Plus size={15} /> Add pattern</button></div>
+        {!paxOptions.length && <p>Add a traveller pattern to see the package price breakdown.</p>}
+        <div className="package-breakdown-list">{breakdown.map((pattern, index) => <article key={`${pattern.id || 'new'}-${pattern.adults}-${pattern.children}-${index}`}>
+          <header><strong>{pattern.adults} adult{pattern.adults === 1 ? '' : 's'}{pattern.children ? ` + ${pattern.children} child${pattern.children === 1 ? '' : 'ren'}` : ''}</strong><button type="button" className="package-icon-button" aria-label="Remove traveller pattern" onClick={() => setPaxOptions((previous) => previous.filter((_, rowIndex) => rowIndex !== index))}><Trash2 size={15} /></button></header>
+          {pattern.currencies.length ? pattern.currencies.map((row) => <div className="package-currency-breakdown" key={row.currency}>
+            <h3>{row.currency}</h3>
+            <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Package item</th><th>Unit contribution / person</th><th>Accommodation sharing / adult</th><th>Single supplement</th><th>Child sharing with adults</th></tr></thead>
+              <tbody>
+                {row.unitRows.map((item, itemIndex) => <tr key={`unit-${itemIndex}`}><td>{item.name}</td><td>{money(item.perPerson, row.currency)}</td><td>—</td><td>—</td><td>—</td></tr>)}
+                {row.accommodationRows.map((item, itemIndex) => <tr key={`stay-${itemIndex}`}><td>{item.name}<small>{item.roomCount} room(s), max {item.capacity} per room</small></td><td>—</td><td>{money(item.sharingPerAdult, row.currency)}</td><td>{money(item.singleSupplement, row.currency)}</td><td>{money(item.childPerTraveller, row.currency)}</td></tr>)}
+                <tr className="package-breakdown-total"><th>Total per person</th><td>{money(row.unitPerPerson, row.currency)}</td><td>{money(row.accommodationRows.reduce((sum, item) => sum + item.sharingPerAdult, 0), row.currency)}</td><td>{money(row.singleSupplement, row.currency)}</td><td>{money(row.accommodationRows.reduce((sum, item) => sum + item.childPerTraveller, 0), row.currency)}</td></tr>
+              </tbody>
+            </table></div>
+            <div className="package-price-grid">
+              <div><span>Total per adult sharing</span><strong>{money(row.totalPerPersonSharing, row.currency)}</strong></div>
+              <div><span>Single supplement</span><strong>{money(row.singleSupplement, row.currency)}</strong><small>Added to an adult sharing price</small></div>
+              <div><span>Total single adult price</span><strong>{money(row.totalSinglePerPerson, row.currency)}</strong></div>
+              {pattern.children > 0 && <div><span>Child sharing with adults</span><strong>{money(row.childPerPerson, row.currency)}</strong><small>Includes allocated unit costs and child/single accommodation rate</small></div>}
+            </div>
+          </div>) : <p>No included services to price.</p>}
+        </article>)}</div>
+      </section>}
+      {tab === 'inclusions' && <section className="package-tab-panel"><h2>Inclusions &amp; exclusions</h2><label className="package-field"><span>Inclusions</span><textarea rows={7} value={form.inclusions} onChange={(event) => updateForm('inclusions', event.target.value)} placeholder="Describe what is included in the package" /></label><label className="package-field"><span>Exclusions</span><textarea rows={7} value={form.exclusions} onChange={(event) => updateForm('exclusions', event.target.value)} placeholder="Describe what is not included" /></label></section>}
+      {tab === 'terms' && <section className="package-tab-panel"><h2>Terms &amp; conditions</h2><label className="package-field"><span>Package terms and conditions</span><textarea rows={14} value={form.terms} onChange={(event) => updateForm('terms', event.target.value)} placeholder="Add package-specific terms and conditions" /></label></section>}
+      {tab === 'client' && <section className="package-tab-panel"><h2>Assign / quote to clients</h2><p>Client assignment is optional and may include more than one client. This does not add markup to contract rates.</p>
+        <div className="package-client-multiselect">
+          <button type="button" className="package-client-select-trigger" aria-expanded={clientSelectOpen} onClick={() => setClientSelectOpen((open) => !open)}>
+            <span>{selectedClients.length ? selectedClients.map(nameOf).join(', ') : 'Search and select client(s)'}</span><ChevronDown size={16} />
+          </button>
+          {clientSelectOpen && <div className="package-client-select-menu">
+            <div className="packages-search"><Search size={15} /><input autoFocus value={clientQuery} onChange={(event) => setClientQuery(event.target.value)} placeholder="Search clients…" /></div>
+            <div className="package-client-select-options">{visibleClients.map((client) => <label key={client.id}>
+              <input type="checkbox" checked={form.assignedClientIds.includes(client.id)} onChange={(event) => updateForm('assignedClientIds', event.target.checked ? [...form.assignedClientIds, client.id] : form.assignedClientIds.filter((id) => id !== client.id))} />
+              <span>{nameOf(client)}</span>
+            </label>)}{!visibleClients.length && <p>No clients match your search.</p>}</div>
+            <button type="button" className="package-client-select-done" onClick={() => { setClientSelectOpen(false); setClientQuery(''); }}>Done</button>
+          </div>}
+        </div>
+        {!!selectedClients.length && <div className="package-client-selected">{selectedClients.map((client) => <button key={client.id} type="button" onClick={() => updateForm('assignedClientIds', form.assignedClientIds.filter((id) => id !== client.id))}>{nameOf(client)} <X size={13} /></button>)}</div>}
+        {!clients.length && <p>No clients are set up for this company.</p>}
+        <label className="package-field"><span>Package overview</span><textarea rows={4} value={form.description} onChange={(event) => updateForm('description', event.target.value)} placeholder="Optional package overview" /></label><label className="package-publish-toggle"><input type="checkbox" checked={form.isAvailable} onChange={(event) => updateForm('isAvailable', event.target.checked)} /><span><strong>Available in the itinerary Library Items picker</strong><small>When enabled, this package can be selected and quoted on client itineraries.</small></span></label></section>}
+    </>}
+    {exportDialog && <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setExportDialog(false); }}><section className="modal-content package-export-modal">
+      <div className="modal-header"><div><h2>Export package</h2><p>Choose the format and optional content for the document.</p></div><button className="close-btn" onClick={() => setExportDialog(false)}><X size={20} /></button></div>
+      <div className="package-export-options"><label><input type="radio" name="package-export-format" value="pdf" checked={exportFormat === 'pdf'} onChange={() => setExportFormat('pdf')} /> PDF (print / save as PDF)</label><label><input type="radio" name="package-export-format" value="word" checked={exportFormat === 'word'} onChange={() => setExportFormat('word')} /> Word document</label></div>
+      <div className="package-export-options">{[['cover', 'Cover image'], ['inclusions', 'Inclusions and exclusions'], ['terms', 'Terms and conditions']].map(([key, label]) => <label key={key}><input type="checkbox" checked={exportOptions[key]} onChange={(event) => setExportOptions((previous) => ({ ...previous, [key]: event.target.checked }))} /> {label}</label>)}</div>
+      <div className="package-modal-actions"><button className="secondary-btn" onClick={() => setExportDialog(false)}>Cancel</button><button className="primary-btn" onClick={exportDocument}><FileText size={16} /> Export</button></div>
+    </section></div>}
   </div>;
 };
-
-const BackpackIcon = () => <div className="package-builder-icon"><ImagePlus size={20} /></div>;
