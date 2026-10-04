@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Backpack } from 'lucide-react';
+import { ArrowLeft, Backpack, Pencil } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -54,10 +54,22 @@ export const PackageView = () => {
     .filter((service) => service.is_included !== false)
     .map((service) => service.currency_code || 'ZAR'))];
 
+  const childBands = Array.isArray(pkg?.child_age_ranges) ? pkg.child_age_ranges : [];
+
+  /* Clicking a package lands here to read it. Editing the contents has to be
+     reachable from the same screen, otherwise a package can only ever be built
+     once, in the redirect that follows creating it. */
+  const openBuilder = () => navigate(`/packages/builder/${packageId}`, {
+    state: { packageId, packageName: pkg?.name }
+  });
+
   return <div className="super-admin-page package-view-page">
     <header className="page-header">
-      <div className="header-title"><Backpack className="header-icon" /><div><h1>{pkg?.name || 'Package'}</h1><p>Read-only package details</p></div></div>
-      <button className="secondary-btn" onClick={() => navigate('/packages')}><ArrowLeft size={16} /> Packages</button>
+      <div className="header-title"><Backpack className="header-icon" /><div><h1>{pkg?.name || 'Package'}</h1><p>Package details</p></div></div>
+      <div className="package-builder-actions">
+        <button className="secondary-btn" onClick={() => navigate('/packages')}><ArrowLeft size={16} /> Packages</button>
+        <button className="primary-btn" onClick={openBuilder} disabled={!pkg}><Pencil size={16} /> Edit contents</button>
+      </div>
     </header>
     {loading ? <div className="admin-table-container package-view-loading">Loading package...</div> : !pkg ? <div className="admin-table-container package-view-loading">Package not found.</div> : <>
       <section className="package-view-summary">
@@ -65,8 +77,11 @@ export const PackageView = () => {
         <div className="package-view-facts">
           {pkg.description && <p>{pkg.description}</p>}
           <div><strong>Validity</strong><span>{periods.length ? periods.map((period) => `${dateLabel(period.valid_from)} – ${dateLabel(period.valid_to)}`).join('; ') : 'Not set'}</span></div>
-          <div><strong>Passenger options</strong><span>{paxOptions.length ? paxOptions.map((option) => `${option.adults}A${option.children ? ` + ${option.children}C` : ''}`).join(', ') : 'Not set'}</span></div>
+          <div><strong>Pax options</strong><span>{paxOptions.length ? paxOptions.map((option) => `${Number(option.pax) || Number(option.adults || 0) + Number(option.children || 0)} pax`).join(', ') : 'Not set'}</span></div>
           <div><strong>Library availability</strong><span>{pkg.is_available_in_library ? 'Available for itinerary quotes' : 'Private package'}</span></div>
+          <div><strong>Children</strong><span>{pkg.accepts_children
+            ? `Accepted${childBands.length ? ` — ages ${childBands[0].ageFrom}–${childBands[0].ageTo ?? 18} yrs, priced per accommodation contract` : ' (no age range set)'}`
+            : 'Not accepted — adults only'}</span></div>
           <div><strong>Currencies</strong><span>{currencies.length ? currencies.join(', ') : 'Not set'}</span></div>
         </div>
         {(pkg.gallery_image_urls || []).length > 0 && <div className="package-view-gallery">{pkg.gallery_image_urls.map((url, index) => <img key={`${url}-${index}`} src={url} alt={`${pkg.name} gallery ${index + 1}`} />)}</div>}

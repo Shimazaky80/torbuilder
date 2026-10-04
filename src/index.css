@@ -2527,11 +2527,57 @@ aside.sidebar:not(.collapsed) .logo-full {
 .package-export-options { display: grid; gap: .65rem; padding: .8rem 1.4rem; }
 .package-export-options label { display: flex; align-items: center; gap: .55rem; color: #334155; font-size: .85rem; }
 
+/* Library Items picker rows stay on one line: the operator scans names, not
+   cards, and the rate plus the day number are the only two things needed to act. */
+.package-library-card { flex-direction: row; align-items: center; gap: .4rem; padding: .45rem .5rem; }
+.package-library-card .package-library-name { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: .78rem; font-weight: 700; color: #1e293b; text-overflow: ellipsis; white-space: nowrap; }
+.package-library-card select { flex: 1 1 40%; width: auto; padding: .35rem .45rem; font-size: .72rem; }
+.package-library-card .package-library-flag { flex: 0 0 auto; padding: .15rem .35rem; border: 1px solid #e2e8f0; border-radius: 5px; font-size: .65rem; color: #64748b; }
+.package-library-card .package-library-flag.warn { border-color: #fde68a; background: #fffbeb; color: #b45309; font-weight: 700; }
+.package-library-card .package-library-add { flex: 0 0 auto; display: inline-flex; align-items: center; gap: .2rem; padding: .35rem .45rem; font-size: .7rem; white-space: nowrap; }
+.package-library-card .package-library-add:disabled { cursor: not-allowed; opacity: .55; }
+.package-season-warning { color: #b45309 !important; font-weight: 700; }
+.package-quantity.auto { padding: .3rem .5rem; border: 1px dashed #99f6e4; border-radius: 7px; background: #f0fdfa; color: #0f766e; font-weight: 700; }
+
+/* Children are a conditional extra: an off switch, then the supplier contract
+   bands, then the per-child price those bands produce. */
+.package-child-off { margin: 0 0 1rem; padding: .8rem; border: 1px dashed #cbd5e1; border-radius: 9px; color: #64748b; font-size: .82rem; }
+.package-child-toolbar { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; margin: 1rem 0 .5rem; }
+.package-child-toolbar h3 { margin: 0; color: #0d7478; font-size: .9rem; }
+.package-child-bands { display: grid; gap: .5rem; margin: .6rem 0; }
+.package-child-band { display: flex; align-items: flex-end; gap: .6rem; padding: .6rem; border: 1px solid #e2e8f0; border-radius: 9px; }
+.package-child-band label { display: flex; flex: 1 1 0; flex-direction: column; gap: .25rem; color: #64748b; font-size: .72rem; }
+.package-child-band input { width: 100%; min-width: 0; padding: .5rem; border: 1px solid #cbd5e1; border-radius: 7px; font: inherit; font-size: .8rem; }
+.package-child-price-title { margin: 1.4rem 0 .3rem; color: #0d7478; font-size: .9rem; }
+.package-child-note { margin: .5rem 0 0; color: #64748b; font-size: .76rem; }
+.package-breakdown-table td span { display: block; }
+.package-breakdown-table td span + span { margin-top: .2rem; }
+
+/* The package as the picker shows it: one line, expandable to the items. */
+.package-library-preview { margin-top: 1rem; }
+.package-preview-help { margin: 0 0 .5rem; color: #64748b; font-size: .78rem; }
+.package-preview-line { display: flex; width: 100%; align-items: center; gap: .6rem; padding: .6rem .7rem; border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: #334155; font: inherit; text-align: left; cursor: pointer; }
+.package-preview-line:hover { border-color: #0d7478; }
+.package-preview-name { flex: 0 1 auto; overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.package-preview-meta { flex: 1 1 auto; color: #64748b; font-size: .75rem; text-align: right; }
+.package-preview-chevron { flex: 0 0 auto; color: #64748b; transition: transform .15s ease; }
+.package-preview-chevron.open { transform: rotate(180deg); }
+.package-preview-items { display: grid; gap: .6rem; margin-top: .5rem; padding: .7rem; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
+.package-preview-items section { display: grid; gap: .3rem; }
+.package-preview-items section > strong { color: #334155; font-size: .75rem; }
+.package-preview-items p { margin: 0; color: #94a3b8; font-size: .75rem; }
+.package-preview-item { display: flex; align-items: center; gap: .6rem; color: #475569; font-size: .78rem; }
+.package-preview-item > span:first-child { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; }
+.package-preview-item small { color: #64748b; font-size: .7rem; }
+.package-preview-price { flex: 0 0 auto; color: #0f766e; font-size: .75rem; white-space: nowrap; }
+
 @media (max-width: 750px) {
   .package-canvas-service { flex-wrap: wrap; }
   .package-service-main { flex-basis: calc(100% - 40px); }
   .package-service-price { margin-left: 1.8rem; }
   .package-pax-add { flex-wrap: wrap; }
+  .package-child-band { flex-wrap: wrap; }
+  .package-preview-meta { display: none; }
 }
 
 .packages-table-container .table-header-actions {
@@ -2716,4 +2762,130 @@ aside.sidebar:not(.collapsed) .logo-full {
   .packages-page-header > .primary-btn {
     align-self: flex-start;
   }
+}
+
+/* Render-failure fallback so a broken page never shows as a blank screen. */
+.page-error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+  max-width: 40rem;
+  margin: 3rem auto;
+  padding: 1.75rem;
+  background: #ffffff;
+  border: 1px solid #fecaca;
+  border-left: 4px solid #dc2626;
+  border-radius: 12px;
+  color: #7f1d1d;
+}
+.page-error-boundary h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #991b1b;
+}
+.page-error-boundary p {
+  margin: 0;
+  color: #475569;
+}
+.page-error-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+/* Child price tile inside the adult price grid. Distinguished from the adult
+   tiles so a quote reads "adults ... and a child on request", not another adult. */
+.package-price-grid > div.package-price-child { background: #fff7ed; border: 1px solid #fed7aa; }
+.package-price-grid > div.package-price-child span,
+.package-price-grid > div.package-price-child small { color: #9a5b13; }
+.package-price-grid > div.package-price-child strong { color: #b45309; }
+.package-price-grid > div.package-price-child.pending { background: #f8fafc; border: 1px dashed #cbd5e1; }
+.package-price-grid > div.package-price-child.pending span,
+.package-price-grid > div.package-price-child.pending small,
+.package-price-grid > div.package-price-child.pending strong { color: #94a3b8; }
+
+/* Package library sidebar card.
+   Overrides the earlier single-row layout that existed only to accommodate a
+   season <select>; the season is resolved from the package validity dates now,
+   so the card carries the same four facts as the itinerary builder sidebar:
+   name, category, the price exactly as loaded, supplier and basis. */
+.package-library-sidebar .package-library-card {
+  flex-direction: column;
+  align-items: stretch;
+  gap: .4rem;
+  padding: .7rem .85rem;
+  background: #f8fafc;
+  border-radius: 12px;
+  cursor: grab;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.package-library-sidebar .package-library-card:hover {
+  border-color: var(--primary-color, #0d7478);
+  background: #f0fdfa;
+  box-shadow: 0 4px 10px -2px rgba(13, 116, 120, .15);
+}
+.package-library-sidebar .package-library-card:active { cursor: grabbing; }
+.package-library-sidebar .package-library-card.unavailable { cursor: not-allowed; opacity: .65; }
+.package-library-card .package-library-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+}
+.package-library-card .package-library-name {
+  font-size: .85rem;
+  font-weight: 700;
+  color: #1a202c;
+  line-height: 1.2;
+  white-space: normal;
+}
+.package-library-card .package-library-grip { flex: 0 0 auto; color: #cbd5e1; }
+.package-library-card .package-library-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  margin-top: .4rem;
+}
+.package-library-card .package-library-meta .item-price-tag.missing { color: #94a3b8; font-weight: 600; }
+.package-library-card .package-library-supplier {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .25rem;
+  margin-top: .3rem;
+  font-size: .7rem;
+  color: #9ca3af;
+}
+.package-library-sidebar .package-library-card .package-library-add {
+  align-self: flex-start;
+  padding: .3rem .6rem;
+  font-size: .72rem;
+}
+/* Child policy carried along with a reusable package in the itinerary. */
+.package-snapshot-child {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  margin: 0 0 .5rem;
+  padding: .3rem .5rem;
+  border-radius: 6px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #9a5b13;
+  font-size: .72rem;
+  font-weight: 600;
+}
+
+/* Pricing Protection on a package line: the operator has to be able to see that the
+   figure on the row is not the raw contract rate. */
+.package-season-warning.protected {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fcd34d;
+  font-weight: 600;
+}
+.package-protected-flag {
+  color: #92400e;
+  font-size: 11px;
 }

@@ -160,6 +160,9 @@ export const LibraryItems = () => {
   // Seasonal Rates Matrix shows one season at a time: Maps form tempId -> visible season index.
   const [activeSeasonByItem, setActiveSeasonByItem] = useState({});
 
+  // Same one-at-a-time view for the directory rows, keyed by the saved item id.
+  const [activeSeasonByListItem, setActiveSeasonByListItem] = useState({});
+
   // Image gallery lightbox & description popup
   const [lightbox, setLightbox] = useState(null); // { images: [], index: number }
   const [descriptionPopup, setDescriptionPopup] = useState(null);
@@ -1433,6 +1436,27 @@ adultRate: 0,
     setActiveSeasonByItem(prev => {
       const current = activeSeasonIndexOf(tempId, seasons);
       return { ...prev, [tempId]: (current + delta + total) % total };
+    });
+  };
+
+  /* The list column shows the same one-season-at-a-time view, but it is a
+     different surface from the edit form: the rows are keyed by the saved item id
+     rather than a form tempId, so the two views keep their own position instead of
+     sharing one index. A supplier with many seasons would otherwise push the
+     directory hundreds of pixels down for a figure that is only a few lines tall. */
+  const activeListSeasonIndex = (itemId, seasons) => {
+    const total = (seasons || []).length;
+    if (total <= 1) return 0;
+    const raw = activeSeasonByListItem[itemId];
+    return Number.isInteger(raw) && raw >= 0 && raw < total ? raw : 0;
+  };
+
+  const stepListSeason = (itemId, seasons, delta) => {
+    const total = (seasons || []).length;
+    if (total <= 1) return;
+    setActiveSeasonByListItem(prev => {
+      const current = activeListSeasonIndex(itemId, seasons);
+      return { ...prev, [itemId]: (current + delta + total) % total };
     });
   };
 
@@ -5765,6 +5789,8 @@ adultRate: 0,
                       )}
                       {item.item_rates && item.item_rates.length > 0 ? (
                         item.item_rates.map((rate, rIdx) => {
+                          /* One season at a time, stepped with the arrows below. */
+                          if (rIdx !== activeListSeasonIndex(item.id, item.item_rates)) return null;
                           const isFlat = item.pricing_model === 'per_room' || rate.rate_basis === 'per_room';
                           const flatRate = parseFloat(rate.unit_price) || parseFloat(rate.price_1_adult) || 0;
                           const p1 = parseFloat(rate.price_1_adult || rate.single_room_rate) || 0;
@@ -5788,7 +5814,21 @@ adultRate: 0,
                           const transferChildRate = parseFloat(childRatesMap.child) || 0;
 
                           return (
-                            <div key={rIdx} style={{ fontSize: '0.78rem', background: '#f8fafc', padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #e2e8f0', lineHeight: 1.4 }}>
+                            <div key={rIdx}>
+                              {item.item_rates.length > 1 && (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.3rem' }}>
+                                  <button type="button" aria-label="Previous season" title="Use the arrows to move between seasons" onClick={() => stepListSeason(item.id, item.item_rates, -1)} style={seasonNavBtnStyle}>
+                                    <ChevronLeft size={16} />
+                                  </button>
+                                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#475569', whiteSpace: 'nowrap' }}>
+                                    Season {rIdx + 1} of {item.item_rates.length}
+                                  </span>
+                                  <button type="button" aria-label="Next season" title="Use the arrows to move between seasons" onClick={() => stepListSeason(item.id, item.item_rates, 1)} style={seasonNavBtnStyle}>
+                                    <ChevronRight size={16} />
+                                  </button>
+                                </div>
+                              )}
+                            <div style={{ fontSize: '0.78rem', background: '#f8fafc', padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #e2e8f0', lineHeight: 1.4 }}>
                               <div style={{ fontWeight: 700, color: '#1e293b', marginBottom: '0.15rem' }}>
                                 {rate.season_name || 'Season'}:
                               </div>
@@ -5976,6 +6016,7 @@ adultRate: 0,
                                   )}
                                 </div>
                               )}
+                            </div>
                             </div>
                           );
                         })

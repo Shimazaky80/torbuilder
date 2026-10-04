@@ -37,7 +37,8 @@ import {
   Ticket,
   Lock,
   Users,
-  AlertTriangle
+  AlertTriangle,
+  Baby
 } from 'lucide-react';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -1784,7 +1785,7 @@ export const ItineraryBuilder = () => {
     try {
       const term = searchTerm.trim().replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
       let query = supabase.from('packages')
-        .select('id, name, description, cover_image_url, inclusions, exclusions, terms_and_conditions')
+        .select('id, name, description, cover_image_url, inclusions, exclusions, terms_and_conditions, accepts_children, child_age_ranges')
         .eq('company_id', companyId)
         .eq('is_available_in_library', true)
         .order('name', { ascending: true })
@@ -1816,6 +1817,8 @@ export const ItineraryBuilder = () => {
           inclusions: pkg.inclusions,
           exclusions: pkg.exclusions,
           terms_and_conditions: pkg.terms_and_conditions,
+          accepts_children: pkg.accepts_children,
+          child_age_ranges: pkg.child_age_ranges,
           days: daysByPackage.get(pkg.id) || []
         }
       })));
@@ -6012,6 +6015,12 @@ const missing = !sv.confirmationNumber ||
                                   <Layers size={13} /> {expandedPackageRows[sv.key] ? 'Hide package services' : `Show package services (${(sv.packageSnapshot.days || []).reduce((sum, day) => sum + (day.services || []).length, 0)})`}
                                 </button>
                                 {expandedPackageRows[sv.key] && <div className="package-snapshot-services">
+                                  {sv.packageSnapshot.accepts_children && <p className="package-snapshot-child">
+                                    <Baby size={13} /> Children accepted
+                                    {(sv.packageSnapshot.child_age_ranges || []).length
+                                      ? ` — ages ${sv.packageSnapshot.child_age_ranges[0].ageFrom}–${sv.packageSnapshot.child_age_ranges[0].ageTo ?? 18} yrs`
+                                      : ' — no age range set'}
+                                  </p>}
                                   {sv.packageSnapshot.days?.length ? sv.packageSnapshot.days.map((packageDay, dayIndex) => (
                                     <section key={`${sv.key}-day-${dayIndex}`}>
                                       <strong>Package Day {packageDay.day_number || dayIndex + 1}</strong>

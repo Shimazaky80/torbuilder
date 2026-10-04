@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Backpack, Search, Plus, Edit3, Trash2, X, ImagePlus } from 'lucide-react';
+import { Backpack, Search, Plus, Edit3, ListTree, Trash2, X, ImagePlus } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../hooks/useConfirm';
@@ -17,7 +17,7 @@ const estimatePackage = (pkg) => {
   if (!services.length || !passengerOptions.length) return [];
   return currencies.map((currency) => {
     const estimates = passengerOptions.map((option) => {
-      const pax = Math.max(1, Number(option.adults || 0) + Number(option.children || 0));
+      const pax = Math.max(1, Number(option.pax) || Number(option.adults || 0) + Number(option.children || 0));
       const total = services.filter((item) => (item.currency_code || 'ZAR') === currency).reduce((sum, item) => {
         const quantity = Number(item.quantity) || 1;
         const unitPrice = Number(item.unit_price) || 0;
@@ -66,7 +66,7 @@ export const Packages = () => {
       // changes, before the API relationship cache has refreshed.
       const [periodsRes, paxRes, daysRes] = await Promise.all([
         supabase.from('package_validity_periods').select('*').in('package_id', packageIds).order('valid_from'),
-        supabase.from('package_pax_options').select('*').in('package_id', packageIds).order('adults'),
+        supabase.from('package_pax_options').select('*').in('package_id', packageIds).order('pax'),
         supabase.from('package_days').select('*').in('package_id', packageIds).order('day_number')
       ]);
       if (periodsRes.error) throw periodsRes.error;
@@ -204,14 +204,18 @@ export const Packages = () => {
         return <tr key={pkg.id}>
           <td><button type="button" className="package-list-name" onClick={() => navigate(`/packages/view/${pkg.id}`)}>{pkg.name}</button></td>
           <td>{periods.length ? periods.map((p) => `${dateLabel(p.valid_from)} – ${dateLabel(p.valid_to)}`).join('; ') : <span className="package-list-muted">Not set</span>}</td>
-          <td>{pax.length ? pax.map((x) => `${x.adults}A${x.children ? ` + ${x.children}C` : ''}`).join(', ') : <span className="package-list-muted">Not set</span>}</td>
+          <td>{pax.length ? pax.map((x) => `${Number(x.pax) || Number(x.adults || 0) + Number(x.children || 0)} pax`).join(', ') : <span className="package-list-muted">Not set</span>}</td>
           <td>{pkg.package_days?.length || 0} days</td>
           <td>{packageServices.length}</td>
           <td>{estimatedCosts.length ? <span title="Cheapest estimated per-person price across the saved passenger options">{estimatedCosts.map(({ currency, amount }) => `${currency} ${amount.toFixed(2)}`).join(' · ')} <small className="package-list-muted">pp from</small></span> : <span className="package-list-muted">Not available</span>}</td>
           <td>{currencies.size ? [...currencies].join(', ') : <span className="package-list-muted">—</span>}</td>
           <td>{pkg.is_available_in_library ? 'Available' : 'Private'}</td>
           <td><div className="action-buttons">
-            <button className="action-btn" title="Edit package details" onClick={() => openEdit(pkg)}><Edit3 size={16} /></button>
+            {/* Two different edits, kept apart: this opens the builder to change
+                what is inside the package, the pencil next to it only renames the
+                package and swaps its cover. */}
+            <button className="action-btn" title="Edit package contents (days, items, pricing)" onClick={() => navigate(`/packages/builder/${pkg.id}`, { state: { packageId: pkg.id, packageName: pkg.name } })}><ListTree size={16} /></button>
+            <button className="action-btn" title="Edit package name, overview or cover image" onClick={() => openEdit(pkg)}><Edit3 size={16} /></button>
             <button className="action-btn delete" title="Delete package" onClick={() => remove(pkg)}><Trash2 size={16} /></button>
           </div></td>
         </tr>;

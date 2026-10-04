@@ -20,6 +20,7 @@ import { PartnerPortal } from './pages/PartnerPortal';
 import { PartnerRegister } from './pages/PartnerRegister';
 import { PartnerLogin } from './pages/PartnerLogin';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './context/ToastContext';
 import { NavigationGuardProvider } from './context/NavigationGuardContext';
 import './App.css';
@@ -43,7 +44,8 @@ function App() {
                   <div className="app-container">
                     <Sidebar />
                     <main className="main-content">
-                      <Routes>
+                      <ErrorBoundary>
+                        <Routes>
                         <Route path="dashboard" element={<Dashboard />} />
                         <Route path="" element={<Navigate to="dashboard" replace />} />
                         <Route path="super-admin" element={<SuperAdmin />} />
@@ -64,7 +66,8 @@ function App() {
                         <Route path="users" element={<div>Users (Coming Soon)</div>} />
                         <Route path="settings" element={<Settings />} />
                         <Route path="*" element={<Navigate to="dashboard" replace />} />
-                      </Routes>
+                        </Routes>
+                      </ErrorBoundary>
                     </main>
                   </div>
                 </NavigationGuardProvider>
