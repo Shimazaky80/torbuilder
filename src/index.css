@@ -2523,9 +2523,17 @@ aside.sidebar:not(.collapsed) .logo-full {
 .package-client-list { display: grid; gap: .45rem; max-height: 260px; overflow: auto; margin: .8rem 0; padding: .7rem; border: 1px solid #e2e8f0; border-radius: 8px; }
 .package-client-list label { display: flex; align-items: center; gap: .55rem; color: #334155; font-size: .82rem; }
 .package-client-list p { margin: 0; color: #64748b; font-size: .82rem; }
-.package-export-modal { width: min(540px, calc(100vw - 32px)); }
-.package-export-options { display: grid; gap: .65rem; padding: .8rem 1.4rem; }
-.package-export-options label { display: flex; align-items: center; gap: .55rem; color: #334155; font-size: .85rem; }
+/* Export options are short radio/checkbox lists, so they sit in a two-column grid with the
+   modal capped to the viewport. Column count drops to one on narrow screens, and the grid
+   scrolls rather than pushing the Export button off the bottom. */
+.package-export-modal { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.package-export-modal .modal-header { padding-bottom: .4rem; }
+.package-export-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; align-items: start; overflow: auto; padding: .3rem 0 .4rem; }
+.package-export-options { display: grid; gap: .4rem; align-content: start; padding: .55rem .9rem; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
+.package-export-options label { display: flex; align-items: center; gap: .5rem; color: #334155; font-size: .82rem; }
+@media (max-width: 620px) {
+  .package-export-grid { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* Library Items picker rows stay on one line: the operator scans names, not
    cards, and the rate plus the day number are the only two things needed to act. */
@@ -2889,3 +2897,113 @@ aside.sidebar:not(.collapsed) .logo-full {
   color: #92400e;
   font-size: 11px;
 }
+
+/* The three published prices sit on one horizontal line in three equal columns, so
+   the only thing that differs between them is the amount. The earlier flex layout
+   let a long label push one card wider than its neighbours, which read as the
+   adult sharing price being the headline figure. */
+.package-price-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .6rem;
+}
+
+.package-price-grid > div {
+  min-width: 0;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+.package-price-grid > div > span {
+  min-height: 2.1em;
+}
+
+@media (max-width: 900px) {
+  .package-price-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .package-price-grid > div > span {
+    min-height: 0;
+  }
+}
+
+/* The package builder reuses the itinerary builder's horizontal day strip, so a long
+   package reads left to right and only the selected day is opened on the canvas. */
+.package-itinerary-canvas .day-strip {
+  margin-bottom: .75rem;
+}
+
+.package-itinerary-canvas .package-canvas-day.selected {
+  flex: 1;
+  min-height: 0;
+}
+
+/* A package is priced in one currency, so the sidebar states that rather than offering
+   a currency picker that could produce three competing totals for one holiday. */
+.package-sidebar-currency {
+  margin: .5rem 0 0;
+  padding: .45rem .6rem;
+  border-radius: 8px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: .74rem;
+}
+
+.package-sidebar-currency strong {
+  font-weight: 800;
+}
+/* Traveller bands: a band is priced at its ceiling, and where it came from is stated so a
+   rebuilt band is never mistaken for one the operator set. */
+.package-breakdown-list header { flex-wrap: wrap; gap: .5rem; }
+.package-band-auto,
+.package-band-manual { font-style: normal; font-size: .68rem; padding: .2rem .45rem; border-radius: 6px; white-space: nowrap; }
+.package-band-auto { background: #f0fdfa; color: #0f766e; border: 1px solid #ccfbf1; }
+.package-band-manual { background: #f8fafc; color: #64748b; border: 1px dashed #cbd5e1; }
+.package-band-inputs { display: inline-flex; align-items: center; gap: .3rem; margin-left: auto; font-size: .72rem; color: #64748b; }
+.package-band-inputs input { width: 58px; padding: .3rem .4rem; border: 1px solid #cbd5e1; border-radius: 6px; font: inherit; }
+
+/* Editing one band's itinerary. A line that belongs to a single band is tinted, so it is
+   obvious at a glance that removing it here does not touch the other bands. */
+.package-canvas-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.package-band-scope { display: flex; align-items: center; gap: .4rem; font-size: .72rem; color: #64748b; font-weight: 700; }
+.package-band-scope select { padding: .4rem .55rem; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #1e293b; font: inherit; font-weight: 400; }
+.package-band-scope-note { margin: .1rem 0 .7rem; padding: .55rem .7rem; border-left: 3px solid #0d7478; background: #f0fdfa; color: #0f766e; font-size: .76rem; line-height: 1.45; }
+.package-canvas-service.band-only { background: #f0fdfa; border-color: #99f6e4; }
+.package-band-flag { display: inline-block; font-size: .66rem; font-weight: 700; padding: .12rem .4rem; border-radius: 5px; background: #ccfbf1; color: #0f766e; }
+.package-band-flag.shared { background: #f1f5f9; color: #64748b; }
+.package-band-flag.other { background: #fff7ed; color: #9a5b13; }.package-band-derived-note { margin-left: auto; font-size: .68rem; color: #94a3b8; white-space: nowrap; }
+.package-band-derived-note + .package-band-inputs { margin-left: .6rem; }
+/* Seating capacity, shown on the library card so the right vehicle can be chosen without
+   opening the item. Deliberately quieter than the category tag so it reads as a spec, not a
+   label. */
+.item-capacity-tag {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  white-space: nowrap;
+}.package-currency-field select { width: 100%; padding: .65rem .7rem; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #1e293b; font: inherit; }
+.package-currency-field select:disabled { background: #f8fafc; color: #64748b; cursor: not-allowed; }
+.package-currency-help { font-size: .74rem; font-weight: 400; color: #64748b; line-height: 1.4; }.package-band-blocked { margin: .1rem 0 .9rem; padding: .7rem .85rem; border: 1px solid #fecaca; border-left: 3px solid #b91c1c; border-radius: 9px; background: #fef2f2; color: #7f1d1d; font-size: .78rem; line-height: 1.45; }
+.package-band-blocked strong { display: block; font-size: .84rem; color: #991b1b; }
+.package-band-blocked p { margin: .25rem 0 .4rem; }
+.package-band-blocked ul { margin: 0; padding-left: 1.1rem; }
+.package-band-blocked li + li { margin-top: .2rem; }
+.package-band-blocked b { margin-right: .35rem; color: #991b1b; }
+.package-band-suggestions { margin: .1rem 0 .9rem; padding: .7rem .85rem; border: 1px solid #bfdbfe; border-left: 3px solid #1d4ed8; border-radius: 9px; background: #eff6ff; color: #1e3a8a; font-size: .78rem; line-height: 1.45; }
+.package-band-suggestions strong { display: block; font-size: .84rem; color: #1e40af; }
+.package-band-suggestions p { margin: .25rem 0 .5rem; }
+.package-band-suggestion-list { display: flex; flex-wrap: wrap; gap: .4rem; }
+.package-price-note { margin: .4rem 0 0; font-size: .76rem; color: #64748b; line-height: 1.45; }
+.package-export-subhead { margin-bottom: -.05rem; font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #0d7478; }
+.package-export-subhead + .package-export-subhead { margin-top: .5rem; }
+.package-export-hint { margin: .1rem 0 0; font-size: .72rem; color: #64748b; line-height: 1.4; }
+.package-price-note { margin: .4rem 0 0; font-size: .76rem; color: #64748b; line-height: 1.45; }
+.package-price-grid > div.package-price-party { background: #f0fdf4; border: 1px solid #bbf7d0; }
+.package-price-grid > div.package-price-party span,
+.package-price-grid > div.package-price-party small { color: #166534; }
+.package-price-grid > div.package-price-party strong { color: #15803d; }

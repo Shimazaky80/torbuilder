@@ -5665,6 +5665,13 @@ const missing = !sv.confirmationNumber ||
                     </div>
                     <div className="draggable-item-meta">
                       <span className="item-cat-tag">{item.category || 'General'}</span>
+                      {/* Shown only where capacity actually matters, so an operator picking a
+                          vehicle can size the party to it without opening the item. */}
+                      {isVehicleServiceItem(item) && (
+                        <span className="item-capacity-tag" title={`Seats ${Number(item?.capacity ?? item?.max_occupancy ?? item?.maxOccupancy)} travellers`}>
+                          Max: {Number(item?.capacity ?? item?.max_occupancy ?? item?.maxOccupancy)}
+                        </span>
+                      )}
                       <span className="item-price-tag">{fmtMoney(price, currencySymbol)}<span style={{ color: '#94a3b8', fontWeight: 500 }}>{` ${priceUnit}`}</span></span>
                     </div>
                     <div className="draggable-item-supplier">

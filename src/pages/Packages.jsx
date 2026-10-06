@@ -2,27 +2,34 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Backpack, Search, Plus, Edit3, ListTree, Trash2, X, ImagePlus } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../hooks/useConfirm';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { packageBandLabel } from '../lib/packagePricing';
 
-const emptyDraft = () => ({ name: '', description: '', cover: null, clearCover: false });
+const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false });
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 const flatBasis = (basis) => /per_trip|per_vehicle|per_room|flat/i.test(String(basis || ''));
 const estimatePackage = (pkg) => {
   const days = pkg.package_days || [];
-  const services = days.flatMap((day) => day.package_day_items || []).filter((item) => item.is_included !== false);
-  const currencies = [...new Set(services.map((item) => item.currency_code || 'ZAR'))];
+  const allItems = days.flatMap((day) => day.package_day_items || []);
+  /* This is a "from" figure, so it cannot resolve a band's own itinerary: band-only lines
+     are left out rather than charged to every band, which would overstate the price. */
+  const services = allItems.filter((item) => item.is_included !== false && !item.tier_key);
+  const currencies = [...new Set(allItems.map((item) => item.currency_code || 'ZAR'))];
   const passengerOptions = pkg.package_pax_options || [];
   if (!services.length || !passengerOptions.length) return [];
   return currencies.map((currency) => {
     const estimates = passengerOptions.map((option) => {
-      const pax = Math.max(1, Number(option.pax) || Number(option.adults || 0) + Number(option.children || 0));
+      /* A band is quoted at its ceiling, so that is the party size it is priced for. */
+      const pax = Math.max(1, Number(option.max_pax) || Number(option.pax) || Number(option.adults || 0) + Number(option.children || 0));
       const total = services.filter((item) => (item.currency_code || 'ZAR') === currency).reduce((sum, item) => {
         const quantity = Number(item.quantity) || 1;
         const unitPrice = Number(item.unit_price) || 0;
         if (String(item.rate_basis || '').toLowerCase() === 'per_vehicle') {
-          const vehicleCount = Math.ceil(pax / Math.max(1, Number(item.vehicle_capacity) || pax));
+          const capacity = Math.max(1, Number(item.vehicle_capacity) || 0);
+          const vehicleCount = capacity >= pax ? 1 : Math.ceil(pax / capacity);
           return sum + unitPrice * quantity * vehicleCount / pax;
         }
         return sum + (flatBasis(item.rate_basis) ? unitPrice * quantity / pax : unitPrice * quantity);
@@ -45,6 +52,7 @@ export const Packages = () => {
   const [editingPkg, setEditingPkg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
+  const { currencies } = useCurrencies();
   const lastLoadError = useRef('');
 
   const load = useCallback(async () => {
@@ -125,9 +133,39 @@ export const Packages = () => {
     return supabase.storage.from('contracts').getPublicUrl(path).data.publicUrl;
   };
 
+  /* A package already carrying priced services cannot be moved to another currency. Doing
+     so would leave every saved line in the old currency while the package claimed the new
+     one, which is the exact state the one-currency rule exists to prevent. */
+  const currenciesAlreadyUsed = (pkg) => [...new Set((pkg?.package_days || [])
+    .flatMap((day) => day.package_day_items || [])
+    .filter((item) => item.is_included !== false && item.currency_code)
+    .map((item) => String(item.currency_code).toUpperCase()))];
+
+  /* Currencies the company has switched on, with the draft's own choice kept in the list so a
+   package saved under a currency that has since been deactivated still shows it selected
+   rather than silently reading as something else. */
+const currencyOptions = useMemo(() => {
+  const known = currencies.map((currency) => ({
+    code: String(currency.code || '').toUpperCase(),
+    name: currency.name || currency.code || ''
+  })).filter((currency) => currency.code);
+  const chosen = String(draft.currency || '').toUpperCase();
+  return known.some((currency) => currency.code === chosen)
+    ? known
+    : [...known, { code: chosen || 'ZAR', name: 'No longer active' }];
+}, [currencies, draft.currency]);
+
+const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
+
   const openEdit = (pkg) => {
     setEditingPkg(pkg);
-    setDraft({ name: pkg.name || '', description: pkg.description || '', cover: null, clearCover: false });
+    setDraft({
+      name: pkg.name || '',
+      description: pkg.description || '',
+      currency: String(pkg.currency_code || 'ZAR').toUpperCase(),
+      cover: null,
+      clearCover: false
+    });
     setModal(true);
   };
 
@@ -135,6 +173,11 @@ export const Packages = () => {
     event.preventDefault();
     if (!companyId) { showToast('Company not found', 'error'); return; }
     if (!draft.name.trim()) { showToast('Enter a package name', 'warning'); return; }
+    const currency = String(draft.currency || 'ZAR').trim().toUpperCase();
+    if (lockedCurrencies.length && !lockedCurrencies.includes(currency)) {
+      showToast(`This package already has ${lockedCurrencies.join(', ')} priced on it, so it cannot be changed to ${currency}. Remove those services first, or create a new package.`, 'warning');
+      return;
+    }
     setSaving(true);
     try {
       if (editingPkg) {
@@ -144,6 +187,7 @@ export const Packages = () => {
         const { error: updateErr } = await supabase.from('packages').update({
           name: draft.name.trim(),
           description: draft.description.trim(),
+          currency_code: currency,
           cover_image_url: coverUrl,
           default_markup_percentage: 0
         }).eq('id', editingPkg.id).eq('company_id', companyId);
@@ -152,6 +196,7 @@ export const Packages = () => {
       }
       const { data: pkg, error } = await supabase.from('packages').insert({
         company_id: companyId, name: draft.name.trim(), description: draft.description,
+        currency_code: currency,
         default_markup_percentage: 0
       }).select().single();
       if (error) throw error;
@@ -201,10 +246,15 @@ export const Packages = () => {
         const pax = pkg.package_pax_options || [];
         const packageServices = (pkg.package_days || []).flatMap((day) => day.package_day_items || []);
         const estimatedCosts = estimatePackage(pkg);
+        /* A band is one exact party size, so the label comes straight from the pricing engine rather
+           than being rebuilt here. */
+        const bandLabels = pax.map((x) => packageBandLabel({
+          pax: Number(x.pax) || Number(x.max_pax) || Number(x.adults || 0) + Number(x.children || 0)
+        })).sort();
         return <tr key={pkg.id}>
           <td><button type="button" className="package-list-name" onClick={() => navigate(`/packages/view/${pkg.id}`)}>{pkg.name}</button></td>
           <td>{periods.length ? periods.map((p) => `${dateLabel(p.valid_from)} – ${dateLabel(p.valid_to)}`).join('; ') : <span className="package-list-muted">Not set</span>}</td>
-          <td>{pax.length ? pax.map((x) => `${Number(x.pax) || Number(x.adults || 0) + Number(x.children || 0)} pax`).join(', ') : <span className="package-list-muted">Not set</span>}</td>
+          <td>{bandLabels.length ? bandLabels.join(', ') : <span className="package-list-muted">Not set</span>}</td>
           <td>{pkg.package_days?.length || 0} days</td>
           <td>{packageServices.length}</td>
           <td>{estimatedCosts.length ? <span title="Cheapest estimated per-person price across the saved passenger options">{estimatedCosts.map(({ currency, amount }) => `${currency} ${amount.toFixed(2)}`).join(' · ')} <small className="package-list-muted">pp from</small></span> : <span className="package-list-muted">Not available</span>}</td>
@@ -228,6 +278,14 @@ export const Packages = () => {
       <div className="modal-header"><div><h2>{editingPkg ? 'Edit Package' : 'Create Package'}</h2><p>{editingPkg ? 'Update the package name, overview, or cover image.' : 'Add the basic details, then build the package.'}</p></div><button type="button" className="close-btn" onClick={() => { setModal(false); setEditingPkg(null); }} disabled={saving}><X size={20} /></button></div>
       <div className="package-form-scroll">
         <label className="package-field"><span>Package name *</span><input required maxLength={160} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Cape Winelands Escape" /></label>
+        <label className="package-field package-currency-field"><span>Package currency *</span>
+          <select required value={draft.currency} disabled={lockedCurrencies.length > 0} title={lockedCurrencies.length ? 'This package already has priced services in this currency, so it cannot change.' : 'The package is priced in this currency. The builder only offers library items priced in it.'} onChange={(e) => setDraft({ ...draft, currency: e.target.value.toUpperCase() })}>
+            {currencyOptions.map((currency) => <option key={currency.code} value={currency.code}>{currency.code} - {currency.name}</option>)}
+          </select>
+          <small className="package-currency-help">{lockedCurrencies.length
+            ? `Locked to ${lockedCurrencies.join(', ')}: the package already has services priced in it.`
+            : 'A package is priced in one currency. The builder only offers library items priced in this one.'}</small>
+        </label>
         <label className="package-field"><span>Overview description (optional)</span><textarea rows={3} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} placeholder="A short overview of this package" /></label>
         <label className="package-upload"><ImagePlus size={19} /><span>Cover image (optional)</span><input type="file" accept="image/*" onChange={(e) => setDraft({ ...draft, cover: e.target.files?.[0] || null, clearCover: false })} />{draft.cover && <small>{draft.cover.name}</small>}</label>
         {!draft.cover && editingPkg?.cover_image_url && !draft.clearCover && <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>

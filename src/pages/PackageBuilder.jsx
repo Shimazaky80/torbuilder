@@ -1,29 +1,45 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
-  ArrowLeft, Backpack, Baby, CalendarDays, Check, ChevronDown, Download, FileText,
+  ArrowLeft, Backpack, Baby, CalendarDays, ChevronDown, Download, FileText,
   GripVertical, Plus, Save, Search, Trash2, X
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { usePageGuard } from '../context/NavigationGuardContext';
-import { useCurrencies } from '../hooks/useCurrencies';
 import {
   accommodationRoomPlan,
   calculatePackageTravellerBreakdown,
   largestTravellerPattern,
   normaliseChildAgeRange,
   PACKAGE_MAX_CHILD_AGE,
+packageBandCapacityError,
+  packageBandLabel,
+  packageBandPax,
+  packageBandSuggestions,
   packageChildAgeRange,
-  packageItemCapacityError,
-  packageRateForDates,
-  packageSeasonResolution
+  applyPackageMarkup,
+  packageCurrencyFor,
+  packageKey,
+  packageMarkupPercent,
+  packageItemCapacitySetupError,
+  packageVehicleCapacity,
+packageAutoBandKey,
+packageIsTransport,
+packageTransportSummary,
+packageRateForDates,
+  packageSeasonResolution,
+  packageTierDays
 } from '../lib/packagePricing';
+
+const uuid = packageKey;
 
 const round = (value) => Math.round((Number(value) || 0) * 100) / 100;
 const money = (value, code) => `${code} ${round(value).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const nameOf = (client) => client?.name || 'Unnamed client';
-const currencyMatches = (rate, code) => !code || String(rate?.currency || '').toUpperCase() === String(code).toUpperCase();
+/* Bands read smallest party first. Every band is the operator's: the vehicles only ever
+   suggest party sizes, so there is nothing for a rebuild to take back off them. */
+const byBandMin = (a, b) => packageBandPax(a) - packageBandPax(b);const currencyMatches = (rate, code) => !code || String(rate?.currency || '').toUpperCase() === String(code).toUpperCase();
 const destinationsOf = (item) => [...new Set([
   item?.destination_region, item?.destination_area, item?.location
 ].map((destination) => String(destination || '').trim()).filter(Boolean))];
@@ -83,7 +99,6 @@ export const PackageBuilder = () => {
   const { packageId } = useParams();
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { currencies } = useCurrencies();
   const [companyId, setCompanyId] = useState(null);
   const [pkg, setPkg] = useState(null);
   const [form, setForm] = useState(initialForm);
@@ -96,12 +111,12 @@ export const PackageBuilder = () => {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [destinationFilter, setDestinationFilter] = useState('');
-  const [currencyFilter, setCurrencyFilter] = useState('');
-  const [currencyOpen, setCurrencyOpen] = useState(false);
-  const [currencySearch, setCurrencySearch] = useState('');
   const [results, setResults] = useState([]);
-  const [selectedDay, setSelectedDay] = useState(0);
-  const [tab, setTab] = useState('itinerary');
+const [selectedDay, setSelectedDay] = useState(0);
+const [tab, setTab] = useState('itinerary');
+/* Which band the Itinerary tab is being edited as. Empty string means the shared base
+   itinerary that every band uses. */
+const [bandScope, setBandScope] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   /* Pricing Protection, read from the same tenant setting the itinerary builder uses,
@@ -109,7 +124,11 @@ export const PackageBuilder = () => {
   const [protectionPercent, setProtectionPercent] = useState(0);
   const [lastSaved, setLastSaved] = useState('');
   const [exportDialog, setExportDialog] = useState(false);
-  const [exportOptions, setExportOptions] = useState({ cover: true, inclusions: true, terms: true });
+  /* bandPrice is which figure leads the band section. 'party' shows what the whole party pays,
+   which is the number that has to recover the vehicle; 'perPerson' shows the per-adult
+   share, which is how a client is normally quoted. Either way the party total stays on the
+   card, because a per-person price on its own is what made a small party look under-quoted. */
+  const [exportOptions, setExportOptions] = useState({ cover: true, inclusions: true, terms: true, explainPricing: false, bandPrices: true, bandPrice: 'party', bandSelection: 'all', showVehicleOptions: false, partyCard: 'both', audience: 'client' });
   const [exportFormat, setExportFormat] = useState('pdf');
   const [clientSelectOpen, setClientSelectOpen] = useState(false);
   const [clientQuery, setClientQuery] = useState('');
@@ -155,7 +174,7 @@ export const PackageBuilder = () => {
       let loadedClients = [];
       let assignedClientIds = [];
       const [clientsRes, assignmentsRes] = await Promise.all([
-        supabase.from('clients').select('id, name').eq('company_id', profile.company_id).order('name'),
+        supabase.from('clients').select('id, name, markup_percentage').eq('company_id', profile.company_id).order('name'),
         supabase.from('package_client_assignments').select('client_id').eq('company_id', profile.company_id).eq('package_id', packageId)
       ]);
       if (clientsRes.error || assignmentsRes.error) {
@@ -249,7 +268,7 @@ export const PackageBuilder = () => {
     let active = true;
     const timer = setTimeout(async () => {
       const term = search.trim();
-      if (!companyId || (term.length > 0 && term.length < 2 && !categoryFilter && !currencyFilter)) {
+      if (!companyId || (term.length > 0 && term.length < 2 && !categoryFilter)) {
         if (active) setResults([]);
         return;
       }
@@ -288,7 +307,7 @@ export const PackageBuilder = () => {
       active = false;
       clearTimeout(timer);
     };
-  }, [search, categoryFilter, currencyFilter, companyId, showToast]);
+  }, [search, categoryFilter, companyId, showToast]);
 
   const categoryOptions = useMemo(() => [...new Set([
     ...DEFAULT_CATEGORIES,
@@ -300,23 +319,24 @@ export const PackageBuilder = () => {
     ...results.flatMap(destinationsOf)
   ])].sort((a, b) => a.localeCompare(b)), [destinationCatalog, results]);
 
-  const currencyOptions = useMemo(() => {
-    const options = new Map(currencies.map((currency) => [currency.code, currency]));
-    results.flatMap((item) => item.item_rates || []).forEach((rate) => {
-      const code = String(rate.currency || '').toUpperCase();
-      if (code && !options.has(code)) {
-        options.set(code, { code, name: code, symbol: code });
-      }
-    });
-    return [...options.values()].filter((currency) => !currencySearch
-      || `${currency.code} ${currency.name} ${currency.symbol}`.toLowerCase().includes(currencySearch.trim().toLowerCase()));
-  }, [currencies, results, currencySearch]);
+/* The currency chosen when the package was created, so the sidebar can filter the library
+   before a single service has been added. Falling back to the first included service covers
+   packages created before the currency was chosen. */
+const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
 
+  /* A package is priced in one currency, so the sidebar filters the library down to the
+     rates that can actually go into this package rather than offering a currency picker
+     that produced three competing totals. The currency is set by the first service added
+     and reported next to the search box. */
   const visibleResults = useMemo(() => results.filter((item) => {
     if (destinationFilter && !destinationsOf(item).includes(destinationFilter)) return false;
-    if (currencyFilter && !(item.item_rates || []).some((rate) => currencyMatches(rate, currencyFilter))) return false;
+    /* An item with no rate in the package's currency cannot be priced into this package at
+       all, so it is hidden rather than listed as unavailable: with one currency per package
+       it is clutter, not information. Before the first service is added there is no currency
+       yet, and everything stays visible so the first pick can set it. */
+    if (packageCurrency && !(item.item_rates || []).some((entry) => currencyMatches(entry, packageCurrency))) return false;
     return true;
-  }), [results, destinationFilter, currencyFilter]);
+  }), [results, destinationFilter, packageCurrency]);
 
   const selectedClients = useMemo(() => clients.filter((client) => form.assignedClientIds.includes(client.id)), [clients, form.assignedClientIds]);
   const visibleClients = useMemo(() => {
@@ -340,9 +360,39 @@ export const PackageBuilder = () => {
     [itemForService]
   );
 
-  /* Rooms are worked out from the party size rather than entered by hand. The
-     biggest configured traveller pattern is the party the package is sized for. */
-  const autoPattern = useMemo(() => largestTravellerPattern(paxOptions), [paxOptions]);
+  /* A band is one exact party size and always belongs to the operator: the vehicles in the
+     itinerary only ever SUGGEST party sizes, so nothing here is derived and nothing can be
+     taken away when a vehicle is added or removed.
+
+     A suggestion the operator accepts gets the stable key for its party size, so accepting
+     the same suggestion again after deleting it reattaches to the same key rather than
+     orphaning any band services that pointed at it. */
+  const bandSuggestions = useMemo(
+    () => packageBandSuggestions(days, library, paxOptions),
+    [days, library, paxOptions]
+  );
+  const mergedBands = useMemo(() => [...paxOptions].sort(byBandMin), [paxOptions]);
+
+  const acceptBandSuggestion = (pax) => {
+    /* Only the transport this band would actually be given counts here. Asking the whole
+       package instead would reject the band because some other band owns a smaller bus. */
+    const capacityError = packageBandCapacityError(days, library, { pax });
+    if (capacityError) {
+      showToast(capacityError, 'warning');
+      return;
+    }
+    setPaxOptions((previous) => [...previous, {
+      pax,
+      min_pax: pax,
+      max_pax: pax,
+      item_key: packageAutoBandKey(pax),
+      is_auto_generated: false
+    }].sort(byBandMin));
+  };
+
+  /* Rooms are worked out from the party size rather than entered by hand. The widest band
+     is the largest party the package has to sleep, so that band sizes the accommodation. */
+  const autoPattern = useMemo(() => largestTravellerPattern(mergedBands), [mergedBands]);
   const autoRoomsFor = useCallback(
     (service) => (isStay(service) ? accommodationRoomPlan(service, itemForService(service), autoPattern).roomCount : null),
     [isStay, itemForService, autoPattern]
@@ -352,9 +402,13 @@ export const PackageBuilder = () => {
     [itemForService, autoPattern]
   );
 
-  const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextPax = paxOptions, nextForm = form) => {
-    if (!companyId || !pkg) return false;
-    const validPeriods = nextPeriods.filter((period) => period.valid_from && period.valid_to);
+const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextPax = mergedBands, nextForm = form) => {
+   if (!companyId || !pkg) return false;
+   const validPeriods = nextPeriods.filter((period) => period.valid_from && period.valid_to);
+   /* Resolved from the client records rather than the component state so a save always
+      stamps the same figure the pricing cards are showing, even when triggered by an
+      autosave that has not re-rendered yet. */
+   const assignedMarkup = packageMarkupPercent(clients.filter((client) => nextForm.assignedClientIds.includes(client.id)));
     if (nextPeriods.some((period) => Boolean(period.valid_from) !== Boolean(period.valid_to))) {
       showToast('Complete both dates for each validity period, or remove the incomplete row.', 'warning');
       return false;
@@ -394,8 +448,11 @@ export const PackageBuilder = () => {
         child_age_ranges: nextForm.acceptsChildren && nextForm.childAgeRange
           ? [normaliseChildAgeRange(nextForm.childAgeRange)]
           : [],
-        default_markup_percentage: 0
-      }).eq('id', pkg.id).eq('company_id', companyId);
+default_markup_percentage: assignedMarkup,
+  /* Kept in step with the currency chosen at creation. It is not editable here: the modal
+     owns it, and only while the package has no priced services. */
+  currency_code: packageCurrency
+  }).eq('id', pkg.id).eq('company_id', companyId);
       if (packageError) throw packageError;
 
       const { error: assignmentDeleteError } = await supabase.from('package_client_assignments')
@@ -429,13 +486,19 @@ export const PackageBuilder = () => {
           currency_code: service.currency_code || 'ZAR',
           rate_basis: service.rate_basis || 'per_person',
           unit_cost: Number(service.unit_cost) || 0,
-          unit_price: Number(service.unit_cost) || 0,
-          markup_percentage: 0,
+          unit_price: applyPackageMarkup(Number(service.unit_cost) || 0, assignedMarkup),
+          markup_percentage: assignedMarkup,
           is_included: service.is_included !== false,
           notes: service.notes || null,
           sort_order: sortOrder,
           quantity: autoRoomsFor(service) ?? Math.max(1, Number(service.quantity) || 1),
           vehicle_capacity: Number(service.vehicle_capacity) || null,
+          /* Stable identity for the line. A band item points at the base item it replaces
+             by this key, and both sides have to survive the delete-and-reinsert that
+             persist() does to the whole package on every save. */
+          item_key: service.item_key || uuid(),
+          tier_key: service.tier_key || null,
+          replaces_item_key: service.replaces_item_key || null,
           rate_snapshot: service.rate_snapshot || {},
           /* Kept on the line so a protected price stays explainable after the save,
              exactly as it is on the itinerary. */
@@ -461,9 +524,27 @@ export const PackageBuilder = () => {
       if (paxDeleteError) throw paxDeleteError;
       if (nextPax.length) {
         const { error: paxError } = await supabase.from('package_pax_options').insert(
-          /* pax is the single party size. adults/children are kept as a mirror so
-             anything still reading the old columns sees the same party. */
-          nextPax.map(({ pax }) => ({ package_id: pkg.id, pax, adults: pax, children: 0 }))
+          /* pax is the party's exact headcount: a vehicle is paid for in full by the travellers in it,
+             so the band total comes back to the contracted cost exactly.
+             adults/children are kept
+             as a mirror so anything still reading the old columns sees the same party.
+
+             item_key is generated on the client and written through unchanged: persist()
+             recreates every row id on each save, so band membership is linked by this key
+             and would dangle if it were a foreign key. */
+          nextPax.map((band) => ({
+            package_id: pkg.id,
+            item_key: band.item_key || uuid(),
+            pax: packageBandPax(band),
+            adults: packageBandPax(band),
+            children: 0,
+            /* A band is one exact party size, so both columns carry the same number. They
+               are still written because the columns are not null and are read by the
+               Packages list when it needs a party size. */
+            min_pax: packageBandPax(band),
+            max_pax: packageBandPax(band),
+            is_auto_generated: false
+          }))
         );
         if (paxError) throw paxError;
       }
@@ -491,7 +572,7 @@ export const PackageBuilder = () => {
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, paxOptions, form, library, autoRoomsFor, protectionPercent, showToast]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, clients, packageCurrency, showToast]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -501,7 +582,7 @@ export const PackageBuilder = () => {
      resulting figure only. A different season can still be picked on the day
      row once the item has landed. */
   const rateForDates = (item) => {
-    const eligible = (item.item_rates || []).filter((entry) => currencyMatches(entry, currencyFilter));
+    const eligible = (item.item_rates || []).filter((entry) => currencyMatches(entry, packageCurrency));
     const covering = packageRateForDates(item, periods);
     return (covering && eligible.find((entry) => entry.id === covering.id))
       || eligible[0];
@@ -515,17 +596,29 @@ export const PackageBuilder = () => {
   const seasonFor = (item, rate) => packageSeasonResolution({
     item, rate, periods, currencyCode: rate?.currency || item?.currency || '', protectionPercent
   });
-  const addService = (item, rateId, dayIndex = selectedDay) => {
+  const addService = (item, rateId, dayIndex = selectedDay, scope = {}) => {
     const rate = rateId
       ? (item.item_rates || []).find((entry) => entry.id === rateId) || rateForDates(item)
       : rateForDates(item);
     if (!rate) {
-      showToast(currencyFilter
-        ? `This library item has no contract rate in ${currencyFilter}. Choose another currency or add the rate in Library Items.`
+      showToast((item.item_rates || []).length
+        ? `This library item has no contract rate in ${packageCurrency}, which is what this package is priced in. Add the rate in Library Items, or pick an item priced in ${packageCurrency}.`
         : 'This library item has no loaded contract rates. Add a rate in Library Items first.', 'warning');
       return;
     }
-    const capacityError = packageItemCapacityError(item, rate, paxOptions);
+    /* New lines are stamped with the partner markup in force at the moment they are
+       added, so the saved sell price always matches the cards on screen. */
+    const assignedMarkup = packageMarkupPercent(selectedClients);
+    if (String(rate.currency || item.currency || packageCurrency).toUpperCase() !== String(packageCurrency).toUpperCase()) {
+      showToast(`This package is priced in ${packageCurrency}. ${item.name} only has a ${rate.currency} rate, which would make the package total meaningless.`, 'warning');
+      return;
+    }
+    /* Whether this item is fit to be in a package at all. Whether it is big enough is not
+       asked here: a package is loaded one vehicle at a time, so every vehicle set is
+       incomplete until the last one is in, and a check against the bands would block the
+       first small vehicle of the set. "Does the party fit" is answered per band by
+       packageBandCapacityError, which is shown against the band that cannot be served. */
+    const capacityError = packageItemCapacitySetupError(item, rate);
     if (capacityError) {
       showToast(capacityError, 'warning');
       return;
@@ -541,21 +634,25 @@ export const PackageBuilder = () => {
     const unitCost = Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0;
     const isStayItem = /accommodation/i.test(String(item.category || ''));
     const service = {
-      item_id: item.id,
-      rate_id: rate.id,
+      item_key: uuid(),
+      item_id: item.id,      rate_id: rate.id,
       item_name: item.name,
       category: item.category || '',
       supplier_name: item.supplier_name || '',
       currency_code: rate.currency || item.currency || 'ZAR',
       rate_basis: rate.rate_basis || item.pricing_model || 'per_person',
       unit_cost: unitCost,
-      unit_price: unitCost,
-      markup_percentage: 0,
+      unit_price: applyPackageMarkup(unitCost, assignedMarkup),
+      markup_percentage: assignedMarkup,
       quantity: isStayItem
         ? accommodationRoomPlan({ ...item, rate_id: rate.id }, item, autoPattern).roomCount
         : 1,
       is_included: true,
       vehicle_capacity: Number(item.max_occupancy) || Number(rate.max_occupancy) || 0,
+      /* A band scope on the itinerary tab makes this line belong to that band alone, which
+         is how a band gets an extra excursion without every other band paying for it. */
+      tier_key: scope.tier_key || null,
+      replaces_item_key: scope.replaces_item_key || null,
       rate_snapshot: storedRate,
       price_protection_percent: season.protectionPercent || 0,
       protected_season_name: season.status === 'protected' ? season.seasonName : ''
@@ -617,6 +714,46 @@ export const PackageBuilder = () => {
     services: day.services.filter((_, itemIndex) => itemIndex !== serviceIndex)
   }));
 
+  /* -------------------------------------------------------------------------
+     EDITING ONE BAND'S ITINERARY
+     -------------------------------------------------------------------------
+     A band sometimes needs a different itinerary: another excursion, a different lodge,
+     or it simply does not pay for the saloon. Those are exceptions to the shared base
+     itinerary, and they are edited by picking a band at the top of the Itinerary tab and
+     working as if that band were the package. Adding a service then adds it for that band
+     only, and removing a shared service records that this band does not have it - the
+     other bands are untouched, which is the whole reason this stops being a copy-paste.
+
+     Two vehicles on the same day need none of this: they are priced as alternatives, so
+     the band picks the smallest one that seats it. */
+  const scopedServicesFor = (day) => (bandScope
+    ? packageTierDays([day], { item_key: bandScope, pax: packageBandPax(mergedBands.find((band) => band.item_key === bandScope) || {}) }, library)[0]?.services || []
+    : (day?.services || []).filter((service) => service?.is_included !== false));
+
+  const rawIndexOf = (dayIndex, service) => (days[dayIndex]?.services || []).findIndex((entry) => (
+    service?.item_key && entry.item_key ? entry.item_key === service.item_key : entry === service
+  ));
+
+  /* Writing to a band: a service the band does not have is recorded as an exclusion of the
+     shared item rather than by deleting the shared item, so the other bands keep it. */
+  const removeServiceForBand = (dayIndex, service, bandKey) => {
+    if (service?.tier_key) {
+      removeService(dayIndex, rawIndexOf(dayIndex, service));
+      return;
+    }
+    setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
+      ...day,
+      services: [...day.services, {
+        ...service,
+        item_key: uuid(),
+        tier_key: bandKey,
+        replaces_item_key: service.item_key || null,
+        is_included: false,
+        notes: `Not included in the ${packageBandLabel(mergedBands.find((band) => band.item_key === bandKey) || {})} band`
+      }]
+    }));
+  };
+
   const moveService = (fromDay, fromIndex, toDay) => setDays((previous) => {
     if (!previous[fromDay] || !previous[toDay]) return previous;
     const service = previous[fromDay].services[fromIndex];
@@ -635,14 +772,57 @@ export const PackageBuilder = () => {
     });
   };
 
-  /* One price per traveller pattern and currency. The child age range is passed in
-     because a child is priced once, against the accommodation, and that same figure
-     feeds the child card in this breakdown and the Children tab. */
-  const childRange = packageChildAgeRange(form.childAgeRange);
-  const breakdown = useMemo(() => paxOptions.map((pattern) => ({
-    ...pattern,
-    currencies: calculatePackageTravellerBreakdown({ days, pattern, library, childRange })
-  })), [paxOptions, days, library, childRange]);
+  /* The strip shows each day as a card so a long package reads left to right instead
+     of as one tall stack. The strip card carries the same three facts as the
+     itinerary builder's day card: which day it is, a label, and the count and value. */
+  const dayTotal = (day) => (day?.services || [])
+    .filter((service) => service.is_included !== false)
+    .reduce((total, service) => total + Number(service.unit_price || service.unit_cost || 0) * Number(service.quantity || 1), 0);
+
+  const dayValueCurrency = (day) => (day?.services || []).find((service) => service.is_included !== false)?.currency_code || 'ZAR';
+
+  const dayDayLabel = (day) => {
+    const firstLine = String(day?.notes || '').split('\n').find((line) => line.trim());
+    if (firstLine) return firstLine.trim().slice(0, 28);
+    const places = (day?.services || []).map((service) => service.category).filter(Boolean);
+    return [...new Set(places)].slice(0, 2).join(', ') || 'No items yet';
+  };
+
+  /* One price per traveller pattern, in the package's single currency. The child age
+     range is passed in because a child is priced once, against the accommodation, and
+     that same figure feeds the child card here and the Children tab. */
+const childRange = packageChildAgeRange(form.childAgeRange);
+  /* A package assigned to a partner is priced at that client's default markup, the same
+     figure the itinerary builder applies. With several partners attached the highest
+     markup is used so the package is never under-quoted to one of them, and the note
+     on the client tab says which figure is in play. */
+  const markupPercent = useMemo(
+    () => packageMarkupPercent(selectedClients),
+    [selectedClients]
+  );
+  /* Each band is priced off ITS OWN services and off its own party size, which is what lets one
+     package sell 3 pax in a saloon and 10 pax in a microbus without being copied.
+     packageTierDays is what keeps the other vehicle out of the band's price. */
+  const breakdown = useMemo(() => mergedBands.map((band) => ({
+    ...band,
+    capacityError: packageBandCapacityError(days, library, band),
+    pricing: calculatePackageTravellerBreakdown({
+      days: packageTierDays(days, band, library),
+      pattern: band,
+      library,
+      childRange,
+      markupPercent
+    })
+  })), [mergedBands, days, library, childRange, markupPercent]);
+
+  /* The bands no vehicle in the itinerary can take. Loading a vehicle set is deliberately
+     not blocked as it goes, because every set is incomplete until the last vehicle is in,
+     so this is the one place that says "this package cannot be quoted yet" instead of
+     leaving it to be noticed on a card further down the tab. */
+  const unservableBands = useMemo(
+    () => breakdown.filter((band) => band.capacityError).map((band) => ({ label: packageBandLabel(band), error: band.capacityError })),
+    [breakdown]
+  );
 
   const setChildRange = (range) => setForm((previous) => ({ ...previous, childAgeRange: range }));
   const changeChildRange = (field, value) => setChildRange(normaliseChildAgeRange({
@@ -650,25 +830,106 @@ export const PackageBuilder = () => {
     [field]: value
   }));
 
-  /* The child price does not move with the party size, so it is priced off the
-     biggest pattern and shown once on the Children tab. */
-  const childBreakdown = useMemo(() => calculatePackageTravellerBreakdown({
-    days,
-    library,
-    childRange,
-    pattern: largestTravellerPattern(paxOptions)
-  }), [days, library, childRange, paxOptions]);
+  /* The child price does not move with the party size, so it is priced off the biggest
+     band and shown once on the Children tab. It is priced off that band's own services:
+     the child of a 3 pax booking is not sitting in the microbus. */
+  const childBreakdown = useMemo(() => {
+    const biggest = mergedBands.length
+      ? mergedBands.reduce((top, band) => (packageBandPax(band) > packageBandPax(top) ? band : top), mergedBands[0])
+      : null;
+    return calculatePackageTravellerBreakdown({
+      days: packageTierDays(days, biggest, library),
+      library,
+      childRange,
+      markupPercent,
+      pattern: largestTravellerPattern(biggest ? [biggest] : [])
+    });
+  }, [days, library, childRange, markupPercent, mergedBands]);
+
+  /* With a markup in play the card shows what the partner pays, so the explanation line
+     has to say what the contract figure was, otherwise the two numbers silently
+     disagree and the operator cannot tell which one the guest was quoted. */
+  const markupNote = (row, contractLine) => (row.markupPercent
+    ? `${contractLine} · net, plus ${row.markupPercent}% partner markup`
+    : contractLine);
 
   const buildExportHtml = (options) => {
     const cover = options.cover && pkg.cover_image_url
       ? `<img class="cover" src="${escapeHtml(pkg.cover_image_url)}" alt="">`
       : '';
+    /* The vehicles on a day are alternatives, not separate inclusions: the party takes ONE of
+       them, sized to its own band. Printed one per line, a 19 pax package reads as though
+       the client is receiving four vehicles. So they collapse into a single line that names
+       what they actually get, and the ladder is only spelled out when asked for. */
     const dayMarkup = days.map((day, index) => {
-      const services = day.services.filter((service) => service.is_included !== false)
+      const included = day.services.filter((service) => service.is_included !== false);
+      const vehicles = included.filter((service) => packageIsTransport(service, library));
+      const others = included.filter((service) => !packageIsTransport(service, library));
+      const vehicleLines = vehicles.length ? (options.showVehicleOptions
+        ? vehicles.map((service) => `<li>${escapeHtml(service.item_name)}${service.supplier_name ? ` — ${escapeHtml(service.supplier_name)}` : ''}</li>`).join('')
+        : `<li>${escapeHtml(packageTransportSummary(vehicles, library))}</li>`) : '';
+      const otherLines = others
         .map((service) => `<li>${escapeHtml(service.item_name)}${service.supplier_name ? ` — ${escapeHtml(service.supplier_name)}` : ''}</li>`).join('');
-      return `<section><h2>Day ${index + 1}</h2>${day.notes ? `<p>${escapeHtml(day.notes)}</p>` : ''}<ul>${services}</ul></section>`;
+      const services = `${vehicleLines}${otherLines}`;
+      return `<section><h2>Day ${index + 1}</h2>${day.notes ? `<p>${escapeHtml(day.notes)}</p>` : ''}${services ? `<ul>${services}</ul>` : ''}</section>`;
     }).join('');
-    const pricingMarkup = breakdown.map((pattern) => `<section><h2>${pattern.pax} pax</h2>${pattern.currencies.map((row) => `<p><b>${escapeHtml(row.currency)}</b> — Total per adult sharing: ${money(row.adultSharingTotal, row.currency)} · Single supplement (adult own room): ${money(row.singleSupplementTotal, row.currency)} · Child sharing with adult: ${money(row.childTotal, row.currency)}</p><ul>${row.accommodationRows.map((item) => `<li>${escapeHtml(item.name)} — adult sharing: ${money(item.sharingPerAdult, row.currency)} · single supplement: ${money(item.singleSupplement, row.currency)} · child: ${money(item.childAccommodation, row.currency)}${item.childAllowed ? '' : ' (single supplement)'} · ${item.roomCount} room(s), max ${item.capacity} per room</li>`).join('')}</ul>`).join('') || '<p>No priced items.</p>'}</section>`).join('');
+    /* A working sheet shows every vehicle, because the operator needs to see the ladder they
+       are pricing. A client document does not: the client gets one vehicle sized to their
+       band, so the ladder is replaced by that single line above. */
+    /* Deliberately no note about how the vehicles are sized. A client document says what they get
+       and what it costs; explaining the internal vehicle ladder invites them to compare it
+       against a smaller vehicle and question the price, which is not this document's job. */
+    const vehicleNote = '';
+/* The exported document carries the same three coloured cards as the Traveller &
+       pricing tab, so a buyer reads the same labels and colours they saw on screen. The
+       pricing explanation is the only addition, and the accommodation breakdown is
+       deliberately left out: it is a working sheet, not something a client should read.
+
+       A package is not a quotation. "Client version" means the partner-facing document
+       with that partner's default markup applied; "internal version" is the STO sheet at
+       contract cost, which is what an operator needs to see what they actually pay. */
+    const partnerView = options.audience === 'client' && markupPercent > 0;
+    /* Which cards are printed, and in what order.
+       'lead' prints both with the chosen figure first, which is right for a working sheet.
+       'only' prints the chosen figure on its own, which is what a client quote wants: two
+       prices for the same holiday on one page invites the reader to pick the smaller one.
+       The party total can be left out but the per-adult price cannot - a client is quoted per
+       person, so dropping it would leave the document with no price they can actually act on. */
+    const leadCards = (row, { explain, bandPrice }) => {
+      const sell = partnerView ? row.sell : row;
+      const note = (line) => (explain ? `<small>${partnerView ? `${line} · net, plus ${row.markupPercent}% partner markup` : line}</small>` : '');
+      const party = `<div class="price-card price-card-party lead"><span>Whole party of ${row.pax}</span><strong>${money(sell.partyTotal, row.currency)}</strong>${note(`${row.pax} travellers at ${money(row.adultSharingTotal, row.currency)} each`)}</div>`;
+      const perPerson = `<div class="price-card lead"><span>Per adult sharing</span><strong>${money(sell.adultSharingTotal, row.currency)}</strong>${note(`Unit share ${money(row.unitPerPerson, row.currency)} + sharing ${money(row.accommodationSharing, row.currency)}`)}</div>`;
+      const both = bandPrice === 'perPerson' ? perPerson + party : party + perPerson;
+      if (options.partyCard === 'hide' || options.partyCard === 'only') return perPerson;
+      return options.partyCard === 'only' ? party : both;
+    };
+    const bandSizes = breakdown.map((band) => packageBandPax(band));
+    /* The per-party-size explanation is only true of a document that quotes more than one
+       size. On a single-band quote it is noise, and on a client document naming the sizes
+       sold is an invitation to pick the cheapest one. */
+    const bandNote = options.bandSelection === 'all' && bandSizes.length
+      ? `<p class="pattern-note">Each band is priced for exactly that party size. A vehicle is paid for in full by the travellers in it, so each band carries the whole vehicle charge divided by its own party size. The party sizes this package sells are: ${bandSizes.join(', ')}.</p>`
+      : '';
+    /* Which bands the document quotes. "all" is the operator's reconciliation sheet; a
+       single named band is how a client is actually quoted one price for their party. The
+       lead figure inside each band is still chosen separately below. */
+    const bandsToShow = options.bandSelection === 'all'
+      ? breakdown
+      : breakdown.filter((band) => packageBandPax(band) === Number(options.bandSelection))
+        .concat(breakdown.length && !breakdown.some((band) => packageBandPax(band) === Number(options.bandSelection)) ? [breakdown[0]] : []);
+    const bandPricesMarkup = !options.bandPrices ? '' : bandsToShow.map((band) => `<section><h2>Traveller band pricing</h2><p class="pattern-pax">${packageBandLabel(band)}</p><div class="price-cards">${leadCards(band.pricing, { explain: options.explainPricing, bandPrice: options.bandPrice })}${band.pricing.hasAccommodation ? `<div class="price-card"><span>Single supplement</span><strong>${money(partnerView ? band.pricing.sell.singleSupplementTotal : band.pricing.singleSupplementTotal, band.pricing.currency)}</strong>${options.explainPricing ? `<small>${partnerView ? `Added to the sharing price · net, plus ${band.pricing.markupPercent}% partner markup` : 'Added to the sharing price'}</small>` : ''}</div>` : ''}${band.pricing.hasAccommodation ? `<div class="price-card price-card-child${childRange ? '' : ' pending'}"><span>Child price</span><strong>${money(partnerView ? band.pricing.sell.childTotal : band.pricing.childTotal, band.pricing.currency)}</strong>${options.explainPricing ? `<small>${childRange ? (partnerView ? `Unit share + accommodation · net, plus ${band.pricing.markupPercent}% partner markup` : 'Unit share + accommodation') : 'No child age range set'}</small>` : ''}</div>` : ''}</div></section>`).join('');
+    const markupNoteLine = partnerView
+      ? `<p class="pattern-note">Client version: prices include the ${markupPercent}% markup assigned to this partner. The internal version shows these prices at contract cost.</p>`
+      : (options.audience === 'client' && markupPercent === 0
+        ? '<p class="pattern-note">Client version requested, but no partner markup is assigned to this package, so these prices are the contract cost.</p>'
+        : '<p class="pattern-note">Internal version: prices are at contract cost (STO) with no partner markup applied.</p>');
+    /* The child card already carries the child price, so the document has no separate
+       child section. It does need to say so when the card is not a real price, because a
+       reader would otherwise take the greyed figure as the amount a child is charged. */
+    const childNote = !form.acceptsChildren
+      ? '<p class="pattern-note">Children are not accepted on this package, so no child price applies. The child figure above is shown for reference only.</p>'
+      : (!childRange ? '<p class="pattern-note">No child age range has been set on this package, so the child price above is not final.</p>' : '');
     const validity = periods.map((period) => `<li>${escapeHtml(period.valid_from)} – ${escapeHtml(period.valid_to)}</li>`).join('');
     const inclusionMarkup = options.inclusions
       ? `${form.inclusions ? `<h3>Inclusions</h3><p>${escapeHtml(form.inclusions).replace(/\n/g, '<br>')}</p>` : ''}${form.exclusions ? `<h3>Exclusions</h3><p>${escapeHtml(form.exclusions).replace(/\n/g, '<br>')}</p>` : ''}`
@@ -676,11 +937,11 @@ export const PackageBuilder = () => {
     const termsMarkup = options.terms && form.terms
       ? `<section><h2>Terms &amp; Conditions</h2><p>${escapeHtml(form.terms).replace(/\n/g, '<br>')}</p></section>`
       : '';
-    const childMarkup = form.acceptsChildren && childRange
-      ? `<section><h2>Child price</h2><p>Quoted per child for ages ${childRange.ageFrom}–${childRange.ageTo}. A child pays the same per-pax unit share as an adult, plus each accommodation below.</p>${childBreakdown.map((row) => `<p><b>${escapeHtml(row.currency)}</b> — child sharing with adult: ${money(row.childTotal, row.currency)}</p><ul>${row.accommodationRows.map((item) => `<li>${escapeHtml(item.name)} — ${item.childAllowed ? `child band ${escapeHtml(item.childBandName)}: ${money(item.childAccommodation, row.currency)}` : `does not accept a child for this age range: ${money(item.childAccommodation, row.currency)} single supplement`}</li>`).join('') || '<li>No accommodation in this package.</li>'}</ul>`).join('') || '<p>No priced items.</p>'}</section>`
-      : `<section><h2>Child price</h2><p>${form.acceptsChildren ? 'Set a child age range to price a child.' : 'Children are not accepted on this package.'}</p></section>`;
     const clientNames = selectedClients.map(nameOf).join(', ');
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(form.description)}</p>${validity ? `<h3>Valid dates</h3><ul>${validity}</ul>` : ''}${clientNames ? `<p>Quoted for: ${escapeHtml(clientNames)}</p>` : ''}</header>${dayMarkup}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}<h2>Traveller pattern pricing</h2>${pricingMarkup}${childMarkup}${termsMarkup}</body></html>`;
+    /* The three price cards reuse the tab's colours exactly: teal for the two adult
+       prices, amber for the child, and grey when no child range is set. */
+    const priceCardCss = `.price-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 4px}.price-card{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:8px;background:#f0fdfa}.price-card span,.price-card small{color:#64748b;font-size:11px;line-height:1.35}.price-card strong{color:#0f766e;font-size:17px}.price-card.lead{box-shadow:0 0 0 2px #0d7478 inset}.price-card-party{background:#f0fdf4;border:1px solid #bbf7d0}.price-card-party span,.price-card-party small{color:#166534}.price-card-party strong{color:#15803d}.price-card-child{background:#fff7ed;border:1px solid #fed7aa}.price-card-child span,.price-card-child small{color:#9a5b13}.price-card-child strong{color:#b45309}.price-card-child.pending{background:#f8fafc;border:1px dashed #cbd5e1}.price-card-child.pending span,.price-card-child.pending small,.price-card-child.pending strong{color:#94a3b8}.pattern-pax{margin:0 0 2px;font-weight:bold;color:#1a202c}.pattern-note{margin:8px 0 0;padding:8px 10px;border-left:3px solid #94a3b8;background:#f8fafc;color:#475569;font-size:12px;line-height:1.45}@media print{.price-cards{break-inside:avoid}}`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}${priceCardCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(form.description)}</p>${validity ? `<h3>Valid dates</h3><ul>${validity}</ul>` : ''}${clientNames ? `<h3>For partner: ${escapeHtml(clientNames)}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${bandPricesMarkup}${bandNote}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
   };
 
   const exportDocument = () => {
@@ -711,34 +972,51 @@ export const PackageBuilder = () => {
     rowIndex === index ? { ...period, [field]: value } : period));
   /* A traveller pattern is a party size, nothing more. A child is priced once against
      the accommodation in the Children tab, so it is not counted here as well. */
+  /* Changing a band changes the party size it is quoted for. The size is checked against the
+     vehicles first, so a band is never left holding a party that nothing can carry, and
+     against the other bands second, because two bands at the same party size would leave
+     that price down to whichever happened to be listed first. */
+  const changeBand = (itemKey, rawValue) => {
+    const pax = Number(rawValue);
+    if (!itemKey || !Number.isFinite(pax) || pax < 1) return;
+    const target = paxOptions.find((band) => band.item_key === itemKey);
+    if (!target || packageBandPax(target) === pax) return;
+    const clash = paxOptions.find((band) => band.item_key !== itemKey && packageBandPax(band) === pax);
+    if (clash) {
+      showToast(`${packageBandLabel(clash)} is already a band. Two bands cannot both price the same party size.`, 'warning');
+      return;
+    }
+    const capacityError = packageBandCapacityError(days, library, { pax });
+    if (capacityError) {
+      showToast(capacityError, 'warning');
+      return;
+    }
+    setPaxOptions((previous) => previous
+      .map((band) => (band.item_key === itemKey
+        ? { ...band, pax, min_pax: pax, max_pax: pax }
+        : band))
+      .sort(byBandMin));
+  };
+
   const addPaxPattern = () => {
     const pax = Number(document.getElementById('package-pax')?.value) || 0;
     if (pax < 1) {
-      showToast('A traveller pattern needs at least one traveller.', 'warning');
+      showToast('A traveller band needs at least one traveller.', 'warning');
       return;
     }
-    if (paxOptions.some((option) => (Number(option.pax) || 0) === pax)) {
-      showToast('That traveller pattern already exists.', 'warning');
+    if (mergedBands.some((band) => packageBandPax(band) === pax)) {
+      showToast(`${pax} pax is already a band. Edit it instead of adding it twice.`, 'warning');
       return;
     }
-    const candidate = { pax };
-    const oversized = days.flatMap((day) => day.services)
-      .map((service) => {
-        const saved = itemForService(service);
-        const item = {
-          ...(saved || {}),
-          category: saved?.category || service.category,
-          max_occupancy: saved?.max_occupancy || service.vehicle_capacity,
-          name: saved?.name || service.item_name
-        };
-        return { error: packageItemCapacityError(item, rateForService(service), [candidate]) };
-      })
-      .find((entry) => entry.error);
-    if (oversized) {
-      showToast(oversized.error, 'warning');
+    const candidate = { pax, min_pax: pax, max_pax: pax, item_key: uuid(), is_auto_generated: false };
+    /* Only the transport this band would actually be given counts here. Asking the whole
+       package instead would reject the band because some other band owns a smaller bus. */
+    const capacityError = packageBandCapacityError(days, library, candidate);
+    if (capacityError) {
+      showToast(capacityError, 'warning');
       return;
     }
-    setPaxOptions((previous) => [...previous, candidate].sort((a, b) => (Number(a.pax) || 0) - (Number(b.pax) || 0)));
+    setPaxOptions((previous) => [...previous, candidate].sort(byBandMin));
   };
 
   if (!packageId) return <div className="super-admin-page"><button className="secondary-btn" onClick={() => navigate('/packages')}><ArrowLeft size={16} /> Packages</button><p>Open a package from the Packages list.</p></div>;
@@ -750,12 +1028,12 @@ export const PackageBuilder = () => {
     ['children', 'Children & ages'],
     ['inclusions', 'Inclusions & exclusions'],
     ['terms', 'Terms & conditions'],
-    ['client', 'Client quote']
+    ['client', 'Client partner']
   ];
 
   return <div className="super-admin-page package-builder-page">
     <header className="page-header">
-      <div className="header-title"><Backpack /><div><h1>{pkg?.name || state?.packageName || 'Package Builder'}</h1><p>Build and quote a reusable package using contract prices</p></div></div>
+      <div className="header-title"><Backpack /><div><h1>{pkg?.name || state?.packageName || 'Package Builder'}</h1><p>Build and price a reusable package using contract rates</p></div></div>
       <div className="package-builder-actions">
         <button className="secondary-btn" onClick={() => requestNavigate('/packages')}><ArrowLeft size={16} /> Packages</button>
         <button className="secondary-btn" onClick={() => setExportDialog(true)} disabled={!pkg}><Download size={16} /> Export</button>
@@ -770,45 +1048,24 @@ export const PackageBuilder = () => {
         <aside className="package-library-sidebar">
           <h2>Library Items</h2>
           <div className="packages-search"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search contracted services…" /></div>
-          <div className="package-filter-section">
-            <strong>Currency availability</strong>
-            <div className="menu-popover currency-popover">
-              <button type="button" className="currency-trigger" onClick={() => { setCurrencyOpen((open) => !open); setCurrencySearch(''); }}>
-                <span className="currency-trigger-code">{currencyFilter || 'ALL'}</span>
-                <span className="currency-trigger-name">{currencyFilter ? 'Rates in this currency' : 'All currencies'}</span>
-                <ChevronDown size={14} className={`currency-chevron ${currencyOpen ? 'open' : ''}`} />
-              </button>
-              {currencyOpen && <>
-                <div className="menu-overlay" onClick={() => setCurrencyOpen(false)} />
-                <div className="menu-panel currency-panel">
-                  <div className="sidebar-search" style={{ margin: 0 }}><Search size={14} /><input autoFocus placeholder="Search currency…" value={currencySearch} onChange={(event) => setCurrencySearch(event.target.value)} /></div>
-                  <div className="currency-list">
-                    <button type="button" className={`menu-item ${currencyFilter === '' ? 'active' : ''}`} onClick={() => { setCurrencyFilter(''); setCurrencyOpen(false); }}>
-                      <span className="currency-opt-code">ALL</span><span className="currency-opt-name">All currencies</span>{currencyFilter === '' && <Check size={14} />}
-                    </button>
-                    {currencyOptions.map((currency) => <button key={currency.code} type="button" className={`menu-item ${currency.code === currencyFilter ? 'active' : ''}`} onClick={() => { setCurrencyFilter(currency.code); setCurrencyOpen(false); }}>
-                      <span className="currency-opt-sym">{currency.symbol}</span><span className="currency-opt-code">{currency.code}</span><span className="currency-opt-name">{currency.name}</span>{currency.code === currencyFilter && <Check size={14} />}
-                    </button>)}
-                    {!currencyOptions.length && <div className="currency-empty">No currency matches “{currencySearch}”</div>}
-                  </div>
-                </div>
-              </>}
-            </div>
-          </div>
+          <p className="package-sidebar-currency">Prices in <strong>{packageCurrency}</strong> — this package is priced in one currency.</p>
           <div className="package-filter-section">
             <strong>Item type</strong>
             <div className="category-filters">{categoryOptions.map((category) => <button key={category} type="button" className={`category-chip ${categoryFilter === category ? 'active' : ''}`} onClick={() => setCategoryFilter((current) => current === category ? '' : category)}>{category}</button>)}</div>
           </div>
           <label className="package-filter-section package-destination-filter"><strong>Destination / island</strong><select value={destinationFilter} onChange={(event) => setDestinationFilter(event.target.value)}><option value="">All destinations</option>{destinationOptions.map((destination) => <option key={destination} value={destination}>{destination}</option>)}</select></label>
-          {(categoryFilter || destinationFilter || currencyFilter || search) && <button type="button" className="clear-filters-btn" onClick={() => { setCategoryFilter(''); setDestinationFilter(''); setCurrencyFilter(''); setSearch(''); }}>Clear filters</button>}
-          <p className="package-help">Rates are copied at their contract amount. No package markup is applied.</p>
+          {(categoryFilter || destinationFilter || search) && <button type="button" className="clear-filters-btn" onClick={() => { setCategoryFilter(''); setDestinationFilter(''); setSearch(''); }}>Clear filters</button>}
+          <p className="package-help">{markupPercent > 0 ? `Contract rates are copied, then the assigned partner markup of ${markupPercent}% is applied to every price.` : 'Rates are copied at their contract amount. Assign a partner on the Client partner tab to apply that client markup.'}</p>
           <div className="package-library-results">
             {visibleResults.map((item) => {
-              const eligibleRates = (item.item_rates || []).filter((entry) => currencyMatches(entry, currencyFilter));
+              const eligibleRates = (item.item_rates || []).filter((entry) => currencyMatches(entry, packageCurrency));
               const rate = rateForDates(item);
               const coverage = seasonFor(item, rate);
               const basis = basisOfRate(rate, item);
-              const addToDay = () => addService(item, rate?.id);
+              /* The same capacity the band engine reads, so the number on the card is the
+                 number that decides which band this vehicle opens up. */
+              const vehicleCapacity = packageVehicleCapacity(item, rate);
+              const addToDay = () => addService(item, rate?.id, selectedDay, bandScope ? { tier_key: bandScope } : {});
               return <article key={item.id} className={`package-library-card ${!rate ? 'unavailable' : ''}`} draggable={!!rate} onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'library', itemId: item.id, rateId: rate?.id }))} onDoubleClick={addToDay}>
                 <div className="package-library-top">
                   <span className="package-library-name">{item.name}</span>
@@ -816,6 +1073,7 @@ export const PackageBuilder = () => {
                 </div>
                 <div className="package-library-meta">
                   <span className="item-cat-tag">{item.category || 'General'}</span>
+                  {vehicleCapacity > 0 && <span className="item-capacity-tag" title={`Seats ${vehicleCapacity} travellers, so a band is offered up to ${vehicleCapacity} pax`}>Max: {vehicleCapacity}</span>}
                   {rate
                     ? <span className="item-price-tag">{money(contractPriceOf(rate), rate.currency || item.currency || 'ZAR')} <span style={{ color: '#94a3b8', fontWeight: 500 }}>{basisLabelOf(basis)}</span></span>
                     : <span className="item-price-tag missing">No rate{eligibleRates.length ? ' in this currency' : ''}</span>}
@@ -831,12 +1089,34 @@ export const PackageBuilder = () => {
               </article>;
             })}
             {search.trim().length > 0 && search.trim().length < 2 && <p>Enter at least 2 characters to search.</p>}
-            {(search.trim().length >= 2 || categoryFilter || currencyFilter) && !visibleResults.length && <p>No matching active library items with rates in this currency.</p>}
+            {(search.trim().length >= 2 || categoryFilter) && !visibleResults.length && <p>No matching active library items with rates in this currency.</p>}
           </div>
         </aside>
         <main className="package-itinerary-canvas">
-          <div className="package-canvas-header"><div><h2>Day-by-day itinerary</h2><p>Drag library items onto a day, or use the Add button.</p></div><button className="secondary-btn" onClick={addDay}><Plus size={15} /> Add day</button></div>
-          {days.map((day, dayIndex) => <section key={day.id || `day-${dayIndex}`} className={`package-canvas-day ${selectedDay === dayIndex ? 'selected' : ''}`} onClick={() => setSelectedDay(dayIndex)}
+          <div className="package-canvas-header"><div><h2>Day-by-day itinerary</h2><p>Pick a day from the strip, then build it on the canvas below.</p></div><div className="package-canvas-actions">
+            <label className="package-band-scope">Editing as
+              <select value={bandScope} onChange={(event) => setBandScope(event.target.value)} aria-label="Which traveller band the itinerary is being edited for">
+                <option value="">All bands (shared itinerary)</option>
+                {mergedBands.map((band) => <option key={band.item_key} value={band.item_key}>{packageBandLabel(band)} only</option>)}
+              </select>
+            </label>
+            <button className="secondary-btn" onClick={addDay}><Plus size={15} /> Add day</button>
+          </div></div>
+          {bandScope && <p className="package-band-scope-note">Anything you add here is priced in the {packageBandLabel(mergedBands.find((band) => band.item_key === bandScope) || {})} band only. The other bands keep the shared itinerary. Switch back to &ldquo;All bands&rdquo; to edit what every band pays for.</p>}
+          <div className="day-strip-wrap" style={{ flexShrink: 0 }}>
+            <div className="day-strip">
+              {days.map((day, dayIndex) => {
+                const dayValue = dayTotal(day);
+                return <button type="button" key={day.id || `day-${dayIndex}`} className={`day-strip-card ${selectedDay === dayIndex ? 'active' : ''}`} onClick={() => setSelectedDay(dayIndex)}>
+                  <div className="day-strip-card-title">Day {dayIndex + 1}</div>
+                  <div className="day-strip-card-date">{dayDayLabel(day)}</div>
+                  <div className="day-strip-card-summary"><span>{day.services.length} item{day.services.length === 1 ? '' : 's'}</span><span>{money(dayValue, dayValueCurrency(day))}</span></div>
+                </button>;
+              })}
+              <button type="button" className="day-add-chip" onClick={addDay}><Plus size={15} /> Add Day</button>
+            </div>
+          </div>
+          {days[selectedDay] && <section key={days[selectedDay].id || `day-${selectedDay}`} className="package-canvas-day selected"
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
@@ -844,15 +1124,16 @@ export const PackageBuilder = () => {
                 const payload = JSON.parse(event.dataTransfer.getData('application/json'));
                 if (payload.type === 'library') {
                   const item = library.find((entry) => entry.id === payload.itemId) || results.find((entry) => entry.id === payload.itemId);
-                  if (item) addService(item, payload.rateId, dayIndex);
-                } else if (payload.type === 'service') moveService(payload.fromDay, payload.fromIndex, dayIndex);
+                  if (item) addService(item, payload.rateId, selectedDay, bandScope ? { tier_key: bandScope } : {});
+                } else if (payload.type === 'service') moveService(payload.fromDay, payload.fromIndex, selectedDay);
               } catch (error) {
                 showToast(`Could not add the dragged item: ${error.message}`, 'error');
               }
             }}>
-            <header><h3><CalendarDays size={17} /> Day {dayIndex + 1}</h3><span>{day.services.length} item{day.services.length === 1 ? '' : 's'}</span></header>
-            <textarea aria-label={`Day ${dayIndex + 1} notes`} value={day.notes || ''} onChange={(event) => setDays((previous) => previous.map((row, index) => index === dayIndex ? { ...row, notes: event.target.value } : row))} placeholder="Optional day overview or notes" rows={2} />
-            {day.services.map((service, serviceIndex) => {
+            <header><h3><CalendarDays size={17} /> Day {selectedDay + 1}</h3><span>{days[selectedDay].services.length} item{days[selectedDay].services.length === 1 ? '' : 's'}</span></header>
+            <textarea aria-label={`Day ${selectedDay + 1} notes`} value={days[selectedDay].notes || ''} onChange={(event) => setDays((previous) => previous.map((row, index) => index === selectedDay ? { ...row, notes: event.target.value } : row))} placeholder="Optional day overview or notes" rows={2} />
+            {scopedServicesFor(days[selectedDay]).map((service) => {
+              const rawIndex = rawIndexOf(selectedDay, service);
               const item = itemForService(service);
               const coverage = seasonFor(item, rateForService(service));
               const roomPlan = isStay(service) ? roomPlanFor(service) : null;
@@ -862,10 +1143,15 @@ export const PackageBuilder = () => {
                   ? `Max ${capacity} per room`
                   : `Capacity: ${capacity} traveller${capacity === 1 ? '' : 's'}`
                 : '';
-              return <article key={`${service.id || service.item_id}-${serviceIndex}`} className="package-canvas-service" draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: dayIndex, fromIndex: serviceIndex }))}>
+              const bandOnly = service.tier_key && service.tier_key === bandScope;
+              return <article key={service.item_key || `${service.id || service.item_id}-${rawIndex}`} className={`package-canvas-service ${bandOnly ? 'band-only' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: selectedDay, fromIndex: rawIndex }))}>
                 <GripVertical size={16} className="package-grip" />
                 <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}</small>
-                  {item?.item_rates?.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(dayIndex, serviceIndex, 'rate_id', event.target.value)}>
+                  {bandOnly
+                    ? <small className="package-band-flag">this band only</small>
+                    : (service.tier_key && <small className="package-band-flag other">{packageBandLabel(mergedBands.find((band) => band.item_key === service.tier_key) || {})} only</small>)}
+                  {!bandOnly && !service.tier_key && <small className="package-band-flag shared">all bands</small>}
+                  {item?.item_rates?.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(selectedDay, rawIndex, 'rate_id', event.target.value)}>
                     {item.item_rates.map((rate) => <option key={rate.id} value={rate.id}>{rate.season_name || rate.option_name || 'Contract rate'} · {rate.currency} {Number(rate.unit_cost || rate.price_1_adult || rate.unit_price || 0).toFixed(2)}</option>)}
                   </select>}
                   {Number(service.price_protection_percent) > 0
@@ -878,16 +1164,20 @@ export const PackageBuilder = () => {
                     {roomPlan.roomCount} room{roomPlan.roomCount === 1 ? '' : 's'} auto · {round(roomPlan.sharingPerAdult).toFixed(2)}/adult sharing · +{round(roomPlan.singleSupplement).toFixed(2)} single supp.
                   </small>}
                 </div>
-                <label className="package-included-toggle"><input type="checkbox" checked={service.is_included !== false} onChange={(event) => updateService(dayIndex, serviceIndex, 'is_included', event.target.checked)} /> Included</label>
+                <label className="package-included-toggle"><input type="checkbox" checked={service.is_included !== false} onChange={(event) => updateService(selectedDay, rawIndex, 'is_included', event.target.checked)} /> Included</label>
                 {roomPlan
-                  ? <span className="package-quantity auto" title={`Rooms are worked out from ${autoPattern.pax} pax at ${roomPlan.capacity} per room — no need to add rooms by hand`}>Rooms {roomPlan.roomCount}</span>
-                  : <label className="package-quantity">Qty <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(dayIndex, serviceIndex, 'quantity', Number(event.target.value) || 1)} /></label>}
-                <button type="button" className="package-icon-button" aria-label={`Remove ${service.item_name}`} onClick={() => removeService(dayIndex, serviceIndex)}><Trash2 size={16} /></button>
+                  ? <span className="package-quantity auto" title={`Rooms are worked out from ${autoPattern.pax} pax at ${roomPlan.capacity} per room`}>Rooms {roomPlan.roomCount}</span>
+                  : <label className="package-quantity">Qty <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(selectedDay, rawIndex, 'quantity', Number(event.target.value) || 1)} /></label>}
+                <button type="button" className="package-icon-button" aria-label={bandScope ? `Remove ${service.item_name} from the ${packageBandLabel(mergedBands.find((band) => band.item_key === bandScope) || {})} band` : `Remove ${service.item_name}`} onClick={() => (bandScope ? removeServiceForBand(selectedDay, service, bandScope) : removeService(selectedDay, rawIndex))}><Trash2 size={16} /></button>
               </article>;
             })}
-            {!day.services.length && <p className="package-drop-hint">Drop a library item here, or select this day and add from the sidebar.</p>}
-            {days.length > 1 && <button type="button" className="package-remove-day" onClick={() => { setDays((previous) => previous.filter((_, index) => index !== dayIndex)); setSelectedDay(0); }}><Trash2 size={14} /> Remove day</button>}
-          </section>)}
+            {!scopedServicesFor(days[selectedDay]).length && <p className="package-drop-hint">Drop a library item here, or add from the sidebar.</p>}
+            {days.length > 1 && <button type="button" className="package-remove-day" onClick={() => {
+              const remaining = days.filter((_, index) => index !== selectedDay);
+              setDays(remaining);
+              setSelectedDay((current) => Math.min(current, Math.max(0, remaining.length - 1)));
+            }}><Trash2 size={14} /> Remove day</button>}
+          </section>}
           {!days.length && <div className="package-canvas-empty">Add a day to start building this package.</div>}
         </main>
       </div>}
@@ -901,40 +1191,80 @@ export const PackageBuilder = () => {
         <button className="secondary-btn" onClick={addPeriod}><Plus size={15} /> Add validity period</button>
       </section>}
       {tab === 'travellers' && <section className="package-tab-panel">
-        <h2>Traveller patterns &amp; contract price breakdown</h2><p>Each pattern is a party size. Every non-accommodation service is shared unit cost divided by pax, and the accommodation is priced per adult sharing plus its single supplement. A child is priced once from the same unit share — see the Children &amp; ages tab.</p>
-        /* The field is uncontrolled and kept its last value, so it sat on 2 next to an
-           8-pax pattern and invited the same party to be added twice. Remounting it
-           on the pattern count clears it after every successful add. */
-        <div className="package-pax-add"><label>Pax<input key={`pax-${paxOptions.length}`} id="package-pax" type="number" min="1" defaultValue="2" /></label><button className="secondary-btn" onClick={addPaxPattern}><Plus size={15} /> Add pattern</button></div>
-        {!paxOptions.length && <p>Add a traveller pattern to see the package price breakdown.</p>}
-        <div className="package-breakdown-list">{breakdown.map((pattern, index) => <article key={`${pattern.id || 'new'}-${pattern.pax}-${index}`}>
-          <header><strong>{pattern.pax} pax</strong><button type="button" className="package-icon-button" aria-label="Remove traveller pattern" onClick={() => setPaxOptions((previous) => previous.filter((_, rowIndex) => rowIndex !== index))}><Trash2 size={15} /></button></header>
-          {pattern.currencies.length ? pattern.currencies.map((row) => <div className="package-currency-breakdown" key={row.currency}>
+        <h2>Traveller bands &amp; contract price breakdown</h2>
+        <p>A band is one exact party size this package sells. A vehicle is paid for in full by the people in it, so a band of 3 in a 4-seat vehicle carries the whole vehicle charge divided by 3, and the three travellers together pay the vehicle price exactly. That is why a band is a single number rather than a range of sizes: the price of a party depends on how many people are actually travelling.</p>
+        <p>Each band is given the smallest vehicle in the itinerary that seats it, so add every vehicle size you intend to sell to, on each day that carries the party. The vehicles suggest the party sizes they were contracted for, but a suggestion never becomes a band on its own &mdash; accept the ones you want to sell, and add any others by hand.</p>
+        <p>Within a band, every non-accommodation service is shared unit cost divided by pax, and the accommodation is priced per adult sharing plus its single supplement. A child is priced once from the same unit share, plus the accommodation prices set on the Children &amp; ages tab.</p>
+        {bandSuggestions.length > 0 && <div className="package-band-suggestions" role="status">
+          <strong>Your vehicles seat {bandSuggestions.join(', ')} traveller{bandSuggestions.length === 1 ? '' : 's'}</strong>
+          <p>These are suggestions from the vehicle capacities in the itinerary, not bands. Add the party sizes you actually sell.</p>
+          <div className="package-band-suggestion-list">{bandSuggestions.map((pax) => <button key={`suggestion-${pax}`} type="button" className="secondary-btn" onClick={() => acceptBandSuggestion(pax)}><Plus size={15} /> {pax} pax band</button>)}</div>
+        </div>}
+        <div className="package-pax-add"><label>Add a band of<input key={`pax-${paxOptions.length}`} id="package-pax" type="number" min="1" defaultValue="2" />pax</label><button className="secondary-btn" onClick={addPaxPattern}><Plus size={15} /> Add band</button></div>
+        {!mergedBands.length && <p>Add a vehicle to the itinerary, or add a band by hand, to see the package price breakdown.</p>}
+        {unservableBands.length > 0 && <div className="package-band-blocked" role="status">
+          <strong>{unservableBands.length} band{unservableBands.length === 1 ? '' : 's'} cannot be quoted yet</strong>
+          <p>You can keep adding vehicles. A package is only quotable once every band has something that seats it, on every day that carries the party.</p>
+          <ul>{unservableBands.map((band) => <li key={band.label}><b>{band.label}</b>{band.error}</li>)}</ul>
+        </div>}
+        <div className="package-breakdown-list">{breakdown.map((pattern, index) => {
+          const bandPax = packageBandPax(pattern);
+          return <article key={`${pattern.item_key || 'new'}-${bandPax}-${index}`}>
+          <header>
+            <strong>{packageBandLabel(pattern)}</strong>
+            <em className="package-band-manual">set by hand</em>
+            <label className="package-band-inputs">party of<input type="number" min="1" aria-label={`Party size for band ${packageBandLabel(pattern)}`} value={bandPax} onChange={(event) => changeBand(pattern.item_key, event.target.value)} />pax</label>
+            <button type="button" className="package-icon-button" aria-label={`Remove the ${packageBandLabel(pattern)} band`} onClick={() => setPaxOptions((previous) => previous.filter((band) => band.item_key !== pattern.item_key))}><Trash2 size={15} /></button>
+          </header>
+          {pattern.capacityError && <p className="package-season-warning">{pattern.capacityError}</p>}
+          {pattern.pricing.unitRows.length || pattern.pricing.accommodationRows.length ? (() => {
+            const row = pattern.pricing;
+            return <div className="package-currency-breakdown">
             <h3>{row.currency}</h3>
-            <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Package item</th><th>Total unit contribution / pax</th><th>Total accommodation sharing per pax (adult / child)</th><th>Total single supplement</th></tr></thead>
+            <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Package item</th><th>Total unit contribution / pax</th>{row.hasAccommodation && <th>Total accommodation sharing per pax (adult / child)</th>}{row.hasAccommodation && <th>Total single supplement</th>}</tr></thead>
               <tbody>
                 {/* Every column is filled for every row. A unit service carries no room
-                    cost, so those cells are a real 0.00 rather than a dash. */}
-                {row.unitRows.map((item, itemIndex) => <tr key={`unit-${itemIndex}`}><td>{item.name}</td><td>{money(item.perPerson, row.currency)}</td><td>{money(item.sharingPerAdult, row.currency)}</td><td>{money(item.singleSupplement, row.currency)}</td></tr>)}
+                    cost, so those cells are a real 0.00 rather than a dash. The two
+                    accommodation columns are dropped entirely when the band has no rooms,
+                    because a column headed "single supplement" on a package that never
+                    sleeps anyone is a figure with nothing behind it. */}
+                {row.unitRows.map((item, itemIndex) => <tr key={`unit-${itemIndex}`}><td>{item.name}</td><td>{money(item.perPerson, row.currency)}</td>{row.hasAccommodation && <td>{money(item.sharingPerAdult, row.currency)}</td>}{row.hasAccommodation && <td>{money(item.singleSupplement, row.currency)}</td>}</tr>)}
                 {row.accommodationRows.map((item, itemIndex) => <tr key={`stay-${itemIndex}`}><td>{item.name}<small>{item.roomCount} room(s) allocated, max {item.capacity} per room</small></td><td>{money(0, row.currency)}</td><td><span>Adult {money(item.sharingPerAdult, row.currency)}</span><br /><span>Child {money(item.childAccommodation, row.currency)}{item.childAllowed ? '' : ' (single supp.)'}</span></td><td>{money(item.singleSupplement, row.currency)}</td></tr>)}
-                <tr className="package-breakdown-total"><th>Total</th><td>{money(row.unitPerPerson, row.currency)}</td><td><span>Adult {money(row.accommodationSharing, row.currency)}</span><br /><span>Child {money(row.childAccommodation, row.currency)}</span></td><td>{money(row.singleSupplement, row.currency)}</td></tr>
+                <tr className="package-breakdown-total"><th>Total</th><td>{money(row.unitPerPerson, row.currency)}</td>{row.hasAccommodation && <td><span>Adult {money(row.accommodationSharing, row.currency)}</span><br /><span>Child {money(row.childAccommodation, row.currency)}</span></td>}{row.hasAccommodation && <td>{money(row.singleSupplement, row.currency)}</td>}</tr>
               </tbody>
             </table></div>
             <div className="package-price-grid">
-              <div><span>Total per adult sharing</span><strong>{money(row.adultSharingTotal, row.currency)}</strong><small>Unit share {money(row.unitPerPerson, row.currency)} + sharing {money(row.accommodationSharing, row.currency)}</small></div>
-              <div><span>Total single supplement for adults in own room</span><strong>{money(row.singleSupplementTotal, row.currency)}</strong><small>Added to the adult sharing price</small></div>
-              <div><span>Child sharing with adult price</span><strong>{money(row.childTotal, row.currency)}</strong><small>Unit share {money(row.unitPerPerson, row.currency)} + accommodation {money(row.childAccommodation, row.currency)}</small>
-                {!childRange && <small>Set the child age range on the Children &amp; ages tab</small>}
-                {!!childRange && !!row.childNotAllowed.length && <small>Not accepted, priced at single supplement: {row.childNotAllowed.join(', ')}</small>}
-              </div>
+              <div className="package-price-party"><span>Whole party of {row.pax}</span><strong>{money(row.markupPercent ? row.sell.partyTotal : row.partyTotal, row.currency)}</strong><small>{markupNote(row, `${row.pax} travellers at ${money(row.adultSharingTotal, row.currency)} each`)}</small></div>
+  <div><span>Total per adult sharing</span><strong>{money(row.markupPercent ? row.sell.adultSharingTotal : row.adultSharingTotal, row.currency)}</strong><small>{markupNote(row, `Unit share ${money(row.unitPerPerson, row.currency)} + sharing ${money(row.accommodationSharing, row.currency)}`)}</small></div>
+              {/* A single supplement is a room charge. With no accommodation in the band
+                  there is no room and nothing to supplement, so the card is left out
+                  entirely rather than shown as a zero - a zero here reads as a real price,
+                  and the card total would otherwise duplicate the sharing figure above. */}
+              {row.hasAccommodation && <div><span>Single supplement</span><strong>{money(row.markupPercent ? row.sell.singleSupplementTotal : row.singleSupplementTotal, row.currency)}</strong><small>{markupNote(row, `Added to the adult sharing price of ${money(row.adultSharingTotal, row.currency)}`)}</small></div>}
+              {/* The child price is only a distinct figure when there is accommodation to
+                  price. On a package with no rooms a child pays exactly the adult unit
+                  share, so the card would be a duplicate of it. */}
+              {row.hasAccommodation
+                ? <div className={`package-price-child ${!childRange ? 'pending' : ''}`}><span>Child price</span><strong>{money(row.markupPercent ? row.sell.childTotal : row.childTotal, row.currency)}</strong>
+                  {!childRange
+                    ? <small>Set the child age range on the Children &amp; ages tab</small>
+                    : <small>{markupNote(row, `Unit share ${money(row.unitPerPerson, row.currency)} + accommodation ${money(row.childAccommodation, row.currency)}`)}</small>}
+                  {!!childRange && !!row.childNotAllowed.length && <small>Charged the single supplement at: {row.childNotAllowed.join(', ')}</small>}
+                </div>
+                : null}
             </div>
-          </div>) : <p>No included services to price.</p>}
-        </article>)}</div>
+            {!row.hasAccommodation && <p className="package-price-note">This band has no accommodation, so there is no single supplement or child price. The price above is the whole party total for the services in the itinerary.</p>}
+            {!!row.foreignCurrencyItems.length && <p className="package-season-warning">{row.foreignCurrencyItems.map((entry) => `${escapeHtml(entry.name)} (${entry.currency} ${entry.unitPrice.toFixed(2)})`).join(', ')} {row.foreignCurrencyItems.length === 1 ? 'is' : 'are'} priced in another currency and {row.foreignCurrencyItems.length === 1 ? 'is not' : 'are not'} included in these totals. This package is priced in {row.currency} only.</p>}
+            </div>;
+          })() : <p>No included services to price.</p>}
+          </article>;
+        })}</div>
       </section>}
       {tab === 'children' && <section className="package-tab-panel">
         <h2><Baby size={19} /> Children on this package</h2>
         <p>A child is only priced differently because of the accommodation. Everything else in the package is shared unit cost divided by pax, and a child pays exactly that same unit share. The one figure that can differ is the room, and that comes from the property's own child price for the age range set below.</p>
-        <label className="package-publish-toggle"><input type="checkbox" checked={form.acceptsChildren} onChange={(event) => updateForm('acceptsChildren', event.target.checked)} /><span><strong>A child may travel on this package</strong><small>When off, the package is quoted for adults only and no child price is published.</small></span></label>
+        {markupPercent > 0 && <p className="package-help">The figures on this tab are contract costs. The child price on the Traveller &amp; pricing tab and in a client export carries the {markupPercent}% partner markup.</p>}
+        <label className="package-publish-toggle"><input type="checkbox" checked={form.acceptsChildren} onChange={(event) => updateForm('acceptsChildren', event.target.checked)} /><span><strong>A child may travel on this package</strong><small>When off, the package is for adults only and no child price is published.</small></span></label>
         {!form.acceptsChildren ? <p className="package-child-off">Children are not accepted on this package.</p> : <>
           <div className="package-child-toolbar">
             <h3>Child age range</h3>
@@ -947,32 +1277,33 @@ export const PackageBuilder = () => {
             </div>
           </div>
           <h3 className="package-child-price-title">What each accommodation charges for that range</h3>
-          <p>The child price is the same unit share an adult pays, plus each accommodation below: the property's own child rate where it has one for this range, or its single supplement where it does not accept a child.</p>
-{childBreakdown.length ? childBreakdown.map((row) => <div className="package-currency-breakdown" key={`child-${row.currency}`}>
-            <h3>{row.currency}</h3>
+          <p>This tab covers the accommodation only, because the accommodation is the only part of a package that can price a child differently. Each property is listed with its supplier: where the property contracts a child rate for this age range that rate is used, and where it does not accept a child its single supplement is used instead. The unit share an adult pays is added on the Travellers &amp; pricing tab.</p>
+<div className="package-currency-breakdown">
             {!childRange ? <p className="package-child-off">Set the child age range above to price a child.</p> : <>
-            <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Accommodation</th><th>Contracted child band</th><th>Charges a child</th><th>Child accommodation price</th></tr></thead>
+            <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Accommodation</th><th>Supplier</th><th>Contracted child band</th><th>Child price basis</th><th>Child accommodation price</th></tr></thead>
               <tbody>
-                {row.accommodationRows.map((item, itemIndex) => <tr key={`child-stay-${itemIndex}`}>
+                {childBreakdown.accommodationRows.map((item, itemIndex) => <tr key={`child-stay-${itemIndex}`}>
                   <td>{item.name}</td>
+                  <td>{item.supplierName || 'No supplier recorded'}</td>
                   <td>{item.childBandName || 'No child band on this property'}</td>
-                  <td>{item.childAllowed ? 'Yes' : 'No'}</td>
-                  <td>{money(item.childAccommodation, row.currency)}{item.childAllowed ? '' : ' (single supplement)'}</td>
+                  <td>{item.childBasis || (item.childAllowed ? 'Property child rate' : 'Single supplement')}</td>
+                  <td>{!item.childAllowed && <small>Charged the single supplement of {money(item.singleSupplement, childBreakdown.currency)}</small>}
+                    {money(item.childAccommodation, childBreakdown.currency)}</td>
                 </tr>)}
-                {!row.accommodationRows.length && <tr><td colSpan={4}>No accommodation in this package, so the child price is the per-pax unit share.</td></tr>}
+                {!childBreakdown.accommodationRows.length && <tr><td colSpan={5}>No accommodation in this package, so the child price is the per-pax unit share.</td></tr>}
+                {!!childBreakdown.accommodationRows.length && childBreakdown.childAccommodation === 0 && <tr><td colSpan={5} className="package-child-note">Every accommodation in this package charges R0.00 for a child. Nothing here is being published as a free child; check the single supplement on each property above.</td></tr>}
+                <tr className="package-breakdown-total"><th colSpan={4}>Total child accommodation, added to the unit share</th><td>{money(childBreakdown.childAccommodation, childBreakdown.currency)}</td></tr>
               </tbody>
             </table></div>
-            <div className="package-price-grid">
-              <div><span>Child sharing with adult price</span><strong>{money(row.childTotal, row.currency)}</strong><small>Unit share {money(row.unitPerPerson, row.currency)} + accommodation {money(row.childAccommodation, row.currency)}</small></div>
-            </div>
-            {!!row.accommodationRows.length && !!row.childNotAllowed.length && <p className="package-child-note">{row.childNotAllowed.join(', ')} does not accept a child for {childRange.ageFrom}–{childRange.ageTo} yrs, so its single supplement is included in the child price above.</p>}
+            <p className="package-child-note">Added to the unit share of {money(childBreakdown.unitPerPerson, childBreakdown.currency)} on the Travellers &amp; pricing tab, giving a child price of {money(childBreakdown.childTotal, childBreakdown.currency)}.</p>
+            {!!childBreakdown.accommodationRows.length && !!childBreakdown.childNotAllowed.length && <p className="package-child-note">{childBreakdown.childNotAllowed.join(', ')} does not accept a child for {childRange.ageFrom}–{childRange.ageTo} yrs, so each is charged the single supplement of {money(childBreakdown.childSupplement, childBreakdown.currency)} instead of a child rate.</p>}
             </>}
-          </div>) : <p>No included services to price.</p>}
+          </div>
         </>}
       </section>}
       {tab === 'inclusions' && <section className="package-tab-panel"><h2>Inclusions &amp; exclusions</h2><label className="package-field"><span>Inclusions</span><textarea rows={7} value={form.inclusions} onChange={(event) => updateForm('inclusions', event.target.value)} placeholder="Describe what is included in the package" /></label><label className="package-field"><span>Exclusions</span><textarea rows={7} value={form.exclusions} onChange={(event) => updateForm('exclusions', event.target.value)} placeholder="Describe what is not included" /></label></section>}
       {tab === 'terms' && <section className="package-tab-panel"><h2>Terms &amp; conditions</h2><label className="package-field"><span>Package terms and conditions</span><textarea rows={14} value={form.terms} onChange={(event) => updateForm('terms', event.target.value)} placeholder="Add package-specific terms and conditions" /></label></section>}
-      {tab === 'client' && <section className="package-tab-panel"><h2>Assign / quote to clients</h2><p>Client assignment is optional and may include more than one client. This does not add markup to contract rates.</p>
+      {tab === 'client' && <section className="package-tab-panel"><h2>Assign partners to this package</h2><p>Client assignment is optional and may include more than one client. {markupPercent > 0 ? `Prices are shown and exported with the ${markupPercent}% default markup of the assigned partner${selectedClients.length > 1 ? 's' : ''}.` : 'No partner is assigned, so prices stay at contract cost.'}</p>
         <div className="package-client-multiselect">
           <button type="button" className="package-client-select-trigger" aria-expanded={clientSelectOpen} onClick={() => setClientSelectOpen((open) => !open)}>
             <span>{selectedClients.length ? selectedClients.map(nameOf).join(', ') : 'Search and select client(s)'}</span><ChevronDown size={16} />
@@ -998,10 +1329,13 @@ export const PackageBuilder = () => {
             <ChevronDown size={15} className={`package-preview-chevron ${packagePreviewOpen ? 'open' : ''}`} />
           </button>
           {packagePreviewOpen && <div className="package-preview-items">
+            {/* This is the operator's own list, so every vehicle stays on it. It is the
+                CLIENT document above that collapses the ladder to one line, because here the
+                operator needs to see and edit every size they are pricing. */}
             {days.length ? days.map((day, dayIndex) => <section key={day.id || `preview-${dayIndex}`}>
               <strong>Day {dayIndex + 1}</strong>
               {(day.services || []).map((service, serviceIndex) => <div className="package-preview-item" key={`${service.id || service.item_id}-${serviceIndex}`}>
-                <span>{service.item_name}<small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}{service.is_included === false ? ' · optional' : ''}</small></span>
+                <span>{service.item_name}<small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}{service.is_included === false ? ' · optional' : ''}{packageIsTransport(service, library) && !service.tier_key ? ' · vehicle ladder, party picks one' : ''}</small></span>
                 <span className="package-preview-price">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} × {service.quantity || 1}</span>
                 <button type="button" className="package-icon-button" aria-label={`Remove ${service.item_name} from the package`} onClick={() => removeService(dayIndex, serviceIndex)}><Trash2 size={14} /></button>
               </div>)}
@@ -1012,9 +1346,17 @@ export const PackageBuilder = () => {
       </section>}
     </>}
     {exportDialog && <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setExportDialog(false); }}><section className="modal-content package-export-modal">
-      <div className="modal-header"><div><h2>Export package</h2><p>Choose the format and optional content for the document.</p></div><button className="close-btn" onClick={() => setExportDialog(false)}><X size={20} /></button></div>
-      <div className="package-export-options"><label><input type="radio" name="package-export-format" value="pdf" checked={exportFormat === 'pdf'} onChange={() => setExportFormat('pdf')} /> PDF (print / save as PDF)</label><label><input type="radio" name="package-export-format" value="word" checked={exportFormat === 'word'} onChange={() => setExportFormat('word')} /> Word document</label></div>
-      <div className="package-export-options">{[['cover', 'Cover image'], ['inclusions', 'Inclusions and exclusions'], ['terms', 'Terms and conditions']].map(([key, label]) => <label key={key}><input type="checkbox" checked={exportOptions[key]} onChange={(event) => setExportOptions((previous) => ({ ...previous, [key]: event.target.checked }))} /> {label}</label>)}</div>
+      <div className="modal-header"><div><h2>Export package</h2><p>Who it's for, the format, and what goes in.</p></div><button className="close-btn" onClick={() => setExportDialog(false)}><X size={20} /></button></div>
+      {/* Two columns rather than one long stack. Every group here is a short list of
+          radio buttons or checkboxes, so the old layout spent a whole screen on about
+          fifteen controls and pushed Export below the fold on a laptop. */}
+      <div className="package-export-grid">
+        <div className="package-export-options"><span className="package-export-subhead">For</span><label><input type="radio" name="package-export-audience" value="client" checked={exportOptions.audience === 'client'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'client' }))} /> Client {markupPercent > 0 ? `(+${markupPercent}%)` : '(no markup)'}</label><label><input type="radio" name="package-export-audience" value="internal" checked={exportOptions.audience === 'internal'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'internal' }))} /> Internal (STO)</label></div>
+        <div className="package-export-options"><span className="package-export-subhead">Format</span><label><input type="radio" name="package-export-format" value="pdf" checked={exportFormat === 'pdf'} onChange={() => setExportFormat('pdf')} /> PDF</label><label><input type="radio" name="package-export-format" value="word" checked={exportFormat === 'word'} onChange={() => setExportFormat('word')} /> Word</label></div>
+        <div className="package-export-options"><span className="package-export-subhead">Include</span>{[['cover', 'Cover image'], ['inclusions', 'Inclusions'], ['terms', 'Terms'], ['bandPrices', 'Band prices'], ['explainPricing', 'Explain pricing'], ['showVehicleOptions', 'Every vehicle size']].map(([key, label]) => <label key={key}><input type="checkbox" checked={!!exportOptions[key]} onChange={(event) => setExportOptions((previous) => ({ ...previous, [key]: event.target.checked }))} /> {label}</label>)}</div>
+        {exportOptions.bandPrices && <div className="package-export-options"><span className="package-export-subhead">Cards</span><label><input type="radio" name="package-export-party-card" value="both" checked={!exportOptions.partyCard || exportOptions.partyCard === 'both'} onChange={() => setExportOptions((previous) => ({ ...previous, partyCard: 'both' }))} /> Whole party + per adult</label><label><input type="radio" name="package-export-party-card" value="hide" checked={exportOptions.partyCard === 'hide'} onChange={() => setExportOptions((previous) => ({ ...previous, partyCard: 'hide' }))} /> Per adult only</label><label><input type="radio" name="package-export-party-card" value="only" checked={exportOptions.partyCard === 'only'} onChange={() => setExportOptions((previous) => ({ ...previous, partyCard: 'only' }))} /> Whole party only</label><span className="package-export-subhead">Lead</span><label><input type="radio" name="package-export-band-price" value="party" checked={exportOptions.bandPrice === 'party'} onChange={() => setExportOptions((previous) => ({ ...previous, bandPrice: 'party' }))} /> Party total</label><label><input type="radio" name="package-export-band-price" value="perPerson" checked={exportOptions.bandPrice === 'perPerson'} onChange={() => setExportOptions((previous) => ({ ...previous, bandPrice: 'perPerson' }))} /> Per adult</label></div>}
+        {exportOptions.bandPrices && <div className="package-export-options"><span className="package-export-subhead">Bands shown</span><label><input type="radio" name="package-export-bands" value="all" checked={exportOptions.bandSelection === 'all'} onChange={() => setExportOptions((previous) => ({ ...previous, bandSelection: 'all' }))} /> Every band</label>{breakdown.map((band) => <label key={`export-band-${band.item_key || band.pax}`}><input type="radio" name="package-export-bands" value={String(packageBandPax(band))} checked={exportOptions.bandSelection !== 'all' && Number(exportOptions.bandSelection) === packageBandPax(band)} onChange={() => setExportOptions((previous) => ({ ...previous, bandSelection: String(packageBandPax(band)) }))} /> {packageBandLabel(band)} only</label>)}</div>}
+      </div>
       <div className="package-modal-actions"><button className="secondary-btn" onClick={() => setExportDialog(false)}>Cancel</button><button className="primary-btn" onClick={exportDocument}><FileText size={16} /> Export</button></div>
     </section></div>}
   </div>;
