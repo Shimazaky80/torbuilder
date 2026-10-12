@@ -1,0 +1,42 @@
+Let us fix the VAT formula, for example, in IT-2026-000003, under Pricing breakdown, the final sell price of R12,255.6 is correct inclusive of VAT.
+However, the VAT I am charging the client is not correct, it should have been R1,598.56. 
+
+I am giving you the instructions and the formula on how to charge VAT correctly according to SARS rules, respecting Input VAT on buy embedded and Net VAT to SARS.
+
+To apply the SARS VAT formula correctly, you must follow a standard 3-step sequence: strip the input VAT, apply the markup, and then calculate the new output VAT.
+
+For example on this itinerary, a purchase of R10,213.00 inclusive of VAT with a 20% markup, the final selling price is R12,255.60 inclusive of VAT, and the final VAT charge on the invoice is R1,598.56.
+
+------------------------------
+Step-by-Step SARS VAT Calculation
+Here is exactly how to calculate each phase of the transaction to comply with SARS Guidelines:
+
+1. Strip the Input VAT (Find the base cost)
+To remove the 15% VAT from the supplier's price, divide the inclusive price by 1.15.
+
+	- R10,213.00 / 1.15 = R8,880.87 (VAT Exclusive Cost) 
+	Note: The VAT paid to the supplier is R1,332.13 (R10,213.00 - R8,880.87). This is the Input VAT.
+
+2. Apply the [%] Markup, in this case 20
+Add the 20% profit margin directly to the VAT-exclusive base cost.
+
+	R8,880.87 x 1.20 = R10,657.04 (VAT Exclusive Selling Price) 
+
+3. Calculate Final Sale VAT & Inclusive Price
+Multiply the new exclusive selling price by the VAT [%], for South African case is 15% to find the correct VAT to charge the client.
+
+	R10,657.04 x 0.15 = R1,598.56 (Final VAT Charge / Output VAT)
+	R10,657.04 + R1,598.56 = R12,255.60 (Final Client Invoice Total)
+
+------------------------------
+What the tenant Actually Pay (Output to SARS)
+If the business is registered for VAT, then the tenant does not pay the full R1,598.56 over to SARS. The tenant is legally entitled to claw back the VAT the tenant paid to the supplier.
+
+The tenant's net payment submission to SARS is calculated as Output VAT minus Input VAT:
+
+	R1,598.56 (Collected from client) - R1,332.13 (Paid to supplier) = R266.43
+
+The tenant will owe SARS exactly R266.43 for this specific transaction on the next VAT201 return.
+
+Please implement following the formulas and inctructions
+

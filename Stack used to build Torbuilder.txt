@@ -1,0 +1,13 @@
+Stack used to build Torbuilder:
+
+- React 19 + React DOM 19 — UI framework
+- Vite 8 — build tool/dev server (with @vitejs/plugin-react)
+- TypeScript types (@types/react, @types/react-dom) — but JSX source, ES modules ("type": "module")
+- Supabase (@supabase/supabase-js) — backend: Postgres + auth + storage
+- React Router 7 — routing
+- Zustand 5 — state management
+- react-hook-form + zod 4 — forms and validation
+- lucide-react — icons
+- ESLint 9 (flat config) with eslint-plugin-react-hooks v7 (compiler-aware purity rules) and react-refresh
+
+No test framework is installed (verification is done via node scripts), and it uses rolldown under Vite 8 for bundling.

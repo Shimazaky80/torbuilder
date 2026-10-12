@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Package Builder — Pricing and Seasons (mockup v3)</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f1f5f9; color: #0f172a; font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 24px 20px 64px; }
+  .crumb { font-size: 12px; color: #64748b; margin-bottom: 6px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #64748b; font-size: 13px; margin-bottom: 18px; }
+  .decisions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }
+  .dec { font-size: 11.5px; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 5px 9px; color: #475569; }
+  .dec b { color: #0f766e; }
+  .dec.abort { text-decoration: line-through; opacity: .6; }
+
+  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; margin-bottom: 18px; overflow: hidden; }
+  .card-h { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+  .card-h b { font-size: 13px; }
+  .card-h span { display: block; font-size: 12px; color: #64748b; margin-top: 2px; }
+  .card-b { padding: 16px; }
+
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; padding: 0 8px; flex-wrap: wrap; }
+  .tab { padding: 11px 15px; font-size: 13px; font-weight: 600; color: #475569; border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tab:hover { color: #0f766e; }
+  .tab.on { color: #0f766e; border-bottom-color: #0f766e; background: #fff; }
+  .tab .new { font-size: 10px; background: #ccfbf1; color: #0f766e; padding: 1px 5px; border-radius: 4px; margin-left: 6px; }
+
+  .seasons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .chip { border: 1px solid #cbd5e1; background: #fff; color: #334155; border-radius: 999px; padding: 6px 14px; font-size: 12.5px; cursor: pointer; display: flex; align-items: center; gap: 7px; }
+  .chip:hover { border-color: #0f766e; }
+  .chip.on { background: #0f766e; border-color: #0f766e; color: #fff; font-weight: 600; }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .55; }
+  .chip.add { border-style: dashed; color: #0f766e; }
+
+  .trip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: #475569; margin-top: 12px; }
+  .trip input { border: 1px solid #cbd5e1; border-radius: 6px; padding: 5px 8px; font-size: 13px; font-family: inherit; }
+  .trip .res { font-weight: 700; color: #0f172a; }
+  .warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 6px; padding: 7px 11px; font-size: 12.5px; margin-top: 8px; }
+
+  table.grid { width: 100%; border-collapse: collapse; }
+  table.grid th, table.grid td { border: 1px solid #e2e8f0; vertical-align: top; }
+  table.grid th.rowlab { width: 158px; background: #f8fafc; text-align: left; font-size: 11.5px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: .04em; padding: 10px 12px; }
+  table.grid td.rowlab { background: #f8fafc; font-size: 12.5px; font-weight: 600; color: #334155; padding: 10px 12px; }
+  table.grid td.rowlab small { display: block; font-weight: 400; color: #94a3b8; font-size: 11px; margin-top: 2px; }
+
+  .veh-head { background: #f0fdfa; padding: 8px !important; }
+  .veh-select { width: 100%; border: 1px solid #99f6e4; background: #fff; border-radius: 6px; padding: 6px; font-size: 12.5px; font-weight: 600; color: #0f766e; }
+  .veh-meta { font-size: 10.5px; color: #64748b; margin-top: 5px; display: flex; justify-content: space-between; }
+  .empty-slot { padding: 10px 4px; text-align: center; color: #94a3b8; font-size: 11.5px; font-style: italic; }
+
+  .datecell { padding: 10px 12px; background: #fffbeb; }
+  .datecell .lbl { font-size: 11px; color: #b45309; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  .datecell .val { font-size: 14px; font-weight: 700; color: #78350f; margin-top: 3px; }
+  .datecell .hint { font-size: 11.5px; color: #92400e; margin-top: 4px; }
+
+  .bands { display: flex; gap: 6px; padding: 8px; }
+  .band { flex: 1; min-width: 0; text-align: center; }
+  .band .pax { display: flex; align-items: center; justify-content: center; gap: 3px; }
+  .band input { width: 48px; text-align: center; border: 1px solid #cbd5e1; border-radius: 5px; padding: 5px 3px; font-size: 13px; font-weight: 700; }
+  .band .u { font-size: 11px; color: #64748b; }
+  .band .price { font-size: 14px; font-weight: 700; color: #0f172a; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .band .formula { font-size: 10px; color: #94a3b8; font-variant-numeric: tabular-nums; }
+
+  .flat-cell { padding: 10px 12px; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .flat-cell.season { background: #fefce8; color: #854d0e; }
+  .flat-cell.child { background: #fdf2f8; color: #9d174d; }
+  .flat-cell .from { display: block; font-size: 11px; font-weight: 500; color: #94a3b8; margin-top: 3px; }
+  .colspacer { padding: 10px 12px; background: #fff; }
+
+  .overlay { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .ov { border: 1px dashed #cbd5e1; border-radius: 8px; padding: 12px; background: #f8fafc; }
+  .ov h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #475569; }
+  .ov .big { font-size: 21px; font-weight: 800; color: #0f172a; font-variant-numeric: tabular-nums; }
+  .ov .note { font-size: 11.5px; color: #64748b; margin-top: 6px; }
+  .ov.locked { background: #f1f5f9; border-color: #e2e8f0; }
+  .ov.locked .big { color: #0f766e; }
+  .stamp { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; padding: 2px 7px; border-radius: 4px; }
+  .stamp.same { background: #ccfbf1; color: #0f766e; }
+  .stamp.chg { background: #fef3c7; color: #b45309; }
+
+  table.svc { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.svc th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #64748b; padding: 7px 10px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+  table.svc td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+  .basis { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; white-space: nowrap; }
+  .basis.veh { background: #ccfbf1; color: #0f766e; }
+  .basis.pp { background: #e0e7ff; color: #3730a3; }
+  .basis.flat { background: #fce7f3; color: #9d174d; }
+  .basis.acc { background: #fef3c7; color: #b45309; }
+  .vec { display: flex; gap: 4px; flex-wrap: wrap; }
+  .pill { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #f1f5f9; color: #334155; font-variant-numeric: tabular-nums; }
+  .pill.miss { background: #fee2e2; color: #b91c1c; text-decoration: line-through; }
+  .lock { font-size: 11px; color: #64748b; display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .btn { border: 1px solid #0f766e; background: #fff; color: #0f766e; border-radius: 6px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .btn:hover { background: #f0fdfa; }
+  .btn.done { border-color: #cbd5e1; color: #94a3b8; }
+
+  .callout { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px; padding: 14px 16px; font-size: 13px; color: #0c4a6e; margin-bottom: 18px; }
+  .callout b { color: #075985; }
+  .callout ul { margin: 8px 0 0; padding-left: 18px; }
+  .callout li { margin-bottom: 5px; }
+  .dead { opacity: .38; pointer-events: none; }
+  .placeholder { padding: 40px; text-align: center; color: #94a3b8; font-size: 13px; }
+  footer { font-size: 11.5px; color: #94a3b8; margin-top: 22px; line-height: 1.7; }
+  code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="crumb">Packages / Edit</div>
+  <h1>Kenya Classic — 8 Days</h1>
+  <div class="sub">Mockup v3 — supplier/destination removed from the picker. Interactive: switch season, change trip dates, pick vehicle sizes, edit traveller bands.</div>
+
+  <div class="decisions">
+    <span class="dec"><b>A</b> straddle → charge <b>highest</b> rate</span>
+    <span class="dec"><b>B</b> child price from library <code>child_rates</code>, else = adult</span>
+    <span class="dec"><b>C</b> single supplement full width</span>
+    <span class="dec"><b>D</b> vehicles set in Settings → filter picker; bands seeded from size</span>
+    <span class="dec"><b>E</b> package prices locked until manually updated</span>
+    <span class="dec"><b>F</b> 6 columns, unique per vehicle <b>size</b></span>
+    <span class="dec abort">supplier · destination · region in picker</span>
+  </div>
+
+  <!-- TABS -->
+  <div class="card">
+    <div class="tabs">
+      <button class="tab on" data-tab="pricing">Pricing and Seasons<span class="new">merged</span></button>
+      <button class="tab" data-tab="children">Children &amp; ages</button>
+      <button class="tab" data-tab="incl">Inclusions &amp; exclusions</button>
+      <button class="tab" data-tab="terms">Terms &amp; conditions</button>
+      <button class="tab" data-tab="partner">Client partner</button>
+    </div>
+
+    <div id="pane-pricing" class="pane"><div class="card-b" style="padding:16px 8px 8px;">
+
+      <!-- SEASONS + TRIP DATES -->
+      <div class="card-h" style="border:1px solid #e2e8f0; border-radius:8px 8px 0 0;">
+        <b>Seasons</b>
+        <span>One package, many seasons. Switching a season never duplicates the package and never reloads the services.</span>
+      </div>
+      <div style="border:1px solid #e2e8f0; border-top:0; border-radius:0 0 8px 8px; padding:14px 16px; margin-bottom:16px;">
+        <div class="seasons" id="seasonStrip"></div>
+
+        <div class="trip">
+          <span>Trip dates</span>
+          <input type="date" id="tripFrom" value="2026-03-10">
+          <span>&rarr;</span>
+          <input type="date" id="tripTo" value="2026-03-17">
+          <span class="res" id="seasonRes"></span>
+        </div>
+        <div id="straddleWarn"></div>
+
+        <div style="font-size:12px; color:#64748b; margin-top:10px;">
+          The grid keeps the <b>same annual prices</b> whatever season is selected — only the amber and pink rows, the overlay and the accommodation resolution change.
+        </div>
+      </div>
+
+      <!-- VEHICLE GRID -->
+      <div class="card-h" style="border:1px solid #e2e8f0; border-radius:8px 8px 0 0;">
+        <b>Vehicle × traveller grid</b>
+        <span>Up to 6 columns. Vehicle sizes come from Settings and can only be used once each — the column is the size, not the supplier.</span>
+      </div>
+      <div style="border:1px solid #e2e8f0; border-top:0; border-radius:0 0 8px 8px; padding:14px; overflow-x:auto;">
+        <table class="grid" id="mainGrid"></table>
+        <div style="font-size:12px; color:#64748b; margin-top:10px;">
+          Traveller bands are seeded from the vehicle size in Settings: <b>step = round(size ÷ 3)</b>, bands <b>[step, 2×step, size]</b>, smallest vehicle gets 2 bands. The pickers are free — override per package.
+        </div>
+      </div>
+
+      <!-- SEASON OVERLAY -->
+      <div class="card-h" style="border:1px solid #e2e8f0; border-radius:8px 8px 0 0; margin-top:16px;">
+        <b>Season overlay — the only thing a season changes</b>
+        <span>Accommodation is the one line whose price moves inside the year.</span>
+      </div>
+      <div style="border:1px solid #e2e8f0; border-top:0; border-radius:0 0 8px 8px; padding:14px;">
+        <div class="overlay">
+          <div class="ov">
+            <h4>Accommodation &amp; park fees <span class="stamp chg">changes</span></h4>
+            <div class="big" id="ovAccom">—</div>
+            <div class="note">Per person, sharing. From the accommodation library item's <code>seasonal_rates</code> matched to the trip dates.</div>
+          </div>
+          <div class="ov">
+            <h4>Single supplement <span class="stamp chg">changes</span></h4>
+            <div class="big" id="ovSingle">—</div>
+            <div class="note">Per person, <b>full width — identical for every vehicle column</b>.</div>
+          </div>
+          <div class="ov locked">
+            <h4>Vehicle &amp; service pool <span class="stamp same">identical</span></h4>
+            <div class="big" id="ovPool">—</div>
+            <div class="note">Shared, divided by traveller count. Transfers, game drives, meals — annual, never per season.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACCOMMODATION SEASON RESOLUTION -->
+      <div class="card-h" style="border:1px solid #e2e8f0; border-radius:8px 8px 0 0; margin-top:16px;">
+        <b>Accommodation season resolution</b>
+        <span>When a trip straddles an accommodation's own rate boundary, the higher rate is charged for every night.</span>
+      </div>
+      <div style="border:1px solid #e2e8f0; border-top:0; border-radius:0 0 8px 8px; padding:14px;" id="accomResolve"></div>
+
+      <!-- CALC -->
+      <div class="card-h" style="border:1px solid #e2e8f0; border-radius:8px 8px 0 0; margin-top:16px;">
+        <b>How the selected cell is priced</b>
+      </div>
+      <div style="border:1px solid #e2e8f0; border-top:0; border-radius:0 0 8px 8px; padding:14px 16px; font-size:13px;" id="calcStrip"></div>
+
+    </div></div>
+
+    <div id="pane-children" class="pane dead"><div class="placeholder">Children &amp; ages — unchanged. Supplies the age rules; the child rate itself is read from the library item.</div></div>
+    <div id="pane-incl" class="pane dead"><div class="placeholder">Inclusions &amp; exclusions — unchanged from today.</div></div>
+    <div id="pane-terms" class="pane dead"><div class="placeholder">Terms &amp; conditions — unchanged from today.</div></div>
+    <div id="pane-partner" class="pane dead"><div class="placeholder">Client partner — unchanged from today.</div></div>
+  </div>
+
+  <!-- SERVICES -->
+  <div class="card">
+    <div class="card-h">
+      <b>Services — locked snapshot</b>
+      <span>Shared by every vehicle column. Prices are written on the package when you add the line and stay locked until you press <i>Update from library</i>.</span>
+    </div>
+    <div class="card-b" style="padding:0;">
+      <table class="svc">
+        <thead><tr><th>Service</th><th>Cost basis</th><th>Vehicle prices</th><th>Season</th><th style="text-align:right">Snapshot</th></tr></thead>
+        <tbody id="svcBody"></tbody>
+      </table>
+      <div style="padding:10px 12px; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #e2e8f0; font-size:12.5px; color:#64748b;">
+        <span>Supplier changes are expected — that is why nothing re-reads on its own. Which supplier is cheaper is decided here, at the line, not in the vehicle picker.</span>
+        <button class="btn" id="updateAll">Update all from library</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <b>How seasons work — the answer to your one challenge</b>
+    <ul>
+      <li><b>A season is a header, not a copy.</b> Stored as <code>{ from, to, accommodation, single_supplement }</code> — it points at the same service rows. Nothing duplicates, no service reload.</li>
+      <li><b>Two price stores.</b> The vehicle × traveller grid is annual and written once. The season overlay holds only the two numbers your Excel proves vary.</li>
+      <li><b>Resolve by date.</b> Trip dates → the season containing them → accommodation from that season, everything else from the annual pool.</li>
+      <li><b>Straddling a boundary → highest rate wins</b> (decision A), charged for all nights, never split.</li>
+      <li><b>Prices are a locked snapshot (decision E).</b> Library edits never move an existing package; the user pulls them in deliberately.</li>
+      <li><b>A column is a vehicle size (decision F).</b> Two suppliers with the same 30-seater are one size and one column — the cheaper one is picked at the service line.</li>
+    </ul>
+  </div>
+
+  <footer>
+    Numbers derived from <code>itinerary_pricing.json</code>: vehicle pools are the column sums of every <code>pricing_by_vehicle</code> entry; annual flat services add 5&nbsp;685; per-person fixed = 341 + 1&nbsp;177 = <b>1&nbsp;518</b>; seasons are the three <code>seasonal_packaged_summaries</code> periods. Child rate and the sixth vehicle are illustrative — they are not in the Excel.
+  </footer>
+
+</div>
+
+<script>
+const PER_PERSON_FIXED = 1518;
+const ANNUAL_FLAT = 5685;
+const MAX_COLS = 6;
+
+/* Vehicle types come from Settings: name + seat count. A column is a SIZE, never a
+   supplier — two suppliers with the same 30-seater are the same column, and which
+   one is cheaper is decided on the service line. */
+const VEHICLES = [
+  { code:'saloon',      name:'Saloon',        seats:3,  pool: 9980 },
+  { code:'combi',       name:'Combi',         seats:6,  pool:13660 },
+  { code:'quantum_10',  name:'Quantum (10)',  seats:10, pool:16564 },
+  { code:'sprinter_16', name:'Sprinter (16)', seats:16, pool:30110 },
+  { code:'bus_39',      name:'Bus (39)',      seats:39, pool:47280 },
+  { code:'aranza_40',   name:'Aranza (40)',   seats:40, pool: 1030 }
+];
+
+/* Band seeding: step = round(size/3), bands [step, 2*step, size]; two bands if size <= 3. */
+const seedBands = seats => seats <= 3 ? [2, seats] : (() => {
+  const s = Math.max(1, Math.round(seats / 3));
+  return [...new Set([s, Math.min(seats, 2 * s), seats])];
+})();
+
+const SEASONS = [
+  { id:'s1', from:'2026-01-01', to:'2026-03-30', label:'01 Jan – 30 Mar 2026', accom:7546.02, single:2981.82 },
+  { id:'s2', from:'2026-04-01', to:'2026-08-30', label:'01 Apr – 30 Aug 2026', accom:7315.91, single:2869.32 },
+  { id:'s3', from:'2026-09-01', to:'2026-12-30', label:'01 Sep – 30 Dec 2026', accom:7546.02, single:2981.82 }
+];
+
+/* The accommodation keeps its OWN rate seasons, which need not match the package seasons. */
+const ACCOM = {
+  name:'Serengeti Sopa Lodge',
+  rates:[
+    { name:'High', from:'2026-01-01', to:'2026-03-15', sharing:807.5, single:558, child:404 },
+    { name:'Low',  from:'2026-03-16', to:'2026-06-30', sharing:740,   single:525, child:370 }
+  ]
+};
+
+const SLOTS = [0,1,2,3,4,5];
+let slotChoice = ['saloon','combi','quantum_10',null,null,null];
+let bands = {};
+VEHICLES.forEach(v => { bands[v.code] = seedBands(v.seats); });
+let activeSeason = 's1';
+let updated = {};
+
+const money = n => Math.round(n).toLocaleString('en-US');
+const veh = code => VEHICLES.find(v => v.code === code) || null;
+const sharedPool = code => (veh(code) || { pool:0 }).pool + ANNUAL_FLAT;
+const season = () => SEASONS.find(s => s.id === activeSeason);
+
+function renderStrip() {
+  const el = document.getElementById('seasonStrip');
+  el.innerHTML = SEASONS.map(s =>
+    `<button class="chip ${s.id===activeSeason?'on':''}" data-season="${s.id}"><span class="dot"></span>${s.label}</button>`
+  ).join('') + `<button class="chip add" id="addSeason">+ Add season</button>`;
+  el.querySelectorAll('[data-season]').forEach(b => b.onclick = () => { activeSeason = b.dataset.season; render(); });
+  document.getElementById('addSeason').onclick = () => {
+    const n = SEASONS.length + 1;
+    SEASONS.push({ id:'s'+n, from:'2027-01-01', to:'2027-12-31', label:'New season '+n, accom:0, single:0 });
+    activeSeason = 's'+n; render();
+  };
+}
+
+function optionList(slot) {
+  const used = slotChoice.filter((c,i) => i !== slot && c);
+  const current = slotChoice[slot];
+  return `<option value="">— empty column —</option>` + VEHICLES.map(v =>
+    `<option value="${v.code}"${used.includes(v.code) ? ' disabled' : ''}${current === v.code ? ' selected' : ''}>${v.name} · ${v.seats} seats</option>`
+  ).join('');
+}
+
+function renderGrid() {
+  const s = season();
+
+  let head = `<tr><th class="rowlab">Vehicle</th>`;
+  SLOTS.forEach(i => {
+    const v = veh(slotChoice[i]);
+    head += `<td class="veh-head">
+      <select class="veh-select" data-slot="${i}">${optionList(i)}</select>
+      ${v ? `<div class="veh-meta"><span>${v.seats} seats</span><span>col ${i+1}</span></div>`
+          : `<div class="empty-slot">pick a size, or leave out</div>`}
+    </td>`;
+  });
+  head += `</tr>`;
+
+  const dateRow = `<tr>
+    <td class="rowlab">Travel season<small>one row, all columns</small></td>
+    <td colspan="${SLOTS.length}">
+      <div class="datecell">
+        <div class="lbl">Season ${SEASONS.findIndex(x=>x.id===activeSeason)+1} · applies to every vehicle column</div>
+        <div class="val">${s.from} &rarr; ${s.to}</div>
+        <div class="hint">Driven by the accommodation — lodges are what change dates inside a year. Vehicles have no dates of their own.</div>
+      </div>
+    </td></tr>`;
+
+  const bandRow = `<tr>
+    <td class="rowlab">Travellers<small>pax per band</small></td>
+    ${SLOTS.map(i => {
+      const v = veh(slotChoice[i]);
+      if (!v) return `<td><div class="colspacer"></div></td>`;
+      return `<td><div class="bands">${bands[v.code].map((p,bi) => `
+        <div class="band"><div class="pax">
+          <input type="number" min="1" max="${v.seats}" value="${p}" data-band="${v.code}" data-bi="${bi}" data-slot="${i}"><span class="u">pax</span>
+        </div></div>`).join('')}</div></td>`;
+    }).join('')}
+  </tr>`;
+
+  const priceRow = `<tr>
+    <td class="rowlab">Price per person<small>vehicle ÷ pax + per-person</small></td>
+    ${SLOTS.map(i => {
+      const v = veh(slotChoice[i]);
+      if (!v) return `<td><div class="colspacer"></div></td>`;
+      const pool = sharedPool(v.code);
+      return `<td data-pricecell="${i}"><div class="bands">${bands[v.code].map((p,bi) => {
+        const each = pool / p;
+        return `<div class="band" data-bandcell="${bi}">
+          <div class="price">${money(each + PER_PERSON_FIXED)}</div>
+          <div class="formula">${money(each)} + 1 518</div>
+        </div>`;
+      }).join('')}</div></td>`;
+    }).join('')}
+  </tr>`;
+
+  const singleRow = `<tr>
+    <td class="rowlab">Single supplement<small>full width</small></td>
+    <td colspan="${SLOTS.length}">
+      <div class="flat-cell season">${money(s.single)}<span class="from">per person · identical for every vehicle column · switches with the season</span></div>
+    </td></tr>`;
+
+  const childRow = `<tr>
+    <td class="rowlab">Child price<small>from library</small></td>
+    <td colspan="${SLOTS.length}">
+      <div class="flat-cell child">${resolveAccom().child}<span class="from">accommodation child rate from the library item's <code>child_rates</code> for the resolved season · for every other line the child pays the adult price already shown above</span></div>
+    </td></tr>`;
+
+  document.getElementById('mainGrid').innerHTML = head + dateRow + bandRow + priceRow + singleRow + childRow;
+
+  document.querySelectorAll('.veh-select').forEach(sel => sel.onchange = () => {
+    slotChoice[+sel.dataset.slot] = sel.value || null; render();
+  });
+  document.querySelectorAll('input[data-band]').forEach(inp => inp.oninput = () => {
+    bands[inp.dataset.band][+inp.dataset.bi] = Math.max(1, parseInt(inp.value) || 1);
+    renderPricesOnly();
+  });
+}
+
+function renderPricesOnly() {
+  document.querySelectorAll('input[data-band]').forEach(inp => {
+    const slot = +inp.dataset.slot, bi = +inp.dataset.bi, code = inp.dataset.band;
+    const td = document.querySelector(`td[data-pricecell="${slot}"]`);
+    if (!td) return;
+    const cell = td.querySelector(`div.band[data-bandcell="${bi}"]`);
+    if (!cell) return;
+    const each = sharedPool(code) / bands[code][bi];
+    cell.querySelector('.price').textContent = money(each + PER_PERSON_FIXED);
+    cell.querySelector('.formula').textContent = money(each) + ' + 1 518';
+  });
+}
+
+/* (A) straddle rule: the higher overlapping accommodation rate wins, for all nights. */
+function resolveAccom() {
+  const from = document.getElementById('tripFrom').value;
+  const to   = document.getElementById('tripTo').value;
+  const overlapping = ACCOM.rates.filter(r => r.from <= to && r.to >= from);
+  const chosen = overlapping.reduce((best, r) => (!best || r.sharing > best.sharing) ? r : best, null) || ACCOM.rates[0];
+  return { from, to, overlapping, chosen, child: money(chosen.child) };
+}
+
+function renderTrip() {
+  const r = resolveAccom();
+  const pkgSeason = SEASONS.find(s => s.from <= r.to && s.to >= r.from);
+  document.getElementById('seasonRes').textContent =
+    pkgSeason ? `→ package season: ${pkgSeason.label}` : '→ no package season covers these dates';
+
+  document.getElementById('straddleWarn').innerHTML = r.overlapping.length > 1
+    ? `<div class="warn"><b>Straddle rule (A):</b> these dates fall in the <b>${r.overlapping.map(x=>x.name).join('</b> and <b>')}</b> rate seasons of ${ACCOM.name}. Charging the <b>higher</b> one — <b>${r.chosen.name}</b> at ${money(r.chosen.sharing)}/night — for <i>all</i> nights. Not split, not first-night.</div>`
+    : `<div style="font-size:12px; color:#64748b; margin-top:8px;">No straddle — every night falls in the <b>${r.chosen.name}</b> rate season.</div>`;
+
+  document.getElementById('accomResolve').innerHTML = `
+    <table class="svc" style="font-size:12.5px">
+      <thead><tr><th>Accommodation</th><th>Its rate seasons</th><th>Covers trip?</th><th>Charged</th></tr></thead>
+      <tbody><tr>
+        <td>${ACCOM.name}<br><span style="color:#94a3b8">${r.from} → ${r.to}</span></td>
+        <td>${ACCOM.rates.map(x => `${x.name} ${x.from}→${x.to} · ${money(x.sharing)}`).join('<br>')}</td>
+        <td>${r.overlapping.map(x => `<span class="basis acc">${x.name}</span>`).join(' ') || '<span class="basis flat">none</span>'}</td>
+        <td><span class="basis veh">${r.chosen.name} ${money(r.chosen.sharing)}/night</span></td>
+      </tr></tbody>
+    </table>
+    <div style="font-size:12px; color:#64748b; margin-top:8px;">
+      Runs per accommodation line, because two lodges in one trip can have different boundaries. The package season strip above is only the label the client sees.
+    </div>`;
+}
+
+function renderOverlay() {
+  const s = season();
+  document.getElementById('ovAccom').textContent = money(s.accom);
+  document.getElementById('ovSingle').textContent = money(s.single);
+  const first = slotChoice.find(Boolean);
+  document.getElementById('ovPool').textContent = first ? money(sharedPool(first)) : '—';
+}
+
+function renderCalc() {
+  const s = season();
+  const code = slotChoice.find(Boolean);
+  const box = document.getElementById('calcStrip');
+  if (!code) { box.innerHTML = '<span style="color:#94a3b8">Pick a vehicle column to see the arithmetic.</span>'; return; }
+  const v = veh(code), pool = sharedPool(code), p = bands[code][0];
+  const each = pool / p;
+  box.innerHTML = `
+    <div style="font-family:ui-monospace,Consolas,monospace; font-size:12.5px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px 14px; line-height:1.9;">
+      <div><b>Annual pool</b> &nbsp;${v.name}: vehicle ${money(v.pool)} + flat ${money(ANNUAL_FLAT)} = <b>${money(pool)}</b> <span style="color:#94a3b8">(locked snapshot)</span></div>
+      <div><b>÷ ${p} travellers</b> &nbsp;= ${money(each)} &nbsp;+&nbsp; per-person ${money(PER_PERSON_FIXED)} = <b>${money(each + PER_PERSON_FIXED)}</b> <span style="color:#0f766e">&#10003; per person</span></div>
+      <div><b>+ accommodation (${s.label})</b> &nbsp;${money(s.accom)} = <b>${money(each + PER_PERSON_FIXED + s.accom)}</b> all-in per person</div>
+      <div><b>+ single supplement</b> &nbsp;${money(s.single)} if they want their own room</div>
+      <div><b>child</b> &nbsp;${resolveAccom().child} accommodation, everything else at the adult rate above</div>
+    </div>`;
+}
+
+function renderServices() {
+  const rows = [
+    ['Airport transfer · Day 1',      'PER_VEHICLE',  {saloon:750, combi:900, quantum_10:1050, sprinter_16:2310, bus_39:4150, aranza_40:0}, 'annual'],
+    ['Nyerere game drive · Day 2',    'PER_VEHICLE',  {saloon:835, combi:1870, quantum_10:5910, sprinter_16:17100, bus_39:28700}, 'annual'],
+    ['Boat excursion · Day 3',        'PER_VEHICLE',  {saloon:835, combi:1870}, 'annual'],
+    ['Transfer + game drive · Day 4', 'PER_VEHICLE',  {saloon:1160, combi:1540, quantum_10:1782, sprinter_16:3080, bus_39:4950}, 'annual'],
+    ['Conservation fee',              'PER_PERSON',   null, 'annual'],
+    ['Lunches (per person)',          'PER_PERSON',   null, 'annual'],
+    ['Bottled water',                 'FLAT',         null, 'annual'],
+    [ACCOM.name,                      'ACCOMMODATION',null, 'seasonal']
+  ];
+  document.getElementById('svcBody').innerHTML = rows.map(([name, basis, vec, seas], idx) => {
+    const cls = basis === 'PER_VEHICLE' ? 'veh' : basis === 'PER_PERSON' ? 'pp' : basis === 'FLAT' ? 'flat' : 'acc';
+    let vecCell = '<span style="color:#94a3b8">—</span>';
+    if (vec) {
+      vecCell = '<div class="vec">' + VEHICLES.map(v => {
+        const has = Object.prototype.hasOwnProperty.call(vec, v.code) && vec[v.code] > 0;
+        return `<span class="pill ${has?'':'miss'}">${v.name}${has?' '+vec[v.code]:' not priced'}</span>`;
+      }).join('') + '</div>';
+    } else if (basis === 'ACCOMMODATION') {
+      vecCell = '<span style="color:#b45309">from the season overlay</span>';
+    }
+    const done = !!updated[idx];
+    return `<tr>
+      <td>${name}</td>
+      <td><span class="basis ${cls}">${basis}</span></td>
+      <td>${vecCell}</td>
+      <td><span class="basis ${seas==='seasonal'?'acc':'veh'}">${seas}</span></td>
+      <td><div class="lock">${done ? '<span>updated just now</span><button class="btn done" disabled>Updated</button>' : '<span>locked snapshot</span><button class="btn" data-upd="'+idx+'">Update from library</button>'}</div></td>
+    </tr>`;
+  }).join('');
+  document.querySelectorAll('[data-upd]').forEach(b => b.onclick = () => { updated[b.dataset.upd] = true; renderServices(); });
+  const all = document.getElementById('updateAll');
+  all.onclick = () => {
+    rows.forEach((_, i) => updated[i] = true); renderServices();
+    document.getElementById('updateAll').textContent = 'All services updated';
+    document.getElementById('updateAll').classList.add('done');
+  };
+}
+
+function render() { renderStrip(); renderGrid(); renderTrip(); renderOverlay(); renderCalc(); renderServices(); }
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+  document.querySelectorAll('.pane').forEach(x => x.classList.add('dead'));
+  t.classList.add('on');
+  document.getElementById('pane-' + t.dataset.tab).classList.remove('dead');
+});
+document.getElementById('tripFrom').onchange = render;
+document.getElementById('tripTo').onchange = render;
+
+render();
+</script>
+</body>
+</html>

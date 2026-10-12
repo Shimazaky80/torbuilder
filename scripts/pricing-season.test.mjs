@@ -9,6 +9,14 @@
    it runs:  npm run test:pricing
 */
 import { resolveSeasonForTravel, rateForTravel, applyProtectionToRate } from '../src/lib/priceValidity.js';
+import {
+  accommodationOptionGroups,
+  accommodationSeasonChoices,
+  accommodationHasChoices,
+  seasonChoiceLabel,
+  seasonForRate,
+  formatSeasonDate
+} from '../src/lib/accommodationOptions.js';
 import { calculateRoomCharges, getRateRow, buildRoomModalItem } from '../src/lib/roomAllocationHelper.js';
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
@@ -336,6 +344,64 @@ check(
   fixedHtml.includes('Season: Summer') && !rawHtml.includes('Season: Summer'),
   true
 );
+
+/* 13. A guide prices from its per-service-type flat fields, so its dated
+      season must count as priced even though the classic money columns are all
+      zero. Without this the itinerary blocked every guide with "No season in
+      the pricing matrix covers the travel dates". */
+const guideRate = {
+  id: 'r-guide', currency: 'ZAR', season_name: 'Base Season',
+  valid_from: '2026-01-01', valid_to: '2026-12-31',
+  guide_full_day_rate: 2360, guide_overland_rate: 3600,
+  price_1_adult: 0, price_2_adults: 0, rate_basis: 'per_trip'
+};
+const guideSeason = resolveSeasonForTravel({
+  rates: [guideRate], currencyCode: 'ZAR',
+  startDate: '2026-10-29', endDate: '2026-10-30'
+});
+check('a guide season priced by its guide fields is not priceless', guideSeason.status, 'ok');
+check('the guide season resolves and can be added', guideSeason.canAdd, true);
+check('the guide season names itself', guideSeason.seasonName, 'Base Season');
+const guideRow = rateForTravel({
+  rates: [guideRate], currencyCode: 'ZAR',
+  startDate: '2026-10-29', endDate: '2026-10-30'
+});
+check('rateForTravel keeps the guide full-day figure', guideRow.guide_full_day_rate, 2360);
+
+/* 14. An accommodation negotiated at several charge types stores each option on
+       the item_rates meal_plan. Prices are SEASON-first: one season is priced at
+       several charge types, each at its own row, and a drop can pin the exact
+       row the operator chose. */
+const bbWinter = { id: 'r-bb-winter', currency: 'ZAR', meal_plan: 'Bed & Breakfast', season_name: 'Winter', valid_from: '2026-04-01', valid_to: '2026-08-31', price_2_adults: 1675, rate_basis: 'per_person_sharing' };
+const bbSummer = { id: 'r-bb-summer', currency: 'ZAR', meal_plan: 'Bed & Breakfast', season_name: 'Summer', valid_from: '2026-09-01', valid_to: '2027-03-31', price_2_adults: 2290, rate_basis: 'per_person_sharing' };
+const hbSummer = { id: 'r-hb-summer', currency: 'ZAR', meal_plan: 'Half Board', season_name: 'Summer', valid_from: '2026-09-01', valid_to: '2027-03-31', price_2_adults: 2680, rate_basis: 'per_person_sharing' };
+const multiOptionItem = { item_rates: [bbWinter, bbSummer, hbSummer] };
+
+const groups = accommodationOptionGroups(multiOptionItem.item_rates);
+check('accommodation rows group into one group per charge option', groups.map((g) => g.label).join(','), 'Bed & Breakfast,Half Board');
+check('each option keeps its own season rows', groups.map((g) => g.rates.length).join(','), '2,1');
+
+const choices = accommodationSeasonChoices(multiOptionItem);
+check('season choices group SEASON-first', choices.map((c) => c.name).join(','), 'Winter,Summer');
+check('a season lists every charge type priced for it', choices.map((c) => c.options.map((o) => o.label).join('|')).join(','), 'Bed & Breakfast,Bed & Breakfast|Half Board');
+check('each season row keeps its exact rate id', choices[1].options.map((o) => o.rateId).join(','), 'r-bb-summer,r-hb-summer');
+check('one season with one option groups into a single season', accommodationSeasonChoices({ item_rates: [bbSummer] }).length, 1);
+
+check('an accommodation with several charge types on a season prompts on drop', accommodationHasChoices(multiOptionItem), true);
+check('a single option priced over two seasons also prompts', accommodationHasChoices({ item_rates: [bbWinter, bbSummer] }), true);
+check('a single charge type on a single season does not prompt', accommodationHasChoices({ item_rates: [bbSummer] }), false);
+check('the Skukuza case - one season at Bed & Breakfast AND Half Board - prompts', accommodationHasChoices({ item_rates: [bbSummer, hbSummer] }), true);
+
+check('formatSeasonDate prints YYYY/MM/DD', formatSeasonDate('2027-04-01'), '2027/04/01');
+check('seasonChoiceLabel shows season with its exact window', seasonChoiceLabel({ name: 'Summer', validFrom: '2027-04-01', validTo: '2027-08-31' }), 'Summer: 2027/04/01-2027/08/31');
+
+const pinned = seasonForRate(hbSummer);
+check('a pinned rate yields an addable ok season', pinned.status, 'ok');
+check('pinned season can add', pinned.canAdd, true);
+check('pinned season prices from the chosen row', pinned.rate.id, 'r-hb-summer');
+check('pinned season names the chosen option season', pinned.seasonName, 'Summer');
+const pinnedHalfBoard = seasonForRate({ ...hbSummer, price_2_adults: 0 });
+check('an unpriced pinned row is flagged, not silently added', pinnedHalfBoard.canAdd, false);
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll checks passed.');
 process.exit(failures ? 1 : 0);

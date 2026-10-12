@@ -75,7 +75,8 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
     const taxRate = numOr(sv.taxRate, defaultTaxRate);
     const pp = round2(Number(sv.sellPP) || 0);
     if (pp < 0) return;
-    if (!/accommodation/i.test(String(sv.category || ''))) {
+    if (sv.guideOnly === true || sv.guide_only === true
+      || !/accommodation/i.test(String(sv.category || ''))) {
       add(pp * T, taxRate, 'sharing');
       return;
     }

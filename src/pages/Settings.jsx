@@ -25,8 +25,17 @@ import {
   Rows3,
   Eye,
   Compass,
+  Truck,
   AlertTriangle
 } from 'lucide-react';
+
+/* The stable key written into a rate row's price map. Derived once when a vehicle type
+   is created and never recomputed, so renaming "Quantum (10)" cannot silently re-key
+   every price already saved against quantum_10. */
+const vehicleCodeFrom = (value) => String(value || '').trim().toLowerCase()
+  .replace(/[^a-z0-9]+/g, '_')
+  .replace(/^_+|_+$/g, '')
+  .slice(0, 40);
 
 const emptyBank = () => ({
   label: '',
@@ -216,6 +225,9 @@ export const Settings = () => {
   const [tourTypes, setTourTypes] = useState([]);
   const [tourTypeName, setTourTypeName] = useState('');
   const [editingTourTypeId, setEditingTourTypeId] = useState(null);
+  const [vehicleTypes, setVehicleTypes] = useState([]);
+  const [vehicleForm, setVehicleForm] = useState({ name: '', capacity: '' });
+  const [editingVehicleTypeId, setEditingVehicleTypeId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -357,6 +369,17 @@ export const Settings = () => {
     setTourTypes(data || []);
   }, []);
 
+  const fetchVehicleTypes = useCallback(async (cid) => {
+    if (!cid) return;
+    const { data, error } = await supabase
+      .from('company_vehicle_types')
+      .select('id, code, name, max_capacity, is_active')
+      .eq('company_id', cid)
+      .order('max_capacity', { ascending: true });
+    if (error) throw error;
+    setVehicleTypes(data || []);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -364,7 +387,7 @@ export const Settings = () => {
         const cid = await fetchCompanyId();
         if (cancelled) return;
         setCompanyId(cid);
-        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchTourTypes(cid)]);
+        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchTourTypes(cid), fetchVehicleTypes(cid)]);
       } catch (err) {
         if (!cancelled) showToast(err.message || 'Failed to load settings', 'error');
       } finally {
@@ -372,7 +395,7 @@ export const Settings = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchTourTypes, showToast]);
+  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchTourTypes, fetchVehicleTypes, showToast]);
 
   const handleTourTypeSubmit = async (event) => {
     event.preventDefault();
@@ -425,6 +448,78 @@ export const Settings = () => {
       showToast(tourType.is_active ? 'Tour type deactivated' : 'Tour type activated', 'success');
     } catch (err) {
       showToast(err.message || 'Could not update tour type', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleVehicleTypeSubmit = async (event) => {
+    event.preventDefault();
+    const name = vehicleForm.name.trim();
+    const capacity = Math.floor(Number(vehicleForm.capacity));
+    if (!companyId) {
+      showToast('No active company found', 'error');
+      return;
+    }
+    if (!name) {
+      showToast('Vehicle type name is required', 'warning');
+      return;
+    }
+    if (!Number.isFinite(capacity) || capacity < 1) {
+      showToast('Seats must be a whole number of at least 1', 'warning');
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editingVehicleTypeId) {
+        const { error } = await supabase
+          .from('company_vehicle_types')
+          .update({ name, max_capacity: capacity, updated_at: new Date().toISOString() })
+          .eq('id', editingVehicleTypeId)
+          .eq('company_id', companyId);
+        if (error) {
+          if (error.code === '23505') throw new Error('A vehicle type with that name already exists.');
+          throw error;
+        }
+      } else {
+        const code = vehicleCodeFrom(name);
+        if (!code) {
+          showToast('That name cannot be turned into a vehicle code. Try something like "Sprinter (16)".', 'warning');
+          return;
+        }
+        const { error } = await supabase
+          .from('company_vehicle_types')
+          .insert([{ company_id: companyId, code, name, max_capacity: capacity }]);
+        if (error) {
+          if (error.code === '23505') throw new Error('A vehicle type with that code already exists.');
+          throw error;
+        }
+      }
+      await fetchVehicleTypes(companyId);
+      setVehicleForm({ name: '', capacity: '' });
+      setEditingVehicleTypeId(null);
+      showToast(editingVehicleTypeId ? 'Vehicle type updated' : 'Vehicle type added', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not save vehicle type', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleVehicleTypeToggle = async (vehicleType) => {
+    if (!companyId) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('company_vehicle_types')
+        .update({ is_active: !vehicleType.is_active, updated_at: new Date().toISOString() })
+        .eq('id', vehicleType.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      await fetchVehicleTypes(companyId);
+      showToast(vehicleType.is_active ? 'Vehicle type deactivated' : 'Vehicle type activated', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not update vehicle type', 'error');
     } finally {
       setSaving(false);
     }
@@ -993,6 +1088,93 @@ const handleSavePriceProtection = async () => {
                         title={tourType.is_active ? 'Deactivate tour type' : 'Activate tour type'}
                         disabled={saving}
                         onClick={() => handleTourTypeToggle(tourType)}
+                      >
+                        <Power size={15} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Truck size={18} color="#0d7478" /> Vehicle Types
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            The vehicles every supplier quote is priced against. A service stores one price per type instead of one row per vehicle, and a quote picks the smallest type that seats the party. Deactivated types stay on saved packages but are hidden from new work.
+          </p>
+        </div>
+        <form onSubmit={handleVehicleTypeSubmit} style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
+          <input
+            className="sidebar-select"
+            style={{ ...fieldStyle, width: 'min(100%, 18rem)' }}
+            value={vehicleForm.name}
+            onChange={(event) => setVehicleForm((previous) => ({ ...previous, name: event.target.value }))}
+            placeholder="e.g. Sprinter (16)"
+            aria-label="Vehicle type name"
+            maxLength={80}
+          />
+          <input
+            className="sidebar-select"
+            type="number"
+            min={1}
+            step={1}
+            style={{ ...fieldStyle, width: '7rem' }}
+            value={vehicleForm.capacity}
+            onChange={(event) => setVehicleForm((previous) => ({ ...previous, capacity: event.target.value }))}
+            placeholder="Seats"
+            aria-label="Vehicle seating capacity"
+          />
+          <button type="submit" className="primary-btn" disabled={saving}>
+            <Check size={15} /> {saving ? 'Saving...' : editingVehicleTypeId ? 'Save changes' : 'Add Vehicle Type'}
+          </button>
+          {editingVehicleTypeId && (
+            <button
+              type="button"
+              className="secondary-btn"
+              disabled={saving}
+              onClick={() => { setEditingVehicleTypeId(null); setVehicleForm({ name: '', capacity: '' }); }}
+            >
+              Cancel
+            </button>
+          )}
+        </form>
+        {loading ? (
+          <div style={{ padding: '1rem 0', color: '#94a3b8' }}>Loading vehicle types...</div>
+        ) : vehicleTypes.length === 0 ? (
+          <div style={{ padding: '1rem 0', color: '#64748b' }}>No vehicle types configured.</div>
+        ) : (
+          <table className="admin-table">
+            <thead><tr><th>Vehicle type</th><th>Seats</th><th>Code</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+            <tbody>
+              {vehicleTypes.map((vehicleType) => (
+                <tr key={vehicleType.id} style={vehicleType.is_active ? undefined : { opacity: 0.65 }}>
+                  <td style={{ fontWeight: 700 }}>{vehicleType.name}</td>
+                  <td>{vehicleType.max_capacity}</td>
+                  <td><code>{vehicleType.code}</code></td>
+                  <td>{vehicleType.is_active ? 'Active' : 'Inactive'}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title="Edit vehicle type"
+                        disabled={saving}
+                        onClick={() => { setEditingVehicleTypeId(vehicleType.id); setVehicleForm({ name: vehicleType.name, capacity: String(vehicleType.max_capacity) }); }}
+                      >
+                        <Edit3 size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title={vehicleType.is_active ? 'Deactivate vehicle type' : 'Activate vehicle type'}
+                        disabled={saving}
+                        onClick={() => handleVehicleTypeToggle(vehicleType)}
                       >
                         <Power size={15} />
                       </button>

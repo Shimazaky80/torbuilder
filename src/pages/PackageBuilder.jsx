@@ -1,36 +1,53 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Backpack, Baby, CalendarDays, ChevronDown, Download, FileText,
-  GripVertical, Plus, Save, Search, Trash2, X
+  GripVertical, Plus, RefreshCw, Save, Search, Trash2, UtensilsCrossed, X
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { PricingSeasonsTab } from '../components/PricingSeasonsTab';
+import { PricingSummaryTab } from '../components/PricingSummaryTab';
+import { usePricingGrid } from '../lib/usePricingGrid';
 import { useToast } from '../context/ToastContext';
 import { usePageGuard } from '../context/NavigationGuardContext';
 import {
+  accommodationPerPersonForSeason,
+  accommodationRoomCapacity,
   accommodationRoomPlan,
   calculatePackageTravellerBreakdown,
   largestTravellerPattern,
   normaliseChildAgeRange,
   PACKAGE_MAX_CHILD_AGE,
-packageBandCapacityError,
   packageBandLabel,
   packageBandPax,
-  packageBandSuggestions,
   packageChildAgeRange,
-  applyPackageMarkup,
   packageCurrencyFor,
   packageKey,
   packageMarkupPercent,
+  packageExportMarkup,
   packageItemCapacitySetupError,
   packageVehicleCapacity,
-packageAutoBandKey,
 packageIsTransport,
 packageTransportSummary,
 packageRateForDates,
   packageSeasonResolution,
-  packageTierDays
+  packageTierDays,
+  applyPackageMarkup,
+  presentationPricingColumns,
+  singleSupplementForSeason,
+  vehicleColumnPools,
+  vehicleVectorPrice
 } from '../lib/packagePricing';
+import {
+  guideChargeTotal,
+  guideLabel,
+  isGuideItem,
+  isOverlandGuide
+} from '../lib/guidePricing';
+import GuideServiceTypeModal from '../components/GuideServiceTypeModal';
+import GuideDetailsModal from '../components/GuideDetailsModal';
+import AccommodationChargeModal from '../components/AccommodationChargeModal';
+import { accommodationHasChoices, rateOptionLabel } from '../lib/accommodationOptions';
 
 const uuid = packageKey;
 
@@ -107,6 +124,7 @@ export const PackageBuilder = () => {
   const [paxOptions, setPaxOptions] = useState([]);
   const [clients, setClients] = useState([]);
   const [library, setLibrary] = useState([]);
+  const [vehicleTypes, setVehicleTypes] = useState([]);
   const [destinationCatalog, setDestinationCatalog] = useState([]);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
@@ -124,15 +142,31 @@ const [bandScope, setBandScope] = useState('');
   const [protectionPercent, setProtectionPercent] = useState(0);
   const [lastSaved, setLastSaved] = useState('');
   const [exportDialog, setExportDialog] = useState(false);
-  /* bandPrice is which figure leads the band section. 'party' shows what the whole party pays,
-   which is the number that has to recover the vehicle; 'perPerson' shows the per-adult
-   share, which is how a client is normally quoted. Either way the party total stays on the
-   card, because a per-person price on its own is what made a small party look under-quoted. */
-  const [exportOptions, setExportOptions] = useState({ cover: true, inclusions: true, terms: true, explainPricing: false, bandPrices: true, bandPrice: 'party', bandSelection: 'all', showVehicleOptions: false, partyCard: 'both', audience: 'client' });
+  /* The export audience is one of three, never a fallback from one into another: the
+     document for an assigned partner at their markup, a one-off markup for anyone who is
+     not a partner, or the internal (STO) master at contract cost. The Presentation pricing
+     summary is now the document's only pricing section, so it is on by default. */
+  const [exportOptions, setExportOptions] = useState({ cover: true, inclusions: true, terms: true, explainPricing: false, showVehicleOptions: false, audience: 'partner', markup: '', includePricingSummary: true });
   const [exportFormat, setExportFormat] = useState('pdf');
+  /* The grid lives above the tabs so the working Pricing & seasons grid and the client-facing
+     Presentation pricing read one and the same set of columns and bands. The presentation never
+     edits it. The columns seed from the vehicle_columns chosen on the Packages list when the
+     package was created; a package without any falls back to the first six vehicle sizes. */
+  const grid = usePricingGrid(vehicleTypes, (pkg?.vehicle_columns || []).map(String));
+  const [activeSeason, setActiveSeason] = useState(0);
   const [clientSelectOpen, setClientSelectOpen] = useState(false);
   const [clientQuery, setClientQuery] = useState('');
   const [packagePreviewOpen, setPackagePreviewOpen] = useState(false);
+
+  /* Guide service detour: the pending add held while the operator picks which
+     service types the guide accompanies, and the guide & driver detail (lunch /
+     dinner / overnight lines) for an overland guide on one day. */
+  const [guideModal, setGuideModal] = useState(null);
+  const [guideDetailsModal, setGuideDetailsModal] = useState(null);
+
+  /* Accommodation charge detour: the pending add held while the operator picks
+     the charge type (and season) a multi-price property is booked on. */
+  const [accomChargeModal, setAccomChargeModal] = useState(null);
 
   const snapshot = useMemo(() => JSON.stringify({ form, days, periods, paxOptions }), [form, days, periods, paxOptions]);
   const dirty = Boolean(pkg && lastSaved && snapshot !== lastSaved);
@@ -148,14 +182,15 @@ const [bandScope, setBandScope] = useState('');
       if (!profile?.company_id) throw new Error('Your account is not linked to a company.');
       setCompanyId(profile.company_id);
 
-      const [pkgRes, dayRes, periodRes, paxRes, billingRes] = await Promise.all([
+      const [pkgRes, dayRes, periodRes, paxRes, billingRes, vehicleTypesRes] = await Promise.all([
         supabase.from('packages').select('*').eq('id', packageId).eq('company_id', profile.company_id).single(),
         supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number'),
         supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
         supabase.from('package_pax_options').select('*').eq('package_id', packageId).order('pax'),
-        supabase.from('company_billing_settings').select('itinerary_terms, price_protection_percent').eq('company_id', profile.company_id).maybeSingle()
+        supabase.from('company_billing_settings').select('itinerary_terms, price_protection_percent').eq('company_id', profile.company_id).maybeSingle(),
+        supabase.from('company_vehicle_types').select('*').eq('company_id', profile.company_id).order('max_capacity')
       ]);
-      for (const result of [pkgRes, dayRes, periodRes, paxRes, billingRes]) {
+      for (const result of [pkgRes, dayRes, periodRes, paxRes, billingRes, vehicleTypesRes]) {
         if (result.error) throw result.error;
       }
       const dayIds = (dayRes.data || []).map((day) => day.id);
@@ -200,21 +235,22 @@ const [bandScope, setBandScope] = useState('');
       setForm(packageForm);
       setProtectionPercent(Math.max(0, Number(billingRes.data?.price_protection_percent) || 0));
       setDays(loadedDays);
-      setPeriods((periodRes.data || []).map(({ valid_from, valid_to }) => ({ valid_from, valid_to })));
+      setPeriods((periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement })));
       setPaxOptions(paxRes.data || []);
+      setVehicleTypes((vehicleTypesRes.data || []).filter(Boolean));
       setClients(loadedClients);
       setSelectedDay(0);
       setLastSaved(JSON.stringify({
         form: packageForm,
         days: loadedDays,
-        periods: (periodRes.data || []).map(({ valid_from, valid_to }) => ({ valid_from, valid_to })),
+        periods: (periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement })),
         paxOptions: paxRes.data || []
       }));
 
       const usedIds = [...new Set((itemRes.data || []).map((item) => item.item_id).filter(Boolean))];
       if (usedIds.length) {
         const [itemsRes, ratesRes] = await Promise.all([
-          supabase.from('library_items').select('id, name, category, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active').in('id', usedIds),
+          supabase.from('library_items').select('id, name, category, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active, meal_type, menu_type, guide_meals, guide_accommodation, guide_driver_room_offered').in('id', usedIds),
           supabase.from('item_rates').select('*').in('item_id', usedIds)
         ]);
         if (itemsRes.error) throw itemsRes.error;
@@ -275,7 +311,7 @@ const [bandScope, setBandScope] = useState('');
       try {
         const safe = term.replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
         let query = supabase.from('library_items')
-          .select('id, name, category, description, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active')
+          .select('id, name, category, description, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active, meal_type, menu_type, guide_meals, guide_accommodation, guide_driver_room_offered')
           .eq('company_id', companyId).eq('is_active', true)
           .order('name').limit(50);
         if (categoryFilter) query = query.eq('category', categoryFilter);
@@ -367,28 +403,7 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
      A suggestion the operator accepts gets the stable key for its party size, so accepting
      the same suggestion again after deleting it reattaches to the same key rather than
      orphaning any band services that pointed at it. */
-  const bandSuggestions = useMemo(
-    () => packageBandSuggestions(days, library, paxOptions),
-    [days, library, paxOptions]
-  );
   const mergedBands = useMemo(() => [...paxOptions].sort(byBandMin), [paxOptions]);
-
-  const acceptBandSuggestion = (pax) => {
-    /* Only the transport this band would actually be given counts here. Asking the whole
-       package instead would reject the band because some other band owns a smaller bus. */
-    const capacityError = packageBandCapacityError(days, library, { pax });
-    if (capacityError) {
-      showToast(capacityError, 'warning');
-      return;
-    }
-    setPaxOptions((previous) => [...previous, {
-      pax,
-      min_pax: pax,
-      max_pax: pax,
-      item_key: packageAutoBandKey(pax),
-      is_auto_generated: false
-    }].sort(byBandMin));
-  };
 
   /* Rooms are worked out from the party size rather than entered by hand. The widest band
      is the largest party the package has to sleep, so that band sizes the accommodation. */
@@ -405,10 +420,6 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
 const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextPax = mergedBands, nextForm = form) => {
    if (!companyId || !pkg) return false;
    const validPeriods = nextPeriods.filter((period) => period.valid_from && period.valid_to);
-   /* Resolved from the client records rather than the component state so a save always
-      stamps the same figure the pricing cards are showing, even when triggered by an
-      autosave that has not re-rendered yet. */
-   const assignedMarkup = packageMarkupPercent(clients.filter((client) => nextForm.assignedClientIds.includes(client.id)));
     if (nextPeriods.some((period) => Boolean(period.valid_from) !== Boolean(period.valid_to))) {
       showToast('Complete both dates for each validity period, or remove the incomplete row.', 'warning');
       return false;
@@ -448,10 +459,12 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         child_age_ranges: nextForm.acceptsChildren && nextForm.childAgeRange
           ? [normaliseChildAgeRange(nextForm.childAgeRange)]
           : [],
-default_markup_percentage: assignedMarkup,
   /* Kept in step with the currency chosen at creation. It is not editable here: the modal
      owns it, and only while the package has no priced services. */
-  currency_code: packageCurrency
+  currency_code: packageCurrency,
+  /* The columns the package is priced in. Seeded from the Packages-list choice at load,
+     then stored back here so the working grid and the exported presentation stay in step. */
+  vehicle_columns: grid.usedCodes
   }).eq('id', pkg.id).eq('company_id', companyId);
       if (packageError) throw packageError;
 
@@ -486,8 +499,11 @@ default_markup_percentage: assignedMarkup,
           currency_code: service.currency_code || 'ZAR',
           rate_basis: service.rate_basis || 'per_person',
           unit_cost: Number(service.unit_cost) || 0,
-          unit_price: applyPackageMarkup(Number(service.unit_cost) || 0, assignedMarkup),
-          markup_percentage: assignedMarkup,
+          /* Raw contract cost, matching the rate-change path below. Markup lives on the
+             totals at export time and is never stored on the line, so reassigning a
+             client or selling the package elsewhere re-prices it instead of finding the
+             old margin already baked into the row. */
+          unit_price: Number(service.unit_cost) || 0,
           is_included: service.is_included !== false,
           notes: service.notes || null,
           sort_order: sortOrder,
@@ -503,7 +519,14 @@ default_markup_percentage: assignedMarkup,
           /* Kept on the line so a protected price stays explainable after the save,
              exactly as it is on the itinerary. */
           price_protection_percent: Number(service.price_protection_percent) || 0,
-          protected_season_name: service.protected_season_name || ''
+          protected_season_name: service.protected_season_name || '',
+          /* Guide service detour: which service types the guide line was priced
+             from (null for ordinary lines) and whether the line prices the guide
+             & driver only (their lunch / dinner / overnight details). */
+          guide_service_types: Array.isArray(service.guide_service_types) ? service.guide_service_types : null,
+          guide_only: service.guide_only === true,
+          guide_for_item_key: service.guide_for_item_key || null,
+          guide_charge_type: service.guide_charge_type || null
         }));
         if (rows.length) {
           const { error: itemError } = await supabase.from('package_day_items').insert(rows);
@@ -515,7 +538,14 @@ default_markup_percentage: assignedMarkup,
       if (periodDeleteError) throw periodDeleteError;
       if (validPeriods.length) {
         const { error: periodError } = await supabase.from('package_validity_periods').insert(
-          validPeriods.map((period) => ({ package_id: pkg.id, ...period }))
+          validPeriods.map((period) => ({
+            package_id: pkg.id,
+            valid_from: period.valid_from,
+            valid_to: period.valid_to,
+            name: period.name || null,
+            accommodation_per_person: period.accommodation_per_person ?? null,
+            single_supplement: period.single_supplement ?? 0
+          }))
         );
         if (periodError) throw periodError;
       }
@@ -559,7 +589,13 @@ default_markup_percentage: assignedMarkup,
           return rooms ? { ...service, quantity: rooms } : service;
         })
       }));
-      const savedPeriods = validPeriods.map(({ valid_from, valid_to }) => ({ valid_from, valid_to }));
+      const savedPeriods = validPeriods.map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({
+        valid_from,
+        valid_to,
+        name,
+        accommodation_per_person,
+        single_supplement
+      }));
       setDays(savedDays);
       setPeriods(savedPeriods);
       setPaxOptions(nextPax);
@@ -572,7 +608,7 @@ default_markup_percentage: assignedMarkup,
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, clients, packageCurrency, showToast]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, showToast]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -606,11 +642,21 @@ default_markup_percentage: assignedMarkup,
         : 'This library item has no loaded contract rates. Add a rate in Library Items first.', 'warning');
       return;
     }
-    /* New lines are stamped with the partner markup in force at the moment they are
-       added, so the saved sell price always matches the cards on screen. */
-    const assignedMarkup = packageMarkupPercent(selectedClients);
     if (String(rate.currency || item.currency || packageCurrency).toUpperCase() !== String(packageCurrency).toUpperCase()) {
       showToast(`This package is priced in ${packageCurrency}. ${item.name} only has a ${rate.currency} rate, which would make the package total meaningless.`, 'warning');
+      return;
+    }
+    /* A guide is charged per the service it accompanies, so the service type has
+       to be chosen before the line can be priced. The add is parked until the
+       operator answers, then re-entered with the choice in scope. */
+    if (isGuideItem(item) && !(scope.guideServiceTypes || []).length) {
+      setGuideModal({ item, rateId, dayIndex, scope, rate });
+      return;
+    }
+    /* An accommodation contracted at several charge types (or several seasons)
+       asks which one this booking uses before it is priced. */
+    if (/accommodation/i.test(String(item.category || '')) && accommodationHasChoices(item) && !scope.accommodationChargeChosen) {
+      setAccomChargeModal({ item, rateId, dayIndex, scope, rate });
       return;
     }
     /* Whether this item is fit to be in a package at all. Whether it is big enough is not
@@ -633,6 +679,11 @@ default_markup_percentage: assignedMarkup,
     const storedRate = season.status === 'protected' ? season.rate : rate;
     const unitCost = Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0;
     const isStayItem = /accommodation/i.test(String(item.category || ''));
+    /* A guide line prices the flat per-trip sum of the chosen service types. The
+       guide's own contract figure (unit_cost / price_1_adult) is 0, so the line
+       is built from the selected survey rates and stored so it survives a reload. */
+    const guideTypes = isGuideItem(item) ? (scope.guideServiceTypes || []) : [];
+    const guideTotal = guideTypes.length ? guideChargeTotal(storedRate, guideTypes) : null;
     const service = {
       item_key: uuid(),
       item_id: item.id,      rate_id: rate.id,
@@ -640,10 +691,9 @@ default_markup_percentage: assignedMarkup,
       category: item.category || '',
       supplier_name: item.supplier_name || '',
       currency_code: rate.currency || item.currency || 'ZAR',
-      rate_basis: rate.rate_basis || item.pricing_model || 'per_person',
-      unit_cost: unitCost,
-      unit_price: applyPackageMarkup(unitCost, assignedMarkup),
-      markup_percentage: assignedMarkup,
+      rate_basis: guideTotal !== null ? 'per_trip' : (rate.rate_basis || item.pricing_model || 'per_person'),
+      unit_cost: guideTotal !== null ? guideTotal : unitCost,
+      unit_price: guideTotal !== null ? guideTotal : unitCost,
       quantity: isStayItem
         ? accommodationRoomPlan({ ...item, rate_id: rate.id }, item, autoPattern).roomCount
         : 1,
@@ -655,7 +705,11 @@ default_markup_percentage: assignedMarkup,
       replaces_item_key: scope.replaces_item_key || null,
       rate_snapshot: storedRate,
       price_protection_percent: season.protectionPercent || 0,
-      protected_season_name: season.status === 'protected' ? season.seasonName : ''
+      protected_season_name: season.status === 'protected' ? season.seasonName : '',
+      guide_service_types: guideTotal !== null ? guideTypes : null,
+      guide_only: false,
+      guide_for_item_key: null,
+      guide_charge_type: null
     };
     if (season.message) showToast(season.message, season.status === 'protected' ? 'warning' : 'info');
     setDays((previous) => {
@@ -664,6 +718,109 @@ default_markup_percentage: assignedMarkup,
         ? { ...day, services: [...day.services, service] }
         : day);
     });
+    /* Overland comes with the guide lived in: everything the guide is fed and bedded
+       on this day is asked for right away so the detour is not something the operator
+       has to remember. */
+    if (isOverlandGuide(guideTypes)) {
+      setGuideDetailsModal({ dayIndex, guideKey: service.item_key, defaultValues: guideDetailsDefaultsFor(dayIndex, service.item_key) });
+    }
+  };
+
+  const guideDetailsDefaultsFor = (dayIndex, guideKey) => {
+    const day = days[dayIndex];
+    const details = (day?.services || []).filter((service) => service.guide_for_item_key === guideKey);
+    const byKind = (category) => details.find((service) => {
+      const cat = String(service.category || '');
+      return category === 'meal'
+        ? /meal/i.test(cat)
+        : /accommodation/i.test(cat);
+    });
+    const meal = byKind('meal');
+    const overnights = details.filter((service) => {
+      const cat = String(service.category || '');
+      return /accommodation/i.test(cat);
+    });
+    const lunch = meal ? details.find((service) => /lunch/i.test(service.item_name || '')) : null;
+    const dinner = meal ? details.find((service) => /dinner/i.test(service.item_name || '')) : null;
+    const chargeTypes = overnights.map((service) => service.guide_charge_type || 'guide');
+    return {
+      lunchItemId: lunch?.item_id || (meal ? '' : ''),
+      dinnerItemId: dinner?.item_id || '',
+      overnightItemId: overnights[0]?.item_id || '',
+      riderCharge: chargeTypes.includes('driver') && chargeTypes.includes('guide')
+        ? 'both'
+        : chargeTypes[0] || 'guide',
+      showBothHint: overnights.length > 1,
+      guideOnly: details.some((service) => service.guide_only === true)
+    };
+  };
+
+  const confirmGuideTypes = (types) => {
+    const pending = guideModal;
+    if (!pending) return;
+    setGuideModal(null);
+    addService(pending.item, pending.rateId, pending.dayIndex, { ...pending.scope, guideServiceTypes: types });
+  };
+
+  const confirmAccommodationCharge = (choice) => {
+    const pending = accomChargeModal;
+    if (!pending) return;
+    setAccomChargeModal(null);
+    addService(pending.item, choice.rateId, pending.dayIndex, { ...pending.scope, accommodationChargeChosen: true });
+  };
+
+  const applyGuideDetails = (dayIndex, guideKey, plan) => {
+    const day = days[dayIndex];
+    if (!day) return;
+    const guideService = (day.services || []).find((service) => service.item_key === guideKey);
+    /* Re-applying replaces the existing detail lines so reopening the dialog never
+       stacks a second lunch on top of the first. plan.overnight is an ARRAY of
+       lines — one per charged party when the operator bills guide AND driver —
+       and each line carries who it charges (guide_charge_type) so the dialog
+       reopens with the same choice. */
+    const lines = [plan.lunch, plan.dinner, ...(Array.isArray(plan.overnight) ? plan.overnight : plan.overnight ? [plan.overnight] : [])]
+      .filter(Boolean)
+      .map((detail) => {
+        const item = detail.item;
+        return {
+          item_key: uuid(),
+          item_id: item.id,
+          rate_id: (item.item_rates || [])[0]?.id || null,
+          item_name: item.name,
+          category: item.category || '',
+          supplier_name: item.supplier_name || item.supplier?.name || '',
+          currency_code: packageCurrency,
+          rate_basis: 'per_trip',
+          unit_cost: Number(detail.unitCost) || 0,
+          unit_price: Number(detail.unitCost) || 0,
+          quantity: 1,
+          is_included: true,
+          vehicle_capacity: Number(item.max_occupancy || item.maxOccupancy) || 0,
+          tier_key: guideService?.tier_key || null,
+          replaces_item_key: null,
+          rate_snapshot: (item.item_rates || [])[0] || {},
+          price_protection_percent: 0,
+          protected_season_name: '',
+          guide_service_types: null,
+          /* The overnight is always charged to the guide & driver alone; the
+             checkbox governs only the meal lines. */
+          guide_only: detail.who ? true : plan.guideOnly,
+          guide_for_item_key: guideKey,
+          guide_charge_type: detail.who || null
+        };
+      });
+    setDays((previous) => previous.map((row, index) => index !== dayIndex ? row : {
+      ...row,
+      services: [
+        ...(row.services || []).filter((service) => service.guide_for_item_key !== guideKey),
+        ...lines
+      ]
+    }));
+    if (lines.length) {
+      showToast(plan.guideOnly
+        ? `Guide details added — only the guide & driver are charged at these.`
+        : 'Guide details added.', 'success');
+    }
   };
 
   const updateService = (dayIndex, serviceIndex, field, value) => {
@@ -689,11 +846,15 @@ default_markup_percentage: assignedMarkup,
         if (!rate) return service;
         const season = seasonFor(item, rate);
         const storedRate = season.status === 'protected' ? season.rate : rate;
-        const unitCost = Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0;
+        const guideTypes = Array.isArray(service.guide_service_types) ? service.guide_service_types : [];
+        const guideTotal = guideTypes.length ? guideChargeTotal(storedRate, guideTypes) : null;
+        const unitCost = guideTotal !== null
+          ? guideTotal
+          : (Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0);
         return {
           ...service,
           rate_id: rate.id,
-          rate_basis: rate.rate_basis || item.pricing_model || service.rate_basis,
+          rate_basis: guideTotal !== null ? 'per_trip' : (rate.rate_basis || item.pricing_model || service.rate_basis),
           currency_code: rate.currency || item.currency || service.currency_code,
           unit_cost: unitCost,
           unit_price: unitCost,
@@ -711,8 +872,73 @@ default_markup_percentage: assignedMarkup,
 
   const removeService = (dayIndex, serviceIndex) => setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
     ...day,
-    services: day.services.filter((_, itemIndex) => itemIndex !== serviceIndex)
+    /* Removing a guide line takes its guide & driver detail lines (lunch / dinner /
+       overnight) with it, so the day never keeps orphaned meals and beds. */
+    services: (() => {
+      const target = day.services[serviceIndex];
+      const removedKey = target?.item_key;
+      return day.services.filter((service, itemIndex) => (
+        itemIndex !== serviceIndex
+        && (!removedKey || !service.guide_for_item_key || service.guide_for_item_key !== removedKey)
+      ));
+    })()
   }));
+
+  /* "Update from library" (D18): copy the item's CURRENT contract rate over the line's
+     locked snapshot, so a supplier change the operator has accepted moves the package.
+     Exactly the same protection rules apply as when the line was added, so a refreshed
+     line that no longer covers the package dates is uplifted - or declined outright if
+     nothing usable is left. */
+  const refreshServiceFromLibrary = (dayIndex, serviceIndex) => {
+    setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
+      ...day,
+      services: day.services.map((service, indexInDay) => {
+        if (indexInDay !== serviceIndex) return service;
+        const item = library.find((entry) => entry.id === service.item_id);
+        if (!item) {
+          showToast(`${service.item_name} is no longer in the library, so there is nothing to refresh from.`, 'warning');
+          return service;
+        }
+        const liveRate = (item.item_rates || []).find((entry) => entry.id === service.rate_id) || rateForDates(item);
+        if (!liveRate) {
+          showToast(`${service.item_name} has no library rate in ${packageCurrency} to refresh from.`, 'warning');
+          return service;
+        }
+        if (String(liveRate.currency || item.currency || packageCurrency).toUpperCase() !== String(packageCurrency).toUpperCase()) {
+          showToast(`${service.item_name} is only priced in ${liveRate.currency}, so it cannot be refreshed.`, 'warning');
+          return service;
+        }
+        const capacityError = packageItemCapacitySetupError(item, liveRate);
+        if (capacityError) {
+          showToast(capacityError, 'warning');
+          return service;
+        }
+        const season = seasonFor(item, liveRate);
+        if (!season.canAdd) {
+          showToast(season.message, 'warning');
+          return service;
+        }
+        const storedRate = season.status === 'protected' ? season.rate : liveRate;
+        const guideTypes = Array.isArray(service.guide_service_types) ? service.guide_service_types : [];
+        const guideTotal = guideTypes.length ? guideChargeTotal(storedRate, guideTypes) : null;
+        const unitCost = guideTotal !== null
+          ? guideTotal
+          : (Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0);
+        if (season.message) showToast(season.message, season.status === 'protected' ? 'warning' : 'info');
+        return {
+          ...service,
+          rate_id: liveRate.id,
+          rate_basis: guideTotal !== null ? 'per_trip' : (liveRate.rate_basis || item.pricing_model || service.rate_basis),
+          currency_code: liveRate.currency || item.currency || service.currency_code,
+          unit_cost: unitCost,
+          unit_price: unitCost,
+          rate_snapshot: storedRate,
+          price_protection_percent: season.protectionPercent || 0,
+          protected_season_name: season.status === 'protected' ? season.seasonName : ''
+        };
+      })
+    }));
+  };
 
   /* -------------------------------------------------------------------------
      EDITING ONE BAND'S ITINERARY
@@ -800,35 +1026,19 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     () => packageMarkupPercent(selectedClients),
     [selectedClients]
   );
-  /* Each band is priced off ITS OWN services and off its own party size, which is what lets one
-     package sell 3 pax in a saloon and 10 pax in a microbus without being copied.
-     packageTierDays is what keeps the other vehicle out of the band's price. */
-  const breakdown = useMemo(() => mergedBands.map((band) => ({
-    ...band,
-    capacityError: packageBandCapacityError(days, library, band),
-    pricing: calculatePackageTravellerBreakdown({
-      days: packageTierDays(days, band, library),
-      pattern: band,
-      library,
-      childRange,
-      markupPercent
-    })
-  })), [mergedBands, days, library, childRange, markupPercent]);
-
-  /* The bands no vehicle in the itinerary can take. Loading a vehicle set is deliberately
-     not blocked as it goes, because every set is incomplete until the last vehicle is in,
-     so this is the one place that says "this package cannot be quoted yet" instead of
-     leaving it to be noticed on a card further down the tab. */
-  const unservableBands = useMemo(
-    () => breakdown.filter((band) => band.capacityError).map((band) => ({ label: packageBandLabel(band), error: band.capacityError })),
-    [breakdown]
-  );
-
   const setChildRange = (range) => setForm((previous) => ({ ...previous, childAgeRange: range }));
   const changeChildRange = (field, value) => setChildRange(normaliseChildAgeRange({
     ...(form.childAgeRange || { ageFrom: 0, ageTo: PACKAGE_MAX_CHILD_AGE }),
     [field]: value
   }));
+  /* The child toggle is written the moment it is flipped rather than held for "Save package",
+     because a refresh before saving used to put it straight back. The rest of the form is
+     saved exactly as it stands so flipping the toggle never carries a stale copy with it. */
+  const toggleAcceptsChildren = (checked) => {
+    const nextForm = { ...form, acceptsChildren: checked };
+    setForm(nextForm);
+    persist(days, periods, mergedBands, nextForm);
+  };
 
   /* The child price does not move with the party size, so it is priced off the biggest
      band and shown once on the Children tab. It is priced off that band's own services:
@@ -841,17 +1051,47 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       days: packageTierDays(days, biggest, library),
       library,
       childRange,
+      vehicleTypes,
       markupPercent,
       pattern: largestTravellerPattern(biggest ? [biggest] : [])
     });
-  }, [days, library, childRange, markupPercent, mergedBands]);
+  }, [days, library, childRange, markupPercent, mergedBands, vehicleTypes]);
 
-  /* With a markup in play the card shows what the partner pays, so the explanation line
-     has to say what the contract figure was, otherwise the two numbers silently
-     disagree and the operator cannot tell which one the guest was quoted. */
-  const markupNote = (row, contractLine) => (row.markupPercent
-    ? `${contractLine} · net, plus ${row.markupPercent}% partner markup`
-    : contractLine);
+  /* The buyer wants to know what adding a child costs before anyone has declared a range,
+     so the Presentation tab and the export quote the child price off the full 0-18 range
+     when the package has none set. This is a separate figure from childBreakdown so the
+     Children tab keeps saying "set a range" rather than showing a price nobody confirmed. */
+  const childBreakdownSummary = useMemo(() => {
+    const biggest = mergedBands.length
+      ? mergedBands.reduce((top, band) => (packageBandPax(band) > packageBandPax(top) ? band : top), mergedBands[0])
+      : null;
+    return calculatePackageTravellerBreakdown({
+      days: packageTierDays(days, biggest, library),
+      library,
+      childRange: childRange || { ageFrom: 0, ageTo: PACKAGE_MAX_CHILD_AGE },
+      vehicleTypes,
+      markupPercent,
+      pattern: largestTravellerPattern(biggest ? [biggest] : [])
+    });
+  }, [days, library, childRange, markupPercent, mergedBands, vehicleTypes]);
+
+  /* Accommodation is the one line already in the package, so a season that names dates
+     which fall inside an accommodation's own contract window picks its price up without
+     the operator having to copy it. The per-season override, when set, stays locked
+     (D18): it wins until cleared. */
+  const activePeriod = periods[activeSeason] || null;
+  const derivedAccommodation = useMemo(
+    () => accommodationPerPersonForSeason({
+      days,
+      library,
+      from: activePeriod?.valid_from || null,
+      to: activePeriod?.valid_to || null
+    }),
+    [days, library, activePeriod]
+  );
+  const accommodationPerPerson = activePeriod?.accommodation_per_person != null
+    ? Number(activePeriod.accommodation_per_person)
+    : derivedAccommodation.total;
 
   const buildExportHtml = (options) => {
     const cover = options.cover && pkg.cover_image_url
@@ -880,57 +1120,65 @@ const childRange = packageChildAgeRange(form.childAgeRange);
        and what it costs; explaining the internal vehicle ladder invites them to compare it
        against a smaller vehicle and question the price, which is not this document's job. */
     const vehicleNote = '';
-/* The exported document carries the same three coloured cards as the Traveller &
-       pricing tab, so a buyer reads the same labels and colours they saw on screen. The
-       pricing explanation is the only addition, and the accommodation breakdown is
-       deliberately left out: it is a working sheet, not something a client should read.
-
-       A package is not a quotation. "Client version" means the partner-facing document
-       with that partner's default markup applied; "internal version" is the STO sheet at
-       contract cost, which is what an operator needs to see what they actually pay. */
-    const partnerView = options.audience === 'client' && markupPercent > 0;
-    /* Which cards are printed, and in what order.
-       'lead' prints both with the chosen figure first, which is right for a working sheet.
-       'only' prints the chosen figure on its own, which is what a client quote wants: two
-       prices for the same holiday on one page invites the reader to pick the smaller one.
-       The party total can be left out but the per-adult price cannot - a client is quoted per
-       person, so dropping it would leave the document with no price they can actually act on. */
-    const leadCards = (row, { explain, bandPrice }) => {
-      const sell = partnerView ? row.sell : row;
-      const note = (line) => (explain ? `<small>${partnerView ? `${line} · net, plus ${row.markupPercent}% partner markup` : line}</small>` : '');
-      const party = `<div class="price-card price-card-party lead"><span>Whole party of ${row.pax}</span><strong>${money(sell.partyTotal, row.currency)}</strong>${note(`${row.pax} travellers at ${money(row.adultSharingTotal, row.currency)} each`)}</div>`;
-      const perPerson = `<div class="price-card lead"><span>Per adult sharing</span><strong>${money(sell.adultSharingTotal, row.currency)}</strong>${note(`Unit share ${money(row.unitPerPerson, row.currency)} + sharing ${money(row.accommodationSharing, row.currency)}`)}</div>`;
-      const both = bandPrice === 'perPerson' ? perPerson + party : party + perPerson;
-      if (options.partyCard === 'hide' || options.partyCard === 'only') return perPerson;
-      return options.partyCard === 'only' ? party : both;
-    };
-    const bandSizes = breakdown.map((band) => packageBandPax(band));
-    /* The per-party-size explanation is only true of a document that quotes more than one
-       size. On a single-band quote it is noise, and on a client document naming the sizes
-       sold is an invitation to pick the cheapest one. */
-    const bandNote = options.bandSelection === 'all' && bandSizes.length
-      ? `<p class="pattern-note">Each band is priced for exactly that party size. A vehicle is paid for in full by the travellers in it, so each band carries the whole vehicle charge divided by its own party size. The party sizes this package sells are: ${bandSizes.join(', ')}.</p>`
-      : '';
-    /* Which bands the document quotes. "all" is the operator's reconciliation sheet; a
-       single named band is how a client is actually quoted one price for their party. The
-       lead figure inside each band is still chosen separately below. */
-    const bandsToShow = options.bandSelection === 'all'
-      ? breakdown
-      : breakdown.filter((band) => packageBandPax(band) === Number(options.bandSelection))
-        .concat(breakdown.length && !breakdown.some((band) => packageBandPax(band) === Number(options.bandSelection)) ? [breakdown[0]] : []);
-    const bandPricesMarkup = !options.bandPrices ? '' : bandsToShow.map((band) => `<section><h2>Traveller band pricing</h2><p class="pattern-pax">${packageBandLabel(band)}</p><div class="price-cards">${leadCards(band.pricing, { explain: options.explainPricing, bandPrice: options.bandPrice })}${band.pricing.hasAccommodation ? `<div class="price-card"><span>Single supplement</span><strong>${money(partnerView ? band.pricing.sell.singleSupplementTotal : band.pricing.singleSupplementTotal, band.pricing.currency)}</strong>${options.explainPricing ? `<small>${partnerView ? `Added to the sharing price · net, plus ${band.pricing.markupPercent}% partner markup` : 'Added to the sharing price'}</small>` : ''}</div>` : ''}${band.pricing.hasAccommodation ? `<div class="price-card price-card-child${childRange ? '' : ' pending'}"><span>Child price</span><strong>${money(partnerView ? band.pricing.sell.childTotal : band.pricing.childTotal, band.pricing.currency)}</strong>${options.explainPricing ? `<small>${childRange ? (partnerView ? `Unit share + accommodation · net, plus ${band.pricing.markupPercent}% partner markup` : 'Unit share + accommodation') : 'No child age range set'}</small>` : ''}</div>` : ''}</div></section>`).join('');
-    const markupNoteLine = partnerView
-      ? `<p class="pattern-note">Client version: prices include the ${markupPercent}% markup assigned to this partner. The internal version shows these prices at contract cost.</p>`
-      : (options.audience === 'client' && markupPercent === 0
-        ? '<p class="pattern-note">Client version requested, but no partner markup is assigned to this package, so these prices are the contract cost.</p>'
-        : '<p class="pattern-note">Internal version: prices are at contract cost (STO) with no partner markup applied.</p>');
-    /* The child card already carries the child price, so the document has no separate
-       child section. It does need to say so when the card is not a real price, because a
-       reader would otherwise take the greyed figure as the amount a child is charged. */
+    /* Three audiences, never a fallback from one into another: the partner document at the
+       assigned partner's markup; a one-off markup for anyone who is not a partner; or the
+       internal (STO) master at contract cost. The document's pricing section is the
+       Presentation pricing summary below - the old per-band cards and boxes are gone, so
+       there is nothing to price twice and nothing for two sections to disagree about. */
+    const exportMarkup = packageExportMarkup({
+      audience: options.audience,
+      hasPartner: selectedClients.length > 0,
+      assignedMarkup: markupPercent, typedMarkup: options.markup
+    });
+    const partnerView = exportMarkup > 0;
+    /* The Presentation pricing table mirrors the Presentation pricing tab exactly: one table,
+       every column, five rows — travel season, travellers, price per person sharing, single
+       supplement and child price. Columns are never labelled with a vehicle in a client document. */
+    const summaryMarkup = !options.includePricingSummary || !grid.usedCodes.length ? '' : (() => {
+      const codes = grid.usedCodes;
+      const pool = vehicleColumnPools({ days, library, vehicleTypes });
+      const price = (value) => (partnerView ? applyPackageMarkup(value, exportMarkup) : value);
+      const childPrice = Number(childBreakdownSummary?.childTotal) || 0;
+      const childText = `<strong>${money(price(childPrice), packageCurrency)}</strong><span class="sum-flat-from">unit share + the accommodation child rate</span>`;
+      /* One table per season, stacked. The vehicle pool and the party sizes never move with
+         the season, so from table to table only the season line, the accommodation-based
+         price and the single supplement change. */
+      const seasons = periods.length ? periods : [null];
+      const roomCapacity = accommodationRoomCapacity({ days, library });
+      const tables = seasons.map((period, seasonIndex) => {
+        const accommodation = period?.accommodation_per_person != null
+          ? Number(period.accommodation_per_person)
+          : (accommodationPerPersonForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
+        /* Derived from the accommodation's own contract when the season carries no override,
+           so the reader always sees a supplement rather than a zero that reads as no charge. */
+        const single = period?.single_supplement != null
+          ? Number(period.single_supplement)
+          : (singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
+        const seasonLine = period
+          ? `${period?.name ? `${escapeHtml(period.name)} · ` : ''}Season ${seasonIndex + 1}${period?.valid_from && period?.valid_to ? ` · ${escapeHtml(period.valid_from)} \u2192 ${escapeHtml(period.valid_to)}` : ''}`
+          : 'No season set';
+        const columns = presentationPricingColumns({ codes, bands: grid.bands, pools: pool.pools, perPersonFixed: pool.perPersonFixed, accommodation, singleSupplement: single, roomCapacity });
+        const travellerCells = columns.map(({ pax }) => `<td class="sum-cell sum-trav"><span class="sum-pax">${pax} pax</span></td>`).join('');
+        const priceCells = columns.map(({ each }) => `<td class="sum-cell"><span class="sum-price">${money(price(each), packageCurrency)}</span></td>`).join('');
+        return `<table class="price-summary"><tbody>
+          <tr><td class="lab">Travel seasons</td><td class="sum-date" colspan="${columns.length}">${seasonLine}</td></tr>
+          <tr><td class="lab">Travellers</td>${travellerCells}</tr>
+          <tr><td class="lab">Price per person sharing</td>${priceCells}</tr>
+          <tr><td class="lab">Single supplement</td><td class="sum-flat sum-flat-amber" colspan="${columns.length}"><strong>${money(price(single), packageCurrency)}</strong><span class="sum-flat-from">per person, when you want your own room</span></td></tr>
+          <tr><td class="lab">Child price</td><td class="sum-flat sum-flat-child" colspan="${columns.length}">${childText}</td></tr>
+        </tbody></table>`;
+      }).join('');
+      return `<section class="pricing-summary-section"><h2>Pricing summary</h2>
+        <p class="pattern-note">Per person, sharing price:</p>${tables}</section>`;
+    })();
+    const markupNoteLine = exportMarkup > 0
+      ? `<p class="pattern-note">${options.audience === 'partner' ? 'Partner version' : 'Marked-up version'}: prices include the ${exportMarkup}% markup applied to this quote. The internal version shows these prices at contract cost.</p>`
+      : '<p class="pattern-note">Internal version: prices are at contract cost (STO) with no partner markup applied.</p>';
+    /* The child price now always carries a figure, so the note only says which range it was
+       priced for: the declared one, or 0-18 while none has been set. */
     const childNote = !form.acceptsChildren
-      ? '<p class="pattern-note">Children are not accepted on this package, so no child price applies. The child figure above is shown for reference only.</p>'
-      : (!childRange ? '<p class="pattern-note">No child age range has been set on this package, so the child price above is not final.</p>' : '');
-    const validity = periods.map((period) => `<li>${escapeHtml(period.valid_from)} – ${escapeHtml(period.valid_to)}</li>`).join('');
+      ? '<p class="pattern-note">Children are not accepted on this package, so no child price applies to a booking. The child figure above is shown so a buyer can see what adding one would cost.</p>'
+      : (!childRange ? '<p class="pattern-note">No child age range has been set on this package, so the child price above is priced for a child aged 0 to 18.</p>' : '');
     const inclusionMarkup = options.inclusions
       ? `${form.inclusions ? `<h3>Inclusions</h3><p>${escapeHtml(form.inclusions).replace(/\n/g, '<br>')}</p>` : ''}${form.exclusions ? `<h3>Exclusions</h3><p>${escapeHtml(form.exclusions).replace(/\n/g, '<br>')}</p>` : ''}`
       : '';
@@ -940,8 +1188,9 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     const clientNames = selectedClients.map(nameOf).join(', ');
     /* The three price cards reuse the tab's colours exactly: teal for the two adult
        prices, amber for the child, and grey when no child range is set. */
-    const priceCardCss = `.price-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 4px}.price-card{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:8px;background:#f0fdfa}.price-card span,.price-card small{color:#64748b;font-size:11px;line-height:1.35}.price-card strong{color:#0f766e;font-size:17px}.price-card.lead{box-shadow:0 0 0 2px #0d7478 inset}.price-card-party{background:#f0fdf4;border:1px solid #bbf7d0}.price-card-party span,.price-card-party small{color:#166534}.price-card-party strong{color:#15803d}.price-card-child{background:#fff7ed;border:1px solid #fed7aa}.price-card-child span,.price-card-child small{color:#9a5b13}.price-card-child strong{color:#b45309}.price-card-child.pending{background:#f8fafc;border:1px dashed #cbd5e1}.price-card-child.pending span,.price-card-child.pending small,.price-card-child.pending strong{color:#94a3b8}.pattern-pax{margin:0 0 2px;font-weight:bold;color:#1a202c}.pattern-note{margin:8px 0 0;padding:8px 10px;border-left:3px solid #94a3b8;background:#f8fafc;color:#475569;font-size:12px;line-height:1.45}@media print{.price-cards{break-inside:avoid}}`;
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}${priceCardCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(form.description)}</p>${validity ? `<h3>Valid dates</h3><ul>${validity}</ul>` : ''}${clientNames ? `<h3>For partner: ${escapeHtml(clientNames)}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${bandPricesMarkup}${bandNote}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
+    const priceCardCss = `.price-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 4px}.price-card{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:8px;background:#f0fdfa}.price-card span,.price-card small{color:#64748b;font-size:11px;line-height:1.35}.price-card strong{color:#0f766e;font-size:17px}.price-card.lead{box-shadow:0 0 0 2px #0d7478 inset}.price-card-party{background:#f0fdf4;border:1px solid #bbf7d0}.price-card-party span,.price-card-party small{color:#166534}.price-card-party strong{color:#15803d}.price-card-child{background:#fff7ed;border:1px solid #fed7aa}.price-card-child span,.price-card-child small{color:#9a5b13}.price-card-child strong{color:#b45309}.price-card-child.pending{background:#f8fafc;border:1px dashed #cbd5e1}.price-card-child.pending span,.price-card-child.pending small,.price-card-child.pending strong{color:#94a3b8}.pattern-pax{margin:0 0 2px;font-weight:bold;color:#1a202c}.pattern-note{margin:8px 0 0;padding:8px 10px;border-left:3px solid #94a3b8;background:#f8fafc;color:#475569;font-size:12px;line-height:1.45}.price-matrix-card{margin:12px 0;padding:12px 14px;border:1px solid #e2e8f0;border-radius:9px;background:#f8fafc}.price-matrix-card h2{margin:0 0 9px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#0d7478}.price-matrix-scroll{overflow-x:auto}.price-matrix{width:100%;border-collapse:collapse}.price-matrix th,.price-matrix td{padding:9px 12px;text-align:center;border:1px solid #e2e8f0;font-size:14px;white-space:nowrap}.price-matrix th{background:#f0fdfa;color:#0f766e;font-weight:700}.price-matrix td{color:#1e293b;font-weight:700}.price-matrix td.pending{color:#94a3b8;font-weight:400}@media print{.price-cards,.price-matrix-card{break-inside:avoid}}`;
+    const summaryCss = `.pricing-summary-section{break-inside:avoid}.price-summary{width:100%;border-collapse:collapse;margin:10px 0;table-layout:fixed;break-inside:avoid}.price-summary .lab{width:168px;background:#f8fafc;text-align:left;font-size:12.5px;font-weight:600;color:#334155}.price-summary th,.price-summary td{border:1px solid #e2e8f0;padding:10px 12px;vertical-align:top}.price-summary .sum-cell{text-align:center}.price-summary .sum-trav{background:#f0fdfa}.price-summary .sum-pax{display:block;font-size:15px;font-weight:700;color:#0f766e;font-variant-numeric:tabular-nums}.price-summary .sum-price{display:block;font-size:15px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums}.price-summary .sum-date{background:#fffbeb;text-align:left;font-size:15px;font-weight:700;color:#78350f;font-variant-numeric:tabular-nums}.price-summary .sum-flat{text-align:left;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}.price-summary .sum-flat-amber{background:#fefce8;color:#854d0e}.price-summary .sum-flat-child{background:#fdf2f8;color:#9d174d}.price-summary .sum-flat-from{display:block;margin-top:3px;font-size:11px;font-weight:500;color:#94a3b8}`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}${priceCardCss}${summaryCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(form.description)}</p>${clientNames ? `<h3>For partner: ${escapeHtml(clientNames)}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${summaryMarkup}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
   };
 
   const exportDocument = () => {
@@ -967,64 +1216,16 @@ const childRange = packageChildAgeRange(form.childAgeRange);
   };
 
   const updateForm = (field, value) => setForm((previous) => ({ ...previous, [field]: value }));
-  const addPeriod = () => setPeriods((previous) => [...previous, { valid_from: '', valid_to: '' }]);
+  const addPeriod = () => setPeriods((previous) => [...previous, { valid_from: '', valid_to: '', name: '', accommodation_per_person: null, single_supplement: 0 }]);
   const changePeriod = (index, field, value) => setPeriods((previous) => previous.map((period, rowIndex) =>
     rowIndex === index ? { ...period, [field]: value } : period));
-  /* A traveller pattern is a party size, nothing more. A child is priced once against
-     the accommodation in the Children tab, so it is not counted here as well. */
-  /* Changing a band changes the party size it is quoted for. The size is checked against the
-     vehicles first, so a band is never left holding a party that nothing can carry, and
-     against the other bands second, because two bands at the same party size would leave
-     that price down to whichever happened to be listed first. */
-  const changeBand = (itemKey, rawValue) => {
-    const pax = Number(rawValue);
-    if (!itemKey || !Number.isFinite(pax) || pax < 1) return;
-    const target = paxOptions.find((band) => band.item_key === itemKey);
-    if (!target || packageBandPax(target) === pax) return;
-    const clash = paxOptions.find((band) => band.item_key !== itemKey && packageBandPax(band) === pax);
-    if (clash) {
-      showToast(`${packageBandLabel(clash)} is already a band. Two bands cannot both price the same party size.`, 'warning');
-      return;
-    }
-    const capacityError = packageBandCapacityError(days, library, { pax });
-    if (capacityError) {
-      showToast(capacityError, 'warning');
-      return;
-    }
-    setPaxOptions((previous) => previous
-      .map((band) => (band.item_key === itemKey
-        ? { ...band, pax, min_pax: pax, max_pax: pax }
-        : band))
-      .sort(byBandMin));
-  };
-
-  const addPaxPattern = () => {
-    const pax = Number(document.getElementById('package-pax')?.value) || 0;
-    if (pax < 1) {
-      showToast('A traveller band needs at least one traveller.', 'warning');
-      return;
-    }
-    if (mergedBands.some((band) => packageBandPax(band) === pax)) {
-      showToast(`${pax} pax is already a band. Edit it instead of adding it twice.`, 'warning');
-      return;
-    }
-    const candidate = { pax, min_pax: pax, max_pax: pax, item_key: uuid(), is_auto_generated: false };
-    /* Only the transport this band would actually be given counts here. Asking the whole
-       package instead would reject the band because some other band owns a smaller bus. */
-    const capacityError = packageBandCapacityError(days, library, candidate);
-    if (capacityError) {
-      showToast(capacityError, 'warning');
-      return;
-    }
-    setPaxOptions((previous) => [...previous, candidate].sort(byBandMin));
-  };
-
+  const removePeriod = (index) => setPeriods((previous) => previous.filter((_, rowIndex) => rowIndex !== index));
   if (!packageId) return <div className="super-admin-page"><button className="secondary-btn" onClick={() => navigate('/packages')}><ArrowLeft size={16} /> Packages</button><p>Open a package from the Packages list.</p></div>;
 
   const tabs = [
     ['itinerary', 'Itinerary'],
-    ['validity', 'Valid dates'],
-    ['travellers', 'Travellers & pricing'],
+    ['pricing', 'Pricing & seasons'],
+    ['summary', 'Presentation pricing'],
     ['children', 'Children & ages'],
     ['inclusions', 'Inclusions & exclusions'],
     ['terms', 'Terms & conditions'],
@@ -1036,7 +1237,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       <div className="header-title"><Backpack /><div><h1>{pkg?.name || state?.packageName || 'Package Builder'}</h1><p>Build and price a reusable package using contract rates</p></div></div>
       <div className="package-builder-actions">
         <button className="secondary-btn" onClick={() => requestNavigate('/packages')}><ArrowLeft size={16} /> Packages</button>
-        <button className="secondary-btn" onClick={() => setExportDialog(true)} disabled={!pkg}><Download size={16} /> Export</button>
+        <button className="secondary-btn" onClick={() => { setExportOptions((previous) => (previous.audience === 'partner' && !selectedClients.length ? { ...previous, audience: 'markup' } : previous)); setExportDialog(true); }} disabled={!pkg}><Download size={16} /> Export</button>
         <button className="primary-btn" disabled={saving || loading || !pkg} onClick={() => persist()}><Save size={16} /> {saving ? 'Saving…' : 'Save package'}</button>
       </div>
     </header>
@@ -1081,6 +1282,14 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                 <div className="package-library-supplier">
                   {item.supplier_name || ''}
                   {SIDEBAR_FLAT_BASES.has(String(basis)) && <span className="basis-tag">{basisLabelOf(basis)}</span>}
+                  {rate && /accommodation/i.test(String(item.category || '')) && (() => {
+                    const opt = rateOptionLabel(rate, item);
+                    const season = rate.season_name || rate.option_name || '';
+                    const from = rate.valid_from ? String(rate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
+                    const to = rate.valid_to ? String(rate.valid_to).slice(0, 10).replaceAll('-', '/') : '';
+                    const label = [season, opt, (from && to) ? `${from}-${to}` : ''].filter(Boolean).join(' · ');
+                    return label ? <span className="basis-tag" style={{ color: '#5b21b6', background: '#f5f3ff', borderColor: '#ddd6fe' }}>{label}</span> : null;
+                  })()}
                   {(coverage.status !== 'ok' && coverage.status !== 'open') && <span className="basis-tag package-library-flag warn" title={coverage.message}>
                     {coverage.status === 'protected' ? `Protection ${coverage.protectionPercent}%` : coverage.status === 'blocked' ? 'No matching season' : 'Season mismatch'}
                   </span>}
@@ -1144,6 +1353,16 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                   : `Capacity: ${capacity} traveller${capacity === 1 ? '' : 's'}`
                 : '';
               const bandOnly = service.tier_key && service.tier_key === bandScope;
+              /* The sheet shows one row per service with the vehicle prices in it. On the
+                 working canvas every vehicle stays visible, so a per-vehicle line carries
+                 its own price pills rather than a single figure. */
+              const pillRate = service.rate_snapshot && Object.keys(service.rate_snapshot).length
+                ? service.rate_snapshot
+                : (item?.item_rates || []).find((rate) => rate.id === service.rate_id);
+              const vectorPills = !isStay(service)
+                && String(pillRate?.rate_basis || service.rate_basis || item?.pricing_model || '').toLowerCase() === 'per_vehicle'
+                && pillRate?.prices_by_vehicle && Object.keys(pillRate.prices_by_vehicle).length;
+              const serviceCurrency = service.currency_code || packageCurrency;
               return <article key={service.item_key || `${service.id || service.item_id}-${rawIndex}`} className={`package-canvas-service ${bandOnly ? 'band-only' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: selectedDay, fromIndex: rawIndex }))}>
                 <GripVertical size={16} className="package-grip" />
                 <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}</small>
@@ -1152,22 +1371,44 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                     : (service.tier_key && <small className="package-band-flag other">{packageBandLabel(mergedBands.find((band) => band.item_key === service.tier_key) || {})} only</small>)}
                   {!bandOnly && !service.tier_key && <small className="package-band-flag shared">all bands</small>}
                   {item?.item_rates?.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(selectedDay, rawIndex, 'rate_id', event.target.value)}>
-                    {item.item_rates.map((rate) => <option key={rate.id} value={rate.id}>{rate.season_name || rate.option_name || 'Contract rate'} · {rate.currency} {Number(rate.unit_cost || rate.price_1_adult || rate.unit_price || 0).toFixed(2)}</option>)}
+                    {item.item_rates.map((rate) => {
+                    const opt = rateOptionLabel(rate, item);
+                    const season = rate.season_name || rate.option_name || 'Contract rate';
+                    const from = rate.valid_from ? String(rate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
+                    const to = rate.valid_to ? String(rate.valid_to).slice(0, 10).replaceAll('-', '/') : '';
+                    const label = [season, opt, (from && to) ? `${from}-${to}` : ''].filter(Boolean).join(' · ');
+                    return <option key={rate.id} value={rate.id}>{label} · {rate.currency} {Number(rate.unit_cost || rate.price_1_adult || rate.unit_price || 0).toFixed(2)}</option>;
+                  })}
                   </select>}
                   {Number(service.price_protection_percent) > 0
                     ? <small className="package-season-warning protected" title={service.rate_snapshot?.protection_note || 'Pricing Protection applied'}>{service.protected_season_name ? `Pricing Protection applied — ${service.protected_season_name} season +${service.price_protection_percent}%` : `Pricing Protection applied +${service.price_protection_percent}%`}</small>
                     : !coverage.ok && <small className="package-season-warning" title={coverage.message}>{coverage.message}</small>}
                   {Number(service.price_protection_percent) > 0 && <small className="package-protected-flag">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} includes the protection uplift</small>}
+                  {Array.isArray(service.guide_service_types) && service.guide_service_types.length > 0 && (
+                    <small className="package-band-flag shared guide-service-types">Guide · {guideLabel(service.guide_service_types)}</small>
+                  )}
+                  {service.guide_only === true && <small className="package-band-flag guide-only">guide &amp; driver only</small>}
                 </div>
                 <div className="package-service-price"><span>{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)}</span><small>{service.rate_basis || 'per_person'} · no markup</small>{capacitySummary && <small>{capacitySummary}</small>}
                   {roomPlan && <small title={`Rooms are worked out from ${autoPattern.pax} pax at ${roomPlan.capacity} per room`}>
                     {roomPlan.roomCount} room{roomPlan.roomCount === 1 ? '' : 's'} auto · {round(roomPlan.sharingPerAdult).toFixed(2)}/adult sharing · +{round(roomPlan.singleSupplement).toFixed(2)} single supp.
+                  </small>}
+                  {vectorPills && !!grid.usedCodes.length && <small className="package-vehicle-pills">
+                    {grid.usedCodes.map((code) => {
+                      const cell = vehicleVectorPrice(pillRate.prices_by_vehicle, code);
+                      const type = vehicleTypes.find((entry) => entry?.code === code);
+                      return <span key={code} className={`package-vehicle-pill ${cell === null ? 'none' : ''}`}>{type?.name || code}: {cell === null ? 'not priced' : `${serviceCurrency} ${round(cell).toFixed(2)}`}</span>;
+                    })}
                   </small>}
                 </div>
                 <label className="package-included-toggle"><input type="checkbox" checked={service.is_included !== false} onChange={(event) => updateService(selectedDay, rawIndex, 'is_included', event.target.checked)} /> Included</label>
                 {roomPlan
                   ? <span className="package-quantity auto" title={`Rooms are worked out from ${autoPattern.pax} pax at ${roomPlan.capacity} per room`}>Rooms {roomPlan.roomCount}</span>
                   : <label className="package-quantity">Qty <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(selectedDay, rawIndex, 'quantity', Number(event.target.value) || 1)} /></label>}
+                <button type="button" className="package-icon-button" aria-label={`Update ${service.item_name} from the library (re-locks today's rate)`} onClick={() => refreshServiceFromLibrary(selectedDay, rawIndex)} title="Update from library: re-locks this line to the library's current rate" disabled={!library.find((entry) => entry.id === service.item_id)}><RefreshCw size={16} /></button>
+                {isOverlandGuide(service.guide_service_types) && (
+                  <button type="button" className="package-icon-button" aria-label={`Guide & driver details for ${service.item_name} on day ${selectedDay + 1}`} title="Guide & driver details — meals and overnight for this day" onClick={() => setGuideDetailsModal({ dayIndex: selectedDay, guideKey: service.item_key, defaultValues: guideDetailsDefaultsFor(selectedDay, service.item_key) })}><UtensilsCrossed size={16} /></button>
+                )}
                 <button type="button" className="package-icon-button" aria-label={bandScope ? `Remove ${service.item_name} from the ${packageBandLabel(mergedBands.find((band) => band.item_key === bandScope) || {})} band` : `Remove ${service.item_name}`} onClick={() => (bandScope ? removeServiceForBand(selectedDay, service, bandScope) : removeService(selectedDay, rawIndex))}><Trash2 size={16} /></button>
               </article>;
             })}
@@ -1181,90 +1422,46 @@ const childRange = packageChildAgeRange(form.childAgeRange);
           {!days.length && <div className="package-canvas-empty">Add a day to start building this package.</div>}
         </main>
       </div>}
-      {tab === 'validity' && <section className="package-tab-panel">
-        <h2><CalendarDays size={19} /> Valid from / to dates</h2><p>Leave the list empty if the package has no restricted validity period.</p>
-        {periods.map((period, index) => <div className="package-period" key={`period-${index}`}>
-          <input type="date" aria-label="Valid from" value={period.valid_from || ''} onChange={(event) => changePeriod(index, 'valid_from', event.target.value)} />
-          <span>to</span><input type="date" aria-label="Valid to" value={period.valid_to || ''} onChange={(event) => changePeriod(index, 'valid_to', event.target.value)} />
-          <button type="button" className="package-icon-button" aria-label="Remove validity period" onClick={() => setPeriods((previous) => previous.filter((_, rowIndex) => rowIndex !== index))}><X size={16} /></button>
-        </div>)}
-        <button className="secondary-btn" onClick={addPeriod}><Plus size={15} /> Add validity period</button>
-      </section>}
-      {tab === 'travellers' && <section className="package-tab-panel">
-        <h2>Traveller bands &amp; contract price breakdown</h2>
-        <p>A band is one exact party size this package sells. A vehicle is paid for in full by the people in it, so a band of 3 in a 4-seat vehicle carries the whole vehicle charge divided by 3, and the three travellers together pay the vehicle price exactly. That is why a band is a single number rather than a range of sizes: the price of a party depends on how many people are actually travelling.</p>
-        <p>Each band is given the smallest vehicle in the itinerary that seats it, so add every vehicle size you intend to sell to, on each day that carries the party. The vehicles suggest the party sizes they were contracted for, but a suggestion never becomes a band on its own &mdash; accept the ones you want to sell, and add any others by hand.</p>
-        <p>Within a band, every non-accommodation service is shared unit cost divided by pax, and the accommodation is priced per adult sharing plus its single supplement. A child is priced once from the same unit share, plus the accommodation prices set on the Children &amp; ages tab.</p>
-        {bandSuggestions.length > 0 && <div className="package-band-suggestions" role="status">
-          <strong>Your vehicles seat {bandSuggestions.join(', ')} traveller{bandSuggestions.length === 1 ? '' : 's'}</strong>
-          <p>These are suggestions from the vehicle capacities in the itinerary, not bands. Add the party sizes you actually sell.</p>
-          <div className="package-band-suggestion-list">{bandSuggestions.map((pax) => <button key={`suggestion-${pax}`} type="button" className="secondary-btn" onClick={() => acceptBandSuggestion(pax)}><Plus size={15} /> {pax} pax band</button>)}</div>
-        </div>}
-        <div className="package-pax-add"><label>Add a band of<input key={`pax-${paxOptions.length}`} id="package-pax" type="number" min="1" defaultValue="2" />pax</label><button className="secondary-btn" onClick={addPaxPattern}><Plus size={15} /> Add band</button></div>
-        {!mergedBands.length && <p>Add a vehicle to the itinerary, or add a band by hand, to see the package price breakdown.</p>}
-        {unservableBands.length > 0 && <div className="package-band-blocked" role="status">
-          <strong>{unservableBands.length} band{unservableBands.length === 1 ? '' : 's'} cannot be quoted yet</strong>
-          <p>You can keep adding vehicles. A package is only quotable once every band has something that seats it, on every day that carries the party.</p>
-          <ul>{unservableBands.map((band) => <li key={band.label}><b>{band.label}</b>{band.error}</li>)}</ul>
-        </div>}
-        <div className="package-breakdown-list">{breakdown.map((pattern, index) => {
-          const bandPax = packageBandPax(pattern);
-          return <article key={`${pattern.item_key || 'new'}-${bandPax}-${index}`}>
-          <header>
-            <strong>{packageBandLabel(pattern)}</strong>
-            <em className="package-band-manual">set by hand</em>
-            <label className="package-band-inputs">party of<input type="number" min="1" aria-label={`Party size for band ${packageBandLabel(pattern)}`} value={bandPax} onChange={(event) => changeBand(pattern.item_key, event.target.value)} />pax</label>
-            <button type="button" className="package-icon-button" aria-label={`Remove the ${packageBandLabel(pattern)} band`} onClick={() => setPaxOptions((previous) => previous.filter((band) => band.item_key !== pattern.item_key))}><Trash2 size={15} /></button>
-          </header>
-          {pattern.capacityError && <p className="package-season-warning">{pattern.capacityError}</p>}
-          {pattern.pricing.unitRows.length || pattern.pricing.accommodationRows.length ? (() => {
-            const row = pattern.pricing;
-            return <div className="package-currency-breakdown">
-            <h3>{row.currency}</h3>
-            <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Package item</th><th>Total unit contribution / pax</th>{row.hasAccommodation && <th>Total accommodation sharing per pax (adult / child)</th>}{row.hasAccommodation && <th>Total single supplement</th>}</tr></thead>
-              <tbody>
-                {/* Every column is filled for every row. A unit service carries no room
-                    cost, so those cells are a real 0.00 rather than a dash. The two
-                    accommodation columns are dropped entirely when the band has no rooms,
-                    because a column headed "single supplement" on a package that never
-                    sleeps anyone is a figure with nothing behind it. */}
-                {row.unitRows.map((item, itemIndex) => <tr key={`unit-${itemIndex}`}><td>{item.name}</td><td>{money(item.perPerson, row.currency)}</td>{row.hasAccommodation && <td>{money(item.sharingPerAdult, row.currency)}</td>}{row.hasAccommodation && <td>{money(item.singleSupplement, row.currency)}</td>}</tr>)}
-                {row.accommodationRows.map((item, itemIndex) => <tr key={`stay-${itemIndex}`}><td>{item.name}<small>{item.roomCount} room(s) allocated, max {item.capacity} per room</small></td><td>{money(0, row.currency)}</td><td><span>Adult {money(item.sharingPerAdult, row.currency)}</span><br /><span>Child {money(item.childAccommodation, row.currency)}{item.childAllowed ? '' : ' (single supp.)'}</span></td><td>{money(item.singleSupplement, row.currency)}</td></tr>)}
-                <tr className="package-breakdown-total"><th>Total</th><td>{money(row.unitPerPerson, row.currency)}</td>{row.hasAccommodation && <td><span>Adult {money(row.accommodationSharing, row.currency)}</span><br /><span>Child {money(row.childAccommodation, row.currency)}</span></td>}{row.hasAccommodation && <td>{money(row.singleSupplement, row.currency)}</td>}</tr>
-              </tbody>
-            </table></div>
-            <div className="package-price-grid">
-              <div className="package-price-party"><span>Whole party of {row.pax}</span><strong>{money(row.markupPercent ? row.sell.partyTotal : row.partyTotal, row.currency)}</strong><small>{markupNote(row, `${row.pax} travellers at ${money(row.adultSharingTotal, row.currency)} each`)}</small></div>
-  <div><span>Total per adult sharing</span><strong>{money(row.markupPercent ? row.sell.adultSharingTotal : row.adultSharingTotal, row.currency)}</strong><small>{markupNote(row, `Unit share ${money(row.unitPerPerson, row.currency)} + sharing ${money(row.accommodationSharing, row.currency)}`)}</small></div>
-              {/* A single supplement is a room charge. With no accommodation in the band
-                  there is no room and nothing to supplement, so the card is left out
-                  entirely rather than shown as a zero - a zero here reads as a real price,
-                  and the card total would otherwise duplicate the sharing figure above. */}
-              {row.hasAccommodation && <div><span>Single supplement</span><strong>{money(row.markupPercent ? row.sell.singleSupplementTotal : row.singleSupplementTotal, row.currency)}</strong><small>{markupNote(row, `Added to the adult sharing price of ${money(row.adultSharingTotal, row.currency)}`)}</small></div>}
-              {/* The child price is only a distinct figure when there is accommodation to
-                  price. On a package with no rooms a child pays exactly the adult unit
-                  share, so the card would be a duplicate of it. */}
-              {row.hasAccommodation
-                ? <div className={`package-price-child ${!childRange ? 'pending' : ''}`}><span>Child price</span><strong>{money(row.markupPercent ? row.sell.childTotal : row.childTotal, row.currency)}</strong>
-                  {!childRange
-                    ? <small>Set the child age range on the Children &amp; ages tab</small>
-                    : <small>{markupNote(row, `Unit share ${money(row.unitPerPerson, row.currency)} + accommodation ${money(row.childAccommodation, row.currency)}`)}</small>}
-                  {!!childRange && !!row.childNotAllowed.length && <small>Charged the single supplement at: {row.childNotAllowed.join(', ')}</small>}
-                </div>
-                : null}
-            </div>
-            {!row.hasAccommodation && <p className="package-price-note">This band has no accommodation, so there is no single supplement or child price. The price above is the whole party total for the services in the itinerary.</p>}
-            {!!row.foreignCurrencyItems.length && <p className="package-season-warning">{row.foreignCurrencyItems.map((entry) => `${escapeHtml(entry.name)} (${entry.currency} ${entry.unitPrice.toFixed(2)})`).join(', ')} {row.foreignCurrencyItems.length === 1 ? 'is' : 'are'} priced in another currency and {row.foreignCurrencyItems.length === 1 ? 'is not' : 'are not'} included in these totals. This package is priced in {row.currency} only.</p>}
-            </div>;
-          })() : <p>No included services to price.</p>}
-          </article>;
-        })}</div>
-      </section>}
+      {tab === 'pricing' && <PricingSeasonsTab
+        vehicleTypes={vehicleTypes}
+        periods={periods}
+        onAddPeriod={addPeriod}
+        onChangePeriod={changePeriod}
+        onRemovePeriod={removePeriod}
+        days={days}
+        library={library}
+        childRange={childRange}
+        acceptsChildren={form.acceptsChildren}
+        currency={packageCurrency}
+        childBreakdown={childBreakdown}
+        onRefreshService={refreshServiceFromLibrary}
+        slots={grid.slots}
+        usedCodes={grid.usedCodes}
+        bands={grid.bands}
+        changeSlot={grid.changeSlot}
+        changeBand={grid.changeBand}
+        activeSeason={activeSeason}
+        setActiveSeason={setActiveSeason}
+        accommodationPerPerson={accommodationPerPerson}
+        derivedAccommodation={derivedAccommodation}
+      />}
+      {tab === 'summary' && <PricingSummaryTab
+        vehicleTypes={vehicleTypes}
+        periods={periods}
+        days={days}
+        library={library}
+        activeSeason={activeSeason}
+        slots={grid.slots}
+        bands={grid.bands}
+        currency={packageCurrency}
+        childBreakdown={childBreakdownSummary}
+        accommodationPerPerson={accommodationPerPerson}
+      />}
       {tab === 'children' && <section className="package-tab-panel">
         <h2><Baby size={19} /> Children on this package</h2>
         <p>A child is only priced differently because of the accommodation. Everything else in the package is shared unit cost divided by pax, and a child pays exactly that same unit share. The one figure that can differ is the room, and that comes from the property's own child price for the age range set below.</p>
-        {markupPercent > 0 && <p className="package-help">The figures on this tab are contract costs. The child price on the Traveller &amp; pricing tab and in a client export carries the {markupPercent}% partner markup.</p>}
-        <label className="package-publish-toggle"><input type="checkbox" checked={form.acceptsChildren} onChange={(event) => updateForm('acceptsChildren', event.target.checked)} /><span><strong>A child may travel on this package</strong><small>When off, the package is for adults only and no child price is published.</small></span></label>
+        {markupPercent > 0 && <p className="package-help">The figures on this tab are contract costs. The child price on the Pricing &amp; seasons tab and in a client export carries the {markupPercent}% partner markup.</p>}
+        <label className="package-publish-toggle"><input type="checkbox" checked={form.acceptsChildren} onChange={(event) => toggleAcceptsChildren(event.target.checked)} /><span><strong>A child may travel on this package</strong><small>When off, the package is for adults only and no child price is published.</small></span></label>
         {!form.acceptsChildren ? <p className="package-child-off">Children are not accepted on this package.</p> : <>
           <div className="package-child-toolbar">
             <h3>Child age range</h3>
@@ -1277,7 +1474,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             </div>
           </div>
           <h3 className="package-child-price-title">What each accommodation charges for that range</h3>
-          <p>This tab covers the accommodation only, because the accommodation is the only part of a package that can price a child differently. Each property is listed with its supplier: where the property contracts a child rate for this age range that rate is used, and where it does not accept a child its single supplement is used instead. The unit share an adult pays is added on the Travellers &amp; pricing tab.</p>
+          <p>This tab covers the accommodation only, because the accommodation is the only part of a package that can price a child differently. Each property is listed with its supplier: where the property contracts a child rate for this age range that rate is used, and where it does not accept a child its single supplement is used instead. The unit share an adult pays is added on the Pricing &amp; seasons tab.</p>
 <div className="package-currency-breakdown">
             {!childRange ? <p className="package-child-off">Set the child age range above to price a child.</p> : <>
             <div className="package-breakdown-table-wrap"><table className="package-breakdown-table"><thead><tr><th>Accommodation</th><th>Supplier</th><th>Contracted child band</th><th>Child price basis</th><th>Child accommodation price</th></tr></thead>
@@ -1291,12 +1488,12 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                     {money(item.childAccommodation, childBreakdown.currency)}</td>
                 </tr>)}
                 {!childBreakdown.accommodationRows.length && <tr><td colSpan={5}>No accommodation in this package, so the child price is the per-pax unit share.</td></tr>}
-                {!!childBreakdown.accommodationRows.length && childBreakdown.childAccommodation === 0 && <tr><td colSpan={5} className="package-child-note">Every accommodation in this package charges R0.00 for a child. Nothing here is being published as a free child; check the single supplement on each property above.</td></tr>}
+                {!!childBreakdown.accommodationRows.length && childBreakdown.childAccommodation === 0 && <tr><td colSpan={5} className="package-child-note">Every accommodation in this package publishes its child rate as R0.00 — a child is allowed at all of them and stays free. A property with no child rate at all would quote the single supplement instead.</td></tr>}
                 <tr className="package-breakdown-total"><th colSpan={4}>Total child accommodation, added to the unit share</th><td>{money(childBreakdown.childAccommodation, childBreakdown.currency)}</td></tr>
               </tbody>
             </table></div>
-            <p className="package-child-note">Added to the unit share of {money(childBreakdown.unitPerPerson, childBreakdown.currency)} on the Travellers &amp; pricing tab, giving a child price of {money(childBreakdown.childTotal, childBreakdown.currency)}.</p>
-            {!!childBreakdown.accommodationRows.length && !!childBreakdown.childNotAllowed.length && <p className="package-child-note">{childBreakdown.childNotAllowed.join(', ')} does not accept a child for {childRange.ageFrom}–{childRange.ageTo} yrs, so each is charged the single supplement of {money(childBreakdown.childSupplement, childBreakdown.currency)} instead of a child rate.</p>}
+            <p className="package-child-note">Added to the unit share of {money(childBreakdown.unitPerPerson, childBreakdown.currency)} on the Pricing &amp; seasons tab, giving a child price of {money(childBreakdown.childTotal, childBreakdown.currency)}.</p>
+            {!!childBreakdown.accommodationRows.length && !!childBreakdown.childNotAllowed.length && <p className="package-child-note">{childBreakdown.childNotAllowed.join(', ')} does not accept a child for {childRange.ageFrom}—{childRange.ageTo} yrs, so each is charged the single supplement of {money(childBreakdown.childSupplement, childBreakdown.currency)} instead of a child rate.</p>}
             </>}
           </div>
         </>}
@@ -1336,7 +1533,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
               <strong>Day {dayIndex + 1}</strong>
               {(day.services || []).map((service, serviceIndex) => <div className="package-preview-item" key={`${service.id || service.item_id}-${serviceIndex}`}>
                 <span>{service.item_name}<small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}{service.is_included === false ? ' · optional' : ''}{packageIsTransport(service, library) && !service.tier_key ? ' · vehicle ladder, party picks one' : ''}</small></span>
-                <span className="package-preview-price">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} × {service.quantity || 1}</span>
+                <span className="package-preview-price">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} A- {service.quantity || 1}</span>
                 <button type="button" className="package-icon-button" aria-label={`Remove ${service.item_name} from the package`} onClick={() => removeService(dayIndex, serviceIndex)}><Trash2 size={14} /></button>
               </div>)}
               {!day.services.length && <p>No items on this day.</p>}
@@ -1351,13 +1548,49 @@ const childRange = packageChildAgeRange(form.childAgeRange);
           radio buttons or checkboxes, so the old layout spent a whole screen on about
           fifteen controls and pushed Export below the fold on a laptop. */}
       <div className="package-export-grid">
-        <div className="package-export-options"><span className="package-export-subhead">For</span><label><input type="radio" name="package-export-audience" value="client" checked={exportOptions.audience === 'client'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'client' }))} /> Client {markupPercent > 0 ? `(+${markupPercent}%)` : '(no markup)'}</label><label><input type="radio" name="package-export-audience" value="internal" checked={exportOptions.audience === 'internal'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'internal' }))} /> Internal (STO)</label></div>
+        <div className="package-export-options"><span className="package-export-subhead">For</span><label><input type="radio" name="package-export-audience" value="partner" checked={exportOptions.audience === 'partner'} disabled={!selectedClients.length} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'partner' }))} /> Assign to partner{selectedClients.length ? ` (${selectedClients.map(nameOf).join(', ')})` : ' — none assigned'}</label><label><input type="radio" name="package-export-audience" value="markup" checked={exportOptions.audience === 'markup'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'markup' }))} /> Markup for a non-partner</label>{exportOptions.audience === 'markup' ? <label className="package-export-markup">Markup <input type="number" min="0" step="0.5" value={exportOptions.markup} onChange={(event) => setExportOptions((previous) => ({ ...previous, markup: event.target.value }))} /> %</label> : null}<label><input type="radio" name="package-export-audience" value="internal" checked={exportOptions.audience === 'internal'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'internal' }))} /> Internal (STO)</label></div>
         <div className="package-export-options"><span className="package-export-subhead">Format</span><label><input type="radio" name="package-export-format" value="pdf" checked={exportFormat === 'pdf'} onChange={() => setExportFormat('pdf')} /> PDF</label><label><input type="radio" name="package-export-format" value="word" checked={exportFormat === 'word'} onChange={() => setExportFormat('word')} /> Word</label></div>
-        <div className="package-export-options"><span className="package-export-subhead">Include</span>{[['cover', 'Cover image'], ['inclusions', 'Inclusions'], ['terms', 'Terms'], ['bandPrices', 'Band prices'], ['explainPricing', 'Explain pricing'], ['showVehicleOptions', 'Every vehicle size']].map(([key, label]) => <label key={key}><input type="checkbox" checked={!!exportOptions[key]} onChange={(event) => setExportOptions((previous) => ({ ...previous, [key]: event.target.checked }))} /> {label}</label>)}</div>
-        {exportOptions.bandPrices && <div className="package-export-options"><span className="package-export-subhead">Cards</span><label><input type="radio" name="package-export-party-card" value="both" checked={!exportOptions.partyCard || exportOptions.partyCard === 'both'} onChange={() => setExportOptions((previous) => ({ ...previous, partyCard: 'both' }))} /> Whole party + per adult</label><label><input type="radio" name="package-export-party-card" value="hide" checked={exportOptions.partyCard === 'hide'} onChange={() => setExportOptions((previous) => ({ ...previous, partyCard: 'hide' }))} /> Per adult only</label><label><input type="radio" name="package-export-party-card" value="only" checked={exportOptions.partyCard === 'only'} onChange={() => setExportOptions((previous) => ({ ...previous, partyCard: 'only' }))} /> Whole party only</label><span className="package-export-subhead">Lead</span><label><input type="radio" name="package-export-band-price" value="party" checked={exportOptions.bandPrice === 'party'} onChange={() => setExportOptions((previous) => ({ ...previous, bandPrice: 'party' }))} /> Party total</label><label><input type="radio" name="package-export-band-price" value="perPerson" checked={exportOptions.bandPrice === 'perPerson'} onChange={() => setExportOptions((previous) => ({ ...previous, bandPrice: 'perPerson' }))} /> Per adult</label></div>}
-        {exportOptions.bandPrices && <div className="package-export-options"><span className="package-export-subhead">Bands shown</span><label><input type="radio" name="package-export-bands" value="all" checked={exportOptions.bandSelection === 'all'} onChange={() => setExportOptions((previous) => ({ ...previous, bandSelection: 'all' }))} /> Every band</label>{breakdown.map((band) => <label key={`export-band-${band.item_key || band.pax}`}><input type="radio" name="package-export-bands" value={String(packageBandPax(band))} checked={exportOptions.bandSelection !== 'all' && Number(exportOptions.bandSelection) === packageBandPax(band)} onChange={() => setExportOptions((previous) => ({ ...previous, bandSelection: String(packageBandPax(band)) }))} /> {packageBandLabel(band)} only</label>)}</div>}
+        <div className="package-export-options"><span className="package-export-subhead">Include</span>{[['cover', 'Cover image'], ['inclusions', 'Inclusions'], ['terms', 'Terms'], ['includePricingSummary', 'Presentation pricing'], ['explainPricing', 'Explain pricing'], ['showVehicleOptions', 'Every vehicle size']].map(([key, label]) => <label key={key}><input type="checkbox" checked={!!exportOptions[key]} onChange={(event) => setExportOptions((previous) => ({ ...previous, [key]: event.target.checked }))} /> {label}</label>)}</div>
       </div>
       <div className="package-modal-actions"><button className="secondary-btn" onClick={() => setExportDialog(false)}>Cancel</button><button className="primary-btn" onClick={exportDocument}><FileText size={16} /> Export</button></div>
     </section></div>}
+    {guideModal && <GuideServiceTypeModal
+      item={guideModal.item}
+      rate={guideModal.rate}
+      currency={packageCurrency}
+      onConfirm={confirmGuideTypes}
+      onCancel={() => setGuideModal(null)}
+    />}
+    {accomChargeModal && <AccommodationChargeModal
+      item={accomChargeModal.item}
+      currency={accomChargeModal.item.currency_code || packageCurrency}
+      travelStart={periods[0]?.valid_from || ''}
+      travelEnd={periods[0]?.valid_to || ''}
+      defaultRateId={accomChargeModal.rate?.id || ''}
+      onConfirm={confirmAccommodationCharge}
+      onCancel={() => setAccomChargeModal(null)}
+    />}
+    {guideDetailsModal && (function renderGuideDetails() {
+      const day = days[guideDetailsModal.dayIndex];
+      const guideLine = (day?.services || []).find((service) => service.item_key === guideDetailsModal.guideKey);
+      return <GuideDetailsModal
+        guideName={guideLine?.item_name || 'Guide & driver'}
+        dayLabel={`Day ${guideDetailsModal.dayIndex + 1}`}
+        currency={packageCurrency}
+        libraryItems={library}
+        travelStart={periods[0]?.valid_from || ''}
+        travelEnd={periods[0]?.valid_to || ''}
+        currentAccommodationIds={(day?.services || [])
+          .filter((service) => /accommodation/i.test(service.category || '') && service.is_included !== false)
+          .map((service) => service.item_id)}
+        defaultValues={guideDetailsModal.defaultValues || {}}
+        onConfirm={(plan) => {
+          const modal = guideDetailsModal;
+          setGuideDetailsModal(null);
+          applyGuideDetails(modal.dayIndex, modal.guideKey, plan);
+        }}
+        onCancel={() => setGuideDetailsModal(null)}
+      />;
+    })()}
   </div>;
 };

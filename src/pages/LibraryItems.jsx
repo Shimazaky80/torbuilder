@@ -111,6 +111,42 @@ const seasonNavBtnStyle = {
   cursor: 'pointer'
 };
 
+/* Cells of the vehicle price grid, so the one table on screen reads as a table. */
+const vehicleCellHead = {
+  padding: '0.35rem 0.6rem',
+  borderBottom: '2px solid #cbd5e1',
+  fontSize: '0.72rem',
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  color: '#64748b',
+  textAlign: 'left'
+};
+const vehicleCell = {
+  padding: '0.35rem 0.6rem',
+  borderBottom: '1px solid #e2e8f0',
+  fontSize: '0.8rem',
+  color: '#1e293b'
+};
+
+/* Summary of a per-vehicle rate's price vector for the directory listing. One row per
+   season, so a code can appear priced in one season and FOC in another — the last season
+   wins, which is what the form shows too. Unpriced codes are left off entirely rather
+   than shown as 0, because "never priced" and "priced at zero" are different things. */
+const vehicleVectorSummary = (rates) => {
+  const vec = {};
+  (rates || []).forEach(rate => {
+    const prices = rate && rate.prices_by_vehicle;
+    if (!prices || typeof prices !== 'object') return;
+    Object.entries(prices).forEach(([code, value]) => {
+      if (typeof value === 'number') vec[code] = value;
+      else if (value && value.free) vec[code] = 'FOC';
+      else if (value && value.na) vec[code] = 'n/a';
+      else delete vec[code];
+    });
+  });
+  return Object.entries(vec);
+};
+
 /* The surcharge fee columns written onto one season's item_rates row.
    Entrance fees and conservation levies used to be extra columns on an
    Accommodation / Transfers item's season. They are separate library items now,
@@ -160,6 +196,12 @@ export const LibraryItems = () => {
   // Seasonal Rates Matrix shows one season at a time: Maps form tempId -> visible season index.
   const [activeSeasonByItem, setActiveSeasonByItem] = useState({});
 
+  /* Which charge type of the visible season the accommodation matrix is showing.
+     One season carries several charge types (board basics) at different prices,
+     so within a season the operator picks the charge type to edit. Maps form
+     tempId -> the flat season-row index of the selected charge type. */
+  const [activeChargeByItem, setActiveChargeByItem] = useState({});
+
   // Same one-at-a-time view for the directory rows, keyed by the saved item id.
   const [activeSeasonByListItem, setActiveSeasonByListItem] = useState({});
 
@@ -197,12 +239,18 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, surchargeFees: true });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, surchargeFees: true, pricesByVehicle: false });
   const url = import.meta.env.VITE_SUPABASE_URL;
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
+  // The price axis a per-vehicle rate row is keyed by, read once from Settings.
+  const [vehicleTypes, setVehicleTypes] = useState([]);
+
   // Form State: Array of items for batch creation under supplier
   const [itemsToSave, setItemsToSave] = useState([createNewItemTemplate(1)]);
+
+  // Draft name typed into an accommodation item's "Add charge option" box.
+  const [chargeOptionDraft, setChargeOptionDraft] = useState({});
 
   const { showToast } = useToast();
   const location = useLocation();
@@ -496,6 +544,7 @@ export const LibraryItems = () => {
       seasons: [
         {
           seasonName: 'Base Season',
+          optionName: '',
           validFrom: '',
           validTo: '',
           roomRate: 0, // Flat Room / Unit Rate per Night (up to maxOccupancy persons)
@@ -518,6 +567,7 @@ export const LibraryItems = () => {
           childRate: 0,
           tiers: [],
           vehicleRate: 0,
+          pricesByVehicle: {},
           entranceFeePerson: 0,
           entranceFeeVehicle: 0,
           levyAdultRate: 0,
@@ -716,7 +766,11 @@ export const LibraryItems = () => {
                 && libCols.includes('surcharge_charge_basis')
                 && libCols.includes('surcharge_unit_basis')
                 && libCols.includes('surcharge_chargeable')
-                && libCols.includes('linked_item_id')
+                && libCols.includes('linked_item_id'),
+              /* One price per vehicle type on the rate row. Gated on its own because
+                 only this column is involved, so a database without it keeps the single
+                 per-vehicle input rather than losing rate entry entirely. */
+              pricesByVehicle: rateCols.includes('prices_by_vehicle')
             });
           }
         }
@@ -736,12 +790,19 @@ export const LibraryItems = () => {
         return;
       }
 
+      const { data: vTypes } = await supabase
+        .from('company_vehicle_types')
+        .select('id, code, name, max_capacity, is_active')
+        .eq('company_id', companyId)
+        .eq('is_active', true)
+        .order('max_capacity', { ascending: true });
+      setVehicleTypes(vTypes || []);
+
       const { data: sups } = await supabase
         .from('suppliers')
         .select('*')
         .eq('company_id', companyId)
         .order('name', { ascending: true });
-
       setSuppliers(sups || []);
 
       // Load category options from the database (falls back to the built-in
@@ -1230,7 +1291,7 @@ export const LibraryItems = () => {
   };
 
   // Seasons Management within an item
-  const handleAddSeasonRow = (tempId) => {
+  const handleAddSeasonRow = (tempId, optionName = '') => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
         const seasonCount = item.seasons.length + 1;
@@ -1244,6 +1305,10 @@ export const LibraryItems = () => {
             ...item.seasons,
             {
               seasonName: `Season ${seasonCount}`,
+              /* The charge option this season belongs to. Empty means the
+                 item's default board; a named value makes it one option of a
+                 multi-price accommodation. */
+              optionName: optionName || item.mealPlan || '',
               validFrom: '',
               validTo: '',
               roomRate: 0,
@@ -1269,6 +1334,7 @@ adultRate: 0,
           fastTrackChildRates: {},
           tiers: [],
               vehicleRate: 0,
+              pricesByVehicle: {},
               entranceFeePerson: 0,
               entranceFeeVehicle: 0,
               levyAdultRate: 0,
@@ -1397,6 +1463,32 @@ adultRate: 0,
     if (v !== '' && v !== e.target.value) handleSeasonChange(tempId, seasonIndex, field, v);
   };
 
+  /* One cell of the vehicle price grid. The value is a number, {free:true}, {na:true},
+     or undefined for "never priced". The last case deletes the key rather than writing
+     zero: an untouched cell has to read as an error, not as a gift, because everything
+     is charged unless the item is genuinely free (architecture doc, D12). */
+  const handleVehiclePriceChange = (tempId, seasonIdx, code, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const updatedSeasons = item.seasons.map((s, idx) => {
+        if (idx !== seasonIdx) return s;
+        const next = { ...(s.pricesByVehicle || {}) };
+        const isState = typeof value === 'object' && value !== null;
+        const isBlank = value === '' || value === null || value === undefined;
+        if (isBlank) {
+          delete next[code];
+        } else if (isState) {
+          next[code] = value;
+        } else {
+          const rounded = Number(applyInputRounding(String(value), amountSettings.inputRounding));
+          next[code] = Number.isFinite(rounded) ? rounded : 0;
+        }
+        return { ...s, pricesByVehicle: next };
+      });
+      return { ...item, seasons: updatedSeasons };
+    }));
+  };
+
   const snapBandRate = (e, tempId, seasonIndex, bandId, writer) => {
     const v = applyInputRounding(e.target.value, amountSettings.inputRounding);
     if (v !== '' && v !== e.target.value) writer(tempId, seasonIndex, bandId, v);
@@ -1436,6 +1528,122 @@ adultRate: 0,
     setActiveSeasonByItem(prev => {
       const current = activeSeasonIndexOf(tempId, seasons);
       return { ...prev, [tempId]: (current + delta + total) % total };
+    });
+  };
+
+  /* Accommodation is edited season-first: one season carries several charge
+     types, each its own rate row. Group the flat season rows by (name, window)
+     so the editor can show one season with its charge types inside, then scroll
+     between seasons with the same arrows. Non-accommodation items keep the flat
+     one-row-per-season shape. */
+  const accommodationSeasonGroupsFor = (seasons) => {
+    const groups = [];
+    const byKey = new Map();
+    (seasons || []).forEach((season, index) => {
+      const key = `${season.seasonName || ''}|${season.validFrom || ''}|${season.validTo || ''}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          seasonName: season.seasonName,
+          validFrom: season.validFrom,
+          validTo: season.validTo,
+          memberIndices: []
+        });
+        groups.push(byKey.get(key));
+      }
+      byKey.get(key).memberIndices.push(index);
+    });
+    return groups;
+  };
+
+  /* The charge type of a group currently being edited: the remembered one when
+     it still belongs to that season, otherwise the season's first charge type. */
+  const activeChargeIndexOf = (tempId, group) => {
+    const raw = activeChargeByItem[tempId];
+    if (group && Number.isInteger(raw) && group.memberIndices.includes(raw)) return raw;
+    return group?.memberIndices?.[0] ?? 0;
+  };
+
+  /* Editing the season name / dates edits EVERY charge type of that season, so a
+     season is retyped or redated once rather than once per board basis. */
+  const handleSeasonGroupChange = (tempId, memberIndices, field, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const targets = new Set(memberIndices || []);
+      return {
+        ...item,
+        seasons: item.seasons.map((s, idx) => (targets.has(idx) ? { ...s, [field]: clampNonNegative(value) } : s))
+      };
+    }));
+  };
+
+  /* Add a charge type to an EXISTING season: a fresh rate row that copies the
+     season's name and window and starts at zero, so the operator only types the
+     board basis and its prices. */
+  const handleAddChargeToSeason = (tempId, group, optionName = '') => {
+    if (!group) return;
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const childRatesInit = {};
+      (item.childAgeRanges || []).forEach(b => { childRatesInit[b.id] = 0; });
+      return {
+        ...item,
+        seasons: [
+          ...item.seasons,
+          {
+            seasonName: group.seasonName || 'Base Season',
+            optionName: (optionName || '').trim(),
+            validFrom: group.validFrom || '',
+            validTo: group.validTo || '',
+            roomRate: 0,
+            singleRoomRate: 0,
+            price1Adult: 0,
+            price2Adults: 0,
+            price3PlusAdults: 0,
+            childRates: childRatesInit,
+            singleSupplement: 0,
+            childDiscount: 0,
+            guideRate: 0,
+            driverRate: 0,
+            guideTransferRate: 0,
+            guideHalfDayRate: 0,
+            guideFullDayRate: 0,
+            guideOverlandRate: 0,
+            guideDinnerRate: 0,
+            guideMealPlan: 'Bed & Breakfast',
+            driverMealPlan: 'Bed & Breakfast',
+            adultRate: 0,
+            childRate: 0,
+            fastTrackAdultRate: 0,
+            fastTrackChildRates: {},
+            tiers: [],
+            vehicleRate: 0,
+            pricesByVehicle: {},
+            entranceFeePerson: 0,
+            entranceFeeVehicle: 0,
+            levyAdultRate: 0,
+            levyChildRate: 0,
+            taxesAndSurcharges: 0
+          }
+        ]
+      };
+    }));
+  };
+
+  /* Remove a whole season: every charge type it carries. */
+  const handleRemoveSeasonGroup = (tempId, group) => {
+    if (!group || group.memberIndices.length === 0) return;
+    const targets = new Set(group.memberIndices);
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const seasons = item.seasons.filter((_, idx) => !targets.has(idx));
+      return { ...item, seasons: seasons.length ? seasons : item.seasons };
+    }));
+    setActiveSeasonByItem(prev => {
+      const current = Number.isInteger(prev[tempId]) ? prev[tempId] : 0;
+      const remaining = itemsToSave.find(i => i.tempId === tempId)?.seasons.length || 0;
+      const total = Math.max(1, remaining - group.memberIndices.length);
+      return { ...prev, [tempId]: Math.max(0, Math.min(current, total - 1)) };
     });
   };
 
@@ -1812,10 +2020,16 @@ adultRate: 0,
               };
             }
             if (isTourStyle) {
-              const adultRate = parseFloat(s.adultRate) || 0;
+              const isPerVehicle = pricingModel === 'per_vehicle';
+              const vehiclePrices = (dbFeatures.pricesByVehicle && isPerVehicle && s.pricesByVehicle) || {};
+              /* The two legacy single-price columns still have to hold something, because
+                 they are the only ones quotes read today. They take the cheapest vehicle
+                 that is actually priced; a vector nobody has priced yet stays at zero and
+                 blocks rather than silently selling a free vehicle. */
+              const pricedVector = Object.values(vehiclePrices).filter(p => typeof p === 'number' && p > 0);
+              const adultRate = parseFloat(s.adultRate) || (pricedVector.length ? Math.min(...pricedVector) : 0);
               const vehicleRate = parseFloat(s.vehicleRate) || 0;
               const childRate = parseFloat(s.childRate) || 0;
-              const isPerVehicle = pricingModel === 'per_vehicle';
               const isTiered = pricingModel === 'tiered';
               const tiers = Array.isArray(s.tiers) ? s.tiers
                 .filter(t => t && (parseFloat(t.rate) > 0))
@@ -1841,6 +2055,7 @@ adultRate: 0,
                 rate_basis: isPerVehicle ? 'per_vehicle' : (isTiered ? 'tiered' : 'per_person'),
                 child_sharing_policy: '',
                 unit_price: isPerVehicle ? adultRate : null,
+                ...(dbFeatures.pricesByVehicle && isPerVehicle ? { prices_by_vehicle: vehiclePrices } : {}),
                 ...(dbFeatures.tieredPricing && isTiered ? { tiered_pricing: tiers } : {}),
                 ...(dbFeatures.feeType
                   ? {
@@ -1905,7 +2120,10 @@ adultRate: 0,
               item_id: targetItemId,
               option_name: s.seasonName || 'Base Season',
               season_name: s.seasonName || 'Base Season',
-              meal_plan: itemData.mealPlan,
+              /* Each rate row's meal_plan is its charge option (room only, half
+                 board, ...). Rows sharing a meal_plan form one option's season
+                 matrix; a blank one falls back to the item's default board. */
+              meal_plan: s.optionName || itemData.mealPlan,
               currency: itemData.currency,
               valid_from: s.validFrom || null,
               valid_to: s.validTo || null,
@@ -2078,6 +2296,7 @@ adultRate: 0,
           validTo: r.valid_to || '',
           adultRate: r.rate_basis === 'tiered' ? 0 : (parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0),
           vehicleRate: 0,
+          pricesByVehicle: r.prices_by_vehicle || {},
           childRate: transferChildRate,
           tiers: Array.isArray(r.tiered_pricing) ? r.tiered_pricing.map(t => ({ minPax: t.min_pax ?? '', maxPax: t.max_pax ?? '', rate: t.rate ?? '' })) : [],
           roomRate: 0,
@@ -2120,6 +2339,7 @@ adultRate: 0,
       }
       return {
         seasonName: r.season_name || r.option_name || 'Base Season',
+        optionName: r.meal_plan || '',
         validFrom: r.valid_from || '',
         validTo: r.valid_to || '',
         roomRate: isFlat ? (parseFloat(r.unit_price) || parseFloat(r.price_2_adults) || parseFloat(r.double_twin_rate) || 0) : (parseFloat(r.single_room_rate) || 0),
@@ -4522,10 +4742,75 @@ adultRate: 0,
                       </div>
                     ))}
 
+                    {item.category === 'Accommodation' && (() => {
+                      const groups = accommodationSeasonGroupsFor(item.seasons);
+                      const currentGroup = groups[activeSeasonIndexOf(item.tempId, groups)];
+                      const activeGroup = currentGroup || groups[0] || null;
+                      const chargeLabels = (activeGroup?.memberIndices || [])
+                        .map((idx) => (item.seasons[idx]?.optionName || item.mealPlan || '').trim());
+                      const optionNames = [...new Set(chargeLabels.filter(Boolean))];
+                      return (
+                        <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
+                          <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#5b21b6', marginBottom: '0.2rem' }}>Charge types</div>
+                          <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.6rem', lineHeight: 1.45 }}>
+                            One season is priced at several charge types (room only, half board, full board with activities). Add a charge type to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; below and set its prices in the matrix — on a drop the itinerary asks which season and charge type applies.
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.6rem' }}>
+                            {optionNames.length === 0
+                              ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>This season uses the default &ldquo;{item.mealPlan || 'Bed & Breakfast'}&rdquo;. Add a charge type to price another board basis.</span>
+                              : optionNames.map((name) => (
+                                <span key={name} style={{ background: '#fff', border: '1px solid #ddd6fe', borderRadius: '999px', padding: '0.22rem 0.65rem', fontSize: '0.75rem', fontWeight: 600, color: '#5b21b6' }}>
+                                  {name}
+                                </span>
+                              ))}
+                          </div>
+                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <input
+                              list={`option-list-${item.tempId}`}
+                              className="pricing-select"
+                              style={{ maxWidth: '260px', padding: '0.4rem' }}
+                              placeholder="e.g. Half Board"
+                              value={chargeOptionDraft[item.tempId] || ''}
+                              onChange={(e) => setChargeOptionDraft((prev) => ({ ...prev, [item.tempId]: e.target.value }))}
+                            />
+                            <datalist id={`option-list-${item.tempId}`}>
+                              {optionNames.map((n) => <option key={n} value={n} />)}
+                            </datalist>
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              disabled={!(chargeOptionDraft[item.tempId] || '').trim() || !activeGroup}
+                              onClick={() => {
+                                handleAddChargeToSeason(item.tempId, activeGroup, chargeOptionDraft[item.tempId]);
+                                setChargeOptionDraft((prev) => ({ ...prev, [item.tempId]: '' }));
+                              }}
+                            >
+                              <Plus size={13} /> Add charge type to this season
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     {item.seasons.map((season, seasonIdx) => {
                       /* Seasonal Rates Matrix shows one season at a time; the
-                         arrows below move between them. */
-                      if (seasonIdx !== activeSeasonIndexOf(item.tempId, item.seasons)) return null;
+                         arrows below move between them. Accommodation is edited
+                         season-first: the visible season shows one charge type at
+                         a time, and the chips below switch between them. */
+                      const isAccom = item.category === 'Accommodation';
+                      const accGroups = isAccom ? accommodationSeasonGroupsFor(item.seasons) : null;
+                      const activeGroupIdx = isAccom
+                        ? activeSeasonIndexOf(item.tempId, accGroups)
+                        : activeSeasonIndexOf(item.tempId, item.seasons);
+                      const activeGroup = isAccom ? accGroups[activeGroupIdx] : null;
+                      const activeMemberIdx = isAccom
+                        ? activeChargeIndexOf(item.tempId, activeGroup)
+                        : activeSeasonIndexOf(item.tempId, item.seasons);
+                      if (seasonIdx !== activeMemberIdx) return null;
+                      const totalSeasons = isAccom ? accGroups.length : item.seasons.length;
+                      const seasonPos = isAccom ? activeGroupIdx : seasonIdx;
+                      const headerName = isAccom ? activeGroup?.seasonName : season.seasonName;
+                      const navSeasons = isAccom ? accGroups : item.seasons;
                       const bands = item.childAgeRanges || [];
                       const isFlatRoom = item.pricingModel === 'per_room';
 
@@ -4534,10 +4819,10 @@ adultRate: 0,
 
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              {item.seasons.length > 1 && (
+                              {totalSeasons > 1 && (
                                 <button
                                   type="button"
-                                  onClick={() => stepActiveSeason(item.tempId, item.seasons, -1)}
+                                  onClick={() => stepActiveSeason(item.tempId, navSeasons, -1)}
                                   title="Previous season"
                                   aria-label="Previous season"
                                   style={seasonNavBtnStyle}
@@ -4546,15 +4831,15 @@ adultRate: 0,
                                 </button>
                               )}
                               <span style={{ fontWeight: 700, fontSize: '0.85rem', color: '#475569' }}>
-                                Season {seasonIdx + 1}{' '}
+                                Season {seasonPos + 1}{' '}
                                 <span style={{ fontWeight: 400, color: '#94a3b8' }}>
-                                  of {item.seasons.length} ({season.seasonName})
+                                  of {totalSeasons} ({headerName})
                                 </span>
                               </span>
-                              {item.seasons.length > 1 && (
+                              {totalSeasons > 1 && (
                                 <button
                                   type="button"
-                                  onClick={() => stepActiveSeason(item.tempId, item.seasons, 1)}
+                                  onClick={() => stepActiveSeason(item.tempId, navSeasons, 1)}
                                   title="Next season"
                                   aria-label="Next season"
                                   style={seasonNavBtnStyle}
@@ -4564,42 +4849,84 @@ adultRate: 0,
                               )}
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                              {item.seasons.length > 1 && (
+                              {totalSeasons > 1 && (
                                 <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
                                   Use the arrows to move between seasons
                                 </span>
                               )}
-                              {item.seasons.length > 1 && (
-                                <button type="button" onClick={() => handleRemoveSeasonRow(item.tempId, seasonIdx)}
+                              {totalSeasons > 1 && (
+                                <button type="button" onClick={() => (isAccom ? handleRemoveSeasonGroup(item.tempId, activeGroup) : handleRemoveSeasonRow(item.tempId, seasonIdx))}
                                   style={{ color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                                  <Trash2 size={14} /> Remove Season
+                                  <Trash2 size={14} /> {isAccom ? 'Remove Season' : 'Remove Season'}
                                 </button>
                               )}
                             </div>
                           </div>
 
                           {/* Season Name & Dates */}
-                          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: item.category === 'Accommodation' ? '1.2fr 1fr 1fr 1.1fr' : '2fr 1fr 1fr', gap: '1rem', marginBottom: isAccom ? '0.75rem' : '1rem' }}>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Season Name</label>
                               <input type="text" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 placeholder="e.g. Base / High Season"
                                 value={season.seasonName}
-                                onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'seasonName', e.target.value)} />
+                                onChange={(e) => (isAccom
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'seasonName', e.target.value)
+                                  : handleSeasonChange(item.tempId, seasonIdx, 'seasonName', e.target.value))} />
                             </div>
+                            {item.category === 'Accommodation' && (
+                              <div>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Charge type</label>
+                                <input type="text" className="pricing-select" list={`option-list-${item.tempId}`} style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                                  placeholder="e.g. Half Board (blank = default)"
+                                  value={season.optionName || ''}
+                                  onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'optionName', e.target.value)} />
+                              </div>
+                            )}
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Valid From</label>
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validFrom}
-                                onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'validFrom', e.target.value)} />
+                                onChange={(e) => (isAccom
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validFrom', e.target.value)
+                                  : handleSeasonChange(item.tempId, seasonIdx, 'validFrom', e.target.value))} />
                             </div>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Valid To</label>
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validTo}
-                                onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value)} />
+                                onChange={(e) => (isAccom
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validTo', e.target.value)
+                                  : handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value))} />
                             </div>
                           </div>
+
+                          {/* Charge types of this season — pick which one the
+                              prices below belong to. */}
+                          {isAccom && activeGroup && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
+                              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b' }}>Charge type:</span>
+                              {activeGroup.memberIndices.map((idx) => {
+                                const label = (item.seasons[idx]?.optionName || item.mealPlan || 'Default board').trim() || 'Default board';
+                                const selected = idx === activeMemberIdx;
+                                return (
+                                  <button
+                                    key={idx}
+                                    type="button"
+                                    onClick={() => setActiveChargeByItem((prev) => ({ ...prev, [item.tempId]: idx }))}
+                                    style={{
+                                      padding: '0.22rem 0.7rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600,
+                                      border: `1px solid ${selected ? '#0d7478' : '#ddd6fe'}`,
+                                      background: selected ? '#f0fdfa' : '#fff',
+                                      color: selected ? '#0d7478' : '#5b21b6'
+                                    }}
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
 
                           {/* Flat Room Rate Input OR PPS Tier Inputs */}
                           {isGuideCategory(item.category) ? (
@@ -4990,6 +5317,77 @@ adultRate: 0,
                                   </div>
                                 </>
                               ) : item.pricingModel === 'per_vehicle' ? (
+                                dbFeatures.pricesByVehicle && vehicleTypes.length ? (
+                                  <div>
+                                    <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
+                                      Price by Vehicle Type ({item.currency} per trip)
+                                    </label>
+                                    <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.6rem' }}>
+                                      One price per vehicle this supplier quotes, on the same row. A quote picks the smallest vehicle that seats the party and charges that column in full; the party size divides it.
+                                    </div>
+                                    <table style={{ borderCollapse: 'collapse', fontSize: '0.8rem', minWidth: '30rem' }}>
+                                      <thead>
+                                        <tr>
+                                          <th style={vehicleCellHead}>Vehicle</th>
+                                          <th style={{ ...vehicleCellHead, textAlign: 'right' }}>Seats</th>
+                                          <th style={{ ...vehicleCellHead, textAlign: 'right' }}>Price</th>
+                                          <th style={vehicleCellHead}>Charge</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {vehicleTypes.map((vehicleType) => {
+                                          const entry = (season.pricesByVehicle || {})[vehicleType.code];
+                                          const isState = typeof entry === 'object' && entry !== null;
+                                          const state = entry === undefined ? 'priced' : (isState ? (entry.free ? 'free' : 'na') : 'priced');
+                                          const amount = typeof entry === 'number' ? entry : '';
+                                          return (
+                                            <tr key={vehicleType.code} style={state === 'priced' ? undefined : { opacity: 0.7 }}>
+                                              <td style={vehicleCell}>{vehicleType.name}</td>
+                                              <td style={{ ...vehicleCell, textAlign: 'right' }}>{vehicleType.max_capacity}</td>
+                                              <td style={{ ...vehicleCell, textAlign: 'right' }}>
+                                                {state === 'priced' ? (
+                                                  <input
+                                                    type="number"
+                                                    min="0"
+                                                    step={moneyStep}
+                                                    className="pricing-select"
+                                                    style={{ width: '7.5rem', padding: '0.3rem 0.45rem', textAlign: 'right' }}
+                                                    placeholder="not priced"
+                                                    value={amount}
+                                                    onChange={(e) => handleVehiclePriceChange(item.tempId, seasonIdx, vehicleType.code, e.target.value)}
+                                                  />
+                                                ) : (
+                                                  <span style={{ color: '#94a3b8' }}>&mdash;</span>
+                                                )}
+                                              </td>
+                                              <td style={vehicleCell}>
+                                                <select
+                                                  className="pricing-select"
+                                                  style={{ padding: '0.3rem 0.45rem', fontSize: '0.78rem' }}
+                                                  value={state}
+                                                  onChange={(e) => {
+                                                    const next = e.target.value;
+                                                    handleVehiclePriceChange(item.tempId, seasonIdx, vehicleType.code,
+                                                      next === 'priced' ? (typeof entry === 'number' ? entry : '')
+                                                        : (next === 'free' ? { free: true } : { na: true }));
+                                                  }}
+                                                >
+                                                  <option value="priced">Price</option>
+                                                  <option value="free">Free (no charge)</option>
+                                                  <option value="na">Doesn&rsquo;t apply</option>
+                                                </select>
+                                              </td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                    <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.5rem' }}>
+                                      A vehicle left <strong>not priced</strong> blocks that party size from being sold. Choose <em>Free</em> or <em>Doesn&rsquo;t apply</em> only when the supplier really charges nothing for it.
+                                    </div>
+                                  </div>
+                                )
+                                : (
                                 <div>
                                   <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
                                     Vehicle Rate per Trip ({item.currency})
@@ -5010,6 +5408,7 @@ adultRate: 0,
                                     Flat price for up to <strong>{item.maxOccupancy || 4} pax</strong>. In quotes, per-person rate is: <code>{item.currency} {parseFloat(season.adultRate) || 0} ÷ (Passengers)</code>.
                                   </div>
                                 </div>
+                                )
                               ) : (
                                 <div>
                                   <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
@@ -5327,7 +5726,13 @@ adultRate: 0,
                       type="button"
                       className="secondary-btn"
                       style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
-                      onClick={() => handleAddSeasonRow(item.tempId)}
+                      onClick={() => {
+                        /* A new season starts as a single charge type: blank
+                           name and dates, default board basis. An option's extra
+                           charge types are added on top of it with the charge-type
+                           helper. */
+                        handleAddSeasonRow(item.tempId, '');
+                      }}
                     >
                       <Plus size={13} /> Add Season
                     </button>
@@ -5755,9 +6160,23 @@ adultRate: 0,
                           ✈️ {item.pricing_model === 'per_vehicle' ? 'Per Charter' : 'Per Person'}
                         </span>
                       ) : isTourStyle && item.pricing_model === 'per_vehicle' ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          🚐 Flat Rate (Per Vehicle)
-                        </span>
+                        <>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
+                            🚐 Price by Vehicle
+                          </span>
+                          {vehicleVectorSummary(item.item_rates).length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginBottom: '0.3rem' }}>
+                              {vehicleVectorSummary(item.item_rates).map(([code, value]) => {
+                                const vehicleType = vehicleTypes.find(v => v.code === code);
+                                return (
+                                  <span key={code} style={{ fontSize: '0.7rem', fontWeight: 600, color: '#334155', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '4px', padding: '0.1rem 0.35rem', fontVariantNumeric: 'tabular-nums' }}>
+                                    {vehicleType ? vehicleType.name : code} {value}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </>
                       ) : isTourStyle && item.pricing_model === 'tiered' ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
                           📊 Tiered (by pax count)

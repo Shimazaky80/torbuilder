@@ -102,6 +102,25 @@ export const repriceServicesForPax = ({
   const updatedDays = (Array.isArray(days) ? days : []).map((day) => ({
     ...day,
     services: (Array.isArray(day.services) ? day.services : []).map((service) => {
+      /* A guide line and its guide-&-driver detail lines are a flat per-trip
+         figure split across the party, not a per-person library rate. Re-split
+         the same flat total over the new party size so a pax change neither
+         inflates the guide nor repriced it off the library. */
+      const isGuideLine = (Array.isArray(service.guideServiceTypes) && service.guideServiceTypes.length > 0)
+        || service.guideOnly === true || service.guide_only === true || !!service.guideForKey;
+      if (isGuideLine && Number(service.buyPP) > 0) {
+        const flatTotal = (Number(service.buyPP) || 0) * (Number(service.pax) || count || 1);
+        const buyPP = count > 0 ? round2(flatTotal / count) : round2(flatTotal);
+        const guideMarkup = Number(service.markup) || 0;
+        repriced += 1;
+        return {
+          ...service,
+          buyPP,
+          sellPP: round2(buyPP * (1 + guideMarkup / 100)),
+          pax: count
+        };
+      }
+
       if (/accommodation/i.test(String(service.category || '')) || !service.itemId || Number(service.pax) === count) {
         return service;
       }

@@ -38,7 +38,8 @@ import {
   Lock,
   Users,
   AlertTriangle,
-  Baby
+  Baby,
+  UtensilsCrossed
 } from 'lucide-react';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -46,6 +47,17 @@ import { useCurrencies } from '../hooks/useCurrencies';
 import ClientTourForm from '../components/ClientTourForm';
 import { usePageGuard } from '../context/NavigationGuardContext';
 import RoomAllocationModal from '../components/RoomAllocationModal';
+import GuideServiceTypeModal from '../components/GuideServiceTypeModal';
+import AccommodationChargeModal from '../components/AccommodationChargeModal';
+import GuideDetailsModal from '../components/GuideDetailsModal';
+import {
+  guideChargeTotal,
+  guideLabel,
+  guideSelection,
+  isGuideItem,
+  isOverlandGuide
+} from '../lib/guidePricing';
+import { accommodationHasChoices, ratesForOption, rateById, seasonForRate } from '../lib/accommodationOptions';
 import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination } from '../lib/roomAllocationHelper';
 import { resolveSeasonForTravel, applyProtectionToRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
 import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
@@ -1327,6 +1339,16 @@ export const ItineraryBuilder = () => {
      guessed at one. */
   const [surchargeRepeatPrompt, setSurchargeRepeatPrompt] = useState(null);
   const [surchargeRepeatCount, setSurchargeRepeatCount] = useState(1);
+  /* Guide service detour: the pending add held while the operator says which
+     service types the guide accompanies, and the guide & driver detail dialog
+     (lunch / dinner / overnight lines) for an overland guide on one day. */
+  const [guideModal, setGuideModal] = useState(null);
+  const [guideDetailsModal, setGuideDetailsModal] = useState(null);
+
+  /* Accommodation charge detour: the pending drop held while the operator says
+     which charge type (and which season window) this property is priced from,
+     when the library item carries more than one option or season. */
+  const [accomChargeModal, setAccomChargeModal] = useState(null);
 
   const idSeq = useRef(0);
   const booted = useRef(false);
@@ -1943,6 +1965,10 @@ export const ItineraryBuilder = () => {
               destinationArea: ii.destination_area || '',
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
               roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
+              guideServiceTypes: Array.isArray(ii.guide_service_types) ? ii.guide_service_types : [],
+              guideOnly: ii.guide_only === true,
+              guideForKey: ii.guide_for_item_key || null,
+              guideChargeType: ii.guide_charge_type || null,
 repeatGroupId: ii.repeat_group_id || null,
               splitGroupId: ii.split_group_id || null,
               /* Surcharge attributes survive the reload, so a passed-through
@@ -2320,14 +2346,22 @@ repeatGroupId: ii.repeat_group_id || null,
     /* Pricing Protection: pick the season that actually covers the trip, block
        an unpriceable item outright, and uplift a stale season by the tenant's
        protection percentage. Done before anything is written so a blocked item
-       never lands on the day and has to be undone. */
-    const season = resolveSeasonForTravel({
-      rates: item.item_rates || [],
-      currencyCode,
-      startDate: travelWindow.start,
-      endDate: travelWindow.end,
-      protectionPercent: priceProtectionPercent
-    });
+       never lands on the day and has to be undone.
+
+       An accommodation charge detour pins the exact rate row the operator
+       chose from the modal (a charge option AND its season), so that row is
+       the season here rather than a re-derivation from the travel dates. */
+    const focusRates = ratesForOption(item, options.optionLabel);
+    const pinnedRate = options.rateId ? rateById(item, options.rateId) : null;
+    const season = pinnedRate
+      ? seasonForRate(pinnedRate)
+      : resolveSeasonForTravel({
+        rates: focusRates.length ? focusRates : (item.item_rates || []),
+        currencyCode,
+        startDate: travelWindow.start,
+        endDate: travelWindow.end,
+        protectionPercent: priceProtectionPercent
+      });
     if (!season.canAdd) {
       showToast(`"${item.name}" cannot be added: ${season.reason}`, 'error');
       return;
@@ -2369,6 +2403,18 @@ repeatGroupId: ii.repeat_group_id || null,
     const tourCat = /transfers?|tours?|activities?|excursions?/i.test(cat) || cat === 'Flights / Charter';
     const accomCat = /accommodation/i.test(cat);
     const surcharge = isSurchargeItem(item);
+    /* Guide detour: a guide line prices the flat per-trip sum of the chosen
+       service types; a guide & driver detail line (their lunch/dinner/overnight)
+       prices the flat guide figure of the meal or property. Both are stored per
+       trip and divided across the party so the day total comes back to the flat
+       charge no matter how many travellers are on it. */
+    const guideServiceTypes = isGuideItem(item) ? guideSelection(options.guideServiceTypes) : [];
+    const guideCharge = guideServiceTypes.length ? guideChargeTotal(pricedRate || {}, guideServiceTypes) : null;
+    const detailCharge = Number.isFinite(Number(options.guideDetailCharge)) ? Number(options.guideDetailCharge) : null;
+    const pinnedCharge = guideCharge !== null ? guideCharge : detailCharge;
+    const effBuyPP = pinnedCharge !== null
+      ? (paxCount > 0 ? round2(pinnedCharge / paxCount) : round2(pinnedCharge))
+      : buyPP;
     /* Library items keep the vehicle in middle_category (transfers / tours) and
        the pax capacity in max_occupancy; meal plans live on the per-season
        item_rates rows with an accommodation default of "Bed & Breakfast". */
@@ -2387,10 +2433,10 @@ repeatGroupId: ii.repeat_group_id || null,
       category: item.category || '',
       supplierName: item.supplier?.name || '',
       currencyCode,
-      basis,
-      buyPP,
+      basis: pinnedCharge !== null ? 'per_trip' : basis,
+      buyPP: effBuyPP,
       markup,
-      sellPP: round2(buyPP * (1 + markup / 100)),
+      sellPP: round2(effBuyPP * (1 + markup / 100)),
       pax: paxCount,
       quantity: 1,
       descOverride: '',
@@ -2407,7 +2453,7 @@ repeatGroupId: ii.repeat_group_id || null,
       destinationRegion: item.destination_region || item.destinationRegion || item.location || '',
       destinationArea: item.destination_area || item.destinationArea || '',
       maxOccupancy: numOrBlank(libMaxOcc),
-      mealPlan: item.mealPlan || item.meal_plan || (item.item_rates || []).find((r) => r.meal_plan)?.meal_plan || (accomCat ? 'Bed & Breakfast' : ''),
+      mealPlan: options.optionLabel || item.mealPlan || item.meal_plan || (item.item_rates || []).find((r) => r.meal_plan)?.meal_plan || (accomCat ? 'Bed & Breakfast' : ''),
       checkInTime: item.checkInTime || item.check_in_time || '',
       checkOutTime: item.checkOutTime || item.check_out_time || '',
       startTime: item.startTime || item.start_time || '',
@@ -2420,6 +2466,13 @@ repeatGroupId: ii.repeat_group_id || null,
       item_rates: pricedItem.item_rates,
       isOptional: !!options.isOptional,
       repeatGroupId: options.repeatGroupId || null,
+      /* Guide service detour: which service types priced the guide line, and the
+         guide & driver detail flags (their lunch / dinner / overnight lines carry
+         guide_only and point at the guide service line that owns them). */
+      guideServiceTypes: guideServiceTypes.length ? guideServiceTypes : [],
+      guideOnly: options.guideOnly === true,
+      guideForKey: options.guideForKey || null,
+      guideChargeType: options.guideChargeType || null,
       /* Properties that together house one party on one night. Set from the
          "group split" choice in the placement prompt; alternatives never get
          one because they are not part of the party. */
@@ -2523,7 +2576,15 @@ repeatGroupId: ii.repeat_group_id || null,
         service: svc
       });
     }
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow.start, travelWindow.end, priceProtectionPercent, meta.numChildren, setSurchargeRepeatPrompt]);
+
+    /* Overland comes with the guide lived in: the operator is asked for the
+       guide & driver's lunch, dinner and overnight on this day right away. The
+       detail lines are linked to this line by the guide's ITEM id (a service key
+       is not persisted on the itinerary), so the grouping survives a reload. */
+    if (guideServiceTypes.length && isOverlandGuide(guideServiceTypes)) {
+      setGuideDetailsModal({ dayIndex, guideKey: svc.itemId, guideName: item.name, defaultValues: {} });
+    }
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow.start, travelWindow.end, priceProtectionPercent, meta.numChildren, setSurchargeRepeatPrompt, setGuideDetailsModal]);
 
   /* The unlinked per-night fee was added optimistically at a repeat count of 1
      because nothing was known at the time; once the operator answers, the line
@@ -2622,8 +2683,8 @@ repeatGroupId: ii.repeat_group_id || null,
     }
   }, [libraryItems, createService, showToast]);
 
-  const openPlacementPrompt = useCallback((dayIndex, item, via) => {
-    setPlacementDraft({ dayIndex, item, via });
+  const openPlacementPrompt = useCallback((dayIndex, item, via, chargeChoice = null) => {
+    setPlacementDraft({ dayIndex, item, via, chargeChoice });
     setPlacementError('');
     setPlacementDestinationSplit(false);
     setPlacementRepeat(false);
@@ -2688,6 +2749,20 @@ repeatGroupId: ii.repeat_group_id || null,
 
   const addService = useCallback((dayIndex, item, via) => {
     if (completedRef.current) return;
+    /* A guide is charged per the service it accompanies, so the operator is asked
+       which of the five flat per-trip amounts this line is priced from before it
+       can be costed. */
+    if (isGuideItem(item)) {
+      setGuideModal({ dayIndex, item, via });
+      return;
+    }
+    /* An accommodation with more than one charge option or season asks which
+       one applies before it is dropped, the same way a guide is asked which
+       service it accompanies. */
+    if (isAccommodationItem(item) && accommodationHasChoices(item)) {
+      setAccomChargeModal({ dayIndex, item, via });
+      return;
+    }
     if (via === 'drop' || via === 'double-click') {
       if (isVehicleServiceItem(item)) openVehiclePrompt(dayIndex, item, via);
       else openPlacementPrompt(dayIndex, item, via);
@@ -2695,6 +2770,87 @@ repeatGroupId: ii.repeat_group_id || null,
     }
     createService(dayIndex, item, via);
   }, [createService, isVehicleServiceItem, openPlacementPrompt, openVehiclePrompt]);
+
+  /* The accommodation charge picker answered: re-enter the add with the chosen
+     rate row pinned, so placement (and every repeated day) prices from exactly
+     that option and season. */
+  const confirmAccommodationCharge = useCallback((choice) => {
+    const pending = accomChargeModal;
+    if (!pending) return;
+    setAccomChargeModal(null);
+    const { dayIndex, item, via } = pending;
+    if (via === 'drop' || via === 'double-click') {
+      openPlacementPrompt(dayIndex, item, via, { rateId: choice.rateId, optionLabel: choice.optionLabel });
+    } else {
+      createService(dayIndex, item, via, { rateId: choice.rateId, optionLabel: choice.optionLabel });
+    }
+  }, [accomChargeModal, openPlacementPrompt, createService]);
+
+  /* The guide service-type picker answered: re-enter the add with the choice, so
+     the line is built from the selected flat per-trip amounts. */
+  const confirmGuideTypes = useCallback((types) => {
+    const pending = guideModal;
+    if (!pending) return;
+    setGuideModal(null);
+    createService(pending.dayIndex, pending.item, pending.via, { guideServiceTypes: types });
+  }, [createService, guideModal]);
+
+  /* The guide & driver detail dialog answered: replace that guide's existing
+     lunch / dinner / overnight lines with the fresh choices. Each line keeps the
+     flat guide figure pinned in buyPP (split across the party), is flagged
+     guide_only and points back at the owning guide service by the guide's item id.
+
+     plan.overnight is an ARRAY of lines — one per charged party when the
+     operator bills guide AND driver (each at its own rate). Every overnight
+     line carries which party it prices (guide_charge_type), because the dialog
+     reopens with the same choice only if each line knows whom it charges. */
+  const applyGuideDetails = useCallback((dayIndex, guideItemId, plan) => {
+    const details = [plan.lunch, plan.dinner, ...(Array.isArray(plan.overnight) ? plan.overnight : plan.overnight ? [plan.overnight] : [])].filter(Boolean);
+    if (!details.length) return;
+    setDays((prev) => prev.map((d, i) => i !== dayIndex ? d : {
+      ...d,
+      services: (d.services || []).filter((s) => s.guideForKey !== guideItemId)
+    }));
+    details.forEach((detail) => createService(dayIndex, detail.item, 'guide-detail', {
+      /* The overnight is ALWAYS charged to the guide & driver alone - the
+         clients already have their own room - so its guide_only flag is forced
+         on regardless of the checkbox, which governs the meal lines. */
+      guideOnly: detail.who ? true : plan.guideOnly,
+      guideForKey: guideItemId,
+      guideChargeType: detail.who || null,
+      guideDetailCharge: detail.unitCost,
+      /* The travellers have their own accommodation and their own room
+         allocation; this overnight beds the guide & driver only. */
+      suppressRoomModal: true,
+      suppressSurchargeFollowUps: true
+    }));
+    showToast(plan.guideOnly
+      ? 'Guide details added — only the guide & driver are charged at these.'
+      : 'Guide details added.', 'success');
+  }, [createService, showToast, setDays]);
+
+  /* What the guide & driver detail lines for one guide already hold, so the
+     dialog re-opens with the current choices instead of blank. An overnight in
+     two copies means the operator asked for both the guide and the driver to be
+     charged (riderCharge 'both'), so the dialog restores that instead of a
+     half-baked single choice. */
+  const guideDetailsDefaultsFor = useCallback((dayIndex, guideItemId) => {
+    const details = (days[dayIndex]?.services || [])
+      .filter((service) => service.guideForKey === guideItemId);
+    const meal = details.find((service) => /meal/i.test(service.category || ''));
+    const overnights = details.filter((service) => /accommodation/i.test(service.category || ''));
+    const chargeTypes = overnights.map((service) => service.guideChargeType || 'guide');
+    return {
+      lunchItemId: meal && /lunch/i.test(meal.name || '') ? meal.itemId : '',
+      dinnerItemId: meal && /dinner/i.test(meal.name || '') ? meal.itemId : '',
+      overnightItemId: overnights[0]?.itemId || '',
+      riderCharge: chargeTypes.includes('driver') && chargeTypes.includes('guide')
+        ? 'both'
+        : chargeTypes[0] || 'guide',
+      showBothHint: overnights.length > 1,
+      guideOnly: details.some((service) => service.guideOnly === true)
+    };
+  }, [days]);
 
   const addPackageToDay = useCallback((dayIndex, pkg) => {
     if (completedRef.current || isReadOnly || !days[dayIndex]) return;
@@ -2906,11 +3062,14 @@ repeatGroupId: ii.repeat_group_id || null,
     }
 
     const repeatGroupId = selectedDays.length > 1 ? nextId() : null;
+    const chargeChoice = placementDraft.chargeChoice || {};
     selectedDays.forEach((dayIndex, index) => {
       createService(dayIndex, placementDraft.item, index === 0 ? placementDraft.via : 'copy', {
         repeatGroupId,
         isOptional,
         splitGroupId,
+        rateId: chargeChoice.rateId || null,
+        optionLabel: chargeChoice.optionLabel || '',
         /* A split needs its allocation on every day it lands on — each night
            only asks for the travellers that are still homeless there. */
         suppressRoomModal: isSplit ? false : index !== 0
@@ -3187,7 +3346,18 @@ return !!sv.time; /* activities / meals / other */
   const removeService = useCallback((dayIdx, svcKey) => {
     if (completedRef.current) return;
     setDays((prev) => prev.map((d, i) => (
-      i === dayIdx ? { ...d, services: d.services.filter((s) => s.key !== svcKey) } : d
+      i === dayIdx ? {
+        ...d,
+        services: d.services.filter((s) => {
+          if (s.key === svcKey) return false;
+          /* Removing a guide line takes its guide & driver detail lines (lunch /
+             dinner / overnight) with it so the day never keeps orphaned meals
+             and beds. */
+          const target = d.services.find((t) => t.key === svcKey);
+          if (!target) return true;
+          return !s.guideForKey || s.guideForKey !== target.itemId;
+        })
+      } : d
     )));
   }, [setDays]);
 
@@ -3371,6 +3541,10 @@ return !!sv.time; /* activities / meals / other */
               destinationArea: ii.destination_area || '',
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
             roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
+            guideServiceTypes: Array.isArray(ii.guide_service_types) ? ii.guide_service_types : [],
+            guideOnly: ii.guide_only === true,
+            guideForKey: ii.guide_for_item_key || null,
+            guideChargeType: ii.guide_charge_type || null,
             repeatGroupId: ii.repeat_group_id || null,
             isOptional: ii.is_included === false,
             mealPlan: ii.meal_plan || '',
@@ -4112,6 +4286,13 @@ return !!sv.time; /* activities / meals / other */
           room_allocations: Array.isArray(s.roomAllocations) ? s.roomAllocations : [],
           repeat_group_id: s.repeatGroupId || null,
           split_group_id: s.splitGroupId || null,
+          /* Guide service detour: which service types priced the guide line, and
+             the guide & driver detail flags (their lunch / dinner / overnight
+             lines carry guide_only and point at the owning guide service). */
+          guide_service_types: Array.isArray(s.guideServiceTypes) ? s.guideServiceTypes : null,
+          guide_only: s.guideOnly === true,
+          guide_for_item_key: s.guideForKey || null,
+          guide_charge_type: s.guideChargeType || null,
           /* Surcharge attributes, so a reloaded line still knows what kind of
              fee it is, whether it was chargeable, how many times it repeated
              and which accommodation it belongs to - all of which change what
@@ -6013,6 +6194,16 @@ const missing = !sv.confirmationNumber ||
                               <span className={`basis-tag ${isFlatBasis(sv.basis) ? 'flat' : ''}`}>
                                 {basisLabelOf(sv.basis)}
                               </span>
+                              {Array.isArray(sv.guideServiceTypes) && sv.guideServiceTypes.length > 0 && (
+                                <span className="basis-tag guide" title="This guide line is priced as a flat per-trip charge for the service types shown.">
+                                  Guide · {guideLabel(sv.guideServiceTypes)}
+                                </span>
+                              )}
+                              {sv.guideOnly === true && (
+                                <span className="basis-tag guide" title="This line beds / feeds the guide & driver only — travellers are not charged here.">
+                                  guide &amp; driver only
+                                </span>
+                              )}
                             </div>
                             {sv.packageSnapshot && (
                               <div className="itinerary-package-details">
@@ -6139,9 +6330,26 @@ const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.
                             <span className="service-price line">{fmtMoney(sellLine, svcSymbol(sv.currencyCode))}</span>
                           </div>
                           {isReadOnly ? null : (
-                            <button type="button" className="service-remove" title="Remove" onClick={() => removeService(selectedDayIndex, sv.key)}>
-                              <X size={16} />
-                            </button>
+                            <>
+                              {Array.isArray(sv.guideServiceTypes) && sv.guideServiceTypes.length > 0 && isOverlandGuide(sv.guideServiceTypes) && (
+                                <button
+                                  type="button"
+                                  className="svc-icon-button"
+                                  title="Guide & driver details — lunch, dinner and the overnight room for this day"
+                                  onClick={() => setGuideDetailsModal({
+                                    dayIndex: selectedDayIndex,
+                                    guideKey: sv.itemId,
+                                    guideName: sv.name,
+                                    defaultValues: guideDetailsDefaultsFor(selectedDayIndex, sv.itemId)
+                                  })}
+                                >
+                                  <UtensilsCrossed size={16} />
+                                </button>
+                              )}
+                              <button type="button" className="service-remove" title="Remove" onClick={() => removeService(selectedDayIndex, sv.key)}>
+                                <X size={16} />
+                              </button>
+                            </>
                           )}
                         </div>
                       );
@@ -7962,6 +8170,51 @@ const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.
             currencyCode={currencyCode}
             markupPct={markupPct}
           />
+          )}
+          {guideModal && (
+            <GuideServiceTypeModal
+              item={guideModal.item}
+              rate={(guideModal.item.item_rates || [])[0] || {}}
+              currency={guideModal.item.currency_code || currencyCode}
+              onConfirm={confirmGuideTypes}
+              onCancel={() => setGuideModal(null)}
+            />
+          )}
+          {accomChargeModal && (
+            <AccommodationChargeModal
+              item={accomChargeModal.item}
+              currency={accomChargeModal.item.currency_code || currencyCode}
+              travelStart={travelWindow.start}
+              travelEnd={travelWindow.end}
+              defaultRateId={(resolveSeasonForTravel({
+                rates: accomChargeModal.item.item_rates || [],
+                currencyCode,
+                startDate: travelWindow.start,
+                endDate: travelWindow.end,
+                protectionPercent: priceProtectionPercent
+              }).rate?.id) || ''}
+              onConfirm={confirmAccommodationCharge}
+              onCancel={() => setAccomChargeModal(null)}
+            />
+          )}
+          {guideDetailsModal && (
+            <GuideDetailsModal
+              guideName={guideDetailsModal.guideName || 'guide'}
+              dayLabel={days[guideDetailsModal.dayIndex] ? `Day ${days[guideDetailsModal.dayIndex].dayNumber}` : 'the selected day'}
+              currency={currencyCode}
+              libraryItems={libraryItems}
+              travelStart={travelWindow.start}
+              travelEnd={travelWindow.end}
+              currentAccommodationIds={(days[guideDetailsModal.dayIndex]?.services || [])
+                .filter((s) => /accommodation/i.test(s.category || '') && !s.isOptional)
+                .map((s) => s.itemId)}
+              defaultValues={guideDetailsModal.defaultValues || {}}
+              onConfirm={(plan) => {
+                applyGuideDetails(guideDetailsModal.dayIndex, guideDetailsModal.guideKey, plan);
+                setGuideDetailsModal(null);
+              }}
+              onCancel={() => setGuideDetailsModal(null)}
+            />
           )}
           {invoiceIssuePrompt && (() => {
             const { currency: targetCurrency, total, remaining } = invoiceIssuePrompt;

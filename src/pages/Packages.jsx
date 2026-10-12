@@ -8,7 +8,7 @@ import { useConfirm } from '../hooks/useConfirm';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { packageBandLabel } from '../lib/packagePricing';
 
-const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false });
+const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false, vehicleColumns: [] });
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 const flatBasis = (basis) => /per_trip|per_vehicle|per_room|flat/i.test(String(basis || ''));
 const estimatePackage = (pkg) => {
@@ -52,11 +52,14 @@ export const Packages = () => {
   const [editingPkg, setEditingPkg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
+  const [vehicleTypes, setVehicleTypes] = useState([]);
   const { currencies } = useCurrencies();
   const lastLoadError = useRef('');
 
   const load = useCallback(async () => {
-    setLoading(true);
+    /* `loading` is initialised true and cleared in the finally; keeping this load free of a
+       synchronous setState on its first line keeps the mount effect lint-clean
+       (react-hooks/set-state-in-effect) while the spinner is already showing. */
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -66,6 +69,11 @@ export const Packages = () => {
       if (!profile?.company_id) { setRows([]); return; }
       const { data: packages, error } = await supabase.from('packages').select('*').eq('company_id', profile.company_id).order('created_at', { ascending: false });
       if (error) throw error;
+      /* The vehicle price columns are picked from the company's vehicle types, ordered
+         smallest-first so the modal presents the options in the same order the builder uses. */
+      const { data: vehicleRes, error: vehicleErr } = await supabase.from('company_vehicle_types').select('*').eq('company_id', profile.company_id).order('max_capacity', { ascending: true });
+      if (vehicleErr) throw vehicleErr;
+      setVehicleTypes(vehicleRes || []);
       const packageIds = (packages || []).map((pkg) => pkg.id);
       if (!packageIds.length) { setRows([]); return; }
 
@@ -116,7 +124,9 @@ export const Packages = () => {
     } finally { setLoading(false); }
   }, [showToast]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    void (async () => { await load(); })();
+  }, [load]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -164,7 +174,8 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
       description: pkg.description || '',
       currency: String(pkg.currency_code || 'ZAR').toUpperCase(),
       cover: null,
-      clearCover: false
+      clearCover: false,
+      vehicleColumns: Array.isArray(pkg.vehicle_columns) ? pkg.vehicle_columns : []
     });
     setModal(true);
   };
@@ -188,16 +199,15 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
           name: draft.name.trim(),
           description: draft.description.trim(),
           currency_code: currency,
-          cover_image_url: coverUrl,
-          default_markup_percentage: 0
+          vehicle_columns: draft.vehicleColumns,
+          cover_image_url: coverUrl
         }).eq('id', editingPkg.id).eq('company_id', companyId);
         if (updateErr) throw updateErr;
         setModal(false); setEditingPkg(null); setDraft(emptyDraft()); await load(); showToast('Package details updated', 'success'); return;
       }
       const { data: pkg, error } = await supabase.from('packages').insert({
         company_id: companyId, name: draft.name.trim(), description: draft.description,
-        currency_code: currency,
-        default_markup_percentage: 0
+        currency_code: currency, vehicle_columns: draft.vehicleColumns
       }).select().single();
       if (error) throw error;
       const coverUrl = await uploadImage(draft.cover, pkg.id);
@@ -285,6 +295,17 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
           <small className="package-currency-help">{lockedCurrencies.length
             ? `Locked to ${lockedCurrencies.join(', ')}: the package already has services priced in it.`
             : 'A package is priced in one currency. The builder only offers library items priced in this one.'}</small>
+        </label>
+        <label className="package-field"><span>Vehicle price columns</span>
+          <div className="package-vehicle-chips">
+            {vehicleTypes.map((type) => {
+              const on = (draft.vehicleColumns || []).includes(type.code);
+              const full = (draft.vehicleColumns || []).length >= 6;
+              return <button type="button" key={type.code} className={`package-vehicle-chip${on ? ' on' : ''}`} disabled={!on && full} title={!on && full ? 'Up to 6 vehicle price columns' : on ? 'Remove this column' : 'Add this column'} onClick={() => setDraft({ ...draft, vehicleColumns: on ? draft.vehicleColumns.filter((code) => code !== type.code) : [...draft.vehicleColumns, type.code] })}>{type.name} <small>{Number(type.max_capacity) || 0} seats</small></button>;
+            })}
+            {!vehicleTypes.length && <span className="package-vehicle-none">No vehicle types set up yet. Add them in Settings, then return here.</span>}
+          </div>
+          <small className="package-currency-help">These become the price columns the package is quoted in (up to 6, one per vehicle size). Leave empty to fall back to the first six vehicle sizes in Settings.</small>
         </label>
         <label className="package-field"><span>Overview description (optional)</span><textarea rows={3} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} placeholder="A short overview of this package" /></label>
         <label className="package-upload"><ImagePlus size={19} /><span>Cover image (optional)</span><input type="file" accept="image/*" onChange={(e) => setDraft({ ...draft, cover: e.target.files?.[0] || null, clearCover: false })} />{draft.cover && <small>{draft.cover.name}</small>}</label>

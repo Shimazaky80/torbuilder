@@ -296,7 +296,12 @@ export const defaultAutoAllocation = (travellers = [], maxOccupancy = 2) => {
   return rooms;
 };
 
-export const isAccommodationService = (sv) => /accommodation/i.test(sv?.category || '');
+/* A guide & driver overnight is a charge on the itinerary, not a bed for a
+   traveller, so it is never counted as client accommodation. Both spellings are
+   honoured because the itinerary carries camelCase and a loaded package row
+   carries snake_case. */
+export const isAccommodationService = (sv) => sv?.guideOnly !== true && sv?.guide_only !== true
+  && /accommodation/i.test(sv?.category || '');
 
 /* Stable identity for a traveller so the same guest can be recognised across
    every accommodation on a night. Ids when we have them, otherwise name +

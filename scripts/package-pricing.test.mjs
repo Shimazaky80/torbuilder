@@ -8,19 +8,31 @@ import {
   packageBandForPax,
 packageBandLabel,
   packageBandPax,
+  packageBandPriceColumns,
   packageBandSuggestions,
   packageCurrencyFor,
   packageChildAgeRange,
   packageItemsForTier,
   packageSeasonCoverage,
   packageMarkupPercent,
+  packageExportMarkup,
   packageSeasonResolution,
   packageItemCapacitySetupError,
   packageServicesForTier,
   packageTierDays,
   packageTransportSummary,
   roomsForPax,
-  packageAutoBandKey
+  packageAutoBandKey,
+  vehicleTypeForPax,
+  vehicleVectorPrice,
+  vehicleBlockReason,
+  seedBandsForSeats,
+  presentationPricingColumns,
+  vehicleColumnPools,
+  accommodationRatesForTrip,
+  accommodationPerPersonForSeason,
+  singleSupplementForSeason,
+  accommodationRoomCapacity
 } from '../src/lib/packagePricing.js';
 
 const check = (label, actual, expected) => {
@@ -140,6 +152,33 @@ check('with several partners the highest markup is used so nobody is under-quote
 check('a client with no markup recorded counts as zero', packageMarkupPercent([{ id: 'a' }, { markup_percentage: null }]), 0);
 check('no assigned partner means no markup', packageMarkupPercent([]), 0);
 check('a negative markup is never used to cut a price', packageMarkupPercent([{ markup_percentage: -20 }]), 0);
+/* D6: two independent processes with no path from one into the other. */
+check('internal (STO) is always contract cost, whatever markup is in play',
+  packageExportMarkup({ audience: 'internal', hasPartner: true, assignedMarkup: 15, typedMarkup: 25 }), 0);
+check('an assigned partner locks the export to their markup and ignores the typed figure',
+  packageExportMarkup({ audience: 'client', hasPartner: true, assignedMarkup: 15, typedMarkup: 25 }), 15);
+check('a zero-markup partner is still a partner, so nothing typed can be used instead',
+  packageExportMarkup({ audience: 'client', hasPartner: true, assignedMarkup: 0, typedMarkup: 20 }), 0);
+check('an unassigned package takes the markup typed into the modal',
+  packageExportMarkup({ audience: 'client', hasPartner: false, assignedMarkup: 0, typedMarkup: 25 }), 25);
+check('the typed markup arrives as text from the input',
+  packageExportMarkup({ audience: 'client', hasPartner: false, typedMarkup: '12.5' }), 12.5);
+check('a blank markup is not a markup',
+  packageExportMarkup({ audience: 'client', hasPartner: false, typedMarkup: '' }), 0);
+check('a negative typed markup never cuts a price',
+  packageExportMarkup({ audience: 'client', hasPartner: false, typedMarkup: -10 }), 0);
+/* The three-audience selector: partner (the assigned partner's markup), markup (the typed
+   figure for a non-partner) and internal (contract cost). 'client' stays as the legacy alias. */
+check('the partner audience uses the assigned partner markup',
+  packageExportMarkup({ audience: 'partner', hasPartner: true, assignedMarkup: 15 }), 15);
+check('the partner audience never falls through to the typed figure',
+  packageExportMarkup({ audience: 'partner', hasPartner: true, assignedMarkup: 15, typedMarkup: 40 }), 15);
+check('the partner audience with no partner assigned has no markup to apply',
+  packageExportMarkup({ audience: 'partner', hasPartner: false, assignedMarkup: 15 }), 0);
+check('the markup audience uses the typed figure',
+  packageExportMarkup({ audience: 'markup', hasPartner: false, typedMarkup: 25 }), 25);
+check('the markup audience ignores any assigned partner markup',
+  packageExportMarkup({ audience: 'markup', hasPartner: true, assignedMarkup: 15, typedMarkup: 25 }), 25);
 check('a missing markup leaves the amount untouched', applyPackageMarkup(890, undefined), 890);
 check('a markup is a multiplier on the finished total', applyPackageMarkup(890, 20), 1068);
 check('a negative markup is treated as no markup', applyPackageMarkup(890, -5), 890);
@@ -230,10 +269,10 @@ check('the child basis is named as the single supplement', statedSupplement.acco
 check('the refusing property contributes its supplement to the child total', statedSupplement.childSupplement, 1435);
 check('the child total is the unit share plus the supplement', statedSupplement.childTotal, 1435);
 
-/* A property whose child band is published as 0 has no child price for that band. The
-   itinerary builder honours that as a free child, but a package publishes to a buyer,
-   and R0.00 for the accommodation reads as "the child is free". It must fall through to
-   the single supplement instead. */
+/* A property whose child band is published as R0.00 states plainly that the child is
+   allowed and stays free. The published figure wins - unlike a property that
+   publishes NO child rate, which falls through to its single supplement (the flat and
+   stated-supplement lodges above). */
 const zeroChildBandHotel = {
   id: 'hotel-zero-child-band', name: 'Zero Band Hotel', category: 'Accommodation',
   child_age_ranges: [{ id: 'zcb-1', name: 'Infant', ageFrom: 0, ageTo: 2 }, { id: 'zcb-2', name: 'Child', ageFrom: 3, ageTo: 12 }],
@@ -257,11 +296,11 @@ const zeroBand = calculatePackageTravellerBreakdown({
   library: [zeroChildBandHotel],
   childRange
 });
-check('a zero child rate is not published as a free child', zeroBand.accommodationRows[0].childAccommodation, 620);
-check('a zero child rate is charged the single supplement instead', zeroBand.accommodationRows[0].childBasis, 'Single supplement (no child rate published)');
-check('a zero child rate is reported as refusing the child', zeroBand.childNotAllowed.join(','), zeroChildBandHotel.name);
-check('the child total adds the supplement to the unit share', zeroBand.childTotal, 620);
-check('childSupplement reports the supplement actually charged to a child', zeroBand.childSupplement, 620);
+check('a published R0.00 child rate is a free child, not a missing price', zeroBand.accommodationRows[0].childAccommodation, 0);
+check('a free child is named as a property child rate', zeroBand.accommodationRows[0].childBasis, 'Property child rate');
+check('a free child is not reported as refusing the child', zeroBand.childNotAllowed.length, 0);
+check('a free child prices at the unit share alone', zeroBand.childTotal, 0);
+check('childSupplement reports nothing is charged for the free child', zeroBand.childSupplement, 0);
 
 /* A property with a real child band keeps its child rate and is not charged a supplement. */
 const realChildBandHotel = {
@@ -873,18 +912,460 @@ check('the lodge contributes a single supplement', withStay.singleSupplement > 0
 check('the supplement is a room charge on top of the sharing price, not instead of it',
   withStay.singleSupplementTotal - withStay.adultSharingTotal === withStay.singleSupplement, true);
 
+/* A room the allocation leaves with one occupant is billed single occupancy, so an odd
+   party pays the supplement for it. The sharing rate itself is untouched - the supplement
+   is a party charge that lands in the party total, which is where a missing supplement
+   used to under-quote three travellers in rooms that sleep two. */
+const lodgeQuote = (pax) => calculatePackageTravellerBreakdown({
+  days: [{ services: [lodgeService] }],
+  pattern: { pax },
+  library: [lodge]
+});
+check('a room left single is counted as a single room', lodgeQuote(3).accommodationRows[0].singleRooms, 1);
+check('an odd party pays the supplement for the room it cannot share', lodgeQuote(3).forcedSingleSupplement, 270);
+check('the forced supplement lands in the party total, not the sharing rate',
+  [lodgeQuote(3).accommodationSharing, lodgeQuote(3).partyTotal].join(','), '540,1890');
+check('an even party fills every room and owes no supplement',
+  [lodgeQuote(4).forcedSingleSupplement, lodgeQuote(4).partyTotal].join(','), '0,2160');
+check('the own-room card is still the sharing price plus the supplement',
+  lodgeQuote(3).singleSupplementTotal, 810);
+
 /* The vehicles on a day are alternatives the party chooses between, so a client-facing
    document must describe one vehicle rather than list the whole ladder as four inclusions. */
 /* A client document names the service and stops. A capacity figure turns an itinerary into a
    specification sheet and implies the client must arrive with exactly that many people. */
 check('a vehicle ladder reads as one vehicle to a reader',
   packageTransportSummary(fleetDays[0].services, fleetLibrary), 'Private vehicle sized to your party');
+/* One real line item, so the summary names that vehicle and nothing else. `service` was never
+   defined here - the reference threw before these checks could run and took every test below
+   it with it, which is how a passing count kept appearing while half the file was untested. */
+const transferService = packageDays[0].services[0];
 check('a single vehicle is named without leaking its capacity',
-  packageTransportSummary([service], [transfer, accommodation]), '6-seat transfer');
+  packageTransportSummary([transferService], [transfer, accommodation]), '6-seat transfer');
 check('a capacity is still available when a caller explicitly wants it',
-  packageTransportSummary([service], [transfer, accommodation], { includeCapacity: true }), '6-seat transfer (up to 6 travellers)');
+  packageTransportSummary([transferService], [transfer, accommodation], { includeCapacity: true }),
+  '6-seat transfer (up to 4 travellers)');
 check('a day with no vehicle has no transport summary',
   packageTransportSummary([tourService], vehicleLibrary), '');
+
+/* The price boxes are one column per party size. They have to come back in party order with
+   the same figures the detailed table shows, and each column carries whether the package
+   sleeps anyone, because that is what decides whether the supplement and child boxes are
+   printed at all - a vehicle-only package earns one box, not three with zeros in two of them. */
+const bandMatrix = [
+  { item_key: 'b7', pax: 7, pricing: quoteFor(7) },
+  { item_key: 'b3', pax: 3, pricing: quoteFor(3) },
+  { item_key: 'b19', pax: 19, pricing: quoteFor(19) }
+];
+const boxColumns = packageBandPriceColumns(bandMatrix);
+check('price boxes read left to right in party size order', boxColumns.map((column) => column.pax).join(','), '3,7,19');
+check('a price box column carries that party size per person figure', boxColumns[0].perPerson, quoteFor(3).adultSharingTotal);
+check('a price box column knows whether the package sleeps anyone', boxColumns[0].hasAccommodation, false);
+
+const markedUpBand = [{ item_key: 'b3', pax: 3, pricing: calculatePackageTravellerBreakdown({
+  days: packageTierDays(fleetDays, { item_key: 'b3', pax: 3 }, fleetLibrary),
+  pattern: { item_key: 'b3', pax: 3 },
+  library: fleetLibrary,
+  markupPercent: 20
+}) }];
+check('the contract view of a band stays at contract price',
+  packageBandPriceColumns(markedUpBand)[0].perPerson, applyPackageMarkup(quoteFor(3).adultSharingTotal, 0));
+/* Markup is applied to the totals, never to the lines underneath them, so the box has to show
+   the marked-up figure rather than the contract one it was aggregated from. */
+check('a marked-up view marks up the box figure',
+  packageBandPriceColumns(markedUpBand, { partnerView: true })[0].perPerson,
+  applyPackageMarkup(quoteFor(3).adultSharingTotal, 20));
 check('the band that uses the biggest vehicle is still served by it',
   packageServicesForTier(fleetDays[0], { item_key: 'f19', pax: 19 }, fleetLibrary)
     .map((entry) => entry.item_name).join(','), '19-seat');
+
+/* ── Step 3: the pricing engine reads the rate's price vector ───────────────────
+   A per_vehicle rate now carries prices_by_vehicle, one number per vehicle type from
+   Settings. The quote resolves the smallest type that seats the party and reads that
+   column; a party size with no column blocks (D11/D12). Without a vector, or without
+   the vehicle list, the legacy single-price figures carry the line as before. */
+const typesForVectorTest = [
+  { code: 'saloon', name: 'Saloon', max_capacity: 3 },
+  { code: 'combi', name: 'Combi', max_capacity: 6 },
+  { code: 'quantum_10', name: 'Quantum (10)', max_capacity: 10 },
+  { code: 'sprinter_16', name: 'Sprinter (16)', max_capacity: 16 },
+  { code: 'bus_39', name: 'Bus (39)', max_capacity: 39 }
+];
+
+check('the resolved vehicle is the smallest type that seats the party',
+  [1, 3, 4, 6, 7, 10, 11, 39, 40].map((pax) => vehicleTypeForPax(typesForVectorTest, pax)?.code ?? 'none').join(','),
+  'saloon,saloon,combi,combi,quantum_10,quantum_10,sprinter_16,bus_39,none');
+check('a party bigger than every configured vehicle has no vehicle',
+  vehicleTypeForPax(typesForVectorTest, 41), null);
+check('a vector cell reads a real number as its price',
+  vehicleVectorPrice({ saloon: 750 }, 'saloon'), 750);
+check('a vector cell priced literally at zero is still a price',
+  vehicleVectorPrice({ saloon: 0 }, 'saloon'), 0);
+check('a free or n/a vector cell charges zero, not blocks',
+  [vehicleVectorPrice({ saloon: { free: true } }, 'saloon'),
+   vehicleVectorPrice({ saloon: { na: true } }, 'saloon')].join(','), '0,0');
+check('an unpriced vector cell is not zero - it is blocked',
+  vehicleVectorPrice({ combi: 900 }, 'saloon'), null);
+check('a missing vector or code is blocked',
+  [vehicleVectorPrice({}, 'saloon'), vehicleVectorPrice(null, 'saloon'), vehicleVectorPrice({ saloon: 100 }, 'combi')]
+    .map((value) => (value === null ? 'blocked' : String(value))).join(','), 'blocked,blocked,blocked');
+
+const vectorTransfer = {
+  id: 'vector-transfer',
+  name: 'Park transfer',
+  category: 'Transfers',
+  max_occupancy: 3,
+  item_rates: [{
+    id: 'vector-transfer-rate', currency: 'ZAR', rate_basis: 'per_vehicle',
+    unit_cost: 900,
+    prices_by_vehicle: { saloon: 1500, combi: 2100, quantum_10: 2800 }
+  }]
+};
+const vectorService = {
+  item_id: 'vector-transfer', rate_id: 'vector-transfer-rate', item_name: 'Park transfer',
+  category: 'Transfers', currency_code: 'ZAR', rate_basis: 'per_vehicle',
+  unit_cost: 900, quantity: 1, is_included: true
+};
+const quoteVector = (pax, vehicleTypes = typesForVectorTest) => calculatePackageTravellerBreakdown({
+  days: [{ services: [vectorService] }],
+  pattern: { pax },
+  library: [vectorTransfer],
+  vehicleTypes
+});
+
+check('a 2-pax party takes the saloon column and is charged it in full',
+  quoteVector(2).partyTotal, 1500);
+check('a 6-pax party takes the combi column', quoteVector(6).partyTotal, 2100);
+check('a 7-pax party takes the quantum column', quoteVector(7).partyTotal, 2800);
+check('a 4-pax party takes the smallest vehicle that seats them (combi)',
+  quoteVector(4).partyTotal, 2100);
+check('the vector price replaces the legacy single price, not adds to it',
+  [quoteVector(2).unitPerPerson, quoteVector(2).unitTotal].join(','), '750,1500');
+check('the vector is used per traveller, so the party total recovers the column',
+  quoteVector(6).unitTotal, quoteVector(6).partyTotal);
+check('a vector free cell prices the line at zero and stays servable',
+  calculatePackageTravellerBreakdown({
+    days: [{ services: [{
+      ...vectorService,
+      rate_id: 'vector-transfer-free-rate'
+    }] }],
+    pattern: { pax: 2 },
+    library: [{
+      ...vectorTransfer,
+      item_rates: [{ ...vectorTransfer.item_rates[0], id: 'vector-transfer-free-rate', prices_by_vehicle: { saloon: { free: true } } }]
+    }],
+    vehicleTypes: typesForVectorTest
+  }).servable, true);
+
+check('a party size with no column for the resolved vehicle is blocked',
+  [quoteVector(11).servable, quoteVector(11).blockedVehicleReasons.length].join(','), 'false,1');
+check('the block reason names the resolved vehicle and the missing price',
+  quoteVector(11).blockedVehicleReasons[0].includes('Sprinter (16)') && quoteVector(11).blockedVehicleReasons[0].includes('11'), true);
+check('a party bigger than every configured vehicle is blocked with the sizing reason',
+  quoteVector(41).blockedVehicleReasons[0].includes('41'), true);
+check('the blocked vehicle row is kept with a zero, not dropped',
+  quoteVector(11).unitRows.filter((row) => row.blocked).length, 1);
+check('a price is never invented for a blocked party size',
+  quoteVector(11).unitPerPerson, 0);
+
+/* Without the vehicle list the engine cannot resolve a column, so it keeps today's
+   behaviour: single-price fallback, never a block. */
+check('without vehicle types the legacy single price still applies',
+  quoteVector(2, []).partyTotal, 900);
+check('without vehicle types nothing is falsely blocked',
+  quoteVector(11, []).servable, true);
+
+check('vehicleBlockReason names the service and the traveller count',
+  String(vehicleBlockReason(vectorService, vectorTransfer, 11, typesForVectorTest)).includes('Park transfer'), true);
+
+/* ── Step 4: locked snapshots (D18) ─────────────────────────────────────────
+   A line prices from the rate_snapshot captured when it was added or last refreshed.
+   A supplier change in the library does NOT move a saved package: only an explicit
+   "Update from library" copies the current rate over the snapshot. A line with no
+   snapshot (legacy) keeps living on the current library rate. */
+const lockedTransfer = {
+  id: 'locked-transfer',
+  name: 'Lodge shuttle',
+  category: 'Transfers',
+  max_occupancy: 3,
+  item_rates: [{
+    id: 'locked-transfer-rate', currency: 'ZAR', rate_basis: 'per_person', price_1_adult: 800, unit_cost: 800
+  }]
+};
+const lockedService = (snapshot) => ({
+  item_id: 'locked-transfer', rate_id: 'locked-transfer-rate', item_name: 'Lodge shuttle',
+  category: 'Transfers', currency_code: 'ZAR', rate_basis: 'per_person',
+  unit_cost: Number(snapshot?.unit_cost) || 0, quantity: 1, is_included: true,
+  rate_snapshot: snapshot || {}
+});
+const quoteLocked = (snapshot, library = [lockedTransfer]) => calculatePackageTravellerBreakdown({
+  days: [{ services: [lockedService(snapshot)] }],
+  pattern: { pax: 2 },
+  library
+});
+
+/* The library row has since moved to 800 while the line was locked at 1500: the package
+   keeps quoting 1500 until the operator explicitly refreshes from the library. */
+const movedRate = [{ ...lockedTransfer, item_rates: [{
+  id: 'locked-transfer-rate', currency: 'ZAR', rate_basis: 'per_person', price_1_adult: 800, unit_cost: 800
+}] }];
+check('a locked snapshot holds its price even after the library rate moves',
+  quoteLocked({ id: 'locked-transfer-rate', price_1_adult: 1500, unit_cost: 1500, rate_basis: 'per_person' }, movedRate).unitPerPerson, 1500);
+check('a legacy line with no snapshot prices from the current library rate',
+  quoteLocked(null, movedRate).unitPerPerson, 800);
+
+/* A locked snapshot also locks the vehicle price vector: the supplier moved the saloon from
+   1500 to 2000 on the library, but this line still quotes its captured 1500 - and a cell
+   that was missing when the line was locked stays missing until refreshed. */
+const movingVectorLibrary = [{
+  ...lockedTransfer,
+  item_rates: [{
+    id: 'locked-transfer-rate', currency: 'ZAR', rate_basis: 'per_vehicle',
+    unit_cost: 900, prices_by_vehicle: { saloon: 2000, combi: 2400 }
+  }]
+}];
+const quoteLockedVector = (snapshot) => calculatePackageTravellerBreakdown({
+  days: [{ services: [{
+    ...lockedService(snapshot),
+    rate_basis: 'per_vehicle',
+    unit_cost: 2000
+  }] }],
+  pattern: { pax: 2 },
+  library: movingVectorLibrary,
+  vehicleTypes: typesForVectorTest
+});
+check('a locked snapshot keeps its own price vector after the library vector moves',
+  quoteLockedVector({ id: 'locked-transfer-rate', rate_basis: 'per_vehicle', prices_by_vehicle: { saloon: 1500, combi: 2100 } }).partyTotal, 1500);
+check('a snapshot whose resolved cell is missing blocks, even though the live library prices it',
+  quoteLockedVector({ id: 'locked-transfer-rate', rate_basis: 'per_vehicle', prices_by_vehicle: { combi: 2100 } }).servable, false);
+check('a snapshot with an unpriced cell hides a newly-priced live library row',
+  quoteLockedVector({ id: 'locked-transfer-rate', rate_basis: 'per_vehicle', prices_by_vehicle: { combi: 2100 } }).blockedVehicleReasons[0].includes('no price'), true);
+
+/* ── Step 6: Pricing and Seasons tab helpers ─────────────────────────────────────
+   Three pure helpers feed the tab: the band sizes a vehicle column starts at (D20),
+   the annual per-column price pool (D14 - the grid and overlay card read it), and the
+   per-accommodation season resolution with the straddle rule (D15/D16). */
+check('a six-seat column seeds two, four and six pax bands',
+  seedBandsForSeats(6).join(','), '2,4,6');
+check('a three-seat column seeds just two bands', seedBandsForSeats(3).join(','), '2,3');
+check('a two-seat column seeds a single band', seedBandsForSeats(2).join(','), '2');
+check('a ten-seat column seeds rounded thirds of ten', seedBandsForSeats(10).join(','), '3,6,10');
+check('a sixteen-seat column seeds five-ten-sixteen', seedBandsForSeats(16).join(','), '5,10,16');
+check('a thirty-nine-seat column seeds thirteen-twenty-six-thirty-nine',
+  seedBandsForSeats(39).join(','), '13,26,39');
+check('bigger bands never exceed the seats', seedBandsForSeats(8).every((pax) => pax <= 8), true);
+check('band pax are positive', seedBandsForSeats(4).every((pax) => pax >= 1), true);
+
+const poolTransfer = {
+  id: 'pool-transfer', name: 'Park transfer', category: 'Transfers', max_occupancy: 3,
+  item_rates: [{
+    id: 'pool-transfer-rate', currency: 'ZAR', rate_basis: 'per_vehicle', unit_cost: 900,
+    prices_by_vehicle: { saloon: 1500, combi: 2100 }
+  }]
+};
+const poolLunch = {
+  id: 'pool-lunch', name: 'Lunch', category: 'Meals',
+  item_rates: [{ id: 'pool-lunch-rate', currency: 'ZAR', rate_basis: 'per_person', price_1_adult: 300 }]
+};
+const poolFees = {
+  id: 'pool-fees', name: 'Park fees', category: 'Entry Fees',
+  item_rates: [{ id: 'pool-fees-rate', currency: 'ZAR', rate_basis: 'flat', unit_price: 500 }]
+};
+const poolShop = {
+  id: 'pool-shop', name: 'Shopping stop', category: 'Transfers', max_occupancy: 4,
+  item_rates: [{ id: 'pool-shop-rate', currency: 'ZAR', rate_basis: 'per_vehicle', unit_cost: 900 }]
+};
+const poolDays = [{ services: [
+  { item_id: 'pool-transfer', rate_id: 'pool-transfer-rate', item_name: 'Park transfer', currency_code: 'ZAR', rate_basis: 'per_vehicle', unit_cost: 900, quantity: 1, is_included: true },
+  { item_id: 'pool-lunch', rate_id: 'pool-lunch-rate', item_name: 'Lunch', currency_code: 'ZAR', rate_basis: 'per_person', unit_cost: 300, quantity: 1, is_included: true },
+  { item_id: 'pool-fees', rate_id: 'pool-fees-rate', item_name: 'Park fees', currency_code: 'ZAR', rate_basis: 'flat', unit_price: 500, quantity: 1, is_included: true },
+  { item_id: 'pool-shop', rate_id: 'pool-shop-rate', item_name: 'Shopping stop', currency_code: 'ZAR', rate_basis: 'per_vehicle', unit_cost: 900, quantity: 1, is_included: true },
+  { item_id: 'hotel', rate_id: 'hotel-rate', item_name: 'Contract hotel', category: 'Accommodation', currency_code: 'ZAR', rate_basis: 'per_person_sharing', unit_cost: 810, quantity: 1, is_included: true }
+] }];
+const pools = vehicleColumnPools({
+  days: poolDays,
+  library: [poolTransfer, poolLunch, poolFees, poolShop, accommodation],
+  vehicleTypes: typesForVectorTest
+});
+check('each vehicle column pools its own vector price plus shared flat and legacy lines',
+  [pools.pools.saloon, pools.pools.combi].join(','), '2900,3500');
+check('per-person lines stay out of the pool as a single fixed figure',
+  [pools.pools.saloon, pools.perPersonFixed].join(','), '2900,300');
+check('flat and legacy per-vehicle lines are the shared pool base', pools.flatTotal, 1400);
+check('accommodation is never part of the vehicle pool', pools.perPersonFixed, 300);
+check('the pool read uses the package currency', pools.currency, 'ZAR');
+
+const seasonalLodge = {
+  ...accommodation, id: 'seasonal-lodge', name: 'Seasons lodge',
+  item_rates: [
+    { id: 'low-rate', currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 700, price_2_adults: 450, valid_from: '2026-03-16', valid_to: '2026-11-30' },
+    { id: 'high-rate', currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 900, price_2_adults: 600, valid_from: '2026-01-01', valid_to: '2026-03-15' },
+    { id: 'xmas-rate', currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 1200, price_2_adults: 900, valid_from: '2026-12-01', valid_to: '2026-12-31' }
+  ]
+};
+const seasonalService = {
+  item_id: 'seasonal-lodge', rate_id: 'low-rate', item_name: 'Seasons lodge',
+  category: 'Accommodation', currency_code: 'ZAR', rate_basis: 'per_person_sharing',
+  unit_cost: 700, quantity: 1, is_included: true
+};
+check('a trip inside one season resolves to that season',
+  accommodationRatesForTrip(seasonalService, seasonalLodge, '2026-06-01', '2026-06-05').chosen.id, 'low-rate');
+check('a trip in another season resolves to that season',
+  accommodationRatesForTrip(seasonalService, seasonalLodge, '2026-02-01', '2026-02-05').chosen.id, 'high-rate');
+check('a trip inside a third season resolves to that season',
+  accommodationRatesForTrip(seasonalService, seasonalLodge, '2026-12-20', '2026-12-25').chosen.id, 'xmas-rate');
+check('a straddling trip overlaps both seasons', accommodationRatesForTrip(
+  seasonalService, seasonalLodge, '2026-03-10', '2026-03-20').overlapping.length, 2);
+check('a straddling trip is charged the higher rate for all nights',
+  accommodationRatesForTrip(seasonalService, seasonalLodge, '2026-03-10', '2026-03-20').chosen.sharing, 600);
+check('a rate with no windows covers every date',
+  accommodationRatesForTrip(seasonalService, {
+    ...seasonalLodge,
+    item_rates: [...seasonalLodge.item_rates, { id: 'perpetual-rate', currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 400, price_2_adults: 250 }]
+  }, '2026-06-01', '2026-06-05').overlapping.some((rate) => rate.id === 'perpetual-rate'), true);
+check('the resolved sharing price comes from the chosen contract window',
+  accommodationRatesForTrip(seasonalService, seasonalLodge, '2026-12-20', '2026-12-25').chosen.sharing, 900);
+check('a trip with no matching season has no resolution at all',
+  accommodationRatesForTrip(seasonalService, seasonalLodge, '2027-01-10', '2027-01-15').chosen, null);
+
+/* The Pricing & seasons tab derives the season's accommodation figure off the itinerary's
+   own accommodation lines resolved against the SEASON's dates, so adding an accommodation
+   is never a silent no-op (B1): the per-person sharing rate is distributed across every
+   column. The stored override, when set, is the caller's to prefer; this helper only
+   reads the accommodation lines. */
+const seasonLodgeDays = [{ services: [seasonalService] }];
+check('a season inside a contract window picks the accommodation up as its per-person figure',
+  accommodationPerPersonForSeason({ days: seasonLodgeDays, library: [seasonalLodge], from: '2026-02-01', to: '2026-02-28' }).total, 600);
+check('a season inside another window derives that window',
+  accommodationPerPersonForSeason({ days: seasonLodgeDays, library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).total, 450);
+check('the derived figure names the accommodation line it came from',
+  accommodationPerPersonForSeason({ days: seasonLodgeDays, library: [seasonalLodge], from: '2026-02-01', to: '2026-02-28' }).rows[0].name, 'Seasons lodge');
+const twoLodgeDays = [{ services: [
+  { ...seasonalService },
+  { ...seasonalService, item_name: 'Seasons lodge 2' }
+] }];
+check('two lodges in one season sum to a single per-person figure',
+  accommodationPerPersonForSeason({ days: twoLodgeDays, library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).total, 900);
+check('a season with no covering window cannot be derived',
+  accommodationPerPersonForSeason({ days: seasonLodgeDays, library: [seasonalLodge], from: '2027-01-10', to: '2027-01-15' }).total, null);
+check('an unresolvable accommodation is named so the operator can see why',
+  accommodationPerPersonForSeason({ days: seasonLodgeDays, library: [seasonalLodge], from: '2027-01-10', to: '2027-01-15' }).unresolved.join(','), 'Seasons lodge');
+check('a package with no accommodation derives no figure',
+  accommodationPerPersonForSeason({ days: [{ services: [poolDays[0].services[0]] }], library: [poolTransfer], from: '2026-06-01', to: '2026-06-30' }).total, null);
+check('a package with no accommodation names nothing', accommodationPerPersonForSeason({
+  days: [{ services: [poolDays[0].services[0]] }], library: [poolTransfer],
+  from: '2026-06-01', to: '2026-06-30'
+}).rows.length, 0);
+const guideOnlySeasonDays = [{ services: [
+  { ...seasonalService, guide_only: true }
+] }];
+check('a guide & driver only overnight does not count as the day client accommodation',
+  accommodationPerPersonForSeason({ days: guideOnlySeasonDays, library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).total, null);
+check('the guide & driver only overnight is not named as an accommodation',
+  accommodationPerPersonForSeason({ days: guideOnlySeasonDays, library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).rows.length, 0);
+const guideWithClientDays = [{ services: [
+  { ...seasonalService },
+  { ...seasonalService, item_name: 'Guide & driver room', guide_only: true }
+] }];
+check('a guide & driver only overnight never doubles the per-person accommodation figure',
+  accommodationPerPersonForSeason({ days: guideWithClientDays, library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).total, 450);
+
+/* The Presentation pricing matrix: one column per PARTY SIZE, not one per vehicle. A vehicle
+   column carries a ladder (4/8/12 pax on the same vehicle); the tab stacks those in one cell,
+   but a client document must give each party size its own column so its price sits under its
+   own "N pax" heading. These checks pin that flattening. */
+const ladderColumns = presentationPricingColumns({
+  codes: ['saloon'],
+  bands: { saloon: [4, 8, 12] },
+  pools: { saloon: 9000 },
+  perPersonFixed: 300,
+  accommodation: 200
+});
+check('the ladder is spread into one column per party size, not stacked', ladderColumns.length, 3);
+check('the columns carry the party sizes in order', ladderColumns.map((column) => column.pax).join(','), '4,8,12');
+check('every column still belongs to the vehicle it priced on', ladderColumns.every((column) => column.code === 'saloon'), true);
+check('each column price is the vehicle pool split by its own party size',
+  ladderColumns.map((column) => column.each).join(','), '2750,1625,1250');
+
+const twoVehicleColumns = presentationPricingColumns({
+  codes: ['saloon', 'combi'],
+  bands: { saloon: [4, 8], combi: [12] },
+  pools: { saloon: 4000, combi: 6000 },
+  perPersonFixed: 0,
+  accommodation: 0
+});
+check('columns follow the vehicle order, then each vehicle ladder',
+  twoVehicleColumns.map((column) => `${column.code}:${column.pax}`).join(','), 'saloon:4,saloon:8,combi:12');
+
+check('a vehicle with no bands contributes no column',
+  presentationPricingColumns({ codes: ['saloon'], bands: { saloon: [] }, pools: { saloon: 9000 } }).length, 0);
+check('no vehicle columns means no presentation columns',
+  presentationPricingColumns({ codes: [], bands: {}, pools: {} }).length, 0);
+
+/* A party whose size leaves a room with a single occupant carries the supplement for that
+   room, spread over the party, on every column. It is why a 3 pax column is dearer than a
+   third of a 2 pax column times three, and why the price a client reads already accounts
+   for the room the party cannot fill. */
+const forcedPresentation = presentationPricingColumns({
+  codes: ['suv'],
+  bands: { suv: [2, 3, 4] },
+  pools: { suv: 4000 },
+  perPersonFixed: 0,
+  accommodation: 540,
+  singleSupplement: 270,
+  roomCapacity: 2
+});
+check('an odd party column carries its share of the single supplement it cannot avoid',
+  forcedPresentation.map((column) => Math.round(column.each * 100) / 100).join(','), '2540,1963.33,1540');
+check('an even party column fills every room and carries no supplement',
+  forcedPresentation.map((column) => column.pax).join(','), '2,3,4');
+
+const noRoomPlanColumns = presentationPricingColumns({
+  codes: ['suv'], bands: { suv: [3] }, pools: { suv: 0 }, accommodation: 540
+});
+check('with no supplement there is nothing to spread, so the column is unchanged',
+  noRoomPlanColumns[0].each, 540);
+
+check('room capacity is read from the package accommodation',
+  accommodationRoomCapacity({ days: [{ services: [lodgeService] }], library: [lodge] }), 2);
+check('a smaller room type sets the capacity a party is allocated across',
+  accommodationRoomCapacity({
+    days: [{ services: [{ ...lodgeService, item_id: 'single-room' }] }],
+    library: [{ id: 'single-room', category: 'Accommodation', max_occupancy: 1 }]
+  }), 1);
+check('no accommodation defaults the room capacity to a double',
+  accommodationRoomCapacity({ days: [{ services: [] }], library: [] }), 2);
+
+/* A supplement is a room charge, so the season's supplement is derived the same way the
+   per-person figure is: from the covered contract window. This is what lets the Presentation
+   summary always show a supplement rather than a zero that reads as "no charge". */
+const seasonalSupplementLodge = {
+  ...accommodation, id: 'seasonal-supp-lodge', name: 'Supplement lodge',
+  item_rates: [
+    { id: 'supp-low', currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 700, price_2_adults: 450, single_supplement: 250, valid_from: '2026-03-16', valid_to: '2026-11-30' },
+    { id: 'supp-high', currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 900, price_2_adults: 600, single_supplement: 380, valid_from: '2026-01-01', valid_to: '2026-03-15' }
+  ]
+};
+const seasonalSupplementService = {
+  item_id: 'seasonal-supp-lodge', rate_id: 'supp-low', item_name: 'Supplement lodge',
+  category: 'Accommodation', currency_code: 'ZAR', rate_basis: 'per_person_sharing',
+  unit_cost: 700, quantity: 1, is_included: true
+};
+const supplementDays = [{ services: [seasonalSupplementService] }];
+check('a resolved rate row carries its own single supplement',
+  accommodationRatesForTrip(seasonalSupplementService, seasonalSupplementLodge, '2026-06-01', '2026-06-05').chosen.supplement, 250);
+check('a season inside a contract window derives that window\'s single supplement',
+  singleSupplementForSeason({ days: supplementDays, library: [seasonalSupplementLodge], from: '2026-02-01', to: '2026-02-28' }).total, 380);
+check('the derived supplement names the accommodation line it came from',
+  singleSupplementForSeason({ days: supplementDays, library: [seasonalSupplementLodge], from: '2026-06-01', to: '2026-06-30' }).rows[0].name, 'Supplement lodge');
+check('two lodges in one season sum to a single supplement',
+  singleSupplementForSeason({
+    days: [{ services: [seasonalSupplementService, { ...seasonalSupplementService, item_name: 'Supplement lodge 2' }] }],
+    library: [seasonalSupplementLodge], from: '2026-06-01', to: '2026-06-30'
+  }).total, 500);
+check('a season with no covering window cannot derive a single supplement',
+  singleSupplementForSeason({ days: supplementDays, library: [seasonalSupplementLodge], from: '2027-01-10', to: '2027-01-15' }).total, null);
+check('an unresolvable accommodation is named so the operator can see why',
+  singleSupplementForSeason({ days: supplementDays, library: [seasonalSupplementLodge], from: '2027-01-10', to: '2027-01-15' }).unresolved.join(','), 'Supplement lodge');
+check('a package with no accommodation derives no supplement, so the caller keeps its override',
+  singleSupplementForSeason({ days: [{ services: [poolDays[0].services[0]] }], library: [poolTransfer], from: '2026-06-01', to: '2026-06-30' }).total, null);

@@ -112,6 +112,8 @@ export const rateHasPrice = (rate) => {
     'price_1_adult', 'price_2_adults', 'price_3_plus_adults', 'unit_price',
     'single_room_rate', 'double_twin_rate', 'effective_single_rate',
     'adult_rate', 'guide_rate', 'driver_rate', 'vehicle_rate',
+    'guide_transfer_rate', 'guide_half_day_rate', 'guide_full_day_rate',
+    'guide_overland_rate', 'guide_dinner_rate',
     'entrance_fee_per_person', 'entrance_fee_per_vehicle',
     'conservation_levy_per_adult', 'conservation_levy_per_child'
   ];
@@ -324,6 +326,8 @@ export const RATE_MONEY_FIELDS = [
   'single_supplement', 'single_room_rate', 'double_twin_rate', 'effective_single_rate',
   'triple_room_rate', 'adult_rate', 'child_rate',
   'guide_rate', 'driver_rate', 'vehicle_rate', 'fast_track_adult_rate',
+  'guide_transfer_rate', 'guide_half_day_rate', 'guide_full_day_rate',
+  'guide_overland_rate', 'guide_dinner_rate',
   'entrance_fee_per_person', 'entrance_fee_per_vehicle',
   'conservation_levy_per_adult', 'conservation_levy_per_child'
 ];
