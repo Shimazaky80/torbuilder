@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
 import ConfirmDialog from '../components/ConfirmDialog';
+import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
@@ -17,6 +18,7 @@ import {
   Minus,
   Users,
   User,
+  Eye,
   Edit3,
   Trash2,
   X,
@@ -62,6 +64,50 @@ const clampNonNegative = (value) => {
   if (typeof value !== 'string' || value.trim() === '') return value;
   const n = Number(value);
   return Number.isFinite(n) && n < 0 ? '0' : value;
+};
+
+/* A money box the operator left blank is written to the season row as null, so a row can tell
+   "not offered" apart from a deliberate 0 (a free child, a free third adult, an infants-go-free
+   band). The editor hands over the raw typed string, so a typed 0 or 0.00 becomes the number 0
+   and is kept; a box that was never touched is still the number 0 in form state, which is why a
+   numeric zero reads as "never set". */
+const moneyOrNull = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number' && value === 0) return null;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/* Reads a money column back into the editor. null and a bare numeric 0 both come back as a blank
+   box: a numeric 0 is the residue of the old "start every box at 0.00" default, so it is treated
+   as nothing loaded and rewritten as null on the next save. Raw child-map values keep their typed
+   digits, so an explicit "0.00" survives. */
+const moneyLoad = (value) => {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'number' && value === 0) return '';
+  return String(value);
+};
+
+/* A brand-new season starts with every money box empty, not 0.00. Nothing is priced until the
+   operator types a figure, so a saved rate card only ever carries consciously loaded prices and
+   the read-only view has nothing to hide. */
+const emptySeasonMoney = () => ({
+  roomRate: '', singleRoomRate: '', price1Adult: '', price2Adults: '', price3PlusAdults: '',
+  childRates: {}, singleSupplement: '', childDiscount: '', guideRate: '', driverRate: '',
+  guideTransferRate: '', guideHalfDayRate: '', guideFullDayRate: '', guideOverlandRate: '', guideDinnerRate: '',
+  guideMealPlan: 'Bed & Breakfast', driverMealPlan: 'Bed & Breakfast',
+  adultRate: '', childRate: '', fastTrackAdultRate: '', fastTrackChildRates: {}, tiers: [],
+  vehicleRate: '', pricesByVehicle: {}, entranceFeePerson: '', entranceFeeVehicle: '',
+  levyAdultRate: '', levyChildRate: '', taxesAndSurcharges: ''
+});
+
+/* A single child figure kept in a JSONB map keeps the raw typed digits, so an entered 0.00 comes
+   back as "0.00" and still reads as a price. A blank or never-touched box becomes null and the
+   caller drops it from the map. */
+const childEntry = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number' && value === 0) return null;
+  return value;
 };
 
 /* Reads an image file and re-encodes it as a smaller data URL. Images larger
@@ -160,7 +206,7 @@ const vehicleVectorSummary = (rates) => {
 const surchargeRateFees = (itemData, season) => {
   if (itemData?.category !== SURCHARGE_CATEGORY) return {};
   const unitBasis = itemData.surchargeUnitBasis || 'per_person';
-  const num = (v) => parseFloat(v) || 0;
+  const num = moneyOrNull;
   const isEntrance = (itemData.surchargeType || 'entrance_fee') === 'entrance_fee';
   if (isEntrance) {
     if (unitBasis === 'per_vehicle') {
@@ -209,6 +255,9 @@ export const LibraryItems = () => {
   const [lightbox, setLightbox] = useState(null); // { images: [], index: number }
   const [descriptionPopup, setDescriptionPopup] = useState(null);
   const [contractPopup, setContractPopup] = useState(null); // { name, url }
+  // The read-only "what does this item charge" panel: every season and every pricing
+  // type for one catalog item, without opening the edit form.
+  const [detailItem, setDetailItem] = useState(null);
   const [uploadingContract, setUploadingContract] = useState(null); // tempId being uploaded
 
   // Supplier creation mode: 'existing' vs 'new'
@@ -547,32 +596,7 @@ export const LibraryItems = () => {
           optionName: '',
           validFrom: '',
           validTo: '',
-          roomRate: 0, // Flat Room / Unit Rate per Night (up to maxOccupancy persons)
-          singleRoomRate: 0, // 1 Adult occupying the room alone, per night
-          price1Adult: 0, // Single Room (1 Adult - Per Person)
-          price2Adults: 0, // Per Person Sharing (PPS - 2+ Adults Sharing)
-          price3PlusAdults: 0, // Extra Adult (3+ Adults Sharing)
-          childRates: { band_1: 0, band_2: 0, band_3: 0 },
-          childDiscount: 0,
-          guideRate: 0, // Guide Room Rate per night (0 = fallback to Single rate)
-          driverRate: 0, // Driver Room Rate per night (0 = fallback to Single rate)
-          guideTransferRate: 0,
-          guideHalfDayRate: 0,
-          guideFullDayRate: 0,
-          guideOverlandRate: 0,
-          guideDinnerRate: 0,
-          guideMealPlan: 'Bed & Breakfast',
-          driverMealPlan: 'Bed & Breakfast',
-          adultRate: 0,
-          childRate: 0,
-          tiers: [],
-          vehicleRate: 0,
-          pricesByVehicle: {},
-          entranceFeePerson: 0,
-          entranceFeeVehicle: 0,
-          levyAdultRate: 0,
-          levyChildRate: 0,
-          taxesAndSurcharges: 0
+          ...emptySeasonMoney()
         }
       ]
     };
@@ -1295,10 +1319,6 @@ export const LibraryItems = () => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
         const seasonCount = item.seasons.length + 1;
-        const childRatesInit = {};
-        (item.childAgeRanges || []).forEach(b => {
-          childRatesInit[b.id] = 0;
-        });
         return {
           ...item,
           seasons: [
@@ -1311,35 +1331,7 @@ export const LibraryItems = () => {
               optionName: optionName || item.mealPlan || '',
               validFrom: '',
               validTo: '',
-              roomRate: 0,
-              singleRoomRate: 0,
-              price1Adult: 0,
-              price2Adults: 0,
-              price3PlusAdults: 0,
-              childRates: childRatesInit,
-              singleSupplement: 0,
-              childDiscount: 0,
-              guideRate: 0,
-              driverRate: 0,
-              guideTransferRate: 0,
-              guideHalfDayRate: 0,
-              guideFullDayRate: 0,
-              guideOverlandRate: 0,
-              guideDinnerRate: 0,
-              guideMealPlan: 'Bed & Breakfast',
-              driverMealPlan: 'Bed & Breakfast',
-adultRate: 0,
-          childRate: 0,
-          fastTrackAdultRate: 0,
-          fastTrackChildRates: {},
-          tiers: [],
-              vehicleRate: 0,
-              pricesByVehicle: {},
-              entranceFeePerson: 0,
-              entranceFeeVehicle: 0,
-              levyAdultRate: 0,
-              levyChildRate: 0,
-              taxesAndSurcharges: 0
+              ...emptySeasonMoney()
             }
           ]
         };
@@ -1584,8 +1576,6 @@ adultRate: 0,
     if (!group) return;
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
-      const childRatesInit = {};
-      (item.childAgeRanges || []).forEach(b => { childRatesInit[b.id] = 0; });
       return {
         ...item,
         seasons: [
@@ -1595,35 +1585,7 @@ adultRate: 0,
             optionName: (optionName || '').trim(),
             validFrom: group.validFrom || '',
             validTo: group.validTo || '',
-            roomRate: 0,
-            singleRoomRate: 0,
-            price1Adult: 0,
-            price2Adults: 0,
-            price3PlusAdults: 0,
-            childRates: childRatesInit,
-            singleSupplement: 0,
-            childDiscount: 0,
-            guideRate: 0,
-            driverRate: 0,
-            guideTransferRate: 0,
-            guideHalfDayRate: 0,
-            guideFullDayRate: 0,
-            guideOverlandRate: 0,
-            guideDinnerRate: 0,
-            guideMealPlan: 'Bed & Breakfast',
-            driverMealPlan: 'Bed & Breakfast',
-            adultRate: 0,
-            childRate: 0,
-            fastTrackAdultRate: 0,
-            fastTrackChildRates: {},
-            tiers: [],
-            vehicleRate: 0,
-            pricesByVehicle: {},
-            entranceFeePerson: 0,
-            entranceFeeVehicle: 0,
-            levyAdultRate: 0,
-            levyChildRate: 0,
-            taxesAndSurcharges: 0
+            ...emptySeasonMoney()
           }
         ]
       };
@@ -1948,28 +1910,28 @@ adultRate: 0,
                 currency: itemData.currency,
                 valid_from: s.validFrom || null,
                 valid_to: s.validTo || null,
-                price_1_adult: 0,
-                price_2_adults: 0,
-                price_3_plus_adults: 0,
+                price_1_adult: null,
+                price_2_adults: null,
+                price_3_plus_adults: null,
                 child_rates_breakdown: {},
-                single_supplement: 0,
-                child_discount: 0,
-                single_room_rate: 0,
-                double_twin_rate: 0,
-                effective_single_rate: 0,
+                single_supplement: null,
+                child_discount: null,
+                single_room_rate: null,
+                double_twin_rate: null,
+                effective_single_rate: null,
                 rate_basis: 'per_trip',
                 child_sharing_policy: '',
-                unit_price: 0,
-                guide_transfer_rate: parseFloat(s.guideTransferRate) || 0,
-                guide_half_day_rate: parseFloat(s.guideHalfDayRate) || 0,
-                guide_full_day_rate: parseFloat(s.guideFullDayRate) || 0,
-                guide_overland_rate: parseFloat(s.guideOverlandRate) || 0,
-                guide_dinner_rate: parseFloat(s.guideDinnerRate) || 0
+                unit_price: null,
+                guide_transfer_rate: moneyOrNull(s.guideTransferRate),
+                guide_half_day_rate: moneyOrNull(s.guideHalfDayRate),
+                guide_full_day_rate: moneyOrNull(s.guideFullDayRate),
+                guide_overland_rate: moneyOrNull(s.guideOverlandRate),
+                guide_dinner_rate: moneyOrNull(s.guideDinnerRate)
               };
             }
             if (isMeals) {
-              const adultRate = parseFloat(s.adultRate) || 0;
-              const childRate = parseFloat(s.childRate) || 0;
+              const adultRate = moneyOrNull(s.adultRate);
+              const childRate = childEntry(s.childRate);
               return {
                 item_id: targetItemId,
                 option_name: s.seasonName || 'Base Season',
@@ -1979,24 +1941,24 @@ adultRate: 0,
                 valid_from: s.validFrom || null,
                 valid_to: s.validTo || null,
                 price_1_adult: adultRate,
-                price_2_adults: 0,
-                price_3_plus_adults: 0,
-                child_rates_breakdown: childRate > 0 ? { child: childRate } : {},
-                single_supplement: 0,
-                child_discount: 0,
-                single_room_rate: 0,
-                double_twin_rate: 0,
-                effective_single_rate: 0,
+                price_2_adults: null,
+                price_3_plus_adults: null,
+                child_rates_breakdown: childRate !== null ? { child: childRate } : {},
+                single_supplement: null,
+                child_discount: null,
+                single_room_rate: null,
+                double_twin_rate: null,
+                effective_single_rate: null,
                 rate_basis: 'per_person',
                 child_sharing_policy: '',
                 unit_price: adultRate,
-                guide_rate: parseFloat(s.guideRate) || 0,
-                driver_rate: parseFloat(s.driverRate) || 0
+                guide_rate: moneyOrNull(s.guideRate),
+                driver_rate: moneyOrNull(s.driverRate)
               };
             }
             if (isExtras) {
-              const adultRate = parseFloat(s.adultRate) || 0;
-              const childRate = parseFloat(s.childRate) || 0;
+              const adultRate = moneyOrNull(s.adultRate);
+              const childRate = childEntry(s.childRate);
               return {
                 item_id: targetItemId,
                 option_name: s.seasonName || 'Base Season',
@@ -2006,14 +1968,14 @@ adultRate: 0,
                 valid_from: s.validFrom || null,
                 valid_to: s.validTo || null,
                 price_1_adult: adultRate,
-                price_2_adults: 0,
-                price_3_plus_adults: 0,
-                child_rates_breakdown: childRate > 0 ? { child: childRate } : {},
-                single_supplement: 0,
-                child_discount: 0,
-                single_room_rate: 0,
-                double_twin_rate: 0,
-                effective_single_rate: 0,
+                price_2_adults: null,
+                price_3_plus_adults: null,
+                child_rates_breakdown: childRate !== null ? { child: childRate } : {},
+                single_supplement: null,
+                child_discount: null,
+                single_room_rate: null,
+                double_twin_rate: null,
+                effective_single_rate: null,
                 rate_basis: 'per_person',
                 child_sharing_policy: '',
                 unit_price: adultRate
@@ -2027,9 +1989,10 @@ adultRate: 0,
                  that is actually priced; a vector nobody has priced yet stays at zero and
                  blocks rather than silently selling a free vehicle. */
               const pricedVector = Object.values(vehiclePrices).filter(p => typeof p === 'number' && p > 0);
-              const adultRate = parseFloat(s.adultRate) || (pricedVector.length ? Math.min(...pricedVector) : 0);
+              const typedAdult = moneyOrNull(s.adultRate);
+              const adultRate = typedAdult !== null ? typedAdult : (pricedVector.length ? Math.min(...pricedVector) : null);
               const vehicleRate = parseFloat(s.vehicleRate) || 0;
-              const childRate = parseFloat(s.childRate) || 0;
+              const childRate = childEntry(s.childRate);
               const isTiered = pricingModel === 'tiered';
               const tiers = Array.isArray(s.tiers) ? s.tiers
                 .filter(t => t && (parseFloat(t.rate) > 0))
@@ -2044,14 +2007,14 @@ adultRate: 0,
                 valid_from: s.validFrom || null,
                 valid_to: s.validTo || null,
                 price_1_adult: !isTiered ? adultRate : null,
-                price_2_adults: 0,
-                price_3_plus_adults: 0,
-                child_rates_breakdown: childRate > 0 ? { child: childRate } : {},
-                single_supplement: 0,
-                child_discount: 0,
-                single_room_rate: 0,
-                double_twin_rate: 0,
-                effective_single_rate: 0,
+                price_2_adults: null,
+                price_3_plus_adults: null,
+                child_rates_breakdown: childRate !== null ? { child: childRate } : {},
+                single_supplement: null,
+                child_discount: null,
+                single_room_rate: null,
+                double_twin_rate: null,
+                effective_single_rate: null,
                 rate_basis: isPerVehicle ? 'per_vehicle' : (isTiered ? 'tiered' : 'per_person'),
                 child_sharing_policy: '',
                 unit_price: isPerVehicle ? adultRate : null,
@@ -2067,16 +2030,16 @@ adultRate: 0,
                   : {}),
                 ...(isFlight
                   ? {
-                      taxes_and_surcharges: parseFloat(s.taxesAndSurcharges) || 0
+                      taxes_and_surcharges: moneyOrNull(s.taxesAndSurcharges)
                     }
                   : {})
               };
             }
             if (isTicketCategory(itemData.category)) {
-              const adultRate = parseFloat(s.adultRate) || 0;
+              const adultRate = moneyOrNull(s.adultRate);
               const childRatesMap = s.childRates || {};
               const hasFastTrack = itemData.ticketType === 'both' || itemData.ticketType === 'fast_track';
-              const fastTrackAdultRate = hasFastTrack ? (parseFloat(s.fastTrackAdultRate) || 0) : 0;
+              const fastTrackAdultRate = hasFastTrack ? moneyOrNull(s.fastTrackAdultRate) : null;
               const fastTrackChildRates = hasFastTrack ? (s.fastTrackChildRates || {}) : {};
               return {
                 item_id: targetItemId,
@@ -2087,34 +2050,39 @@ adultRate: 0,
                 valid_from: s.validFrom || null,
                 valid_to: s.validTo || null,
                 price_1_adult: adultRate,
-                price_2_adults: 0,
-                price_3_plus_adults: 0,
+                price_2_adults: null,
+                price_3_plus_adults: null,
                 child_rates_breakdown: childRatesMap,
                 fast_track_adult_rate: fastTrackAdultRate,
                 fast_track_child_rates_breakdown: fastTrackChildRates,
-                single_supplement: 0,
-                child_discount: 0,
-                single_room_rate: 0,
-                double_twin_rate: 0,
-                effective_single_rate: 0,
+                single_supplement: null,
+                child_discount: null,
+                single_room_rate: null,
+                double_twin_rate: null,
+                effective_single_rate: null,
                 rate_basis: 'per_person',
                 child_sharing_policy: 'by_age_range',
                 unit_price: adultRate
               };
             }
             const isFlatRoom = pricingModel === 'per_room';
-            const roomRate = parseFloat(s.roomRate) || 0;
+            const roomRate = moneyOrNull(s.roomRate);
             /* A flat rate is quoted for the room, so it covers everyone who
                sleeps in it up to its occupancy. A party of one still occupies
                the whole room, which is why the flat mode needs a second figure:
                what one adult pays for the room to themselves. Older rows never
                had one, so they fall back to the room rate. */
-            const flatSingleRate = parseFloat(s.singleRoomRate) || roomRate;
-            const p1Adult = isFlatRoom ? flatSingleRate : (parseFloat(s.price1Adult) || 0);
-            const p2Adults = isFlatRoom ? roomRate : (parseFloat(s.price2Adults) || 0);
-            const p3PlusAdults = isFlatRoom ? roomRate : (parseFloat(s.price3PlusAdults) || p2Adults);
+            const flatSingleRate = moneyOrNull(s.singleRoomRate) ?? roomRate;
+            const p1Adult = isFlatRoom ? flatSingleRate : moneyOrNull(s.price1Adult);
+            const p2Adults = isFlatRoom ? roomRate : moneyOrNull(s.price2Adults);
+            /* The 3+ adult figure is whatever the operator typed, including 0 or
+               blank. It used to fall back to the 2-adult rate whenever it was 0 or
+               empty, which silently restored the old price on every save and made
+               "this property does not take a third adult" impossible to record. A
+               blank box is now stored as null (not offered); a typed 0 stays 0. */
+            const p3PlusAdults = isFlatRoom ? roomRate : moneyOrNull(s.price3PlusAdults);
             const childRatesMap = isFlatRoom ? {} : (s.childRates || {});
-            const discount = isFlatRoom ? 0 : (parseFloat(s.childDiscount) || 0);
+            const discount = isFlatRoom ? null : moneyOrNull(s.childDiscount);
 
             return {
               item_id: targetItemId,
@@ -2131,16 +2099,16 @@ adultRate: 0,
               price_2_adults: p2Adults,
               price_3_plus_adults: p3PlusAdults,
               child_rates_breakdown: childRatesMap,
-              single_supplement: 0,
+              single_supplement: null,
               child_discount: discount,
               single_room_rate: p1Adult,
               double_twin_rate: p2Adults,
               effective_single_rate: p1Adult,
               rate_basis: isFlatRoom ? 'per_room' : 'per_person_sharing',
               child_sharing_policy: isFlatRoom ? 'room_rate_divided' : 'sharing_with_adults',
-              unit_price: isFlatRoom ? roomRate : (p2Adults || p1Adult || 0),
+              unit_price: isFlatRoom ? roomRate : (p2Adults ?? p1Adult ?? null),
               ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
-                ? { guide_rate: parseFloat(s.guideRate) || 0, driver_rate: parseFloat(s.driverRate) || 0 }
+                ? { guide_rate: moneyOrNull(s.guideRate), driver_rate: moneyOrNull(s.driverRate) }
                 : {}),
               ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
                 ? { guide_meal_plan: s.guideMealPlan || itemData.mealPlan, driver_meal_plan: s.driverMealPlan || itemData.mealPlan }
@@ -2234,7 +2202,6 @@ adultRate: 0,
       : createNewItemTemplate().childAgeRanges;
 
     const defaultChildRates = {};
-    childBands.forEach(b => { defaultChildRates[b.id] = 0; });
 
     const seasons = rates.length > 0 ? rates.map(r => {
       if (isGuideCategory(item.category)) {
@@ -2242,11 +2209,11 @@ adultRate: 0,
           seasonName: r.season_name || r.option_name || 'Base Season',
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
-          guideTransferRate: parseFloat(r.guide_transfer_rate) || 0,
-          guideHalfDayRate: parseFloat(r.guide_half_day_rate) || 0,
-          guideFullDayRate: parseFloat(r.guide_full_day_rate) || 0,
-          guideOverlandRate: parseFloat(r.guide_overland_rate) || 0,
-          guideDinnerRate: parseFloat(r.guide_dinner_rate) || 0,
+          guideTransferRate: moneyLoad(r.guide_transfer_rate),
+          guideHalfDayRate: moneyLoad(r.guide_half_day_rate),
+          guideFullDayRate: moneyLoad(r.guide_full_day_rate),
+          guideOverlandRate: moneyLoad(r.guide_overland_rate),
+          guideDinnerRate: moneyLoad(r.guide_dinner_rate),
           adultRate: 0,
           childRate: 0,
           tiers: [],
@@ -2267,34 +2234,34 @@ adultRate: 0,
         };
       }
       if (isMealsCategory(item.category)) {
-        const mealChildRate = parseFloat((r.child_rates_breakdown || {}).child) || 0;
+        const mealChildRate = moneyLoad((r.child_rates_breakdown || {}).child);
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
-          adultRate: parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0,
+          adultRate: moneyLoad(r.price_1_adult ?? r.unit_price),
           childRate: mealChildRate,
-          guideRate: parseFloat(r.guide_rate) || 0,
-          driverRate: parseFloat(r.driver_rate) || 0
+          guideRate: moneyLoad(r.guide_rate),
+          driverRate: moneyLoad(r.driver_rate)
         };
       }
       if (isExtrasCategory(item.category)) {
-        const extrasChildRate = parseFloat((r.child_rates_breakdown || {}).child) || 0;
+        const extrasChildRate = moneyLoad((r.child_rates_breakdown || {}).child);
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
-          adultRate: parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0,
+          adultRate: moneyLoad(r.price_1_adult ?? r.unit_price),
           childRate: extrasChildRate
         };
       }
       if (isTourStyle) {
-        const transferChildRate = parseFloat((r.child_rates_breakdown || {}).child) || 0;
+        const transferChildRate = moneyLoad((r.child_rates_breakdown || {}).child);
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
-          adultRate: r.rate_basis === 'tiered' ? 0 : (parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0),
+          adultRate: r.rate_basis === 'tiered' ? '' : moneyLoad(r.price_1_adult ?? r.unit_price),
           vehicleRate: 0,
           pricesByVehicle: r.prices_by_vehicle || {},
           childRate: transferChildRate,
@@ -2310,11 +2277,11 @@ adultRate: 0,
           driverRate: 0,
           guideMealPlan: 'Bed & Breakfast',
           driverMealPlan: 'Bed & Breakfast',
-          entranceFeePerson: parseFloat(r.entrance_fee_per_person) || 0,
-          entranceFeeVehicle: parseFloat(r.entrance_fee_per_vehicle) || 0,
-          levyAdultRate: parseFloat(r.conservation_levy_per_adult) || 0,
-          levyChildRate: parseFloat(r.conservation_levy_per_child) || 0,
-          taxesAndSurcharges: parseFloat(r.taxes_and_surcharges) || 0
+          entranceFeePerson: moneyLoad(r.entrance_fee_per_person),
+          entranceFeeVehicle: moneyLoad(r.entrance_fee_per_vehicle),
+          levyAdultRate: moneyLoad(r.conservation_levy_per_adult),
+          levyChildRate: moneyLoad(r.conservation_levy_per_child),
+          taxesAndSurcharges: moneyLoad(r.taxes_and_surcharges)
         };
       }
       const isFlat = pricingModel === 'per_room' || r.rate_basis === 'per_room';
@@ -2323,13 +2290,13 @@ adultRate: 0,
           seasonName: r.season_name || r.option_name || 'Base Season',
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
-          adultRate: parseFloat(r.price_1_adult) || parseFloat(r.unit_price) || 0,
+          adultRate: moneyLoad(r.price_1_adult ?? r.unit_price),
           roomRate: 0,
           price1Adult: 0,
           price2Adults: 0,
           price3PlusAdults: 0,
           childRates: r.child_rates_breakdown || defaultChildRates,
-          fastTrackAdultRate: parseFloat(r.fast_track_adult_rate) || 0,
+          fastTrackAdultRate: moneyLoad(r.fast_track_adult_rate),
           fastTrackChildRates: r.fast_track_child_rates_breakdown || defaultChildRates,
           singleSupplement: 0,
           childDiscount: 0,
@@ -2342,56 +2309,29 @@ adultRate: 0,
         optionName: r.meal_plan || '',
         validFrom: r.valid_from || '',
         validTo: r.valid_to || '',
-        roomRate: isFlat ? (parseFloat(r.unit_price) || parseFloat(r.price_2_adults) || parseFloat(r.double_twin_rate) || 0) : (parseFloat(r.single_room_rate) || 0),
-        singleRoomRate: isFlat ? (parseFloat(r.single_room_rate) || parseFloat(r.effective_single_rate) || parseFloat(r.price_1_adult) || 0) : 0,
-        price1Adult: parseFloat(r.price_1_adult || r.single_room_rate) || 0,
-        price2Adults: parseFloat(r.price_2_adults || r.double_twin_rate) || 0,
-        price3PlusAdults: parseFloat(r.price_3_plus_adults) || 0,
+        roomRate: isFlat ? moneyLoad(r.unit_price ?? r.price_2_adults ?? r.double_twin_rate) : moneyLoad(r.single_room_rate),
+        singleRoomRate: isFlat ? moneyLoad(r.single_room_rate ?? r.effective_single_rate ?? r.price_1_adult) : 0,
+        price1Adult: moneyLoad(r.price_1_adult ?? r.single_room_rate),
+        price2Adults: moneyLoad(r.price_2_adults ?? r.double_twin_rate),
+        price3PlusAdults: moneyLoad(r.price_3_plus_adults),
         childRates: isFlat ? {} : (r.child_rates_breakdown || defaultChildRates),
-        singleSupplement: parseFloat(r.single_supplement) || 0,
-        childDiscount: isFlat ? 0 : (parseFloat(r.child_discount) || 0),
-        guideRate: parseFloat(r.guide_rate) || 0,
-        driverRate: parseFloat(r.driver_rate) || 0,
+        singleSupplement: moneyLoad(r.single_supplement),
+        childDiscount: isFlat ? '' : moneyLoad(r.child_discount),
+        guideRate: moneyLoad(r.guide_rate),
+        driverRate: moneyLoad(r.driver_rate),
         guideMealPlan: r.guide_meal_plan || r.meal_plan || 'Bed & Breakfast',
         driverMealPlan: r.driver_meal_plan || r.meal_plan || 'Bed & Breakfast',
-        entranceFeePerson: parseFloat(r.entrance_fee_per_person) || 0,
-        entranceFeeVehicle: parseFloat(r.entrance_fee_per_vehicle) || 0,
-        levyAdultRate: parseFloat(r.conservation_levy_per_adult) || 0,
-        levyChildRate: parseFloat(r.conservation_levy_per_child) || 0,
-        taxesAndSurcharges: parseFloat(r.taxes_and_surcharges) || 0
+        entranceFeePerson: moneyLoad(r.entrance_fee_per_person),
+        entranceFeeVehicle: moneyLoad(r.entrance_fee_per_vehicle),
+        levyAdultRate: moneyLoad(r.conservation_levy_per_adult),
+        levyChildRate: moneyLoad(r.conservation_levy_per_child),
+        taxesAndSurcharges: moneyLoad(r.taxes_and_surcharges)
       };
     }) : [{
       seasonName: 'Base Season',
       validFrom: '',
       validTo: '',
-      roomRate: 0,
-      singleRoomRate: 0,
-      price1Adult: 0,
-      price2Adults: 0,
-      price3PlusAdults: 0,
-      childRates: defaultChildRates,
-      singleSupplement: 0,
-      childDiscount: 0,
-      guideRate: 0,
-      driverRate: 0,
-      guideTransferRate: 0,
-      guideHalfDayRate: 0,
-      guideFullDayRate: 0,
-      guideOverlandRate: 0,
-      guideDinnerRate: 0,
-      guideMealPlan: 'Bed & Breakfast',
-      driverMealPlan: 'Bed & Breakfast',
-      adultRate: 0,
-      childRate: 0,
-      fastTrackAdultRate: 0,
-      fastTrackChildRates: {},
-      tiers: [],
-      vehicleRate: 0,
-      entranceFeePerson: 0,
-      entranceFeeVehicle: 0,
-      levyAdultRate: 0,
-      levyChildRate: 0,
-      taxesAndSurcharges: 0
+      ...emptySeasonMoney()
     }];
 
     const carRatesRows = Array.isArray(item.car_rental_rates) ? item.car_rental_rates : [];
@@ -6044,7 +5984,11 @@ adultRate: 0,
                       )}
                       <div>
                         {item.destination_region && <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0d7478', display: 'block', marginBottom: '0.15rem' }}>{item.destination_region}{item.destination_area ? ` · ${item.destination_area}` : ''}</span>}
-                        <span style={{ fontWeight: 700, color: '#0f172a', display: 'block' }}>
+                        <span
+                          onClick={() => setDetailItem(item)}
+                          title="Click to view every season's pricing"
+                          style={{ fontWeight: 700, color: '#0f172a', display: 'block', cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: '3px' }}
+                        >
                           {item.name}{item.identifier_code && <span style={{ color: '#0d7478' }}> - {item.identifier_code}</span>}
                         </span>
                         {isTourStyle && item.sub_category && item.sub_category !== 'Transfers' && (
@@ -6503,6 +6447,9 @@ adultRate: 0,
                   </td>
                   <td>
                     <div className="action-buttons">
+                      <button className="action-btn" onClick={() => setDetailItem(item)} title="View all pricing">
+                        <Eye size={16} />
+                      </button>
                       <button className="action-btn" onClick={() => handleEditItem(item)} title="Edit Item">
                         <Edit3 size={16} />
                       </button>
@@ -6636,6 +6583,15 @@ adultRate: 0,
             </p>
           </div>
         </div>
+      )}
+
+      {/* READ-ONLY PRICING VIEW */}
+      {detailItem && (
+        <LibraryItemDetailModal
+          item={detailItem}
+          vehicleTypes={vehicleTypes}
+          onClose={() => setDetailItem(null)}
+        />
       )}
 
       {/* CONTRACT DOCUMENT POPUP */}

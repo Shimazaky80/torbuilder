@@ -53,13 +53,13 @@ export const PricingSummaryTab = ({
       <p>What a traveller pays, per person, for each season. Each column is one priced option for the party sizes above it &mdash; pick the column that holds your traveller count.</p>
       {!usedCodes.length && <p className="ps-empty">No vehicle columns are set up yet. Add them on the Pricing &amp; seasons tab to see prices here.</p>}
       {!!usedCodes.length && seasons.map((period, seasonIndex) => {
-        const accommodation = period?.accommodation_per_person != null
+        const accommodation = period?.accommodation_per_person != null && period.accommodation_per_person !== 0
           ? Number(period.accommodation_per_person)
           : (accommodationPerPersonForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
         /* The supplement is derived from the accommodation's own contract when the season
            carries no override, so a buyer always reads a figure rather than a zero that
            looks like nothing is charged for a single room. The override still wins. */
-        const singleSupplement = period?.single_supplement != null
+        const singleSupplement = (period?.single_supplement != null && period.single_supplement !== 0)
           ? Number(period.single_supplement)
           : (singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
         const columns = presentationPricingColumns({

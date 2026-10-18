@@ -1,7 +1,7 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
-  ArrowLeft, Backpack, Baby, CalendarDays, ChevronDown, Download, FileText,
+  ArrowLeft, Backpack, Baby, CalendarDays, Check, ChevronDown, Download, FileText,
   GripVertical, Plus, RefreshCw, Save, Search, Trash2, UtensilsCrossed, X
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -156,6 +156,11 @@ const [bandScope, setBandScope] = useState('');
   const [activeSeason, setActiveSeason] = useState(0);
   const [clientSelectOpen, setClientSelectOpen] = useState(false);
   const [clientQuery, setClientQuery] = useState('');
+  /* The export flow assigns from its own picker rather than sending the operator to the
+     Client tab first: choosing "Assign to partner" with nobody assigned opens this search,
+     limited to travel agents, right on top of the export modal. */
+  const [assignPickerOpen, setAssignPickerOpen] = useState(false);
+  const [agentQuery, setAgentQuery] = useState('');
   const [packagePreviewOpen, setPackagePreviewOpen] = useState(false);
 
   /* Guide service detour: the pending add held while the operator picks which
@@ -209,7 +214,7 @@ const [bandScope, setBandScope] = useState('');
       let loadedClients = [];
       let assignedClientIds = [];
       const [clientsRes, assignmentsRes] = await Promise.all([
-        supabase.from('clients').select('id, name, markup_percentage').eq('company_id', profile.company_id).order('name'),
+        supabase.from('clients').select('id, name, markup_percentage, client_type').eq('company_id', profile.company_id).order('name'),
         supabase.from('package_client_assignments').select('client_id').eq('company_id', profile.company_id).eq('package_id', packageId)
       ]);
       if (clientsRes.error || assignmentsRes.error) {
@@ -379,6 +384,14 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
     const term = clientQuery.trim().toLowerCase();
     return clients.filter((client) => !term || nameOf(client).toLowerCase().includes(term));
   }, [clients, clientQuery]);
+  /* A package is only ever assigned to a travel agent, so the export picker lists those and
+     leaves direct clients out. */
+  const visibleAgents = useMemo(() => {
+    const term = agentQuery.trim().toLowerCase();
+    return clients
+      .filter((client) => client.client_type === 'Travel Agency')
+      .filter((client) => !term || nameOf(client).toLowerCase().includes(term));
+  }, [clients, agentQuery]);
 
   /* Every season, capacity and room decision below answers from these two
      lookups, so a service can never be priced from one contract row and then
@@ -1039,6 +1052,24 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     setForm(nextForm);
     persist(days, periods, mergedBands, nextForm);
   };
+  /* Assignment decided in the export picker is written straight away for the same reason the
+     child toggle is: the operator has chosen the partner and expects the package to hold it,
+     not to depend on a later "Save package". The rest of the form is saved as it stands. */
+  const assignClient = (clientId) => {
+    const assignedClientIds = form.assignedClientIds.includes(clientId)
+      ? form.assignedClientIds.filter((id) => id !== clientId)
+      : [...form.assignedClientIds, clientId];
+    const nextForm = { ...form, assignedClientIds };
+    setForm(nextForm);
+    persist(days, periods, mergedBands, nextForm);
+  };
+  /* Choosing "Assign to partner" with nobody assigned opens the travel-agent picker instead
+     of silently exporting the contract cost. The audience still switches to 'partner' so the
+     radio reads correctly once an agent is chosen. */
+  const choosePartnerAudience = () => {
+    setExportOptions((previous) => ({ ...previous, audience: 'partner' }));
+    if (!selectedClients.length) setAssignPickerOpen(true);
+  };
 
   /* The child price does not move with the party size, so it is priced off the biggest
      band and shown once on the Children tab. It is priced off that band's own services:
@@ -1089,9 +1120,27 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     }),
     [days, library, activePeriod]
   );
-  const accommodationPerPerson = activePeriod?.accommodation_per_person != null
+  const accommodationPerPerson = activePeriod?.accommodation_per_person != null && activePeriod.accommodation_per_person !== 0
     ? Number(activePeriod.accommodation_per_person)
     : derivedAccommodation.total;
+  /* The season's single supplement is derived from the accommodation's own contract the
+     same way the per-person figure is, so the tab always shows a real number rather than a
+     dash. It is a room charge, so only the accommodation lines contribute; every other line
+     in the package is shared unit cost and carries no supplement. The season override, when
+     set, still wins (D18). */
+  const derivedSingleSupplement = useMemo(
+    () => singleSupplementForSeason({
+      days,
+      library,
+      from: activePeriod?.valid_from || null,
+      to: activePeriod?.valid_to || null
+    }),
+    [days, library, activePeriod]
+  );
+  const hasSupplementOverride = activePeriod?.single_supplement != null && activePeriod.single_supplement !== 0;
+  const singleSupplementForDisplay = hasSupplementOverride
+    ? Number(activePeriod.single_supplement)
+    : derivedSingleSupplement.total;
 
   const buildExportHtml = (options) => {
     const cover = options.cover && pkg.cover_image_url
@@ -1139,19 +1188,19 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       const pool = vehicleColumnPools({ days, library, vehicleTypes });
       const price = (value) => (partnerView ? applyPackageMarkup(value, exportMarkup) : value);
       const childPrice = Number(childBreakdownSummary?.childTotal) || 0;
-      const childText = `<strong>${money(price(childPrice), packageCurrency)}</strong><span class="sum-flat-from">unit share + the accommodation child rate</span>`;
+      const childText = `<strong>${money(price(childPrice), packageCurrency)}</strong><span class="sum-flat-from">per child when sharing with one or two adults</span>`;
       /* One table per season, stacked. The vehicle pool and the party sizes never move with
          the season, so from table to table only the season line, the accommodation-based
          price and the single supplement change. */
       const seasons = periods.length ? periods : [null];
       const roomCapacity = accommodationRoomCapacity({ days, library });
       const tables = seasons.map((period, seasonIndex) => {
-        const accommodation = period?.accommodation_per_person != null
+        const accommodation = period?.accommodation_per_person != null && period.accommodation_per_person !== 0
           ? Number(period.accommodation_per_person)
           : (accommodationPerPersonForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
         /* Derived from the accommodation's own contract when the season carries no override,
            so the reader always sees a supplement rather than a zero that reads as no charge. */
-        const single = period?.single_supplement != null
+        const single = (period?.single_supplement != null && period.single_supplement !== 0)
           ? Number(period.single_supplement)
           : (singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
         const seasonLine = period
@@ -1444,6 +1493,9 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         setActiveSeason={setActiveSeason}
         accommodationPerPerson={accommodationPerPerson}
         derivedAccommodation={derivedAccommodation}
+        derivedSingleSupplement={derivedSingleSupplement}
+        singleSupplementOverride={hasSupplementOverride}
+        singleSupplement={singleSupplementForDisplay}
       />}
       {tab === 'summary' && <PricingSummaryTab
         vehicleTypes={vehicleTypes}
@@ -1548,11 +1600,25 @@ const childRange = packageChildAgeRange(form.childAgeRange);
           radio buttons or checkboxes, so the old layout spent a whole screen on about
           fifteen controls and pushed Export below the fold on a laptop. */}
       <div className="package-export-grid">
-        <div className="package-export-options"><span className="package-export-subhead">For</span><label><input type="radio" name="package-export-audience" value="partner" checked={exportOptions.audience === 'partner'} disabled={!selectedClients.length} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'partner' }))} /> Assign to partner{selectedClients.length ? ` (${selectedClients.map(nameOf).join(', ')})` : ' — none assigned'}</label><label><input type="radio" name="package-export-audience" value="markup" checked={exportOptions.audience === 'markup'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'markup' }))} /> Markup for a non-partner</label>{exportOptions.audience === 'markup' ? <label className="package-export-markup">Markup <input type="number" min="0" step="0.5" value={exportOptions.markup} onChange={(event) => setExportOptions((previous) => ({ ...previous, markup: event.target.value }))} /> %</label> : null}<label><input type="radio" name="package-export-audience" value="internal" checked={exportOptions.audience === 'internal'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'internal' }))} /> Internal (STO)</label></div>
+        <div className="package-export-options"><span className="package-export-subhead">For</span><label><input type="radio" name="package-export-audience" value="partner" checked={exportOptions.audience === 'partner'} onChange={choosePartnerAudience} /> Assign to partner{selectedClients.length ? ` (${selectedClients.map(nameOf).join(', ')})` : ' — none assigned'}</label><button type="button" className="package-export-assign" onClick={() => setAssignPickerOpen(true)}>{selectedClients.length ? 'Change partner' : 'Assign a travel agent'}</button><label><input type="radio" name="package-export-audience" value="markup" checked={exportOptions.audience === 'markup'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'markup' }))} /> Markup for a non-partner</label>{exportOptions.audience === 'markup' ? <label className="package-export-markup">Markup <input type="number" min="0" step="0.5" value={exportOptions.markup} onChange={(event) => setExportOptions((previous) => ({ ...previous, markup: event.target.value }))} /> %</label> : null}<label><input type="radio" name="package-export-audience" value="internal" checked={exportOptions.audience === 'internal'} onChange={() => setExportOptions((previous) => ({ ...previous, audience: 'internal' }))} /> Internal (STO)</label></div>
         <div className="package-export-options"><span className="package-export-subhead">Format</span><label><input type="radio" name="package-export-format" value="pdf" checked={exportFormat === 'pdf'} onChange={() => setExportFormat('pdf')} /> PDF</label><label><input type="radio" name="package-export-format" value="word" checked={exportFormat === 'word'} onChange={() => setExportFormat('word')} /> Word</label></div>
         <div className="package-export-options"><span className="package-export-subhead">Include</span>{[['cover', 'Cover image'], ['inclusions', 'Inclusions'], ['terms', 'Terms'], ['includePricingSummary', 'Presentation pricing'], ['explainPricing', 'Explain pricing'], ['showVehicleOptions', 'Every vehicle size']].map(([key, label]) => <label key={key}><input type="checkbox" checked={!!exportOptions[key]} onChange={(event) => setExportOptions((previous) => ({ ...previous, [key]: event.target.checked }))} /> {label}</label>)}</div>
       </div>
       <div className="package-modal-actions"><button className="secondary-btn" onClick={() => setExportDialog(false)}>Cancel</button><button className="primary-btn" onClick={exportDocument}><FileText size={16} /> Export</button></div>
+    </section></div>}
+    {assignPickerOpen && <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setAssignPickerOpen(false); }}><section className="modal-content package-export-modal">
+      <div className="modal-header"><div><h2>Assign to partner</h2><p>Only travel agents are listed. The choice is saved to the package straight away.</p></div><button className="close-btn" onClick={() => setAssignPickerOpen(false)}><X size={20} /></button></div>
+      <label className="packages-search"><Search size={15} /><input autoFocus value={agentQuery} onChange={(event) => setAgentQuery(event.target.value)} placeholder="Search travel agents\u2026" /></label>
+      <div className="package-client-select-options">
+        {visibleAgents.map((client) => (
+          <label key={client.id}>
+            <input type="checkbox" checked={form.assignedClientIds.includes(client.id)} onChange={() => assignClient(client.id)} />
+            <span>{nameOf(client)}{Number(client.markup_percentage) > 0 ? ` \u00b7 +${client.markup_percentage}%` : ''}</span>
+          </label>
+        ))}
+        {!visibleAgents.length && <p className="package-export-empty">{clients.some((client) => client.client_type === 'Travel Agency') ? 'No travel agents match your search.' : 'No travel agents are set up yet. Add one on the Clients page with type "Travel Agency".'}</p>}
+      </div>
+      <div className="package-modal-actions"><button className="primary-btn" onClick={() => setAssignPickerOpen(false)}><Check size={16} /> Done</button></div>
     </section></div>}
     {guideModal && <GuideServiceTypeModal
       item={guideModal.item}

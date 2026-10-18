@@ -1252,6 +1252,22 @@ check('an unresolvable accommodation is named so the operator can see why',
   accommodationPerPersonForSeason({ days: seasonLodgeDays, library: [seasonalLodge], from: '2027-01-10', to: '2027-01-15' }).unresolved.join(','), 'Seasons lodge');
 check('a package with no accommodation derives no figure',
   accommodationPerPersonForSeason({ days: [{ services: [poolDays[0].services[0]] }], library: [poolTransfer], from: '2026-06-01', to: '2026-06-30' }).total, null);
+/* A saved package line carries the rate it was added with as a locked snapshot. The
+   per-season preview must price the contract window it resolves, NOT that snapshot: a
+   line added before the supplier's prices were loaded would otherwise quote its stale
+   (0.00) snapshot for every season and the accommodation would read as nothing. */
+const snapshotSeasonService = {
+  ...seasonalService,
+  rate_id: 'high-rate',
+  rate_snapshot: { id: 'high-rate', rate_basis: 'per_person_sharing', price_1_adult: 900, price_2_adults: 600 }
+};
+const snapshotSeasonDays = [{ services: [snapshotSeasonService] }];
+check('a locked line still resolves each contract window on its own terms',
+  accommodationRatesForTrip(snapshotSeasonService, seasonalLodge, '2026-06-01', '2026-06-05').chosen.sharing, 450);
+check('the per-season figure ignores a stale locked snapshot',
+  accommodationPerPersonForSeason({ days: snapshotSeasonDays, library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).total, 450);
+check('a pre-load snapshot that priced the line at zero no longer blanks the figure',
+  singleSupplementForSeason({ days: [{ services: [{ ...snapshotSeasonService, rate_snapshot: { id: 'high-rate', rate_basis: 'per_person_sharing', price_2_adults: 0 } }] }], library: [seasonalLodge], from: '2026-06-01', to: '2026-06-30' }).derived, true);
 check('a package with no accommodation names nothing', accommodationPerPersonForSeason({
   days: [{ services: [poolDays[0].services[0]] }], library: [poolTransfer],
   from: '2026-06-01', to: '2026-06-30'

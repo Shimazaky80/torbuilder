@@ -1124,9 +1124,12 @@ export const accommodationRatesForTrip = (service, item, tripFrom, tripTo) => {
   const rates = (item?.item_rates || [])
     .map((rate) => {
       /* The row is priced against its own window: the rate this line was saved with is
-         irrelevant to the preview, so each contract season is read on its own terms. */
+         irrelevant to the preview, so each contract season is read on its own terms. The
+         service's locked rate_snapshot has to be dropped explicitly, or rateFor() would
+         read the snapshot instead of the window we are iterating - quoting a stale (often
+         pre-load, 0.00) figure for every season on the item. */
       const terms = accommodationTerms(
-        { ...(service || {}), rate_id: rate.id },
+        { ...(service || {}), rate_id: rate.id, rate_snapshot: undefined },
         { ...(item || {}), item_rates: [rate] }
       );
       return {
