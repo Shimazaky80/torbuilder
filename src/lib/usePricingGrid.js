@@ -47,8 +47,10 @@ export const usePricingGrid = (vehicleTypes = [], storedColumns = []) => {
     const out = {};
     for (const code of usedCodes) {
       const seats = seatsOf(code, vehicleTypes);
+      /* A band is never smaller than two travellers (margin guard), but it can never
+         exceed the vehicle's seats either. */
       out[code] = (bandEdits[code] || seedBandsForSeats(seats))
-        .map((pax) => seats ? Math.min(seats, Math.max(1, Math.floor(pax))) : Math.max(1, Math.floor(pax)));
+        .map((pax) => seats ? Math.min(seats, Math.max(2, Math.floor(pax))) : Math.max(2, Math.floor(pax)));
     }
     return out;
   }, [usedCodes, bandEdits, vehicleTypes]);
@@ -59,8 +61,9 @@ export const usePricingGrid = (vehicleTypes = [], storedColumns = []) => {
   const changeBand = useCallback((code, bandIndex, rawValue) => {
     const pax = Number(rawValue);
     const seats = seatsOf(code, vehicleTypes);
-    if (!Number.isFinite(pax) || pax < 1) return;
-    const nextPax = seats ? Math.min(seats, Math.floor(pax)) : Math.floor(pax);
+    const minPax = seats ? Math.min(seats, 2) : 2;
+    if (!Number.isFinite(pax) || pax < minPax) return;
+    const nextPax = seats ? Math.min(seats, Math.max(2, Math.floor(pax))) : Math.max(2, Math.floor(pax));
     setBandEdits((previous) => {
       const current = previous[code] || seedBandsForSeats(seats);
       return { ...previous, [code]: current.map((value, index) => (index === bandIndex ? nextPax : value)) };

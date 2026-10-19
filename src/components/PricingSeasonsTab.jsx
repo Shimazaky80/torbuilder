@@ -240,7 +240,7 @@ export const PricingSeasonsTab = ({
             <tr>
               <td className="ps-grid-label">Travellers<small>pax per band</small></td>
               {slots.map((code, index) => <td key={`band-${index}`}>{code ? <div className="ps-bands">{(bands[code] || []).map((pax, bandIndex) => <div className="ps-band" key={`band-${index}-${bandIndex}`}>
-                <div className="ps-band-pax"><input type="number" min="1" max={seatsOf(code, vehicleTypes)} value={pax} onChange={(event) => changeBand(code, bandIndex, event.target.value)} /><span className="ps-band-unit">pax</span></div>
+                <div className="ps-band-pax"><input type="number" min={Math.min(seatsOf(code, vehicleTypes) || 2, 2)} max={seatsOf(code, vehicleTypes)} value={pax} onChange={(event) => changeBand(code, bandIndex, event.target.value)} /><span className="ps-band-unit">pax</span></div>
               </div>)}</div> : null}</td>)}
             </tr>
             <tr>

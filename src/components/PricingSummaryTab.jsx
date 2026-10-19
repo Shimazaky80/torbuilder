@@ -76,7 +76,7 @@ export const PricingSummaryTab = ({
         <table className="ps-grid ps-summary-grid">
           <tbody>
             <tr>
-              <td className="ps-grid-label">Travel season<small>full width</small></td>
+              <td className="ps-grid-label">Travel season</td>
               <td colSpan={visibleCodes.length}>
                 <div className="ps-datecell">
                   <div className="ps-sum-season-line">{period
@@ -106,7 +106,7 @@ export const PricingSummaryTab = ({
               </td>)}
             </tr>
             <tr>
-              <td className="ps-grid-label">Single supplement<small>full width</small></td>
+              <td className="ps-grid-label">Single supplement</td>
               <td colSpan={visibleCodes.length}>
                 <div className="ps-flat-cell ps-flat-amber">{money(singleSupplement, currency)}
                   <span className="ps-flat-from">per person · added when you want your own room · identical for every option</span>
@@ -114,7 +114,7 @@ export const PricingSummaryTab = ({
               </td>
             </tr>
             <tr>
-              <td className="ps-grid-label">Child price<small>full width</small></td>
+              <td className="ps-grid-label">Child price</td>
               <td colSpan={visibleCodes.length}>
                 <div className="ps-flat-cell ps-flat-child">
                   {money(childPrice, currency)}

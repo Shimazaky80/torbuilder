@@ -1155,6 +1155,10 @@ check('a thirty-nine-seat column seeds thirteen-twenty-six-thirty-nine',
   seedBandsForSeats(39).join(','), '13,26,39');
 check('bigger bands never exceed the seats', seedBandsForSeats(8).every((pax) => pax <= 8), true);
 check('band pax are positive', seedBandsForSeats(4).every((pax) => pax >= 1), true);
+check('a band is never smaller than two travellers, so the vehicle keeps its margin',
+  seedBandsForSeats(8).every((pax) => pax >= 2), true);
+check('a five-seat column seeds two, four and five, never a party of one',
+  seedBandsForSeats(5).join(','), '2,4,5');
 
 const poolTransfer = {
   id: 'pool-transfer', name: 'Park transfer', category: 'Transfers', max_occupancy: 3,

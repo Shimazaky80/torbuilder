@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Backpack, Baby, CalendarDays, Check, ChevronDown, Download, FileText,
@@ -19,6 +19,7 @@ import {
   normaliseChildAgeRange,
   PACKAGE_MAX_CHILD_AGE,
   packageBandLabel,
+  packageBandCapacityError,
   packageBandPax,
   packageChildAgeRange,
   packageCurrencyFor,
@@ -429,6 +430,30 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
     (service) => accommodationRoomPlan(service, itemForService(service), autoPattern),
     [itemForService, autoPattern]
   );
+
+  /* Maximum capacity guard (mirrors the itinerary builder): a band wider than the largest
+     vehicle priced for it cannot be served. The same message the pricing maths produces is
+     raised as an alert, pointing at the two ways out - a bigger vehicle size in the package's
+     drop down, or the vehicle capacity set when the package was created. Re-raising is keyed
+     on the message set, so typing notes or a clean load does not nag. */
+  const bandCapacityAlertsRef = useRef('');
+  useEffect(() => {
+    if (!days.length || !mergedBands.length) {
+      bandCapacityAlertsRef.current = '';
+      return;
+    }
+    const messages = mergedBands
+      .map((band) => packageBandCapacityError(days, library, band))
+      .filter(Boolean);
+    const key = messages.join('|');
+    if (key && key !== bandCapacityAlertsRef.current) {
+      messages.slice(0, 3).forEach((message) => showToast(
+        `${message} Pick a bigger vehicle size that seats the whole band, either from the vehicle drop down in the package or by choosing a larger vehicle when the package was created.`,
+        'warning'
+      ));
+    }
+    bandCapacityAlertsRef.current = key;
+  }, [days, library, mergedBands, showToast]);
 
 const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextPax = mergedBands, nextForm = form) => {
    if (!companyId || !pkg) return false;

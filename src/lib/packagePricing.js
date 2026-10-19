@@ -1025,15 +1025,27 @@ export const childRateForBand = (rate, band, itemAgeRanges = [], sharing = 0) =>
   return childRateForAge(rate, Number(band?.ageFrom), Array.isArray(itemAgeRanges) ? itemAgeRanges : [], sharing);
 };
 
-/* The band sizes a vehicle column is offered at (D20): step = round(size ÷ 3), bands
-   [step, 2×step, size]; a small vehicle gets just two bands. Free to override in the
-   grid, capped at the vehicle's seats. */
+/* The band sizes a vehicle column is offered at (D20): step = round(size / 3), bands
+   [step, 2*step, size]; a small vehicle gets just two bands. Free to override in the
+   grid, capped at the vehicle's seats. Minimum traveller count per band is 2 so the
+   tenant never prices a party smaller than two and under-covers the vehicle. */
 export const seedBandsForSeats = (seats) => {
   const capacity = Math.max(1, Math.floor(numberOf(seats)));
-  if (capacity <= 3) return [...new Set([2, capacity].filter((pax) => pax >= 1 && pax <= capacity))];
-  const step = Math.max(1, Math.round(capacity / 3));
-  return [...new Set([step, Math.min(capacity, Math.max(1, 2 * step)), capacity])]
-    .filter((pax) => pax >= 1 && pax <= capacity);
+  if (capacity < 2) return [capacity];
+  const bands = [];
+  if (capacity <= 4) {
+    bands.push(2, capacity);
+  } else {
+    const step = Math.max(2, Math.min(capacity, Math.round(capacity / 3)));
+    bands.push(step, Math.min(capacity, Math.max(step, 2 * step)), capacity);
+  }
+  const dedup = [];
+  for (const p of bands) {
+    const v = Math.min(capacity, Math.max(2, Math.floor(p)));
+    if (v < 2) continue;
+    if (!dedup.includes(v)) dedup.push(v);
+  }
+  return dedup.sort((a, b) => a - b);
 };
 
 /* The annual price pool of the whole package, split into one column per vehicle type
