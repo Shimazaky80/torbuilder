@@ -190,7 +190,7 @@ export const PricingSeasonsTab = ({
           <label><span>Starts</span><input type="date" value={activePeriod?.valid_from || ''} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'valid_from', event.target.value)} /></label>
           <label><span>Ends</span><input type="date" value={activePeriod?.valid_to || ''} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'valid_to', event.target.value)} /></label>
           <label><span>Accommodation per person <small>sharing</small></span><input type="number" min="0" step="0.01" value={activePeriod?.accommodation_per_person ?? ''} placeholder={derivedAccommodation.total != null ? `derived: ${money(derivedAccommodation.total, currency)}` : 'derived from the season below'} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'accommodation_per_person', event.target.value === '' ? null : Number(event.target.value))} /></label>
-          <label><span>Single supplement <small>per person</small></span><input type="number" min="0" step="0.01" value={activePeriod?.single_supplement ?? ''} placeholder={derivedSingleSupplement.total != null ? `derived: ${money(derivedSingleSupplement.total, currency)}` : '0.00'} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'single_supplement', event.target.value === '' ? null : Number(event.target.value))} /></label>
+          <label><span>Single supplement <small>per person</small></span><input type="number" min="0" step="0.01" value={hasSupplementOverride ? Number(activePeriod.single_supplement) : ''} placeholder={derivedSingleSupplement.total != null ? `derived: ${money(derivedSingleSupplement.total, currency)}` : '0.00'} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'single_supplement', event.target.value === '' ? null : Number(event.target.value))} /></label>
         </div>
         {!resolvedSeason && <button type="button" className="ps-icon-button" aria-label={`Remove ${seasonLabel(activePeriod, activePeriodIndex)}`} onClick={() => onRemovePeriod(activePeriodIndex)}><Trash2 size={15} /> Remove this season</button>}
       </div>}
@@ -266,7 +266,7 @@ export const PricingSeasonsTab = ({
               <td colSpan={slots.length}>
                 <div className="ps-flat-cell ps-flat-amber">{money(singleSupplement, currency)}
                   {supplementDerived && <span className="ps-stamp ps-stamp-ok">derived</span>}
-                  {activePeriod?.single_supplement != null && <span className="ps-stamp">locked on the season</span>}
+                  {hasSupplementOverride && <span className="ps-stamp">locked on the season</span>}
                   <span className="ps-flat-from">per person · identical for every vehicle column · charged only on the accommodation · switches with the season</span>
                 </div>
               </td>
@@ -311,14 +311,14 @@ export const PricingSeasonsTab = ({
           <h4>Single supplement <span className="ps-stamp ps-stamp-chg">changes</span></h4>
           <div className="ps-ov-big">{money(singleSupplement, currency)}
             {supplementDerived && <span className="ps-stamp ps-stamp-ok">derived</span>}
-            {activePeriod?.single_supplement != null && <span className="ps-stamp">locked on the season</span>}
+            {hasSupplementOverride && <span className="ps-stamp">locked on the season</span>}
           </div>
           <div className="ps-ov-note">Per person, <b>full width &mdash; identical for every vehicle column</b>, and charged only on the accommodation &mdash; every other line is shared unit cost. Shown for {activePeriod ? <b>{seasonLabel(activePeriod, activePeriodIndex)}</b> : 'the active season'}.
-            {activePeriod?.single_supplement == null
-              ? (derivedSingleSupplement.total != null
+            {hasSupplementOverride
+              ? ' Locked on this season; clear the field to read it from the accommodation again.'
+              : (derivedSingleSupplement.total != null
                 ? <> Read off the accommodation line{derivedSingleSupplement.rows.length === 1 ? '' : 's'}: <b>{derivedSingleSupplement.rows.map((row) => row.name).join(', ')}</b>. Override it in the editor to lock the season's own figure.</>
-                : ' Enter a figure here to publish a supplement.')
-              : ' Locked on this season; clear the field to read it from the accommodation again.'}</div>
+                : ' Enter a figure here to publish a supplement.')}</div>
         </div>
         <div className="ps-ov ps-ov-locked">
           <h4>Unit pool (vehicle + shared)<span className="ps-stamp ps-stamp-same">annual</span></h4>

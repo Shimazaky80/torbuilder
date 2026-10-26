@@ -434,8 +434,14 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
   /* Maximum capacity guard (mirrors the itinerary builder): a band wider than the largest
      vehicle priced for it cannot be served. The same message the pricing maths produces is
      raised as an alert, pointing at the two ways out - a bigger vehicle size in the package's
-     drop down, or the vehicle capacity set when the package was created. Re-raising is keyed
-     on the message set, so typing notes or a clean load does not nag. */
+     drop down, or the vehicle capacity set when the package was created. The alert is a toast
+     and nothing else: it never blocks a save and it never sits on the band, because a package
+     is saved as it stands and the operator is told what to look at. Re-raising is keyed on the
+     message set, so typing notes or a clean load does not nag.
+
+     The bands checked here are the package's own saved party sizes. The minimum of two
+     travellers is a rule for the working grid, so a band that was saved with fewer (a legacy
+     row, or a party of one) keeps its own size and is judged on its own merits. */
   const bandCapacityAlertsRef = useRef('');
   useEffect(() => {
     if (!days.length || !mergedBands.length) {
@@ -627,12 +633,16 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           return rooms ? { ...service, quantity: rooms } : service;
         })
       }));
+      /* The season keeps the figure the row holds: the column is NOT NULL with a default of
+         zero, so a blank field is stored as zero rather than null. Zero reads as "no override"
+         everywhere (the figure is derived from the accommodation instead), which is what the
+         operator meant by clearing the field. */
       const savedPeriods = validPeriods.map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({
         valid_from,
         valid_to,
         name,
         accommodation_per_person,
-        single_supplement
+        single_supplement: single_supplement ?? 0
       }));
       setDays(savedDays);
       setPeriods(savedPeriods);

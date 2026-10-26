@@ -58,11 +58,11 @@ import {
   isOverlandGuide
 } from '../lib/guidePricing';
 import { accommodationHasChoices, ratesForOption, rateById, seasonForRate } from '../lib/accommodationOptions';
-import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination } from '../lib/roomAllocationHelper';
+import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount } from '../lib/roomAllocationHelper';
 import { resolveSeasonForTravel, applyProtectionToRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
 import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
 import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
-import { contractedServiceTotal, contractPaxRate, repriceServicesForPax, sidebarLibraryRate, supplierPaymentDocumentStatus } from '../lib/servicePricing';
+import { contractedServiceTotal, contractPaxRate, repriceServicesForPax, servicePax, sidebarLibraryRate, supplierPaymentDocumentStatus } from '../lib/servicePricing';
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import { LIBRARY_ITEM_LIGHT_FIELDS, LIBRARY_ITEM_BASE_FIELDS } from '../lib/libraryItemFields';
 import { postInvoice, postReceipt, scaleInvoiceLines } from '../lib/financeJournal';
@@ -102,22 +102,16 @@ const toISODate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
 const isAccommodationItem = (item) => /accommodation/i.test(item?.category || '');
 
-const paxForService = (service, fallbackPax) => {
-  if (/accommodation/i.test(service?.category || '')) {
-    const allocated = allocatedTravellerCount(service.roomAllocations);
-    if (allocated > 0) return allocated;
-  }
-  return Math.max(0, Number(fallbackPax) || 0);
-};
+const paxForService = (service, fallbackPax, shareContext) => servicePax(service, fallbackPax, shareContext);
 
-const storedServicePricing = (row, fallbackPax, markup) => {
+const storedServicePricing = (row, fallbackPax, markup, shareContext = null) => {
   const originalBuyPP = Number(row.unit_cost) || 0;
   const roomAllocations = Array.isArray(row.room_allocations) ? row.room_allocations : [];
-  const allocatedPax = /accommodation/i.test(row.category || '')
-    ? allocatedTravellerCount(roomAllocations)
-    : 0;
+  const isAccommodation = /accommodation/i.test(row.category || '');
+  const allocatedPax = isAccommodation ? allocatedTravellerCount(roomAllocations) : 0;
   const savedPax = Number(row.pax) || Number(fallbackPax) || 0;
-  const hasLegacyWholePartyPricing = allocatedPax > 0 && savedPax > allocatedPax;
+  const staffAccommodation = isAccommodation && hasStaffAccommodation(roomAllocations);
+  const hasLegacyWholePartyPricing = !staffAccommodation && allocatedPax > 0 && savedPax > allocatedPax;
   const savedTotalBuy = Number(row.total_buy);
   const savedTotalSell = Number(row.total_sell);
   const buyPP = hasLegacyWholePartyPricing && savedTotalBuy > 0
@@ -126,10 +120,15 @@ const storedServicePricing = (row, fallbackPax, markup) => {
   const sellPP = hasLegacyWholePartyPricing && savedTotalSell > 0
     ? round2(savedTotalSell / allocatedPax)
     : round2(buyPP * (1 + markup / 100));
+  /* Staff beds are carried by the paying clients, so the stored divisor (the
+     paying clients it was priced on) is the truthful one, not the bed count. */
+  const pax = staffAccommodation
+    ? (Number(row.pax) || Number(shareContext?.payingClients) || allocatedPax || savedPax)
+    : (allocatedPax || savedPax);
   return {
     buyPP,
     sellPP,
-    pax: allocatedPax || savedPax
+    pax
   };
 };
 
@@ -1010,7 +1009,7 @@ const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) =>
   const symbol = currencySymbol || 'R';
   const paymentStatus = supplierPaymentDocumentStatus(sv?.supplierPaid === true);
   const supplier = repairText(sv?.supplierName || sv?.supplier_name || 'Supplier');
-  const servicePax = paxForService(sv, paxCount);
+  const linePax = paxForService(sv, paxCount);
   const total = contractedServiceTotal(sv, paxCount);
   const rooms = (Array.isArray(sv?.roomAllocations) ? sv.roomAllocations : [])
     .filter((rm) => (rm.allocatedTravellers || []).length > 0);
@@ -1018,9 +1017,9 @@ const proofOfPaymentHtml = (sv, day, meta, currencySymbol, paxCount, billing) =>
   const paidAt = sv?.supplierPaidAt ? formatDateLong(String(sv.supplierPaidAt).slice(0, 10)) : '';
   const breakdown = /accommodation/i.test(sv?.category || '') && rooms.length
     ? `${rooms.length} room${rooms.length === 1 ? '' : 's'} \u00d7 ${contractMoney(round2(total / rooms.length), symbol)}`
-    : servicePax > 1
-      ? `${contractMoney(sv?.buyPP, symbol)} \u00d7 ${servicePax} pax`
-      : `${servicePax} pax`;
+    : linePax > 1
+      ? `${contractMoney(sv?.buyPP, symbol)} \u00d7 ${linePax} pax`
+      : `${linePax} pax`;
 
   const header = [
     `<h1>${paymentStatus.heading}</h1>`,
@@ -1383,6 +1382,11 @@ export const ItineraryBuilder = () => {
   };
   const markupPct = Number(meta.client?.markup_percentage) || 0;
   const currentDay = days[selectedDayIndex] || null;
+
+  const shareContext = useMemo(() => {
+    const allAllocations = (days || []).flatMap((d) => (d.services || []).flatMap((s) => s.roomAllocations || []));
+    return buildShareContext({ travellers: meta.travellers || [], allocations: allAllocations });
+  }, [meta.travellers, days]);
   const stage = normaliseStatus(meta.status);
   const itineraryDocAllowed = stage === 'quotation' || stage === 'provisional';
   const isProvisional = stage === 'provisional';
@@ -1481,12 +1485,12 @@ export const ItineraryBuilder = () => {
       (d.services || []).forEach((sv) => {
         /* Optional / alternative services are excluded from the client total. */
         if (sv.isOptional) return;
-        const line = (Number(sv.sellPP) || 0) * paxForService(sv, paxCount);
+        const line = (Number(sv.sellPP) || 0) * paxForService(sv, paxCount, shareContext);
         t += line;
       });
     });
     return round2(t);
-  }, [days, paxCount, defaultTaxRate]);
+  }, [days, paxCount, defaultTaxRate, shareContext]);
 
   /* VAT embedded in the client total — used to show Subtotal (Excl. VAT) /
      VAT / TOTAL DUE (INCL. VAT) on the client-facing invoice drafts. */
@@ -1495,24 +1499,24 @@ export const ItineraryBuilder = () => {
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
         if (sv.isOptional) return;
-        const line = (Number(sv.sellPP) || 0) * paxForService(sv, paxCount);
+        const line = (Number(sv.sellPP) || 0) * paxForService(sv, paxCount, shareContext);
         const rate = numOr(sv.taxRate, defaultTaxRate);
         t += vatOfInclusive(line, rate);
       });
     });
     return round2(t);
-  }, [days, paxCount, defaultTaxRate]);
+  }, [days, paxCount, defaultTaxRate, shareContext]);
 
   const itineraryCostTotal = useMemo(() => {
     let c = 0;
     days.forEach((d) => {
       (d.services || []).forEach((sv) => {
         if (sv.isOptional) return;
-        c += (Number(sv.buyPP) || 0) * paxForService(sv, paxCount);
+        c += (Number(sv.buyPP) || 0) * paxForService(sv, paxCount, shareContext);
       });
     });
     return round2(c);
-  }, [days, paxCount]);
+  }, [days, paxCount, shareContext]);
 
   /* -- Issued-invoice state for this itinerary + currency ------------------ */
   const invoicesInCurrency = useMemo(
@@ -1666,10 +1670,18 @@ export const ItineraryBuilder = () => {
   }, []);
 
   const fetchItineraryItemIds = useCallback(async (iid) => {
+    /* itinerary_day_items has no itinerary_id column (it hangs off the day), so
+       the days are resolved first and the items filtered by their day ids. */
+    const { data: dayRows } = await supabase
+      .from('itinerary_days')
+      .select('id')
+      .eq('itinerary_id', iid);
+    const dayIds = (dayRows || []).map((d) => d.id).filter(Boolean);
+    if (!dayIds.length) return [];
     const { data } = await supabase
       .from('itinerary_day_items')
       .select('item_id')
-      .eq('itinerary_id', iid);
+      .in('itinerary_day_id', dayIds);
     return [...new Set((data || []).map((r) => r.item_id).filter(Boolean))];
   }, []);
 
@@ -1913,6 +1925,13 @@ export const ItineraryBuilder = () => {
           consultantName: it.consultant_name || prev.consultantName || ''
         }));
       }
+      /* The persisted travellers are the authority for the divisors used to
+         reload guide and staff-room lines, even before setMeta lands. */
+      const loadedShare = buildShareContext({
+        travellers: Array.isArray(it?.travellers) && it.travellers.length
+          ? it.travellers
+          : (meta.travellers || [])
+      });
       const { data: dayRows } = await supabase
         .from('itinerary_days')
         .select('*, itinerary_day_items(*)')
@@ -1930,7 +1949,8 @@ export const ItineraryBuilder = () => {
             const pricing = storedServicePricing(
               { ...ii, category: ii.category || '', room_allocations: ii.room_allocations },
               (Number(meta.numAdults) || 0) + (Number(meta.numChildren) || 0),
-              m
+              m,
+              loadedShare
             );
             const ccy = ii.currency_code || 'ZAR';
             const taxed = taxAppliesForCurrency(ccy);
@@ -1964,8 +1984,9 @@ export const ItineraryBuilder = () => {
               roomType: ii.room_type || '',
               destinationArea: ii.destination_area || '',
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
-              roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
+              roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations.map(a => ({ ...a, roomType: a.roomType || a.room_type || (a.staffRole || a.staff_role ? 'staff' : '') })) : [],
               guideServiceTypes: Array.isArray(ii.guide_service_types) ? ii.guide_service_types : [],
+              guide_needed: ii.guide_needed !== false,
               guideOnly: ii.guide_only === true,
               guideForKey: ii.guide_for_item_key || null,
               guideChargeType: ii.guide_charge_type || null,
@@ -2183,7 +2204,7 @@ repeatGroupId: ii.repeat_group_id || null,
       (d.services || []).forEach((sv) => {
         const code = sv.currencyCode || 'ZAR';
         if (!byCurr[code]) byCurr[code] = { buy: 0, sell: 0, tax: 0, taxIn: 0, taxNet: 0, count: 0, taxByLabel: {}, services: [], optBuy: 0, optSell: 0, optTax: 0, optTaxByLabel: {}, optionalServices: [] };
-        const servicePax = paxForService(sv, paxCount);
+        const servicePax = paxForService(sv, paxCount, shareContext);
         const line = (Number(sv.sellPP) || 0) * servicePax;
         const buyLine = (Number(sv.buyPP) || 0) * servicePax;
         const rate = numOr(sv.taxRate, defaultTaxRate);
@@ -2293,7 +2314,7 @@ repeatGroupId: ii.repeat_group_id || null,
         }))
       };
     });
-  }, [days, paxCount, currencies, defaultTaxRate]);
+  }, [days, paxCount, currencies, defaultTaxRate, shareContext]);
 
   /* -- Day / pricing helpers (called from handlers, not render) ----------- */
 
@@ -2321,7 +2342,7 @@ repeatGroupId: ii.repeat_group_id || null,
     let taxOut = 0;
     let taxIn = 0;
     (day.services || []).forEach((sv) => {
-      const servicePax = paxForService(sv, paxCount);
+      const servicePax = paxForService(sv, paxCount, shareContext);
       const mergeLine = (Number(sv.sellPP) || 0) * servicePax;
       const rate = numOr(sv.taxRate, defaultTaxRate);
       buy += (Number(sv.buyPP) || 0) * servicePax;
@@ -2338,7 +2359,7 @@ repeatGroupId: ii.repeat_group_id || null,
       total: round2(sell),
       count: (day.services || []).length
     };
-  }, [paxCount, defaultTaxRate]);
+  }, [paxCount, defaultTaxRate, shareContext]);
 
   const createService = useCallback((dayIndex, item, via, options = {}) => {
     if (completedRef.current) return;
@@ -2409,11 +2430,18 @@ repeatGroupId: ii.repeat_group_id || null,
        trip and divided across the party so the day total comes back to the flat
        charge no matter how many travellers are on it. */
     const guideServiceTypes = isGuideItem(item) ? guideSelection(options.guideServiceTypes) : [];
-    const guideCharge = guideServiceTypes.length ? guideChargeTotal(pricedRate || {}, guideServiceTypes) : null;
+    /* A guide line (or one of its detail lines) shares its flat per-trip figure
+       across the clients + tour leaders, never the tour guide. */
+    const guideNeeded = options.guideNeeded !== false;
+    const isGuideLine = guideServiceTypes.length > 0 || options.guideOnly === true || !!options.guideForKey;
+    const guideDivisor = isGuideLine
+      ? (Number(shareContext?.travellersPlusTl) > 0 ? shareContext.travellersPlusTl : Math.max(1, paxCount))
+      : paxCount;
+    const guideCharge = guideServiceTypes.length && guideNeeded ? guideChargeTotal(pricedRate || {}, guideServiceTypes) : null;
     const detailCharge = Number.isFinite(Number(options.guideDetailCharge)) ? Number(options.guideDetailCharge) : null;
     const pinnedCharge = guideCharge !== null ? guideCharge : detailCharge;
     const effBuyPP = pinnedCharge !== null
-      ? (paxCount > 0 ? round2(pinnedCharge / paxCount) : round2(pinnedCharge))
+      ? (guideDivisor > 0 ? round2(pinnedCharge / guideDivisor) : round2(pinnedCharge))
       : buyPP;
     /* Library items keep the vehicle in middle_category (transfers / tours) and
        the pax capacity in max_occupancy; meal plans live on the per-season
@@ -2437,8 +2465,9 @@ repeatGroupId: ii.repeat_group_id || null,
       buyPP: effBuyPP,
       markup,
       sellPP: round2(effBuyPP * (1 + markup / 100)),
-      pax: paxCount,
+      pax: guideDivisor,
       quantity: 1,
+      guide_needed: guideNeeded,
       descOverride: '',
       taxRate: taxApplies ? defaultTaxRate : 0,
       taxLabel: taxApplies ? defaultTaxLabel : 'No VAT',
@@ -2584,7 +2613,7 @@ repeatGroupId: ii.repeat_group_id || null,
     if (guideServiceTypes.length && isOverlandGuide(guideServiceTypes)) {
       setGuideDetailsModal({ dayIndex, guideKey: svc.itemId, guideName: item.name, defaultValues: {} });
     }
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow.start, travelWindow.end, priceProtectionPercent, meta.numChildren, setSurchargeRepeatPrompt, setGuideDetailsModal]);
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow.start, travelWindow.end, priceProtectionPercent, meta.numChildren, setSurchargeRepeatPrompt, setGuideDetailsModal, shareContext]);
 
   /* The unlinked per-night fee was added optimistically at a repeat count of 1
      because nothing was known at the time; once the operator answers, the line
@@ -3172,7 +3201,12 @@ repeatGroupId: ii.repeat_group_id || null,
     if (!roomModalState.serviceKey || roomModalState.dayIndex === null) return;
     const dayIdx = roomModalState.dayIndex;
     const svKey = roomModalState.serviceKey;
-    const currentPax = Math.max(1, allocatedTravellerCount(roomAllocations) || paxCount);
+    /* Staff beds (tour leader / guide) are absorbed by the paying clients, so
+       the accommodation total is divided across the clients, not every bed. */
+    const paying = payingClientCount(meta.travellers || []);
+    const currentPax = hasStaffAccommodation(roomAllocations) && paying > 0
+      ? paying
+      : Math.max(1, allocatedTravellerCount(roomAllocations) || paxCount);
     const newBuyPP = round2(calculatedBuy / currentPax);
     const newSellPP = round2(calculatedSell / currentPax);
 
@@ -3243,7 +3277,10 @@ repeatGroupId: ii.repeat_group_id || null,
   const applyRoomAllocationToRelated = useCallback((applyToAll) => {
     if (!roomApplyPrompt) return;
     if (applyToAll) {
-      const currentPax = Math.max(1, allocatedTravellerCount(roomApplyPrompt.roomAllocations) || paxCount);
+      const paying = payingClientCount(meta.travellers || []);
+      const currentPax = hasStaffAccommodation(roomApplyPrompt.roomAllocations) && paying > 0
+        ? paying
+        : Math.max(1, allocatedTravellerCount(roomApplyPrompt.roomAllocations) || paxCount);
       const buyPP = round2(roomApplyPrompt.calculatedBuy / currentPax);
       const sellPP = round2(roomApplyPrompt.calculatedSell / currentPax);
       setDays((prev) => prev.map((day) => ({
@@ -3255,7 +3292,7 @@ repeatGroupId: ii.repeat_group_id || null,
     }
     setRoomApplyPrompt(null);
     showToast(applyToAll ? 'Room allocation applied to all repeated days' : 'Room allocation saved for this day only', 'success');
-  }, [roomApplyPrompt, paxCount, showToast, setDays ]);
+  }, [roomApplyPrompt, paxCount, meta.travellers, showToast, setDays ]);
 
   /* Who already has a bed that night in another included property. Handed to
      the room modal so a split group only has to bed the travellers who are
@@ -3510,7 +3547,7 @@ return !!sv.time; /* activities / meals / other */
         services: (rd.itinerary_day_items || []).map((ii) => {
           const mRaw = Number(ii.markup_percentage);
           const m = Number.isFinite(mRaw) ? mRaw : (Number(markupPct) || 0);
-          const pricing = storedServicePricing(ii, paxCount, m);
+          const pricing = storedServicePricing(ii, paxCount, m, shareContext);
           const ccy = ii.currency_code || currencyCode;
           const taxed = taxAppliesForCurrency(ccy);
           return {
@@ -3542,6 +3579,7 @@ return !!sv.time; /* activities / meals / other */
               maxOccupancy: ii.max_occupancy !== null && ii.max_occupancy !== undefined ? Number(ii.max_occupancy) : '',
             roomAllocations: Array.isArray(ii.room_allocations) ? ii.room_allocations : [],
             guideServiceTypes: Array.isArray(ii.guide_service_types) ? ii.guide_service_types : [],
+            guide_needed: ii.guide_needed !== false,
             guideOnly: ii.guide_only === true,
             guideForKey: ii.guide_for_item_key || null,
             guideChargeType: ii.guide_charge_type || null,
@@ -3571,7 +3609,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency, setDays ]);
+  }, [copySourceId, copyInsertDay, days, currencyCode, markupPct, paxCount, shareContext, normalizeDays, applyDateExtension, nextId, availableItineraries, showToast, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency, setDays ]);
 
   const handleCopy = useCallback(() => {
     if (!meta.itineraryId) {
@@ -4268,9 +4306,9 @@ return !!sv.time; /* activities / meals / other */
           rate_basis: s.basis || 'per_person',
           item_price_per_person: s.sellPP || 0,
           quantity: s.quantity || 1,
-          pax: paxForService(s, paxCount),
-          total_buy: round2((s.buyPP || 0) * paxForService(s, paxCount)),
-          total_sell: round2((s.sellPP || 0) * paxForService(s, paxCount)),
+          pax: paxForService(s, paxCount, shareContext),
+          total_buy: round2((s.buyPP || 0) * paxForService(s, paxCount, shareContext)),
+          total_sell: round2((s.sellPP || 0) * paxForService(s, paxCount, shareContext)),
           tax_rate: numOr(s.taxRate, 15),
           tax_label: s.taxLabel || 'VAT',
           service_time: s.time || null,
@@ -4281,6 +4319,7 @@ return !!sv.time; /* activities / meals / other */
           vehicle_type: s.vehicleType || null,
           capacity: s.capacity !== '' && s.capacity !== null && s.capacity !== undefined ? Number(s.capacity) : null,
           room_type: s.roomType || null,
+          guide_needed: s.guide_needed !== false,
           destination_area: s.destinationArea || null,
           max_occupancy: s.maxOccupancy !== '' && s.maxOccupancy !== null && s.maxOccupancy !== undefined ? Number(s.maxOccupancy) : null,
           room_allocations: Array.isArray(s.roomAllocations) ? s.roomAllocations : [],
@@ -4359,7 +4398,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [companyId, meta, currencyCode, days, paxCount, showToast, isReadOnly, isProvisional, EDIT_LOCK_MESSAGE, setDaysRaw]);
+  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, EDIT_LOCK_MESSAGE, setDaysRaw]);
 
   const handleStatusChange = useCallback(async (nextStatus) => {
     setStatusMenuOpen(false);
@@ -5175,6 +5214,7 @@ return !!sv.time; /* activities / meals / other */
         libraryItems,
         paxCount: (Number(payload.numAdults) || 0) + (Number(payload.numChildren) || 0),
         childCount: Number(payload.numChildren) || 0,
+        travellers: payload.travellers || meta.travellers || [],
         travelWindow: {
           start: payload.travelStart || nextDays[0]?.date || '',
           end: payload.travelEnd || nextDays[nextDays.length - 1]?.date || ''
@@ -6160,7 +6200,7 @@ const missing = !sv.confirmationNumber ||
                       </div>
                     )}
                     {(currentDay.services || []).map((sv) => {
-                      const servicePax = paxForService(sv, paxCount);
+                      const servicePax = paxForService(sv, paxCount, shareContext);
                       const sellLine = round2((Number(sv.sellPP) || 0) * servicePax);
                       return (
                         <div
@@ -6418,7 +6458,7 @@ const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.
                   ))}
                   {!meta.travellers?.length && (
                     <tr>
-                      <td colSpan="5" style={{ color: '#94a3b8' }}>No traveller details recorded.</td>
+                      <td colSpan="6" style={{ color: '#94a3b8' }}>No traveller details recorded.</td>
                     </tr>
                   )}
                 </tbody>
@@ -7450,7 +7490,7 @@ const roomCheck = validateAccommodationServiceInDay(sv, days[selectedDayIndex]?.
 
                     <div style={{ padding: '0.35rem 0' }}>
                       {payable.map(({ sv, day, dayIndex }) => {
-                        const amount = round2((Number(sv.buyPP) || 0) * paxForService(sv, paxCount));
+                        const amount = round2((Number(sv.buyPP) || 0) * paxForService(sv, paxCount, shareContext));
                         const paid = !!sv.supplierPaid;
                         return (
                           <div

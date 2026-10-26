@@ -47,8 +47,10 @@ export const usePricingGrid = (vehicleTypes = [], storedColumns = []) => {
     const out = {};
     for (const code of usedCodes) {
       const seats = seatsOf(code, vehicleTypes);
-      /* A band is never smaller than two travellers (margin guard), but it can never
-         exceed the vehicle's seats either. */
+      /* A band in the working grid is never smaller than two travellers (margin guard), but
+         it can never exceed the vehicle's seats either. The guard is a rule of this grid: the
+         party sizes a package has already saved are read from their own rows and are never
+         rewritten by it. */
       out[code] = (bandEdits[code] || seedBandsForSeats(seats))
         .map((pax) => seats ? Math.min(seats, Math.max(2, Math.floor(pax))) : Math.max(2, Math.floor(pax)));
     }

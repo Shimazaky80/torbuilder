@@ -93,7 +93,7 @@ const moneyLoad = (value) => {
    the read-only view has nothing to hide. */
 const emptySeasonMoney = () => ({
   roomRate: '', singleRoomRate: '', price1Adult: '', price2Adults: '', price3PlusAdults: '',
-  childRates: {}, singleSupplement: '', childDiscount: '', guideRate: '', driverRate: '',
+  childRates: {}, singleSupplement: '', childDiscount: '', guideRate: '', driverRate: '', tourLeaderRate: '',
   guideTransferRate: '', guideHalfDayRate: '', guideFullDayRate: '', guideOverlandRate: '', guideDinnerRate: '',
   guideMealPlan: 'Bed & Breakfast', driverMealPlan: 'Bed & Breakfast',
   adultRate: '', childRate: '', fastTrackAdultRate: '', fastTrackChildRates: {}, tiers: [],
@@ -578,6 +578,9 @@ export const LibraryItems = () => {
         { adults: 2, maxChildren: 0 }
       ]),
       guideDriverOffered: false,
+  tourLeaderRoomOffered: false,
+  tourLeaderMinRooms: 1,
+  tourLeaderRate: '',
       driverRequired: false,
       driverMeals: [],
       driverAccommodation: false,
@@ -1827,9 +1830,12 @@ export const LibraryItems = () => {
             ? [{ id: 'child', name: `Child (up to ${parseInt(itemData.childAge) || 12} yrs)`, ageFrom: 0, ageTo: (parseInt(itemData.childAge) || 12) }]
             : (itemData.childAgeRanges || []),
           images: itemData.imageUrls,
-          ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
-            ? { guide_driver_room_offered: !!itemData.guideDriverOffered }
-            : {}),
+                ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
+                  ? { guide_driver_room_offered: !!itemData.guideDriverOffered }
+                  : {}),
+                ...(itemData.category === 'Accommodation'
+                  ? { tour_leader_room_offered: !!itemData.tourLeaderRoomOffered, tour_leader_min_rooms: parseInt(itemData.tourLeaderMinRooms) || 1 }
+                  : {}),
           ...(dbFeatures.feeType
             ? {
                 /* Base categories no longer carry a bundled fee: entrance fees
@@ -2107,9 +2113,12 @@ export const LibraryItems = () => {
               rate_basis: isFlatRoom ? 'per_room' : 'per_person_sharing',
               child_sharing_policy: isFlatRoom ? 'room_rate_divided' : 'sharing_with_adults',
               unit_price: isFlatRoom ? roomRate : (p2Adults ?? p1Adult ?? null),
-              ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
-                ? { guide_rate: moneyOrNull(s.guideRate), driver_rate: moneyOrNull(s.driverRate) }
-                : {}),
+                ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
+                  ? { guide_rate: moneyOrNull(s.guideRate), driver_rate: moneyOrNull(s.driverRate) }
+                  : {}),
+                ...(itemData.category === 'Accommodation'
+                  ? { tour_leader_rate: moneyOrNull(s.tourLeaderRate) }
+                  : {}),
               ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
                 ? { guide_meal_plan: s.guideMealPlan || itemData.mealPlan, driver_meal_plan: s.driverMealPlan || itemData.mealPlan }
                 : {}),
@@ -2319,6 +2328,8 @@ export const LibraryItems = () => {
         childDiscount: isFlat ? '' : moneyLoad(r.child_discount),
         guideRate: moneyLoad(r.guide_rate),
         driverRate: moneyLoad(r.driver_rate),
+        tourLeaderRate: moneyLoad(r.tour_leader_rate),
+  tourLeaderRate: moneyLoad(r.tour_leader_rate),
         guideMealPlan: r.guide_meal_plan || r.meal_plan || 'Bed & Breakfast',
         driverMealPlan: r.driver_meal_plan || r.meal_plan || 'Bed & Breakfast',
         entranceFeePerson: moneyLoad(r.entrance_fee_per_person),
@@ -2408,6 +2419,8 @@ export const LibraryItems = () => {
         ? item.sharing_capacity_rules
         : ensureSharingRules(maxAdults, maxOcc, []),
       guideDriverOffered: item.guide_driver_room_offered === true,
+    tourLeaderRoomOffered: item.tour_leader_room_offered === true,
+    tourLeaderMinRooms: item.tour_leader_min_rooms || 1,
       driverRequired: isDriverEligibleCategory(item.category) && item.driver_required === true,
       driverMeals: isDriverEligibleCategory(item.category) ? ((item.driver_meals || '').split(',').filter(Boolean)) : [],
       driverAccommodation: isDriverEligibleCategory(item.category) && item.driver_accommodation === true,
@@ -3229,6 +3242,58 @@ export const LibraryItems = () => {
                         />
                         Hotel offers Guide/Driver rate
                       </label>
+                    </div>
+                  )}
+                  {item.category === 'Accommodation' && (
+                    <div style={{
+                      background: item.tourLeaderRoomOffered ? '#f0fdfa' : '#f8fafc',
+                      border: item.tourLeaderRoomOffered ? '1px solid #99f6e4' : '1px solid #e2e8f0',
+                      borderRadius: '10px',
+                      padding: '0.85rem 1.15rem',
+                      marginBottom: '1.25rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '0.75rem',
+                      flexWrap: 'wrap'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                        <UserCheck size={18} color={item.tourLeaderRoomOffered ? '#0d7478' : '#64748b'} />
+                        <div>
+                          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>
+                            Tour Leader Room
+                          </span>
+                          <span style={{ fontSize: '0.74rem', color: item.tourLeaderRoomOffered ? '#0f766e' : '#64748b' }}>
+                            {item.tourLeaderRoomOffered
+                              ? 'Enter Tour Leader rate per season below. Threshold applies to client rooms.'
+                              : 'Not offered — Tour Leader uses normal Single rate.'}
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                        <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={item.tourLeaderRoomOffered || false}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'tourLeaderRoomOffered', e.target.checked)}
+                            style={{ width: '17px', height: '17px', accentColor: '#0d7478', cursor: 'pointer' }}
+                          />
+                          Hotel offers Tour Leader rate
+                        </label>
+                        {item.tourLeaderRoomOffered && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 600 }}>Min Client Rooms:</span>
+                            <input
+                              type="number"
+                              min="1"
+                              style={{ width: '60px', padding: '0.25rem 0.5rem', fontSize: '0.82rem' }}
+                              className="pricing-select"
+                              value={item.tourLeaderMinRooms ?? 1}
+                              onChange={(e) => handleItemFieldChange(item.tempId, 'tourLeaderMinRooms', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                            />
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -6351,6 +6416,11 @@ export const LibraryItems = () => {
                                   ) : (
                                     <span>
                                       Guide/Driver: defaults to Single ({item.currency} {singleRate.toLocaleString()})
+                               {item.category === 'Accommodation' && item.tour_leader_room_offered && (
+                                 <div style={{ color: '#0f766e', fontSize: '0.7rem', marginTop: '0.15rem', background: '#f0fdfa', border: '1px solid #99f6e4', padding: '0.2rem 0.4rem', borderRadius: '4px' }}>
+                                   Tour Leader: {item.currency} {(parseFloat(rate.tour_leader_rate) || singleRate).toLocaleString()} (Min {item.tour_leader_min_rooms || 1} client rooms)
+                                 </div>
+                               )}
                                     </span>
                                   )}
                                 </div>

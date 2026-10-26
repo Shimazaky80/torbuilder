@@ -1,6 +1,7 @@
 import { resolveSeasonForTravel, applyProtectionToRate } from './priceValidity';
 import { isSurchargeItem, isSurchargeChargeable, surchargeBuyTotal, surchargePricing } from './surchargeFees';
-import { allocatedTravellerCount } from './roomAllocationHelper';
+import { isGuideService, isGuideOnly } from './guidePricing';
+import { allocatedTravellerCount, hasStaffAccommodation, payingClientCount, travellersPlusTlCount } from './roomAllocationHelper';
 
 const FLAT_BASIS = new Set(['per_vehicle', 'per_trip', 'per_room', 'flat']);
 
@@ -64,11 +65,43 @@ export const sidebarLibraryRate = (item, code, pax) => {
 
 const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
-export const contractedServiceTotal = (service, fallbackPax = 0) => {
-  const allocated = /accommodation/i.test(String(service?.category || ''))
-    ? allocatedTravellerCount(service?.roomAllocations)
-    : Number(fallbackPax) || 0;
-  const pax = allocated || Number(fallbackPax) || 0;
+const isGuideLineService = (service) => isGuideService(service)
+  || isGuideOnly(service)
+  || !!service?.guideForKey
+  || (Array.isArray(service?.guideServiceTypes) && service.guideServiceTypes.length > 0);
+
+/* How many shares a line's per-person figure is multiplied by.
+   Most lines just use the current party size. Two cases differ: a guide line's
+   flat per-trip figure is shared by clients + tour leaders (never the tour
+   guide), and accommodation whose rooms house staff is carried by the paying
+   clients alone. A saved pax wins when present, because that is the divisor the
+   stored buy/sell figures were built on. */
+export const servicePax = (service, fallbackPax = 0, shareContext = null) => {
+  const fallback = Math.max(0, Number(fallbackPax) || 0);
+  const saved = Math.max(0, Number(service?.pax) || 0);
+
+  if (/accommodation/i.test(String(service?.category || ''))) {
+    if (hasStaffAccommodation(service?.roomAllocations)) {
+      if (saved > 0) return saved;
+      const paying = Number(shareContext?.payingClients) || 0;
+      if (paying > 0) return paying;
+    }
+    const allocated = allocatedTravellerCount(service?.roomAllocations);
+    if (allocated > 0) return allocated;
+    return saved > 0 ? saved : fallback;
+  }
+
+  if (isGuideLineService(service)) {
+    if (saved > 0) return saved;
+    const divisor = Number(shareContext?.travellersPlusTl) || 0;
+    return divisor > 0 ? divisor : fallback;
+  }
+
+  return fallback;
+};
+
+export const contractedServiceTotal = (service, fallbackPax = 0, shareContext = null) => {
+  const pax = servicePax(service, fallbackPax, shareContext);
   return round2((Number(service?.buyPP) || 0) * Math.max(0, pax));
 };
 
@@ -91,10 +124,13 @@ export const repriceServicesForPax = ({
   libraryItems = [],
   paxCount = 0,
   childCount = 0,
+  travellers = [],
   travelWindow = {},
   protectionPercent = 0
 } = {}) => {
   const count = Math.max(0, Number(paxCount) || 0);
+  const guideDivisor = travellersPlusTlCount(travellers) || count;
+  const payingClients = payingClientCount(travellers);
   const skipped = [];
   let repriced = 0;
   if (!count) return { days, skipped };
@@ -110,18 +146,40 @@ export const repriceServicesForPax = ({
         || service.guideOnly === true || service.guide_only === true || !!service.guideForKey;
       if (isGuideLine && Number(service.buyPP) > 0) {
         const flatTotal = (Number(service.buyPP) || 0) * (Number(service.pax) || count || 1);
-        const buyPP = count > 0 ? round2(flatTotal / count) : round2(flatTotal);
+        const divisor = guideDivisor > 0 ? guideDivisor : 1;
+        const buyPP = round2(flatTotal / divisor);
         const guideMarkup = Number(service.markup) || 0;
         repriced += 1;
         return {
           ...service,
           buyPP,
           sellPP: round2(buyPP * (1 + guideMarkup / 100)),
-          pax: count
+          pax: divisor
         };
       }
 
-      if (/accommodation/i.test(String(service.category || '')) || !service.itemId || Number(service.pax) === count) {
+      /* Staff rooms are absorbed by the paying clients: re-split the same
+         contracted accommodation total across the clients alone. A line with
+         no staff rooms keeps its allocated divisor untouched. */
+      if (/accommodation/i.test(String(service.category || ''))) {
+        const storedPax = Number(service.pax) || 0;
+        if (!hasStaffAccommodation(service.roomAllocations) || payingClients <= 0
+          || !storedPax || storedPax === payingClients) {
+          return service;
+        }
+        const flatTotal = (Number(service.buyPP) || 0) * storedPax;
+        const buyPP = round2(flatTotal / payingClients);
+        const accommodationMarkup = Number(service.markup) || 0;
+        repriced += 1;
+        return {
+          ...service,
+          buyPP,
+          sellPP: round2(buyPP * (1 + accommodationMarkup / 100)),
+          pax: payingClients
+        };
+      }
+
+      if (!service.itemId || Number(service.pax) === count) {
         return service;
       }
 

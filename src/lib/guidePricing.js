@@ -1,4 +1,10 @@
 import { rateForTravel } from './priceValidity';
+import { travellersPlusTlCount } from './roomAllocationHelper';
+
+export const getGuideShareDivisor = (travellers = []) => {
+  const n = travellersPlusTlCount(travellers);
+  return n > 0 ? n : 1;
+};
 
 /* Guide service detour — shared helpers for the Itinerary Builder and the
    Package Builder.
@@ -62,10 +68,12 @@ export const guideRateFor = (rate = {}, type) => {
   return Number.isFinite(value) ? value : 0;
 };
 
-/* The summed per-trip charge for a selected set of service types. */
-export const guideChargeTotal = (rate = {}, types = []) => (
-  guideSelection(types).reduce((sum, type) => sum + guideRateFor(rate, type), 0)
-);
+/* The summed per-trip charge for a selected set of service types.
+   Only charged when guide_needed is true (or undefined/not explicitly false). */
+export const guideChargeTotal = (rate = {}, types = [], guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  return guideSelection(types).reduce((sum, type) => sum + guideRateFor(rate, type), 0);
+};
 
 /* Human-readable summary of the selected service types, e.g. "Half Day · Dinner Transfer". */
 export const guideLabel = (types = []) => guideSelection(types)
@@ -82,17 +90,20 @@ export const numberOf = (value) => {
 };
 
 /* The per-night/meal amount a supporting property charges for the guide. An
-   explicit rate wins; 0 means "fall back to the single rate" (guide_driver_room_rates). */
-export const guideRoomRate = (rate = {}) => (
-  numberOf(rate?.guide_rate) || numberOf(rate?.single_room_rate) || numberOf(rate?.effective_single_rate)
-    || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price)
-);
+   explicit rate wins; 0 means "fall back to the single rate" (guide_driver_room_rates).
+   Only charged when guide_needed is true. */
+export const guideRoomRate = (rate = {}, guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  return numberOf(rate?.guide_rate) || numberOf(rate?.single_room_rate) || numberOf(rate?.effective_single_rate)
+    || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price);
+};
 
 /* A meal served to the guide is charged at the meal item's guide_rate; 0 means
-   the fare the clients pay. */
-export const guideMealRate = (rate = {}) => (
-  numberOf(rate?.guide_rate) || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price)
-);
+   the fare the clients pay. Only charged when guide_needed is true. */
+export const guideMealRate = (rate = {}, guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  return numberOf(rate?.guide_rate) || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price);
+};
 
 /* ---- Guide & driver overnight (overland) ---------------------------------
    The guide and driver are bedded on the day the guide is used overland. The
@@ -136,18 +147,28 @@ export const singleOvernightRate = (rate = {}) => (
 );
 
 /* What a property charges to bed the guide for one night. */
-export const guideTravelRate = (rate = {}) => (
-  numberOf(rate?.guide_rate) || singleOvernightRate(rate)
-);
+export const guideTravelRate = (rate = {}, guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  return numberOf(rate?.guide_rate) || singleOvernightRate(rate);
+};
 
 /* What a property charges to bed the driver for one night. */
-export const driverTravelRate = (rate = {}) => (
-  numberOf(rate?.driver_rate) || singleOvernightRate(rate)
+export const driverTravelRate = (rate = {}, guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  return numberOf(rate?.driver_rate) || singleOvernightRate(rate);
+};
+
+export const overnightRiderRate = (rate = {}, who, guideNeeded = true) => (
+  who === 'driver' ? driverTravelRate(rate, guideNeeded) : guideTravelRate(rate, guideNeeded)
 );
 
-export const overnightRiderRate = (rate = {}, who) => (
-  who === 'driver' ? driverTravelRate(rate) : guideTravelRate(rate)
-);
+/* Helper to divide guide charges by travellersPlusTlCount (clients + TL only).
+   Explicitly ignores Tour Guide count. */
+export const guidePerPersonRate = (totalCharge = 0, travellers = [], guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  const divisor = getGuideShareDivisor(travellers);
+  return divisor > 0 ? (Number(totalCharge) || 0) / divisor : (Number(totalCharge) || 0);
+};
 
 /* The rate row that prices one property's guide bed: the season covering the
    trip when known, else the first row (the engine's season-blind default). */

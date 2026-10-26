@@ -87,7 +87,7 @@ export const PricingSummaryTab = ({
               </td>
             </tr>
             <tr>
-              <td className="ps-grid-label">Travellers<small>pax per option</small></td>
+              <td className="ps-grid-label">Travellers</td>
               {visibleCodes.map((code, index) => <td key={`sum-band-${code}-${index}`} className="ps-sum-travellers">
                 <div className="ps-bands">{(bands[code] || []).map((pax, bandIndex) => <div className="ps-band" key={`sum-band-${code}-${bandIndex}`}>
                   <div className="ps-band-pax"><span className="ps-sum-pax">{pax}</span><span className="ps-band-unit">pax</span></div>
@@ -95,7 +95,7 @@ export const PricingSummaryTab = ({
               </td>)}
             </tr>
             <tr>
-              <td className="ps-grid-label">Price per person sharing<small>per option</small></td>
+              <td className="ps-grid-label">Price per person sharing</td>
               {visibleCodes.map((code, index) => <td key={`sum-price-${code}-${index}`}>
                 <div className="ps-bands">{(bands[code] || []).map((pax, bandIndex) => {
                   const each = columnsFor(code)[bandIndex]?.each ?? 0;
@@ -109,7 +109,7 @@ export const PricingSummaryTab = ({
               <td className="ps-grid-label">Single supplement</td>
               <td colSpan={visibleCodes.length}>
                 <div className="ps-flat-cell ps-flat-amber">{money(singleSupplement, currency)}
-                  <span className="ps-flat-from">per person · added when you want your own room · identical for every option</span>
+                  <span className="ps-flat-from">per person · added when you want your own room</span>
                 </div>
               </td>
             </tr>

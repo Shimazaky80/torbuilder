@@ -640,6 +640,10 @@ check('a legacy range no longer reads as a span', packageBandLabel({ pax: 10, mi
 check('a width-one band reads the same way', packageBandLabel({ pax: 6, min_pax: 6, max_pax: 6 }), '6 pax');
 check('a legacy adults/children row reads as a one-traveller band',
   packageBandPax({ adults: 2, children: 1 }), 3);
+check('a saved band of one traveller keeps its size: the grid minimum never rewrites it',
+  packageBandPax({ item_key: 'band-1', pax: 1, min_pax: 1, max_pax: 1 }), 1);
+check('a saved band of one traveller is labelled as one traveller',
+  packageBandLabel({ item_key: 'band-1', pax: 1 }), '1 pax');
 check('a party of 10 belongs to the 10 pax band', packageBandForPax([threePax, tenPax], 10).item_key, 'band-10');
 check('a party of 3 belongs to the 3 pax band', packageBandForPax([threePax, tenPax], 3).item_key, 'band-3');
 check('a party of 4 belongs to no band, because nobody set one', packageBandForPax([threePax, tenPax], 4), null);
@@ -728,6 +732,8 @@ check('a party of 4 is refused when only a 3-seater is priced for that band',
     { item_key: 'b4', pax: 4 }).includes('holds 3'), true);
 check('a band with no transport at all is not a capacity problem',
   packageBandCapacityError([{ day_number: 1, services: [tourService] }], vehicleLibrary, tenPax), '');
+check('a party of one is servable by any vehicle that seats one',
+  packageBandCapacityError(bothVehicles, vehicleLibrary, { item_key: 'band-1', pax: 1 }), '');
 
 /* Suggestions are not bands. A party size the operator never chose must not turn up in the
    package with a price attached to it, which is what deriving bands from vehicle capacity
@@ -1159,6 +1165,8 @@ check('a band is never smaller than two travellers, so the vehicle keeps its mar
   seedBandsForSeats(8).every((pax) => pax >= 2), true);
 check('a five-seat column seeds two, four and five, never a party of one',
   seedBandsForSeats(5).join(','), '2,4,5');
+check('a one-seat column still seeds a single band of one: the guard never invents a party of two',
+  seedBandsForSeats(1).join(','), '1');
 
 const poolTransfer = {
   id: 'pool-transfer', name: 'Park transfer', category: 'Transfers', max_occupancy: 3,

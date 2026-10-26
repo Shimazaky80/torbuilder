@@ -13,7 +13,8 @@ import {
 } from 'lucide-react';
 import {
   isAdultTraveller,
-  calculateRoomCharges
+  calculateRoomCharges,
+  normaliseTravellerRole
 } from '../lib/roomAllocationHelper';
 import { taxWordOf } from '../lib/invoiceDoc';
 import './RoomAllocationModal.css';
@@ -40,10 +41,11 @@ export default function RoomAllocationModal({
         name: t.name || `Traveller ${idx + 1}`,
         surname: t.surname || '',
         age: t.age ?? 30,
-        type: t.type || (isAdultTraveller(t) ? 'Adult' : 'Child')
+        type: t.type || (isAdultTraveller(t) ? 'Adult' : 'Child'),
+        role: normaliseTravellerRole(t?.role)
       }));
     }
-    return [{ id: 'trav_default_1', name: 'Lead Traveller', surname: '', age: 30, type: 'Adult' }];
+    return [{ id: 'trav_default_1', name: 'Lead Traveller', surname: '', age: 30, type: 'Adult', role: 'client' }];
   }, [itineraryTravellers]);
 
   /* Guests already holding a bed in another included property on this night.
@@ -85,6 +87,7 @@ export default function RoomAllocationModal({
           return matched || t;
         });
         return {
+          ...rm,
           roomId: rm.roomId || idx + 1,
           allocatedTravellers: occs
         };
@@ -394,6 +397,11 @@ export default function RoomAllocationModal({
                       <div className="flex items-center justify-between pb-2.5 border-b border-slate-200">
                         <div className="flex items-center gap-2.5">
                           <span className="font-bold text-sm text-slate-900">Room {rm.roomId}</span>
+                          {rm.roomType === 'staff' && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-purple-100 text-purple-800 border border-purple-200">
+                              Staff Room
+                            </span>
+                          )}
                           <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-bold ${
                             isOver
                               ? 'bg-rose-100 text-rose-800 border border-rose-300'

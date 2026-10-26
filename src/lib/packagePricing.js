@@ -1,6 +1,8 @@
 import { childRateForAge } from './roomAllocationHelper';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
 import { contractPaxRate } from './servicePricing';
+import { buildShareContext } from './staffPricing';
+import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal } from './guidePricing';
 
 const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
 const numberOf = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -277,7 +279,11 @@ export const packageItemCapacitySetupError = (item, rate) => {
    used to hold a span collapses onto the number it was already being priced at - its old
    ceiling - so opening an existing package never silently re-quotes it at a different size.
    min_pax and max_pax are still written to the row and are always the same number, which
-   keeps the stored columns and their indexes meaningful. */
+   keeps the stored columns and their indexes meaningful.
+
+   A stored band keeps the size it was saved at, down to a party of one: the minimum of two
+   travellers is a rule for the working grid (see seedBandsForSeats), and it never rewrites a
+   party size the package has already published. */
 export const packageBandPax = (option) => {
   const value = typeof option === 'number' ? option : (option?.pax ?? option?.max_pax ?? (numberOf(option?.adults) + numberOf(option?.children)));
   return Math.max(1, numberOf(value) || 1);
@@ -628,7 +634,7 @@ export const vehicleBlockReason = (service, item, pax, vehicleTypes = []) => {
    party of 13 pay 3800.03 for a vehicle contracted at 3800.
    Returns null when the rate's price vector is present but BLOCKS this party size - nothing
    priced for the resolved vehicle, or no vehicle type that seats the party. */
-const unitContributionPerTraveller = (service, item, pax, vehicleTypes = []) => {
+const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], shareContext = null) => {
   const rate = rateFor(service, item);
   const currency = service.currency_code || rate.currency || item?.currency || 'ZAR';
   const pricedItem = {
@@ -863,8 +869,11 @@ export const applyPackageMarkup = (value, percent) => round2(
   numberOf(value) * (1 + Math.max(0, numberOf(percent)) / 100)
 );
 
-export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library = [], childRange = null, markupPercent = 0, vehicleTypes = [] } = {}) => {
+export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library = [], childRange = null, markupPercent = 0, vehicleTypes = [], shareContext = null } = {}) => {
   const pax = totalTravellers(pattern);
+  const resolvedShareContext = shareContext || buildShareContext({
+    travellers: Array.isArray(pattern?.travellers) ? pattern.travellers : []
+  });
   const services = includedServices(days);
   const currency = packageCurrencyFor(days);
   const rows = services.filter((service) => currencyOf(service) === currency);
@@ -893,7 +902,7 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
         });
         return;
       }
-      const perPerson = unitContributionPerTraveller(service, item, pax, vehicleTypes);
+      const perPerson = unitContributionPerTraveller(service, item, pax, vehicleTypes, resolvedShareContext);
       if (perPerson === null) {
         /* The rate carries a price vector and this party size is not on it (D12): nothing
            priced for the resolved vehicle, or no configured vehicle seats them. The row is
@@ -1028,7 +1037,9 @@ export const childRateForBand = (rate, band, itemAgeRanges = [], sharing = 0) =>
 /* The band sizes a vehicle column is offered at (D20): step = round(size / 3), bands
    [step, 2*step, size]; a small vehicle gets just two bands. Free to override in the
    grid, capped at the vehicle's seats. Minimum traveller count per band is 2 so the
-   tenant never prices a party smaller than two and under-covers the vehicle. */
+   tenant never prices a party smaller than two and under-covers the vehicle. This is the
+   grid's own rule: a party size the package has already saved keeps the size it was
+   saved at and is never moved up to meet it. */
 export const seedBandsForSeats = (seats) => {
   const capacity = Math.max(1, Math.floor(numberOf(seats)));
   if (capacity < 2) return [capacity];

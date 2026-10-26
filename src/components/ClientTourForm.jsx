@@ -4,6 +4,13 @@ import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { UserPlus, Users, Calendar, User, StickyNote, Compass, UserCheck } from 'lucide-react';
 import ClientForm from './ClientForm';
+import { normaliseTravellerRole } from '../lib/roomAllocationHelper';
+
+const TRAVELLER_ROLE_OPTIONS = [
+  { value: 'client', label: 'Client' },
+  { value: 'tour_leader', label: 'Tour Leader' },
+  { value: 'tour_guide', label: 'Tour Guide' }
+];
 
 const emptyTraveller = () => ({
   name: '',
@@ -14,7 +21,8 @@ const emptyTraveller = () => ({
   emergencyContact: '',
   dietaryRequirements: '',
   insurancePolicy: '',
-  notes: ''
+  notes: '',
+  role: 'client'
 });
 
 const childrenCount = (travellers = []) => {
@@ -23,6 +31,19 @@ const childrenCount = (travellers = []) => {
     const age = parseInt(t && t.age, 10);
     return !Number.isNaN(age) && age < 18;
   }).length;
+};
+
+/* Breakdown label e.g. "3 clients, 1 tour leader, 1 tour guide" */
+const travellerRoleBreakdown = (travellers = []) => {
+  const list = Array.isArray(travellers) ? travellers : [];
+  const clients = list.filter((t) => normaliseTravellerRole(t?.role) === 'client').length;
+  const leaders = list.filter((t) => normaliseTravellerRole(t?.role) === 'tour_leader').length;
+  const guides = list.filter((t) => normaliseTravellerRole(t?.role) === 'tour_guide').length;
+  const parts = [];
+  if (clients > 0) parts.push(`${clients} client${clients !== 1 ? 's' : ''}`);
+  if (leaders > 0) parts.push(`${leaders} tour leader${leaders !== 1 ? 's' : ''}`);
+  if (guides > 0) parts.push(`${guides} tour guide${guides !== 1 ? 's' : ''}`);
+  return parts.join(', ');
 };
 
 export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', submitIcon, onCancel, onSubmit }) => {
@@ -40,7 +61,9 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       emergencyContact: t?.emergencyContact || '',
       dietaryRequirements: t?.dietaryRequirements || '',
       insurancePolicy: t?.insurancePolicy || '',
-      notes: t?.notes || ''
+      notes: t?.notes || '',
+      // Backwards compatibility: missing role defaults to 'client'
+      role: normaliseTravellerRole(t?.role)
     }));
 
   const [clients, setClients] = useState([]);
@@ -199,7 +222,8 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       emergencyContact: t?.emergencyContact || '',
       dietaryRequirements: t?.dietaryRequirements || '',
       insurancePolicy: t?.insurancePolicy || '',
-      notes: t?.notes || ''
+      notes: t?.notes || '',
+      role: normaliseTravellerRole(t?.role)
     }))) !== JSON.stringify(activeTravellers);
 
     if (initial?.clientId && travellersChanged && form.clientId === initial.clientId) {
@@ -379,8 +403,18 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
           borderRadius: '12px',
           border: '1px solid #e2e8f0'
         }}>
-          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: '0 0 1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: '0 0 1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
             <User size={20} color="#0d7478" /> Travellers
+            {(() => {
+              const active = travellers.slice(0, form.numTravellers);
+              const breakdown = travellerRoleBreakdown(active);
+              const hasNonClients = active.some((t) => normaliseTravellerRole(t?.role) !== 'client');
+              return hasNonClients && breakdown ? (
+                <span style={{ fontSize: '0.78rem', fontWeight: 500, color: '#64748b', marginLeft: '0.25rem' }}>
+                  — {breakdown}
+                </span>
+              ) : null;
+            })()}
           </h3>
 
           <div style={{ maxWidth: '300px', marginBottom: '1.25rem' }}>
@@ -435,7 +469,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
                   padding: '0.75rem'
                 }}
               >
-                <div style={{ display: 'grid', gridTemplateColumns: '2.5rem 1fr 1fr 5.5rem', gap: '0.75rem', alignItems: 'center' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '2.5rem 1fr 1fr 5.5rem 8.5rem', gap: '0.75rem', alignItems: 'center' }}>
                 <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#94a3b8', textAlign: 'center' }}>
                   {idx + 1}
                 </div>
@@ -479,6 +513,27 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
                     value={t.age}
                     onChange={(e) => handleTravellerChange(idx, 'age', e.target.value)}
                   />
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.15rem' }}>
+                    Role
+                  </label>
+                  <select
+                    className="pricing-select"
+                    style={{
+                      padding: '0.5rem 0.65rem',
+                      fontSize: '0.8rem',
+                      borderColor: normaliseTravellerRole(t.role) !== 'client' ? '#0d7478' : undefined,
+                      color: normaliseTravellerRole(t.role) !== 'client' ? '#0d7478' : undefined,
+                      fontWeight: normaliseTravellerRole(t.role) !== 'client' ? 700 : undefined
+                    }}
+                    value={normaliseTravellerRole(t.role)}
+                    onChange={(e) => handleTravellerChange(idx, 'role', e.target.value)}
+                  >
+                    {TRAVELLER_ROLE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
                 </div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.6rem', marginTop: '0.4rem' }}>

@@ -30,5 +30,9 @@ export const LIBRARY_ITEM_LIGHT_FIELDS = [
      the full library load. */
   'surcharge_type', 'surcharge_charge_basis', 'surcharge_unit_basis',
   'surcharge_chargeable', 'linked_item_id',
+  /* Tour leader room deal. The room dialog prices a TL room from these, so a
+     dropped/allocated accommodation has to carry them; they stay out of the
+     base list so the retry still works before the migration is applied. */
+  'tour_leader_room_offered', 'tour_leader_min_rooms',
   LIBRARY_ITEM_BASE_FIELDS
 ].join(',');

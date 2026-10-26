@@ -7,6 +7,95 @@ export const isAdultTraveller = (t) => {
   return age >= 18;
 };
 
+/* Staff/traveller role helpers */
+export const normaliseTravellerRole = (role) => {
+  const r = String(role || '').trim().toLowerCase();
+  if (r === 'tour_leader' || r === 'tourleader' || r === 'leader') return 'tour_leader';
+  if (r === 'tour_guide' || r === 'tourguide' || r === 'guide') return 'tour_guide';
+  if (r === 'driver') return 'driver';
+  if (r === 'client') return 'client';
+  return 'client';
+};
+
+export const payingClientCount = (travellers = []) => {
+  const list = Array.isArray(travellers) ? travellers : [];
+  return list.filter((t) => normaliseTravellerRole(t?.role) === 'client').length;
+};
+
+export const tourLeaderCount = (travellers = []) => {
+  const list = Array.isArray(travellers) ? travellers : [];
+  return list.filter((t) => normaliseTravellerRole(t?.role) === 'tour_leader').length;
+};
+
+export const tourGuideCount = (travellers = []) => {
+  const list = Array.isArray(travellers) ? travellers : [];
+  return list.filter((t) => normaliseTravellerRole(t?.role) === 'tour_guide').length;
+};
+
+// Travellers + Tour Leaders only - used for guide expenses split
+// Tour Guide is EXCLUDED even though they're in the traveller list
+export const travellersPlusTlCount = (travellers = []) => {
+  const list = Array.isArray(travellers) ? travellers : [];
+  return list.filter((t) => {
+    const r = normaliseTravellerRole(t?.role);
+    return r === 'client' || r === 'tour_leader';
+  }).length;
+};
+
+// Rooms allocated to client group only - excludes staff rooms
+export const clientRoomsBooked = (allocations = []) => {
+  const list = Array.isArray(allocations) ? allocations : [];
+  return list.filter((rm) => {
+    if (!rm) return false;
+    if (rm.roomType === 'staff' || rm.isStaffRoom === true) return false;
+    if (rm.staffRole) return false;
+    const occs = Array.isArray(rm.allocatedTravellers) ? rm.allocatedTravellers : [];
+    // Tour guide or driver must never be counted as client room
+    if (occs.some((t) => {
+      const r = normaliseTravellerRole(t?.role);
+      return r === 'tour_guide' || r === 'driver';
+    })) {
+      return false;
+    }
+    // Tour leader taking their own room does not count towards client rooms
+    if (occs.length === 1 && normaliseTravellerRole(occs[0]?.role) === 'tour_leader') {
+      return false;
+    }
+    return true;
+  }).length;
+};
+
+/* True when any room houses staff rather than paying guests only — a staff
+   room, a named staff role, or an occupant with a staff role. Those beds are
+   absorbed by the paying clients, so the accommodation line is divided across
+   the clients alone. */
+export const hasStaffAccommodation = (allocations = []) => (Array.isArray(allocations) ? allocations : [])
+  .some((rm) => {
+    if (!rm) return false;
+    if (rm.roomType === 'staff' || rm.isStaffRoom === true || rm.staffRole) return true;
+    const occupants = Array.isArray(rm.allocatedTravellers) ? rm.allocatedTravellers : [];
+    return occupants.some((t) => {
+      const role = normaliseTravellerRole(t?.role);
+      return role === 'tour_leader' || role === 'tour_guide' || role === 'driver';
+    });
+  });
+
+export const buildShareContext = ({ travellers = [], allocations = [] } = {}) => {
+  const payingClients = payingClientCount(travellers);
+  const tourLeaders = tourLeaderCount(travellers);
+  const tourGuides = tourGuideCount(travellers);
+  const travellersPlusTl = travellersPlusTlCount(travellers);
+  const clientRooms = clientRoomsBooked(allocations);
+  return {
+    payingClients,
+    tourLeaders,
+    tourGuides,
+    travellersPlusTl,
+    clientRoomsBooked: clientRooms,
+    paxCount: payingClients > 0 ? payingClients : Math.max(1, (Array.isArray(travellers) ? travellers.length : 1))
+  };
+};
+
 export const getRateRow = (item, currencyCode) => {
   if (!item) return null;
   const rates = item.item_rates || [];
@@ -172,6 +261,14 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   const flatRoomPrice = parseFloat(rate?.unit_price) || parseFloat(rate?.double_twin_rate) || parseFloat(rate?.price_2_adults) || 0;
   const flatSinglePrice = parseFloat(rate?.single_room_rate) || parseFloat(rate?.effective_single_rate) || parseFloat(rate?.price_1_adult) || flatRoomPrice;
 
+  // Tour Leader threshold check based on client rooms only
+  const clientRooms = clientRoomsBooked(roomAllocations);
+  const tlOffered = item?.tour_leader_room_offered === true || item?.tourLeaderRoomOffered === true;
+  const tlMinRooms = Number(item?.tour_leader_min_rooms || item?.tourLeaderMinRooms) || 1;
+  const tlThresholdMet = tlOffered && clientRooms >= tlMinRooms;
+  const tlRate = parseFloat(rate?.tour_leader_rate) > 0 ? parseFloat(rate.tour_leader_rate) : singlePrice;
+  const guideStaffRate = parseFloat(rate?.guide_rate) > 0 ? parseFloat(rate.guide_rate) : singlePrice;
+
   let totalBuy = 0;
   let totalSell = 0;
 
@@ -179,6 +276,9 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
     const occupants = rm.allocatedTravellers || [];
     const adults = occupants.filter(isAdultTraveller).length;
     const children = occupants.length - adults;
+    const isSoloTourLeader = (occupants.length === 1 && normaliseTravellerRole(occupants[0]?.role) === 'tour_leader') || rm?.staffRole === 'tour_leader';
+    const isTourGuide = occupants.some((t) => normaliseTravellerRole(t?.role) === 'tour_guide') || rm?.staffRole === 'tour_guide';
+    const isStaffRoom = (rm?.roomType === 'staff' || rm?.isStaffRoom === true) && !isSoloTourLeader;
 
     let roomBuy = 0;
     let rateDescription = '';
@@ -186,6 +286,17 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
     if (occupants.length === 0) {
       roomBuy = 0;
       rateDescription = 'Empty room (0 guests)';
+    } else if (isSoloTourLeader) {
+      if (tlThresholdMet) {
+        roomBuy = tlRate;
+        rateDescription = `Tour Leader Room Rate: ${tlRate.toFixed(2)} (Threshold of ${tlMinRooms} client rooms met)`;
+      } else {
+        roomBuy = singlePrice;
+        rateDescription = `Tour Leader Single Rate: ${singlePrice.toFixed(2)}${tlOffered ? ` (Threshold of ${tlMinRooms} client rooms not met: ${clientRooms} booked)` : ''}`;
+      }
+    } else if (isStaffRoom || isTourGuide) {
+      roomBuy = guideStaffRate;
+      rateDescription = `Staff Room (${occupants.map((t) => t.name).filter(Boolean).join(', ') || 'Staff'}: ${guideStaffRate.toFixed(2)})`;
     } else if (isFlatRoom) {
       /* One charge for the room: the single-room figure when a lone traveller
          has it to themselves, otherwise the flat room rate. */
