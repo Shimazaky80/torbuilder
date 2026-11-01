@@ -14,7 +14,11 @@ import {
   guideRoomRate,
   guideMealRate,
   guidePerPersonRate,
-  getGuideShareDivisor
+  getGuideShareDivisor,
+  guideTravelRate,
+  overnightRiderRate,
+  guideMinClientRooms,
+  guideRateApplies
 } from '../src/lib/guidePricing';
 import { servicePax, repriceServicesForPax } from '../src/lib/servicePricing';
 
@@ -204,5 +208,202 @@ assert.equal(repricedStaffLine.pax, 10, 'Accommodation reprice stores the paying
 assert.equal(repricedStaffLine.buyPP, 110, 'Accommodation R1100 total re-split across 10 clients');
 assert.equal(repricedStaffLine.buyPP * repricedStaffLine.pax, 1100, 'Accommodation reprice keeps the contracted total');
 log('Example 5: staff-room accommodation reprice keeps the contracted total across paying clients');
+
+// Test Example 6: a configured 0 is a free tour leader room, not a fallback
+const freeTlItem = {
+  ...hotelItem,
+  item_rates: [{ ...hotelItem.item_rates[0], tour_leader_rate: 0 }]
+};
+const freeCharges = calculateRoomCharges(freeTlItem, allocationsEx1, 'ZAR', 0);
+const freeTlRoom = freeCharges.rooms.find(r => r.roomId === 6);
+assert.equal(freeTlRoom.buyCost, 0, 'A configured 0 TL rate charges the room at 0 (free)');
+assert.match(freeTlRoom.rateDescription, /Tour Leader Room Rate: 0\.00/, 'Free TL room is described as the TL rate, not the single rate');
+log('Example 6: a typed 0 TL rate charges a free tour leader room');
+
+// Test Example 7: the best tier reached sets how many TL rooms get the rate
+const tieredItem = {
+  ...hotelItem,
+  item_rates: [{
+    ...hotelItem.item_rates[0],
+    tour_leader_rate: null,
+    tour_leader_tiers: [
+      { minClientRooms: 5, rooms: 1, rate: 0 },
+      { minClientRooms: 10, rooms: 2, rate: 500 }
+    ]
+  }]
+};
+const tierTravellers = [
+  ...travellers.slice(0, 10),
+  { id: 'tl_2', name: 'Leader', surname: 'Two', role: 'tour_leader' },
+  { id: 'tl_3', name: 'Leader', surname: 'Three', role: 'tour_leader' }
+];
+// 10 single-client rooms -> the 10-room tier; three TL rooms competing for two included rooms.
+const tieredAllocations = [
+  ...tierTravellers.slice(0, 10).map((t, i) => ({ roomId: i + 1, roomType: 'client', allocatedTravellers: [t] })),
+  { roomId: 11, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [travellers[10]] },
+  { roomId: 12, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [tierTravellers[10]] },
+  { roomId: 13, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [tierTravellers[11]] }
+];
+assert.equal(clientRoomsBooked(tieredAllocations), 10, 'Ten single-client rooms count as ten client rooms');
+const tieredCharges = calculateRoomCharges(tieredItem, tieredAllocations, 'ZAR', 0);
+const tlOne = tieredCharges.rooms.find(r => r.roomId === 11);
+const tlTwo = tieredCharges.rooms.find(r => r.roomId === 12);
+const tlThree = tieredCharges.rooms.find(r => r.roomId === 13);
+assert.equal(tlOne.buyCost, 0, 'First TL room is free at the 10-room tier');
+assert.equal(tlTwo.buyCost, 500, 'Second TL room takes the tier rate');
+assert.equal(tlThree.buyCost, 1200, 'Third TL room pays the normal single rate once the allowance is used');
+assert.match(tlThree.rateDescription, /allowance of 2 room\(s\) used/, 'Excess TL room explains why it is not on the TL rate');
+log('Example 7: the best tier met opens two TL rooms at 0 and 500; the third pays single (1200)');
+
+// Test Example 8: the lower tier applies until the next threshold is reached
+const lowTierAllocations = [
+  ...tieredAllocations.slice(0, 5),
+  { roomId: 21, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [travellers[10]] },
+  { roomId: 22, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [tierTravellers[10]] }
+];
+const lowTierCharges = calculateRoomCharges(tieredItem, lowTierAllocations, 'ZAR', 0);
+assert.equal(lowTierCharges.rooms.find(r => r.roomId === 21).buyCost, 0, 'Five client rooms meet the 5-room tier: first TL room free');
+assert.equal(lowTierCharges.rooms.find(r => r.roomId === 22).buyCost, 1200, 'The 5-room tier includes only one TL room: the second pays single');
+log('Example 8: tier thresholds step up as more client rooms are booked');
+
+// Test Example 9: below every threshold the TL room prices at the single rate
+const belowTierAllocations = [
+  ...tieredAllocations.slice(0, 2),
+  { roomId: 31, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [travellers[10]] }
+];
+const belowTierCharges = calculateRoomCharges(tieredItem, belowTierAllocations, 'ZAR', 0);
+assert.equal(belowTierCharges.rooms.find(r => r.roomId === 31).buyCost, 1200, 'No tier reached: TL room pays the single rate');
+log('Example 9: no TL tier reached falls back to the normal single rate');
+
+// Test Example 10: a season rate without the item offering a TL deal changes nothing
+const noTlDeal = { ...hotelItem, tour_leader_room_offered: false };
+const noTlCharges = calculateRoomCharges(noTlDeal, allocationsEx1, 'ZAR', 0);
+assert.equal(noTlCharges.rooms.find(r => r.roomId === 6).buyCost, 1200, 'Without the TL deal the TL room pays the single rate');
+log('Example 10: a TL rate on the season is ignored unless the property offers the deal');
+
+// Test Example 11: the guide rate is gated on the property's minimum client rooms
+const guideThresholdHotel = { ...hotelItem, guide_min_rooms: 8 };
+const guideBelowCharges = calculateRoomCharges(guideThresholdHotel, allocationsEx1, 'ZAR', 0);
+const guideBelowRoom = guideBelowCharges.rooms.find(r => r.roomId === 7);
+assert.equal(guideBelowRoom.buyCost, 1200, 'Guide room falls back to the single rate when 5 client rooms are below the 8-room threshold');
+assert.match(guideBelowRoom.rateDescription, /Threshold of 8 client rooms not met: 5 booked/, 'Guide room explains the missed threshold');
+
+const guideMetCharges = calculateRoomCharges({ ...hotelItem, guide_min_rooms: 5 }, allocationsEx1, 'ZAR', 0);
+const guideMetRoom = guideMetCharges.rooms.find(r => r.roomId === 7);
+assert.equal(guideMetRoom.buyCost, 400, 'Guide rate applies when the client-room threshold is met exactly');
+
+const guideNoThreshold = calculateRoomCharges(hotelItem, allocationsEx1, 'ZAR', 0);
+assert.equal(guideNoThreshold.rooms.find(r => r.roomId === 7).buyCost, 400, 'An unset guide threshold keeps the guide rate');
+log('Example 11: guide room uses guide_rate at/above the client-room threshold and the single rate below it');
+
+// Test Example 12: the guide and driver beds share the property's threshold
+const guideBedRate = hotelItem.item_rates[0];
+assert.equal(guideTravelRate(guideBedRate, true, { clientRooms: 5, minRooms: 8 }), 1200, 'Guide bed below the threshold prices at the single rate');
+assert.equal(guideTravelRate(guideBedRate, true, { clientRooms: 8, minRooms: 8 }), 400, 'Guide bed at the threshold prices at the guide rate');
+assert.equal(guideTravelRate(guideBedRate, true, { clientRooms: undefined, minRooms: 8 }), 400, 'An unknown room count keeps the guide rate');
+assert.equal(overnightRiderRate({ ...guideBedRate, driver_rate: 350 }, 'driver', true, { clientRooms: 5, minRooms: 8 }), 1200, 'The driver bed below the shared threshold pays the single rate');
+assert.equal(overnightRiderRate({ ...guideBedRate, driver_rate: 350 }, 'driver', true, { clientRooms: 8, minRooms: 8 }), 350, 'The driver bed at the shared threshold takes the driver rate');
+assert.equal(guideMinClientRooms({ guide_min_rooms: 8 }), 8, 'Item threshold reads guide_min_rooms');
+assert.equal(guideMinClientRooms({}), 1, 'An unset threshold defaults to one client room');
+assert.equal(guideRateApplies(undefined, 8), true, 'No client-room count leaves the rate applicable');
+log('Example 12: guide and driver overnight rates both follow the Min Client Rooms rule');
+
+// Test Example 13: guide and driver have independent TL-style ladders
+const driverTraveller = { id: 'drv_1', name: 'Driver', surname: 'Staff', role: 'driver' };
+const tieredStaffItem = {
+  name: 'Tiered Lodge',
+  category: 'Accommodation',
+  guide_driver_room_offered: true,
+  item_rates: [{
+    currency: 'ZAR',
+    rate_basis: 'per_person_sharing',
+    price_1_adult: 1200,
+    price_2_adults: 600,
+    guide_rate: 400,
+    driver_rate: 350,
+    guide_tiers: [
+      { minClientRooms: 5, rooms: 1, rate: 0 },
+      { minClientRooms: 8, rooms: 2, rate: 300 }
+    ],
+    driver_tiers: [{ minClientRooms: 6, rooms: 1, rate: 250 }]
+  }]
+};
+
+const staffAllocations = (clientRooms, extraGuide = false) => [
+  ...Array.from({ length: clientRooms }, (_, i) => ({
+    roomId: i + 1,
+    roomType: 'client',
+    allocatedTravellers: [{ name: `Client ${i}a` }, { name: `Client ${i}b` }]
+  })),
+  { roomId: 101, roomType: 'staff', staffRole: 'tour_guide', allocatedTravellers: [travellers[11]] },
+  { roomId: 102, roomType: 'staff', staffRole: 'driver', allocatedTravellers: [driverTraveller] },
+  ...(extraGuide
+    ? [{ roomId: 103, roomType: 'staff', staffRole: 'tour_guide', allocatedTravellers: [{ name: 'Second guide' }] }]
+    : [])
+];
+
+const fiveClientCharges = calculateRoomCharges(tieredStaffItem, staffAllocations(5), 'ZAR', 0);
+assert.equal(fiveClientCharges.rooms.find(r => r.roomId === 101).buyCost, 0, 'Five client rooms include the guide room free');
+assert.equal(fiveClientCharges.rooms.find(r => r.roomId === 102).buyCost, 1200, 'The driver ladder starts at six client rooms, so five pays single');
+
+const sixClientCharges = calculateRoomCharges(tieredStaffItem, staffAllocations(6), 'ZAR', 0);
+assert.equal(sixClientCharges.rooms.find(r => r.roomId === 102).buyCost, 250, 'Six client rooms earn the driver rate');
+assert.equal(sixClientCharges.rooms.find(r => r.roomId === 101).buyCost, 0, 'The guide ladder is judged separately from the driver ladder');
+
+const eightClientCharges = calculateRoomCharges(tieredStaffItem, staffAllocations(8, true), 'ZAR', 0);
+assert.equal(eightClientCharges.rooms.find(r => r.roomId === 101).buyCost, 0, 'The first guide room stays free at the higher threshold');
+assert.equal(eightClientCharges.rooms.find(r => r.roomId === 103).buyCost, 300, 'The second guide room earns the discounted tier rate');
+
+const tieredStaffRate = tieredStaffItem.item_rates[0];
+assert.equal(guideTravelRate(tieredStaffRate, true, { clientRooms: 5, tiers: tieredStaffRate.guide_tiers }), 0, 'Guide overnight is free once the five-room tier is met');
+assert.equal(guideTravelRate(tieredStaffRate, true, { clientRooms: 4, tiers: tieredStaffRate.guide_tiers }), 1200, 'Guide overnight below every tier pays the single rate');
+assert.equal(overnightRiderRate(tieredStaffRate, 'driver', true, { clientRooms: 6, tiers: tieredStaffRate.driver_tiers }), 250, 'Driver overnight uses its own tier');
+assert.equal(overnightRiderRate(tieredStaffRate, 'driver', true, { clientRooms: 5, tiers: tieredStaffRate.driver_tiers }), 1200, 'Driver overnight below its tier pays the single rate');
+log('Example 13: guide and driver room rules are independent ladders with free and discounted rooms');
+
+// Test Example 14: a ladder that keeps the room count is a rate band, not a no-op.
+// 1–10 client rooms include one guide/driver/TL room at 800; from 11 it is 650.
+const bandLadder = [
+  { minClientRooms: 1, rooms: 1, rate: 800 },
+  { minClientRooms: 11, rooms: 1, rate: 650 }
+];
+const bandedItem = {
+  ...hotelItem,
+  guide_driver_room_offered: true,
+  item_rates: [{
+    ...hotelItem.item_rates[0],
+    tour_leader_rate: null,
+    guide_rate: null,
+    driver_rate: null,
+    tour_leader_tiers: bandLadder,
+    guide_tiers: bandLadder,
+    driver_tiers: bandLadder
+  }]
+};
+const bandRoom = (charges, roomId) => charges.rooms.find(r => r.roomId === roomId);
+
+const tenClientCharges = calculateRoomCharges(bandedItem, staffAllocations(10), 'ZAR', 0);
+assert.equal(bandRoom(tenClientCharges, 101).buyCost, 800, 'Ten client rooms pay the 1–10 guide band');
+assert.equal(bandRoom(tenClientCharges, 102).buyCost, 800, 'Ten client rooms pay the 1–10 driver band');
+
+const elevenClientCharges = calculateRoomCharges(bandedItem, staffAllocations(11), 'ZAR', 0);
+assert.equal(bandRoom(elevenClientCharges, 101).buyCost, 650, 'Eleven client rooms move the guide room to the 650 band');
+assert.equal(bandRoom(elevenClientCharges, 102).buyCost, 650, 'Eleven client rooms move the driver room to the 650 band');
+
+const bandRate = bandedItem.item_rates[0];
+assert.equal(guideTravelRate(bandRate, true, { clientRooms: 10, tiers: bandRate.guide_tiers }), 800, 'The guide overnight holds 800 up to the tenth client room');
+assert.equal(guideTravelRate(bandRate, true, { clientRooms: 11, tiers: bandRate.guide_tiers }), 650, 'The guide overnight drops to 650 at the eleventh client room');
+
+const elevenWithTl = calculateRoomCharges(bandedItem, [
+  ...staffAllocations(11),
+  { roomId: 104, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [travellers[10]] }
+], 'ZAR', 0);
+assert.equal(bandRoom(elevenWithTl, 104).buyCost, 650, 'The tour leader room follows the same 11+ band');
+const tenWithTl = calculateRoomCharges(bandedItem, [
+  ...staffAllocations(10),
+  { roomId: 103, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [travellers[10]] }
+], 'ZAR', 0);
+assert.equal(bandRoom(tenWithTl, 103).buyCost, 800, 'The tour leader room stays at 800 through ten client rooms');
+log('Example 14: a repeated room count with a new rate prices later client-room bands');
 
 console.log('\nAll Tour Leader and Tour Guide verification examples PASSED successfully!\n');

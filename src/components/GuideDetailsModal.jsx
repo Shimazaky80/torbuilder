@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { UtensilsCrossed, BedDouble, X, CheckCircle2, AlertTriangle } from 'lucide-react';
 import {
   guideMealRate,
+  driverMealRate,
   guideTravelRate,
   driverTravelRate,
   overnightRiderRate,
@@ -9,11 +10,21 @@ import {
   accommodationAcceptsGuide,
   accommodationDestination,
   singleOvernightRate,
+  guideMinClientRooms,
+  guideRateApplies,
+  mealAcceptsDriver,
+  guideMealChoices,
+  crewMealLines,
   OVERNIGHT_RIDER_LABELS
 } from '../lib/guidePricing';
+import { staffRoomLadder } from '../lib/staffRoomTiers';
 
 /* Overland guide detail: the lunch, dinner and overnight the guide and driver are
    fed and bedded on the days the guide is used.
+
+   The meals the guide may be booked on are the ones the supplier flagged on the
+   Meal item; until any meal is flagged every meal stays selectable, so the
+   dialog is never empty for a library that has not been tagged yet.
 
    The overnight is charged to the guide & driver only — never the clients — and
    the operator chooses which party is billed (guide / driver / both; "both"
@@ -28,10 +39,12 @@ const money = (value, code) => `${code} ${(Number(value) || 0).toLocaleString('e
 
 const mealTypeOf = (item) => String(item?.meal_type || '').trim().toLowerCase();
 
-const resolveMealPlan = (item) => {
-  if (!item) return null;
+const mealOptionLabel = (item, currency) => {
   const rate = (item.item_rates || [])[0] || {};
-  return { item, unitCost: guideMealRate(rate) };
+  const guide = money(guideMealRate(rate), currency);
+  return mealAcceptsDriver(item)
+    ? `${item.name} — guide ${guide} · driver ${money(driverMealRate(rate), currency)}`
+    : `${item.name} — ${guide}`;
 };
 
 const riderList = (charge) => (charge === 'both' ? ['guide', 'driver'] : [charge]);
@@ -42,6 +55,14 @@ export default function GuideDetailsModal({
   currency = 'ZAR',
   libraryItems = [],
   currentAccommodationIds = [],
+  /* Paying client rooms booked on this day. The property may only release its
+     guide rate once a minimum is reached; an unknown count (the package
+     builder quotes have no room allocation) leaves the contracted rate on. */
+  clientRooms,
+  /* Per-property client rooms for a split night, so the threshold is judged on
+     the rooms booked at the property the guide is bedded at rather than the
+     whole day's. */
+  clientRoomsByAccommodation = null,
   travelStart = '',
   travelEnd = '',
   defaultValues = {},
@@ -72,9 +93,12 @@ export default function GuideDetailsModal({
   });
   const [altOvernightId, setAltOvernightId] = useState(savedIsAlt ? savedHostId : '');
 
-  const meals = useMemo(() => (libraryItems || [])
+  const allMeals = useMemo(() => (libraryItems || [])
     .filter((item) => /meal/i.test(item.category || ''))
     .sort((a, b) => a.name.localeCompare(b.name)), [libraryItems]);
+
+  /* Flagged meals only, or the whole Meals module while nothing is flagged. */
+  const { meals, restricted } = useMemo(() => guideMealChoices(allMeals), [allMeals]);
 
   const lunchOptions = useMemo(() => meals.filter((item) => mealTypeOf(item).includes('lunch')), [meals]);
   const dinnerOptions = useMemo(() => meals.filter((item) => mealTypeOf(item).includes('dinner')), [meals]);
@@ -101,11 +125,36 @@ export default function GuideDetailsModal({
       : null;
 
   const hostRate = overnightHost ? overnightRateRow(overnightHost, currency, travelStart, travelEnd) : null;
-  const guideCost = overnightHost ? guideTravelRate(hostRate) : 0;
-  const driverCost = overnightHost ? driverTravelRate(hostRate) : 0;
+  /* A split night books its client rooms across more than one property, so the
+     host's own count wins; an alt property (or a caller without allocations)
+     falls back to the day total / unknown. */
+  const clientRoomsAt = (item) => {
+    const count = item ? clientRoomsByAccommodation?.[item.id] : undefined;
+    return count === undefined ? clientRooms : count;
+  };
+  const hostClientRooms = clientRoomsAt(overnightHost);
+  /* A ladder states each threshold; the note names the first one. Without a
+     ladder the property's legacy minimum still applies. */
+  const hostGuideLadder = staffRoomLadder({
+    offered: true,
+    tiers: hostRate?.guide_tiers,
+    minRooms: guideMinClientRooms(overnightHost),
+    rate: 0
+  });
+  const guideMinRooms = hostGuideLadder[0]?.minRooms ?? 1;
+  const guideThresholdMet = guideRateApplies(hostClientRooms, guideMinRooms);
+  const guideRateOptions = {
+    clientRooms: hostClientRooms,
+    minRooms: guideMinRooms,
+    tiers: hostRate?.guide_tiers
+  };
+  const guideCost = overnightHost ? guideTravelRate(hostRate, true, guideRateOptions) : 0;
+  const driverCost = overnightHost
+    ? driverTravelRate(hostRate, true, { clientRooms: hostClientRooms, minRooms: guideMinRooms, tiers: hostRate?.driver_tiers })
+    : 0;
   const singleCost = overnightHost ? singleOvernightRate(hostRate) : 0;
   const nights = riderList(riderCharge);
-  const overnightTotal = nights.reduce((sum, who) => sum + overnightRiderRate(hostRate, who), 0);
+  const overnightTotal = nights.reduce((sum, who) => sum + overnightRiderRate(hostRate, who, true, guideRateOptions), 0);
 
   const lunchChoice = lunchChoices.find((item) => item.id === lunchItemId);
   const dinnerChoice = dinnerChoices.find((item) => item.id === dinnerItemId);
@@ -114,15 +163,15 @@ export default function GuideDetailsModal({
     ? riderList(riderCharge).map((who) => ({
       item: overnightHost,
       who,
-      unitCost: overnightRiderRate(hostRate, who)
+      unitCost: overnightRiderRate(hostRate, who, true, guideRateOptions)
     }))
     : [];
 
   const handleConfirm = () => {
     onConfirm({
-      lunch: resolveMealPlan(lunchChoice),
-      dinner: resolveMealPlan(dinnerChoice),
-      overnight: overnightLines,
+      lunch: crewMealLines(lunchChoice),
+      dinner: crewMealLines(dinnerChoice),
+      overnight: overnightLines.map((line) => ({ ...line, forced: true })),
       guideOnly
     });
   };
@@ -149,12 +198,16 @@ export default function GuideDetailsModal({
           <select value={lunchItemId} onChange={(event) => setLunchItemId(event.target.value)}>
             <option value="">No lunch for the guide on this day</option>
             {lunchChoices.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} — {money(guideMealRate((item.item_rates || [])[0] || {}), currency)}
-              </option>
+              <option key={item.id} value={item.id}>{mealOptionLabel(item, currency)}</option>
             ))}
           </select>
-          {lunchChoices.length === 0 && <p className="service-guide-empty">No meal items in the library to feed the guide.</p>}
+          {lunchChoices.length === 0 && (
+            <p className="service-guide-empty">
+              {restricted
+                ? 'No meal in the library is flagged for the guide. Tick "Guide meal" on a Meal item to feed the guide.'
+                : 'No meal items in the library to feed the guide.'}
+            </p>
+          )}
         </div>
 
         <div className="service-guide-section">
@@ -162,12 +215,22 @@ export default function GuideDetailsModal({
           <select value={dinnerItemId} onChange={(event) => setDinnerItemId(event.target.value)}>
             <option value="">No dinner for the guide on this day</option>
             {dinnerChoices.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} — {money(guideMealRate((item.item_rates || [])[0] || {}), currency)}
-              </option>
+              <option key={item.id} value={item.id}>{mealOptionLabel(item, currency)}</option>
             ))}
           </select>
-          {dinnerChoices.length === 0 && <p className="service-guide-empty">No meal items in the library to feed the guide.</p>}
+          {dinnerChoices.length === 0 && (
+            <p className="service-guide-empty">
+              {restricted
+                ? 'No meal in the library is flagged for the guide. Tick "Guide meal" on a Meal item to feed the guide.'
+                : 'No meal items in the library to feed the guide.'}
+            </p>
+          )}
+          {!restricted && allMeals.length > 0 && (
+            <p className="service-guide-note">
+              No meal has been tagged yet, so every meal is offered. Tick "Guide meal" / "Driver meal"
+              on the Meal items the crew actually eats at to restrict these lists.
+            </p>
+          )}
         </div>
 
         <div className="service-guide-section">
@@ -241,9 +304,27 @@ export default function GuideDetailsModal({
               <option value="">Select a property that offers a guide &amp; driver room</option>
               {altOptions.map((item) => {
                 const rate = overnightRateRow(item, currency, travelStart, travelEnd);
+                const ladder = staffRoomLadder({
+                  offered: true,
+                  tiers: rate?.guide_tiers,
+                  minRooms: guideMinClientRooms(item),
+                  rate: 0
+                });
+                const minRooms = ladder[0]?.minRooms ?? 1;
+                const itemClientRooms = clientRoomsAt(item);
+                const guideNight = guideTravelRate(rate, true, {
+                  clientRooms: itemClientRooms,
+                  minRooms,
+                  tiers: rate?.guide_tiers
+                });
+                const driverNight = driverTravelRate(rate, true, {
+                  clientRooms: itemClientRooms,
+                  minRooms,
+                  tiers: rate?.driver_tiers
+                });
                 return (
                   <option key={item.id} value={item.id}>
-                    {item.name} — guide {money(guideTravelRate(rate), currency)} · driver {money(driverTravelRate(rate), currency)} / night
+                    {item.name} — guide {money(guideNight, currency)} · driver {money(driverNight, currency)} / night{minRooms > 1 ? ` (guide rate from ${minRooms} client rooms)` : ''}
                   </option>
                 );
               })}
@@ -270,7 +351,7 @@ export default function GuideDetailsModal({
             <div className="service-guide-riders">
               <div className="service-guide-riders-head">Who is charged for the night</div>
               {['guide', 'driver', 'both'].map((who) => {
-                const cost = who === 'both' ? guideCost + driverCost : overnightRiderRate(hostRate, who);
+                const cost = who === 'both' ? guideCost + driverCost : overnightRiderRate(hostRate, who, true, guideRateOptions);
                 return (
                   <label key={who} className={`service-guide-choice-row ${riderCharge === who ? 'selected' : ''}`}>
                     <input
@@ -302,6 +383,14 @@ export default function GuideDetailsModal({
             <p className="service-guide-note">
               {referentHost?.name} does not contract a guide &amp; driver room, so the charged
               party falls back to its default single rate.
+            </p>
+          )}
+
+          {overnightHost && riderCharge !== 'driver' && guideMinRooms > 1 && hostClientRooms !== undefined && hostClientRooms !== null && (
+            <p className="service-guide-note">
+              {guideThresholdMet
+                ? `${overnightHost.name} guide rate applies from ${guideMinRooms} client rooms — ${hostClientRooms} booked, so the guide is charged ${money(guideCost, currency)} / night.`
+                : `${overnightHost.name} guide rate needs ${guideMinRooms} client rooms — only ${hostClientRooms} booked, so the guide is charged the single rate (${money(guideCost, currency)} / night).`}
             </p>
           )}
         </div>

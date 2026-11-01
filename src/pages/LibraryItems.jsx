@@ -9,7 +9,17 @@ import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
-import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis } from '../lib/surchargeFees';
+import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis, isSurchargeItem, surchargeTypeLabel, feeEditorRowFromRecord, feeRatePayload, feeSeasonKey, moveFeeAmount, feeBasisChargesHeads } from '../lib/surchargeFees';
+import { chargesChildRate } from '../lib/servicePricing';
+import { waiverLadder, waiverFromLadder, withWaiverNote } from '../lib/singleSupplement';
+import { nightBandLabel, WEEKEND_DAY_OPTIONS, weekendDaysOf } from '../lib/accommodationOptions';
+import { normaliseStaffTiers, staffRoomLadder, staffTierSummary } from '../lib/staffRoomTiers';
+import { STAR_GRADES, starGlyphs, starLabel, starRatingOf } from '../lib/starGrading';
+import { supplierColumns, supplierStarColumn } from '../lib/supplierStarColumn';
+import { normalizeRoomTypes, roomForRate, roomsFromRates } from '../lib/roomTypes';
+import { OCCUPANCY_BASIS, normalizeOccupancyLadder, occupancyLadderError } from '../lib/occupancyPricing';
+import { fetchRoomTypesForItems, roomTypesReady as probeRoomTypesReady } from '../lib/roomTypeTable';
+import { itemDestinationLabel } from '../lib/libraryItemDetail';
 import {
   Package,
   Building2,
@@ -27,7 +37,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Hotel,
+  BedDouble,
+  Star,
   Bus,
+  BusFront,
   Utensils,
   Compass,
   UserCheck,
@@ -88,18 +101,179 @@ const moneyLoad = (value) => {
   return String(value);
 };
 
+/* A tour leader room may deliberately be free, so 0 is a real price here. These
+   two keep a saved 0 through load and save instead of reading it as a blank box
+   the way the generic money helpers do. */
+const moneyLoadKeepZero = (value) => (value === null || value === undefined || value === '' ? '' : String(value));
+const moneyOrZero = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/* A nights band is a whole number of nights (or nothing at all, meaning the
+   band is open on that side). Zero is not a band - a stay is at least one
+   night - so it saves as an open bound rather than as "0 nights". */
+const wholeOrNull = (value) => {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+/* A tier with a blank threshold or rate is still being typed; save only
+   complete ones so a half-filled row cannot become a free tier from zero client
+   rooms. Shared by the tour leader, guide and driver ladders. */
+const tierLadderPayload = (tiers) => (Array.isArray(tiers) ? tiers : [])
+  .map((tier) => {
+    const minRooms = moneyOrZero(tier.minClientRooms);
+    const rate = moneyOrZero(tier.rate);
+    if (minRooms === null || rate === null) return null;
+    return {
+      minClientRooms: Math.max(0, Math.round(minRooms)),
+      rooms: Math.max(1, Math.floor(parseFloat(tier.rooms) || 1)),
+      rate
+    };
+  })
+  .filter(Boolean)
+  .sort((a, b) => a.minClientRooms - b.minClientRooms);
+
+/* Reads a saved ladder back into the editor, keeping a typed 0 rate (a free
+   room) rather than treating it as a blank box. */
+const tierLadderFromRow = (tiers) => (Array.isArray(tiers)
+  ? tiers.map(tier => ({
+      minClientRooms: moneyLoadKeepZero(tier?.minClientRooms ?? tier?.min_rooms),
+      rooms: moneyLoadKeepZero(tier?.rooms) || '1',
+      rate: moneyLoadKeepZero(tier?.rate)
+    }))
+  : []);
+
 /* A brand-new season starts with every money box empty, not 0.00. Nothing is priced until the
    operator types a figure, so a saved rate card only ever carries consciously loaded prices and
    the read-only view has nothing to hide. */
 const emptySeasonMoney = () => ({
   roomRate: '', singleRoomRate: '', price1Adult: '', price2Adults: '', price3PlusAdults: '',
-  childRates: {}, singleSupplement: '', childDiscount: '', guideRate: '', driverRate: '', tourLeaderRate: '',
+  childRates: {}, singleSupplementWaiver: '', childDiscount: '', guideRate: '', guideTiers: [], driverRate: '', driverTiers: [], tourLeaderRate: '', tourLeaderTiers: [],
   guideTransferRate: '', guideHalfDayRate: '', guideFullDayRate: '', guideOverlandRate: '', guideDinnerRate: '',
   guideMealPlan: 'Bed & Breakfast', driverMealPlan: 'Bed & Breakfast',
   adultRate: '', childRate: '', fastTrackAdultRate: '', fastTrackChildRates: {}, tiers: [],
-  vehicleRate: '', pricesByVehicle: {}, entranceFeePerson: '', entranceFeeVehicle: '',
-  levyAdultRate: '', levyChildRate: '', taxesAndSurcharges: ''
+  vehicleRate: '', pricesByVehicle: {}, entranceFeePerson: '', entranceFeeVehicle: '', entranceFeeChild: '',
+  levyAdultRate: '', levyChildRate: '', unitRate: '', taxesAndSurcharges: '',
+  minNights: '', maxNights: '', weekendDays: [], weekendPrice: '', occupancyRates: []
 });
+
+/* The adult/child slots a priced season can actually use. Accommodation takes
+   them from the room the season belongs to; a train (and any other item with
+   capacity boxes) takes them from the item itself. A slot the contract does not
+   offer is greyed out rather than left open to an accidental price.
+   A room's child slots are null when the property does not split its guests by
+   age - the room then takes any mix up to its beds, which is a slot the season
+   does have, not one it lacks. */
+const priceCapacityFor = (item, roomKey = '') => {
+  if (item?.category === 'Accommodation') {
+    const rooms = item.roomTypes || [];
+    const room = rooms.find((entry) => entry.key === roomKey) || rooms[0];
+    if (room) {
+      const maxOccupancy = Math.max(1, parseInt(room.maxOccupancy, 10) || 1);
+      const statedChildren = parseInt(room.maxChildren, 10);
+      return {
+        maxAdults: Math.min(maxOccupancy, Math.max(1, parseInt(room.maxAdults, 10) || maxOccupancy)),
+        maxChildren: Number.isFinite(statedChildren) ? Math.max(0, Math.min(maxOccupancy, statedChildren)) : null
+      };
+    }
+  }
+  const maxOccupancy = Math.max(1, parseInt(item?.maxOccupancy, 10) || 2);
+  return {
+    maxAdults: Math.min(maxOccupancy, Math.max(1, parseInt(item?.maxAdults, 10) || maxOccupancy)),
+    maxChildren: Math.max(0, parseInt(item?.maxChildren, 10) || 0)
+  };
+};
+
+/* What a room's child cap column holds: null when the property does not split
+   its guests by age, otherwise the stated number of beds - never more than the
+   room has, which is how a 6-berth villa ended up sold with room for 22
+   children. */
+const childCapPayload = (room, occupancy) => {
+  const stated = parseInt(room?.maxChildren, 10);
+  if (!Number.isFinite(stated)) return null;
+  return Math.max(0, Math.min(Math.max(1, occupancy), stated));
+};
+
+/* Whether a room offers a child rate at all. A property that does not split its
+   guests by age takes children in any bed, so an unstated cap offers one; only
+   a stated 0 refuses it. */
+const capacityTakesChildren = (capacity) => !capacity
+  || capacity.maxChildren === null
+  || capacity.maxChildren > 0;
+
+/* The smallest party a supplier will run an activity for. Nothing stated and an
+   explicit 0 are the same deal — there is no minimum — so a tour that will depart
+   with two guests never has to be edited just to satisfy a blank box. Reads both
+   the saved row and the editor's own field. */
+const minPaxToRunOf = (item) => {
+  const raw = item?.min_pax_to_run ?? item?.minPaxToRun;
+  return Math.max(0, parseInt(raw, 10) || 0);
+};
+
+/* The party sizes a villa ladder prices: every occupant count from the smallest
+   the supplier sells to the number of beds the room has. One column per size so
+   the grid is typed straight off a supplier sheet, and no gap can be left where a
+   party would have no price. */
+const occupancySizesForRoom = (room) => {
+  const ceiling = Math.max(1, Math.min(30, parseInt(room?.maxOccupancy, 10) || 2));
+  const from = Math.max(1, Math.min(parseInt(room?.occupancyFrom, 10) || 2, ceiling));
+  const sizes = [];
+  for (let pax = from; pax <= ceiling; pax += 1) sizes.push(pax);
+  return sizes;
+};
+
+/* Which contract a room is priced on. The room states it; a room saved before
+   the column existed inherits the item's model, exactly as the engines do. A
+   value from before these three bases (a legacy 'per_person' copied onto a
+   derived room) is not a contract choice, so the item's own model still wins. */
+const ROOM_CHARGE_MODELS = ['per_person_sharing', 'per_room', OCCUPANCY_BASIS];
+const roomPricingModelOf = (room, item = {}) => {
+  const roomModel = String(room?.pricingModel || '').trim();
+  if (ROOM_CHARGE_MODELS.includes(roomModel)) return roomModel;
+  const itemModel = String(item?.pricingModel || '').trim();
+  if (ROOM_CHARGE_MODELS.includes(itemModel)) return itemModel;
+  return roomModel || itemModel || 'per_person_sharing';
+};
+
+const isOccupancyRoom = (room, item = {}) => roomPricingModelOf(room, item) === OCCUPANCY_BASIS;
+
+/* The stored ladder back as the one-figure-per-party-size list the grid edits.
+   A band that covers several sizes (5-8 at one price) opens as three boxes, so
+   the operator can price 6 differently next season without fighting the shape. */
+const occupancyBandsForEdit = (rate) => normalizeOccupancyLadder(rate?.occupancy_rates)
+  .reduce((rows, band) => {
+    for (let pax = band.minPax; pax <= band.maxPax; pax += 1) rows.push({ pax, rate: band.rate });
+    return rows;
+  }, []);
+
+const occupancyRateOf = (season, pax) => {
+  const band = (Array.isArray(season?.occupancyRates) ? season.occupancyRates : [])
+    .find((row) => parseInt(row.pax, 10) === pax);
+  return band ? band.rate : '';
+};
+
+/* The ladder as the supplier sheet reads: contiguous party sizes at their own
+   per-person figures. A size with no price is left out, and the pricing engines
+   refuse to quote a room for it rather than inventing a nearest band. */
+const occupancyLadderFromEdit = (sizes, season) => {
+  const rows = sizes
+    .map((pax) => ({ pax, rate: Number(occupancyRateOf(season, pax)) }))
+    .filter((band) => band.rate > 0)
+    .map((band) => ({ min_pax: band.pax, max_pax: band.pax, rate: band.rate }));
+  return rows.length ? rows : null;
+};
+
+/* Disabled price boxes keep their layout but read as unavailable, so the
+   operator can see the field exists without being able to type into it. */
+const disabledPriceInputStyle = {
+  background: '#f1f5f9',
+  color: '#94a3b8',
+  cursor: 'not-allowed'
+};
 
 /* A single child figure kept in a JSONB map keeps the raw typed digits, so an entered 0.00 comes
    back as "0.00" and still reads as a price. A blank or never-touched box becomes null and the
@@ -196,29 +370,132 @@ const vehicleVectorSummary = (rates) => {
 /* The surcharge fee columns written onto one season's item_rates row.
    Entrance fees and conservation levies used to be extra columns on an
    Accommodation / Transfers item's season. They are separate library items now,
-   so only a Surcharge Fees item writes these, and only into the columns its own
+   so only a Fees & Tickets item writes these, and only into the columns its own
    rate basis actually uses - the unused ones are left off entirely rather than
    written as 0, so a stale fee can never be read back out of a season row.
      per_person / per_adult -> the per-person figure
      per_child              -> the per-child figure
      per_vehicle            -> the per-vehicle figure
-     per_unit               -> the unit price */
-const surchargeRateFees = (itemData, season) => {
-  if (itemData?.category !== SURCHARGE_CATEGORY) return {};
+     per_unit               -> the unit price
+   A fee that bills heads also bills a child on a figure of its own, and the
+   guide's place is written beside it by the caller. `feeChildRate` says whether
+   the workspace has the column yet: writing the amount read from a box nobody
+   can see would put null into a column that does not exist. */
+const surchargeRateFees = (itemData, season, { feeChildRate = false } = {}) => {
+  if (!isSurchargeItem(itemData)) return {};
   const unitBasis = itemData.surchargeUnitBasis || 'per_person';
   const num = moneyOrNull;
   const isEntrance = (itemData.surchargeType || 'entrance_fee') === 'entrance_fee';
-  if (isEntrance) {
-    if (unitBasis === 'per_vehicle') {
-      return { entrance_fee_per_vehicle: num(season.entranceFeeVehicle) };
-    }
-    return { entrance_fee_per_person: num(season.entranceFeePerson) };
+  if (unitBasis === 'per_unit') {
+    return { unit_price: num(season.unitRate) };
   }
+  if (unitBasis === 'per_vehicle') {
+    return { entrance_fee_per_vehicle: num(season.entranceFeeVehicle) };
+  }
+  if (isEntrance) {
+    return {
+      entrance_fee_per_person: num(season.entranceFeePerson),
+      ...(feeChildRate ? { entrance_fee_per_child: num(season.entranceFeeChild) } : {})
+    };
+  }
+  /* A levy quotes both an adult and a child ladder whenever it bills people;
+     the "per child" basis is the one case where only the child figure is
+     charged, so the adult column stays untouched there. */
   if (unitBasis === 'per_child') {
     return { conservation_levy_per_child: num(season.levyChildRate) };
   }
-  return { conservation_levy_per_adult: num(season.levyAdultRate) };
+  return {
+    conservation_levy_per_adult: num(season.levyAdultRate),
+    conservation_levy_per_child: num(season.levyChildRate)
+  };
 };
+
+/* Ladder editor for the rooms a property includes once enough paying client
+   rooms are booked. The tour leader, guide and driver deals share this shape:
+   each tier states the total rooms included from a threshold and the rate for
+   the rooms it adds (0 = free, a partial amount = discounted). */
+const TierLadderEditor = ({
+  legend, roomLabel, currency, tiers = [], tone = 'teal', moneyStep, onAdd, onChange, onRemove
+}) => {
+  const palette = tone === 'amber'
+    ? { border: '#fde68a', title: '#92400e', label: '#a16207', note: '#b45309' }
+    : { border: '#99f6e4', title: '#115e59', label: '#0f766e', note: '#0f766e' };
+  return (
+    <div style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: `1px dashed ${palette.border}` }}>
+      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: palette.title, display: 'block', marginBottom: '0.35rem' }}>
+        {legend}
+      </span>
+      {tiers.map((tier, tierIdx) => (
+        <div key={tierIdx} style={{ display: 'flex', alignItems: 'flex-end', gap: '0.5rem', marginBottom: '0.45rem', flexWrap: 'wrap' }}>
+          <div>
+            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>From client rooms</span>
+            <input
+              type="number"
+              min="0"
+              className="pricing-select"
+              style={{ padding: '0.3rem', width: '110px' }}
+              placeholder="e.g. 10"
+              value={tier.minClientRooms ?? ''}
+              onChange={(e) => onChange(tierIdx, 'minClientRooms', e.target.value)}
+            />
+          </div>
+          <div>
+            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>{roomLabel} rooms (total)</span>
+            <input
+              type="number"
+              min="1"
+              className="pricing-select"
+              style={{ padding: '0.3rem', width: '110px' }}
+              value={tier.rooms ?? '1'}
+              onChange={(e) => onChange(tierIdx, 'rooms', e.target.value)}
+            />
+          </div>
+          <div>
+            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>Rate ({currency})</span>
+            <input
+              type="number"
+              min="0"
+              className="pricing-select"
+              style={{ padding: '0.3rem', width: '130px' }}
+              placeholder="0 = free"
+              value={tier.rate ?? ''}
+              onChange={(e) => onChange(tierIdx, 'rate', e.target.value)}
+              step={moneyStep}
+            />
+          </div>
+          <button
+            type="button"
+            className="secondary-btn"
+            style={{ padding: '0.3rem 0.55rem', fontSize: '0.78rem' }}
+            onClick={() => onRemove(tierIdx)}
+            aria-label={`Remove ${roomLabel.toLowerCase()} tier`}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="secondary-btn"
+        style={{ padding: '0.35rem 0.7rem', fontSize: '0.78rem' }}
+        onClick={onAdd}
+      >
+        + Add tier
+      </button>
+      <div style={{ fontSize: '0.72rem', color: palette.note, marginTop: '0.4rem' }}>
+        Each tier covers the client rooms from its threshold up to the next tier — 1 and 11
+        read as “1–10 client rooms”, then “11+”. Enter the total {roomLabel.toLowerCase()} rooms
+        included from that threshold and the rate for those rooms; repeating the same room
+        count with a new rate changes the price for that band (0 = free). Any further room
+        pays the normal Single rate. Tiers take over from the flat rate above.
+      </div>
+    </div>
+  );
+};
+
+/* Draft room rows need a key before they have a database id. The key is handed
+   in by the caller (sequential within one property), so no clock is read during
+   render; a saved room uses its database id on the next load. */
 
 export const LibraryItems = () => {
   const [suppliers, setSuppliers] = useState([]);
@@ -281,16 +558,15 @@ export const LibraryItems = () => {
     accountHolderName: '',
     bankAccountNumber: '',
     branchCode: '',
-    swiftCode: ''
+    swiftCode: '',
+    starRating: ''
   });
 
   const [savingSupplier, setSavingSupplier] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, surchargeFees: true, pricesByVehicle: false });
-  const url = import.meta.env.VITE_SUPABASE_URL;
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, staffOptions: false, minPaxToRun: false, feeChildRate: false });
 
   // The price axis a per-vehicle rate row is keyed by, read once from Settings.
   const [vehicleTypes, setVehicleTypes] = useState([]);
@@ -301,6 +577,21 @@ export const LibraryItems = () => {
   // Draft name typed into an accommodation item's "Add charge option" box.
   const [chargeOptionDraft, setChargeOptionDraft] = useState({});
 
+  /* Lodging rooms. The table and its columns arrive together, so one probe
+     decides whether the property/room editor is available; until then the item
+     keeps behaving as one room type. */
+  const [roomsReady, setRoomsReady] = useState(false);
+  const [activeRoomByItem, setActiveRoomByItem] = useState({});
+  const [starColumnReady, setStarColumnReady] = useState(false);
+  const [supplierStarDraft, setSupplierStarDraft] = useState({});
+
+  useEffect(() => {
+    let active = true;
+    probeRoomTypesReady().then((ready) => { if (active) setRoomsReady(ready); });
+    supplierStarColumn().then((ready) => { if (active) setStarColumnReady(ready); });
+    return () => { active = false; };
+  }, []);
+
   const { showToast } = useToast();
   const location = useLocation();
   const { currencies } = useCurrencies();
@@ -309,7 +600,7 @@ export const LibraryItems = () => {
 
   const categoryOptions = [
     { id: 'Accommodation', label: 'Accommodation', icon: Hotel, color: '#863bff' },
-    { id: 'Surcharge Fees', label: 'Surcharge Fees', icon: Receipt, color: '#f43f5e' },
+    { id: SURCHARGE_CATEGORY, label: 'Fees & Tickets', icon: Receipt, color: '#f43f5e' },
     { id: 'Transfers', label: 'Transfers', icon: Bus, color: '#3b82f6' },
     { id: 'Activities / Tours', label: 'Activities / Tours', icon: Compass, color: '#10b981' },
     { id: 'Flights / Charter', label: 'Flights / Charter', icon: Plane, color: '#6366f1' },
@@ -318,7 +609,8 @@ export const LibraryItems = () => {
     { id: 'Trains', label: 'Trains', icon: TrainFront, color: '#f97316' },
     { id: 'Tickets', label: 'Tickets', icon: Ticket, color: '#14b8a6' },
     { id: 'Extras', label: 'Extras', icon: Sparkles, color: '#ec4899' },
-    { id: 'Car Rental', label: 'Car Rental', icon: Car, color: '#06b6d4' }
+    { id: 'Car Rental', label: 'Car Rental', icon: Car, color: '#06b6d4' },
+    { id: 'Transport', label: 'Transport', icon: BusFront, color: '#0ea5e9' }
   ];
 
 // Category options are driven by the library_categories table when present,
@@ -356,6 +648,12 @@ export const LibraryItems = () => {
   ];
 
   const tourTypes = [
+    {
+      id: 'short_experience',
+      label: 'Short Experience',
+      icon: '⏱️',
+      description: 'Minutes to an hour — a boat hop, a walk, a quick visit or a ride.'
+    },
     {
       id: 'half_day',
       label: 'Half Day',
@@ -409,9 +707,45 @@ export const LibraryItems = () => {
     }
   ];
 
+  /* A Transport supplier sells the vehicle itself, not a named journey: the same
+     bus can shuttle a tour, run a transfer, haul a group overland, or stand by at
+     the client's disposal. The type is what the itinerary reads to allow for the
+     driver's meals and overnight. */
+  const transportTypes = [
+    {
+      id: 'tour_activity',
+      label: 'Tour / activity transport',
+      icon: '🧭',
+      description: 'The vehicle carries the group to an activity or on a tour and back.'
+    },
+    {
+      id: 'transfer',
+      label: 'Transfer',
+      icon: '🚐',
+      description: 'A point-to-point move between two places, same day.'
+    },
+    {
+      id: 'overland',
+      label: 'Overland',
+      icon: '🛤️',
+      description: 'Long-haul leg that spends the night away from the origin city.'
+    },
+    {
+      id: 'at_disposal',
+      label: 'At disposal',
+      icon: '⏱️',
+      description: 'The vehicle and driver stand by for the day, so the hire is priced per day.'
+    }
+  ];
+
+  /* Transport is the vehicle-only category. It takes the same tour-style editor as
+     a transfer - capacity, per-vehicle pricing, the vehicle price vector - and the
+     same driver rules, because a bus always comes with its driver. */
+  const isTransportCategory = (category) => category === 'Transport';
+
   // Categories that use the simplified tour/transfer form: vehicle capacity,
   // per-vehicle / per-person / tiered pricing, and a minimal seasonal matrix.
-  const isTourStyleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours' || category === 'Flights / Charter';
+  const isTourStyleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours' || category === 'Flights / Charter' || isTransportCategory(category);
   const isFlightCategory = (category) => category === 'Flights / Charter';
   const isMealsCategory = (category) => category === 'Meals';
   const isTrainCategory = (category) => category === 'Trains';
@@ -419,9 +753,17 @@ export const LibraryItems = () => {
   const isExtrasCategory = (category) => category === 'Extras';
   const isCarRentalCategory = (category) => category === 'Car Rental';
   const isGuideCategory = (category) => category === 'Guide' || category === 'Guide / Driver';
-  const normalizeCategoryName = (name) => name === 'Guide / Driver' ? 'Guide' : name;
-  const legacyCategoryName = (name) => name === 'Guide' ? 'Guide / Driver' : null;
-  const isDriverEligibleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours';
+  const normalizeCategoryName = (name) => {
+    if (name === 'Guide / Driver') return 'Guide';
+    if (name === 'Surcharge Fees') return SURCHARGE_CATEGORY;
+    return name;
+  };
+  const legacyCategoryName = (name) => {
+    if (name === 'Guide') return 'Guide / Driver';
+    if (name === SURCHARGE_CATEGORY) return 'Surcharge Fees';
+    return null;
+  };
+  const isDriverEligibleCategory = (category) => category === 'Transfers' || category === 'Activities / Tours' || isTransportCategory(category);
 
   // A dedicated driver is only provided for large vehicles (14+ seats) and the
   // vehicle price already includes the driver — the option only triggers the
@@ -441,16 +783,24 @@ export const LibraryItems = () => {
     { id: 'dinner_transfer', field: 'guideDinnerRate', label: 'Dinner transfer price' }
   ];
   const getVehiclePax = (maxOccupancy) => parseInt(maxOccupancy) || 0;
-  const getDefaultDriverMeals = (category, transferType) => {
+  /* What the vehicle is being hired for, from whichever field the category uses:
+     a transfer names itself by its transfer type, a Transport item by the job the
+     supplier is being paid for. */
+  const driverHireType = (item) => (isTransportCategory(item?.category) ? item?.transportType : item?.transferType);
+  const getDefaultDriverMeals = (category, hireType) => {
     if (category === 'Transfers') {
-      if (transferType === 'dinner') return ['dinner'];
-      if (transferType === 'overland') return ['lunch', 'dinner'];
+      if (hireType === 'dinner') return ['dinner'];
+      if (hireType === 'overland') return ['lunch', 'dinner'];
       return [];
     }
+    /* A Transport day is the vehicle and its driver for as long as the group needs
+       them, so the driver eats with the group; an overland leg runs into the
+       evening as well. */
+    if (isTransportCategory(category)) return hireType === 'overland' ? ['lunch', 'dinner'] : ['lunch'];
     return ['lunch'];
   };
-  const getDefaultDriverAccommodation = (category, transferType) =>
-    category === 'Transfers' && transferType === 'overland';
+  const getDefaultDriverAccommodation = (category, hireType) =>
+    (category === 'Transfers' || isTransportCategory(category)) && hireType === 'overland';
 
   // Dynamic Country Options derived from full currencies table
   const countryOptions = currencies.length > 0
@@ -499,6 +849,74 @@ export const LibraryItems = () => {
     return result;
   }
 
+  /* Rules seeded under an older ceiling keep their old auto-derived values
+     after a room type starts sleeping more guests. A row still holding the old
+     auto value (old ceiling minus adults) follows the new ceiling; a row the
+     operator set lower on purpose keeps that cap, clamped to the new ceiling. */
+  function rebaseSharingRules(maxAdults, oldCeiling, newCeiling, currentRules = []) {
+    const safeAdults = Math.max(1, parseInt(maxAdults) || 1);
+    const safeOld = Math.max(1, parseInt(oldCeiling) || 1);
+    const safeNew = Math.max(safeAdults, parseInt(newCeiling) || safeOld);
+    const rulesMap = {};
+    if (Array.isArray(currentRules)) {
+      currentRules.forEach(r => {
+        if (r && r.adults) {
+          rulesMap[r.adults] = r.maxChildren;
+        }
+      });
+    }
+
+    const result = [];
+    for (let a = 1; a <= safeAdults; a++) {
+      const oldAuto = Math.max(0, safeOld - a);
+      const newAuto = Math.max(0, safeNew - a);
+      let assigned = newAuto;
+      if (rulesMap[a] !== undefined) {
+        const stored = parseInt(rulesMap[a]);
+        if (!isNaN(stored)) {
+          assigned = stored === oldAuto ? newAuto : Math.max(0, Math.min(newAuto, stored));
+        }
+      }
+      result.push({
+        adults: a,
+        maxChildren: assigned
+      });
+    }
+    return result;
+  }
+
+  /* Detect rows still holding the untouched seed pattern (maxChildren equals
+     ceiling minus adults on every row) under a smaller ceiling than the rooms
+     currently offer — the signature of rules seeded before a room was widened.
+     Returns that stale ceiling, or null when any row was edited by hand. */
+  function staleAutoCeilingOf(rules, currentCeiling) {
+    if (!Array.isArray(rules) || rules.length === 0) return null;
+    const sorted = [...rules].sort((a, b) => (parseInt(a.adults) || 0) - (parseInt(b.adults) || 0));
+    const firstAdults = Math.max(1, parseInt(sorted[0]?.adults) || 1);
+    if (firstAdults !== 1) return null;
+    const candidate = Math.max(1, (parseInt(sorted[0]?.maxChildren) || 0) + 1);
+    if (candidate >= currentCeiling) return null;
+    const matches = sorted.every(r => {
+      const a = parseInt(r.adults) || 0;
+      const c = parseInt(r.maxChildren);
+      return !isNaN(c) && c === Math.max(0, candidate - a);
+    });
+    return matches ? candidate : null;
+  }
+
+  /* With room types the property-wide ceiling and adult row count come from
+     the widest room, since the sharing rules are property-wide by contract. */
+  function roomCeilingOf(rooms) {
+    return (rooms || []).reduce((max, room) => Math.max(max, parseInt(room.maxOccupancy) || 0), 0);
+  }
+
+  function roomAdultsOf(rooms) {
+    return (rooms || []).reduce(
+      (max, room) => Math.max(max, Math.min(parseInt(room.maxAdults) || 1, parseInt(room.maxOccupancy) || 1)),
+      1
+    );
+  }
+
   function createCarRentalGroup() {
     return {
       groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
@@ -524,6 +942,29 @@ export const LibraryItems = () => {
     };
   }
 
+  /* A hoisted declaration, not a const: createNewItemTemplate() runs from the
+     useState initializer above, before this line would have been evaluated. */
+  function newRoomTemplate(name = '', key = 'room_1') {
+    return {
+      key,
+      id: null,
+      name,
+      description: '',
+      maxOccupancy: 2,
+      maxAdults: 2,
+      /* A new room starts without a child cap. Most properties sell a room by
+         how many sleep in it and only name a child limit when they have one, so
+         the blank is the common contract rather than an unfilled box. */
+      maxChildren: null,
+      /* A villa is contracted on how many sleep in it; a standard room on its
+         adult count. The room carries the choice so one property can hold both,
+         and the smallest party the ladder sells - the price bands themselves are
+         per season and charge type, so they are typed in the grid below. */
+      pricingModel: '',
+      occupancyFrom: 2
+    };
+  }
+
   function createNewItemTemplate(index = 1) {
     const defaultAgeBands = [
       { id: 'band_1', name: 'Infants', ageFrom: 0, ageTo: 2 },
@@ -533,6 +974,7 @@ export const LibraryItems = () => {
 
     const initialMaxOcc = 2;
     const initialMaxAdults = 2;
+    const defaultRoom = newRoomTemplate('Standard Room');
 
     return {
       tempId: Date.now() + Math.random(),
@@ -546,7 +988,9 @@ export const LibraryItems = () => {
       mealPlan: 'Bed & Breakfast',
       vehicleType: '',
       tourType: '',
+      minPaxToRun: '',
       transferType: '',
+      transportType: '',
       flightNumber: '',
       airlineName: '',
       departureCity: '',
@@ -558,9 +1002,15 @@ export const LibraryItems = () => {
       mealType: 'Breakfast',
       menuType: 'a_la_carte',
       mealGratuityPercent: 0,
+      /* Crew flags: which meals the guide and the driver are booked on, and
+         whether this flight also sells the guide a seat. All three decide what
+         the itinerary offers, never what a season costs. */
+      guideMealOffered: false,
+      driverMealOffered: false,
+      guideFlightOffered: false,
       feeType: 'none',
       levyBasis: 'per_night',
-      /* Surcharge Fees items only. A surcharge is its own library item rather
+      /* Fees & Tickets items only. A surcharge is its own library item rather
          than a switch on an accommodation, so it carries its own type, basis,
          rate basis, chargeable flag and the property it belongs to. */
       surchargeType: 'entrance_fee',
@@ -568,6 +1018,12 @@ export const LibraryItems = () => {
       surchargeUnitBasis: 'per_person',
       surchargeChargeable: true,
       linkedItemId: '',
+      /* Park fees and conservation levies that belong to this property. They are
+         saved as linked Fees & Tickets items so the itinerary can price them on
+         their own line, but the operator types them once here with the
+         accommodation rather than creating a separate library item. */
+      linkedFees: [],
+      linkedFeeOriginalIds: [],
       childAge: 12,
       pricingModel: 'per_person', // 'per_person' | 'per_room' | transfer: 'per_vehicle' | 'tiered'
       maxOccupancy: initialMaxOcc,
@@ -577,7 +1033,9 @@ export const LibraryItems = () => {
         { adults: 1, maxChildren: 1 },
         { adults: 2, maxChildren: 0 }
       ]),
+      childrenOwnRoomPolicy: 'child_rates',
       guideDriverOffered: false,
+  guideMinRooms: 1,
   tourLeaderRoomOffered: false,
   tourLeaderMinRooms: 1,
   tourLeaderRate: '',
@@ -593,10 +1051,12 @@ export const LibraryItems = () => {
       contractName: '',
       childAgeRanges: defaultAgeBands,
       carGroups: [createCarRentalGroup()],
+      roomTypes: [defaultRoom],
       seasons: [
         {
           seasonName: 'Base Season',
           optionName: '',
+          roomKey: defaultRoom.key,
           validFrom: '',
           validTo: '',
           ...emptySeasonMoney()
@@ -608,7 +1068,10 @@ export const LibraryItems = () => {
   const handleSharingRuleChange = (tempId, adultCount, maxChildrenVal) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        const safeMaxOcc = parseInt(item.maxOccupancy) || 2;
+        const hasRooms = item.category === 'Accommodation' && Array.isArray(item.roomTypes) && item.roomTypes.length > 0 && roomsReady;
+        const safeMaxOcc = hasRooms
+          ? (roomCeilingOf(item.roomTypes) || 2)
+          : (parseInt(item.maxOccupancy) || 2);
         const currentRules = item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, safeMaxOcc, []);
         const rowMaxAllowed = Math.max(0, safeMaxOcc - adultCount);
         const parsedVal = maxChildrenVal === '' ? '' : Math.max(0, Math.min(rowMaxAllowed, parseInt(maxChildrenVal) || 0));
@@ -629,8 +1092,166 @@ export const LibraryItems = () => {
     }));
   };
 
-  const handleAddChildAgeBand = (tempId) => {
+  const activeRoomKeyFor = (item) => {
+    const rooms = item?.roomTypes || [];
+    const raw = activeRoomByItem[item?.tempId];
+    return rooms.some((room) => room.key === raw) ? raw : (rooms[0]?.key || '');
+  };
+
+  /* One property can sell sharing rooms and occupancy-priced villas, so what the
+     price matrix and its explainer offer is decided by the room on screen. */
+  const activeRoomFor = (item, roomKey = '') => (item?.roomTypes || [])
+    .find((room) => room.key === (roomKey || activeRoomKeyFor(item))) || null;
+  const roomModelFor = (item, roomKey = '') => roomPricingModelOf(
+    item?.category === 'Accommodation' ? activeRoomFor(item, roomKey) : null,
+    item
+  );
+
+  const handleAddRoom = (tempId) => {
+    const current = itemsToSave.find(entry => entry.tempId === tempId);
+    const rooms = current?.roomTypes || [];
+    const used = new Set(rooms.map(room => room.key));
+    let seq = rooms.length + 1;
+    while (used.has(`room_${seq}`)) seq += 1;
+    const room = newRoomTemplate('', `room_${seq}`);
     setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const newRooms = [...(item.roomTypes || []), room];
+      const oldCeiling = roomCeilingOf(item.roomTypes);
+      const newCeiling = roomCeilingOf(newRooms);
+      return {
+        ...item,
+        roomTypes: newRooms,
+        sharingCapacityRules: newCeiling !== oldCeiling
+          ? rebaseSharingRules(roomAdultsOf(newRooms), oldCeiling || 1, newCeiling, item.sharingCapacityRules)
+          : item.sharingCapacityRules
+      };
+    }));
+    /* Pricing is entered one room at a time, so a new room becomes the one on
+       screen instead of the operator hunting for it in a collapsed list. */
+    setActiveRoomByItem(prev => ({ ...prev, [tempId]: room.key }));
+  };
+
+  const handleUpdateRoom = (tempId, roomKey, field, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const oldCeiling = roomCeilingOf(item.roomTypes);
+      const newRooms = (item.roomTypes || []).map(room => {
+        if (room.key !== roomKey) return room;
+        if (field === 'name' || field === 'description') return { ...room, [field]: value };
+        if (field === 'pricingModel') return { ...room, pricingModel: String(value || '') };
+        if (field === 'occupancyFrom') {
+          const from = Math.min(Math.max(1, parseInt(value, 10) || 1), Math.max(1, parseInt(room.maxOccupancy, 10) || 2));
+          return { ...room, occupancyFrom: from };
+        }
+        const number = Math.max(1, parseInt(value, 10) || 0);
+        if (field === 'maxOccupancy') {
+          const maxOccupancy = Math.min(30, number);
+          const statedChildren = parseInt(room.maxChildren, 10);
+          return {
+            ...room,
+            maxOccupancy,
+            maxAdults: Math.min(room.maxAdults || 1, maxOccupancy),
+            /* Fewer beds cannot mean more children. A room that never stated a
+               child cap keeps it unstated - shrinking the room does not turn a
+               property that does not split its guests into one that refuses
+               them. */
+            maxChildren: Number.isFinite(statedChildren)
+              ? Math.min(maxOccupancy, Math.max(0, statedChildren))
+              : null
+          };
+        }
+        if (field === 'maxAdults') {
+          return { ...room, maxAdults: Math.min(number, room.maxOccupancy || number) };
+        }
+        if (field === 'maxChildren') {
+          const stated = parseInt(value, 10);
+          if (!Number.isFinite(stated)) return { ...room, maxChildren: null };
+          const ceiling = Math.max(1, parseInt(room.maxOccupancy, 10) || 2);
+          return { ...room, maxChildren: Math.min(ceiling, Math.max(0, stated)) };
+        }
+        return room;
+      });
+      let next = { ...item, roomTypes: newRooms };
+      if (field === 'maxOccupancy' || field === 'maxAdults') {
+        const newCeiling = roomCeilingOf(newRooms);
+        next = {
+          ...next,
+          sharingCapacityRules: rebaseSharingRules(roomAdultsOf(newRooms), oldCeiling || 1, newCeiling, item.sharingCapacityRules)
+        };
+      }
+      return next;
+    }));
+  };
+
+  const handleRemoveRoom = (tempId, roomKey) => {
+    const item = itemsToSave.find(entry => entry.tempId === tempId);
+    if (!item) return;
+    if ((item.roomTypes || []).length <= 1) {
+      showToast('A property needs at least one room type', 'warning');
+      return;
+    }
+    if ((item.seasons || []).some(season => season.roomKey === roomKey)) {
+      showToast('Remove this room type\'s seasons before deleting it', 'warning');
+      return;
+    }
+    setItemsToSave(prev => prev.map(entry => {
+      if (entry.tempId !== tempId) return entry;
+      const oldCeiling = roomCeilingOf(entry.roomTypes);
+      const newRooms = (entry.roomTypes || []).filter(room => room.key !== roomKey);
+      const newCeiling = roomCeilingOf(newRooms);
+      return {
+        ...entry,
+        roomTypes: newRooms,
+        sharingCapacityRules: newCeiling !== oldCeiling
+          ? rebaseSharingRules(roomAdultsOf(newRooms), oldCeiling || 1, newCeiling || 1, entry.sharingCapacityRules)
+          : entry.sharingCapacityRules
+      };
+    }));
+    setActiveRoomByItem(prev => (prev[tempId] === roomKey ? { ...prev, [tempId]: '' } : prev));
+  };
+
+  /* The star grade belongs to the supplier (the hotel or lodge), not to one
+     room: every room in this property inherits it, and the itinerary, vouchers
+     and rate cards print it from there. An existing supplier is updated as the
+     stars are clicked; an unsaved inline supplier keeps the grade in the form
+     so it is written with the rest of the supplier record. */
+  /* A property's locality is the supplier's city — one source of truth, so the
+     operator does not retype the destination on every room and rate. */
+  const supplierDestination = () => {
+    if (supplierMode === 'new' || !selectedSupplierId) {
+      return String(supplierForm.city || supplierForm.provinceState || '').trim();
+    }
+    const supplier = suppliers.find((s) => s.id === selectedSupplierId) || {};
+    return String(supplier.city_location || supplier.city || supplier.province_state || '').trim();
+  };
+
+  const supplierStarValue = () => {
+    if (!selectedSupplierId) return starRatingOf(supplierForm.starRating);
+    if (supplierStarDraft[selectedSupplierId] !== undefined) return supplierStarDraft[selectedSupplierId];
+    return starRatingOf((suppliers.find(s => s.id === selectedSupplierId) || {}).star_rating);
+  };
+
+  const handleStarGradeChange = async (grade) => {
+    const rating = grade === null ? null : starRatingOf(grade);
+    if (!selectedSupplierId) {
+      setSupplierForm(prev => ({ ...prev, starRating: rating ?? '' }));
+      return;
+    }
+    setSupplierStarDraft(prev => ({ ...prev, [selectedSupplierId]: rating }));
+    if (!starColumnReady) return;
+    const { error } = await supabase
+      .from('suppliers')
+      .update({ star_rating: rating })
+      .eq('id', selectedSupplierId);
+    if (error) {
+      showToast(error.message, 'error');
+      return;
+    }
+    setSuppliers(prev => prev.map(s => (s.id === selectedSupplierId ? { ...s, star_rating: rating } : s)));
+  };
+
+  const handleAddChildAgeBand = (tempId) => {    setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
         const currentBands = item.childAgeRanges || [];
         const newBandId = 'band_' + Date.now();
@@ -763,46 +1384,80 @@ export const LibraryItems = () => {
   const fetchInitialData = async () => {
     setLoading(true);
     try {
-      // Detect which DB columns exist (lean toward enabled when the DB is
-      // stricter); column names come from PostgREST's OpenAPI introspection.
+      /* Optional columns differ between deployments, so probe the ones the
+         editor writes. A select against a missing column fails, which hides
+         only the controls that need it instead of breaking the save. */
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.access_token) {
-          const specResp = await fetch(`${url}/rest/v1/`, {
-            headers: { apikey: anonKey, Authorization: `Bearer ${session.access_token}` }
-          });
-          if (specResp.ok) {
-            const spec = await specResp.json();
-            const libCols = spec.definitions?.library_items?.properties ? Object.keys(spec.definitions.library_items.properties) : [];
-            const rateCols = spec.definitions?.item_rates?.properties ? Object.keys(spec.definitions.item_rates.properties) : [];
-            setDbFeatures({
-              guideDriver: libCols.includes('guide_driver_room_offered') && rateCols.includes('guide_rate') && rateCols.includes('driver_rate') && rateCols.includes('guide_meal_plan') && rateCols.includes('driver_meal_plan'),
-              contracts: libCols.includes('contract_url') && libCols.includes('contract_name'),
-              tieredPricing: rateCols.includes('tiered_pricing'),
-              transferType: libCols.includes('transfer_type'),
-              tourType: libCols.includes('tour_type'),
-              // conservation_levy_basis is written on the same payload as
-              // fee_type, so it has to be part of the same gate: a database
-              // missing it rejects the whole insert, not just the field.
-              feeType: libCols.includes('fee_type') && libCols.includes('conservation_levy_basis') && rateCols.includes('entrance_fee_per_person') && rateCols.includes('conservation_levy_per_adult'),
-              driverOption: libCols.includes('driver_required') && libCols.includes('driver_meals') && libCols.includes('driver_accommodation'),
-              /* Surcharge Fees as independent items. All five columns are written
-                 on one payload, so they gate together: a database missing any
-                 one of them rejects the whole insert. */
-              surchargeFees: libCols.includes('surcharge_type')
-                && libCols.includes('surcharge_charge_basis')
-                && libCols.includes('surcharge_unit_basis')
-                && libCols.includes('surcharge_chargeable')
-                && libCols.includes('linked_item_id'),
-              /* One price per vehicle type on the rate row. Gated on its own because
-                 only this column is involved, so a database without it keeps the single
-                 per-vehicle input rather than losing rate entry entirely. */
-              pricesByVehicle: rateCols.includes('prices_by_vehicle')
-            });
-          }
-        }
+        const hasColumns = async (table, columns) => {
+          const { error } = await supabase.from(table).select(columns.join(',')).limit(1);
+          return !error;
+        };
+        const [
+          guideDriverRates, guideMinRooms, guideDriverTiers,
+          contracts, tieredPricing, transferType, tourType, transportType,
+          feeTypeLib, feeTypeRates, driverOption, surchargeFees,
+          pricesByVehicle, tourLeaderTiers, singleSupplementTiers, nightBands, weekendRates,
+          roomPricingModel, occupancyRatesColumn, staffOptions, minPaxToRun, entranceFeeChildRate
+        ] = await Promise.all([
+          hasColumns('item_rates', ['guide_rate', 'driver_rate', 'guide_meal_plan', 'driver_meal_plan']),
+          hasColumns('library_items', ['guide_min_rooms']),
+          hasColumns('item_rates', ['guide_tiers', 'driver_tiers']),
+          hasColumns('library_items', ['contract_url', 'contract_name']),
+          hasColumns('item_rates', ['tiered_pricing']),
+          hasColumns('library_items', ['transfer_type']),
+          hasColumns('library_items', ['tour_type']),
+          hasColumns('library_items', ['transport_type']),
+          /* fee_type and conservation_levy_basis travel on the same library
+             payload, so they gate together; the fee figures are rate columns. */
+          hasColumns('library_items', ['fee_type', 'conservation_levy_basis']),
+          hasColumns('item_rates', ['entrance_fee_per_person', 'conservation_levy_per_adult']),
+          hasColumns('library_items', ['driver_required', 'driver_meals', 'driver_accommodation']),
+          hasColumns('library_items', ['surcharge_type', 'surcharge_charge_basis', 'surcharge_unit_basis', 'surcharge_chargeable', 'linked_item_id']),
+          hasColumns('item_rates', ['prices_by_vehicle']),
+          hasColumns('item_rates', ['tour_leader_tiers']),
+          hasColumns('item_rates', ['single_supplement_tiers']),
+          hasColumns('item_rates', ['min_nights', 'max_nights']),
+          hasColumns('item_rates', ['weekend_days', 'weekend_price']),
+          /* A villa ladder spans two tables: the room says which contract it is
+             sold on and the rate row carries the per-person bands. Both must
+             exist before the editor offers the basis, or a save would write a
+             column the database has not got. */
+          hasColumns('library_item_room_types', ['pricing_model']),
+          hasColumns('item_rates', ['occupancy_rates']),
+          /* Which meals the crew eats and whether the supplier sells the guide a
+             seat: three item-level flags that arrive on the same migration, so
+             they gate together. */
+          hasColumns('library_items', ['guide_meal_offered', 'driver_meal_offered', 'guide_flight_offered']),
+          /* A tour that runs for one guest is a fact about the item, not a season;
+             the child entrance fee is a figure on the rate row beside the adult
+             one. Both arrive on 20261245. */
+          hasColumns('library_items', ['min_pax_to_run']),
+          hasColumns('item_rates', ['entrance_fee_per_child'])
+        ]);
+        setDbFeatures({
+          guideDriver: guideDriverRates,
+          guideMinRooms,
+          guideDriverTiers,
+          contracts,
+          tieredPricing,
+          transferType,
+          tourType,
+          transportType,
+          feeType: feeTypeLib && feeTypeRates,
+          driverOption,
+          surchargeFees,
+          pricesByVehicle,
+          tourLeaderTiers,
+          singleSupplementTiers,
+          nightBands,
+          weekendRates,
+          occupancyPricing: roomPricingModel && occupancyRatesColumn,
+          staffOptions,
+          minPaxToRun,
+          feeChildRate: entranceFeeChildRate
+        });
       } catch {
-        // Introspection failed — assume feature is present.
+        // Probes failed (offline / row-level security) — keep the defaults.
       }
 
       const { data: { user } } = await supabase.auth.getUser();
@@ -925,6 +1580,11 @@ export const LibraryItems = () => {
         ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
         : { data: [] };
 
+      /* Room types are a child of the property, so a hotel with three rooms
+         loads as one library row. The lookup is silent until the lodging
+         migration is applied, and a legacy item simply reads as no rooms. */
+      const roomsByItem = await fetchRoomTypesForItems(itemIds);
+
       // Fetch car_rental_rates separately — no FK join
       let carRatesData = [];
       if (itemIds.length > 0) {
@@ -939,7 +1599,7 @@ export const LibraryItems = () => {
       // Fetch suppliers separately — no FK join
       const { data: suppliersData } = await supabase
         .from('suppliers')
-        .select('id, name')
+        .select(await supplierColumns('id, name'))
         .eq('company_id', profile.company_id);
 
       // Build lookup maps and merge
@@ -960,9 +1620,10 @@ export const LibraryItems = () => {
 
       const merged = (items || []).map(item => ({
         ...item,
-        category: item.category === 'Guide / Driver' ? 'Guide' : item.category,
+        category: normalizeCategoryName(item.category),
         item_rates: ratesMap[item.id] || [],
         car_rental_rates: carRatesMap[item.id] || [],
+        room_types: roomsByItem.get(item.id) || [],
         supplier: supplierMap[item.supplier_id] || null
       }));
 
@@ -1318,10 +1979,13 @@ export const LibraryItems = () => {
   };
 
   // Seasons Management within an item
-  const handleAddSeasonRow = (tempId, optionName = '') => {
+  const handleAddSeasonRow = (tempId, optionName = '', roomKey = '') => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        const seasonCount = item.seasons.length + 1;
+        const room = (item.roomTypes || []).find(entry => entry.key === roomKey) || item.roomTypes?.[0];
+        const seasonCount = room
+          ? item.seasons.filter(s => s.roomKey === room.key).length + 1
+          : item.seasons.length + 1;
         return {
           ...item,
           seasons: [
@@ -1332,6 +1996,10 @@ export const LibraryItems = () => {
                  item's default board; a named value makes it one option of a
                  multi-price accommodation. */
               optionName: optionName || item.mealPlan || '',
+              /* A season is priced for one room type. The key is the room the
+                 new row is entered under; a legacy one-room item leaves it on
+                 its only room. */
+              roomKey: room?.key || '',
               validFrom: '',
               validTo: '',
               ...emptySeasonMoney()
@@ -1354,8 +2022,8 @@ export const LibraryItems = () => {
         vehicleType: label,
         maxOccupancy: pax || (parseInt(item.maxOccupancy) || 0),
         driverRequired: driverEligible ? true : false,
-        driverMeals: driverEligible ? getDefaultDriverMeals(item.category, item.transferType) : [],
-        driverAccommodation: driverEligible ? getDefaultDriverAccommodation(item.category, item.transferType) : false
+        driverMeals: driverEligible ? getDefaultDriverMeals(item.category, driverHireType(item)) : [],
+        driverAccommodation: driverEligible ? getDefaultDriverAccommodation(item.category, driverHireType(item)) : false
       };
     }));
   };
@@ -1381,7 +2049,7 @@ export const LibraryItems = () => {
       } else if (isCarRentalCategory(category)) {
         pricingModel = 'per_vehicle';
       } else {
-        if (['per_vehicle', 'tiered'].includes(pricingModel)) pricingModel = 'per_person';
+        if (['per_vehicle', 'tiered', 'per_unit'].includes(pricingModel)) pricingModel = 'per_person';
       }
       /* Switching category drops the legacy bundled-fee switch: entrance fees
          and conservation levies live in their own items now, so a base item
@@ -1394,8 +2062,8 @@ export const LibraryItems = () => {
         pricingModel,
         feeType,
         driverRequired: driverEligible ? true : false,
-        driverMeals: driverEligible ? getDefaultDriverMeals(category, item.transferType) : [],
-        driverAccommodation: driverEligible ? getDefaultDriverAccommodation(category, item.transferType) : false
+        driverMeals: driverEligible ? getDefaultDriverMeals(category, driverHireType({ ...item, category })) : [],
+        driverAccommodation: driverEligible ? getDefaultDriverAccommodation(category, driverHireType({ ...item, category })) : false
       };
     }));
   };
@@ -1450,12 +2118,92 @@ export const LibraryItems = () => {
     }));
   };
 
+  /* Some fields hold a list rather than a figure (the weekend weekdays), so they
+     are set as typed instead of going through the numeric clamp. */
+  const handleSeasonValueChange = (tempId, seasonIdx, field, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const updatedSeasons = item.seasons.map((s, idx) => (idx === seasonIdx ? { ...s, [field]: value } : s));
+      return { ...item, seasons: updatedSeasons };
+    }));
+  };
+
+  /* The villa ladder is typed one box per party size. A size with no figure is
+     dropped from the ladder rather than stored at zero: a zero would quote the
+     room for nothing, where the supplier simply does not sell it that size. */
+  const handleOccupancyRateChange = (tempId, seasonIdx, pax, value) => {
+    const price = parseFloat(value);
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        seasons: item.seasons.map((s, idx) => {
+          if (idx !== seasonIdx) return s;
+          const rows = (Array.isArray(s.occupancyRates) ? s.occupancyRates : [])
+            .filter((row) => parseInt(row.pax, 10) !== pax);
+          if (Number.isFinite(price) && price > 0) rows.push({ pax, rate: price });
+          return { ...s, occupancyRates: rows.sort((a, b) => a.pax - b.pax) };
+        })
+      };
+    }));
+  };
+
+  /* Tour leader, guide and driver ladders share one editor shape: a list of
+     { minClientRooms, rooms, rate } rows held on the season under its field. */
+  const updateSeasonTierList = (tempId, seasonIdx, field, updater) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        seasons: item.seasons.map((s, idx) => (idx === seasonIdx
+          ? { ...s, [field]: updater(s[field] || []) }
+          : s))
+      };
+    }));
+  };
+
+  const handleTierAdd = (tempId, seasonIdx, field, defaultMinRooms = 1) => {
+    updateSeasonTierList(tempId, seasonIdx, field, (tiers) => {
+      const previous = tiers[tiers.length - 1];
+      /* A first tier seeds from the item's minimum; a later one starts blank
+         because its threshold is a new contract term, and the rooms count steps
+         up by one so the usual "one more room" ladder is one click away. */
+      const next = previous
+        ? { minClientRooms: '', rooms: String(Math.max(1, parseInt(previous.rooms, 10) || 1) + 1), rate: '' }
+        : { minClientRooms: String(defaultMinRooms || 1), rooms: '1', rate: '' };
+      return [...tiers, next];
+    });
+  };
+
+  const handleTierChange = (tempId, seasonIdx, field, tierIdx, key, value) => {
+    updateSeasonTierList(tempId, seasonIdx, field, (tiers) => tiers.map((tier, tIdx) => (
+      tIdx === tierIdx ? { ...tier, [key]: clampNonNegative(value) } : tier
+    )));
+  };
+
+  const handleTierRemove = (tempId, seasonIdx, field, tierIdx) => {
+    updateSeasonTierList(tempId, seasonIdx, field, (tiers) => tiers.filter((_, tIdx) => tIdx !== tierIdx));
+  };
+
+  /* Single-supplement waiver: the rate card only stores how many single rooms
+     are charged the sharing rate. A blank box is no waiver; anything else is a
+     whole number of rooms. */
+  const handleSingleSupplementWaiverChange = (tempId, seasonIdx, value) => {
+    const digits = String(value ?? '').replace(/[^\d]/g, '');
+    handleSeasonChange(tempId, seasonIdx, 'singleSupplementWaiver', digits);
+  };
+
   /* Money fields only — snaps a typed rate/fee to a whole number on blur when the
      "Round input amounts" setting is active. Counts (pax, capacity, ages) never
      go through this. */
   const snapSeasonMoney = (e, tempId, seasonIndex, field) => {
     const v = applyInputRounding(e.target.value, amountSettings.inputRounding);
     if (v !== '' && v !== e.target.value) handleSeasonChange(tempId, seasonIndex, field, v);
+  };
+
+  const snapOccupancyMoney = (e, tempId, seasonIndex, pax) => {
+    const v = applyInputRounding(e.target.value, amountSettings.inputRounding);
+    if (v !== e.target.value) handleOccupancyRateChange(tempId, seasonIndex, pax, v);
   };
 
   /* One cell of the vehicle price grid. The value is a number, {free:true}, {na:true},
@@ -1526,19 +2274,20 @@ export const LibraryItems = () => {
     });
   };
 
-  /* Accommodation is edited season-first: one season carries several charge
-     types, each its own rate row. Group the flat season rows by (name, window)
-     so the editor can show one season with its charge types inside, then scroll
-     between seasons with the same arrows. Non-accommodation items keep the flat
-     one-row-per-season shape. */
-  const accommodationSeasonGroupsFor = (seasons) => {
+  /* Accommodation is edited room-first, then season-first: a room carries
+     seasons, a season carries charge types. Passing a room key scopes the
+     groups to that room; the room key is part of the identity so two rooms
+     can use the same season name without merging. */
+  const accommodationSeasonGroupsFor = (seasons, roomKey = '') => {
     const groups = [];
     const byKey = new Map();
     (seasons || []).forEach((season, index) => {
-      const key = `${season.seasonName || ''}|${season.validFrom || ''}|${season.validTo || ''}`;
+      if (roomKey && season.roomKey !== roomKey) return;
+      const key = `${roomKey ? `${season.roomKey || ''}|` : ''}${season.seasonName || ''}|${season.validFrom || ''}|${season.validTo || ''}`;
       if (!byKey.has(key)) {
         byKey.set(key, {
           key,
+          roomKey: season.roomKey || '',
           seasonName: season.seasonName,
           validFrom: season.validFrom,
           validTo: season.validTo,
@@ -1565,8 +2314,25 @@ export const LibraryItems = () => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const targets = new Set(memberIndices || []);
+      const first = item.seasons[(memberIndices || [])[0]];
+      const oldKey = first ? feeSeasonKey(first.seasonName, first.validFrom, first.validTo) : '';
+      const next = first ? { ...first, [field]: clampNonNegative(value) } : null;
+      const newKey = next ? feeSeasonKey(next.seasonName, next.validFrom, next.validTo) : '';
+      /* A fee amount is keyed by its season's name and window. Retyping either
+         moves the figure with the season, otherwise the save would read the new
+         key, find no amount, and drop a fee the operator never touched. The
+         child figure rides along in its own map and has to move with it. */
+      const linkedFees = oldKey && newKey && oldKey !== newKey
+        ? (item.linkedFees || []).map((fee) => {
+            const amounts = moveFeeAmount(fee.amounts, oldKey, newKey);
+            const childAmounts = moveFeeAmount(fee.childAmounts, oldKey, newKey);
+            if (amounts === fee.amounts && childAmounts === fee.childAmounts) return fee;
+            return { ...fee, amounts, childAmounts };
+          })
+        : item.linkedFees;
       return {
         ...item,
+        linkedFees,
         seasons: item.seasons.map((s, idx) => (targets.has(idx) ? { ...s, [field]: clampNonNegative(value) } : s))
       };
     }));
@@ -1586,6 +2352,7 @@ export const LibraryItems = () => {
           {
             seasonName: group.seasonName || 'Base Season',
             optionName: (optionName || '').trim(),
+            roomKey: group.roomKey || '',
             validFrom: group.validFrom || '',
             validTo: group.validTo || '',
             ...emptySeasonMoney()
@@ -1610,6 +2377,82 @@ export const LibraryItems = () => {
       const total = Math.max(1, remaining - group.memberIndices.length);
       return { ...prev, [tempId]: Math.max(0, Math.min(current, total - 1)) };
     });
+  };
+
+  /* Park fees / conservation levies typed on the accommodation. Each row becomes
+     a linked Fees & Tickets library item on save, so the itinerary still prices
+     the fee on its own line and brings it along with the property. The fee's
+     terms are shared; its amount is entered season by season. */
+  const handleAddLinkedFee = (tempId) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? {
+            ...item,
+            linkedFees: [
+              ...(item.linkedFees || []),
+              {
+                key: `fee_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                dbId: null,
+                name: '',
+                type: 'entrance_fee',
+                chargeBasis: 'once_off',
+                unitBasis: 'per_person',
+                chargeable: true,
+                amount: '',
+                amounts: {},
+                childAmounts: {}
+              }
+            ]
+          }
+        : item
+    )));
+  };
+
+  const handleRemoveLinkedFee = (tempId, feeKey) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? { ...item, linkedFees: (item.linkedFees || []).filter((fee) => fee.key !== feeKey) }
+        : item
+    )));
+  };
+
+  const handleLinkedFeeChange = (tempId, feeKey, field, value) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        linkedFees: (item.linkedFees || []).map((fee) => {
+          if (fee.key !== feeKey) return fee;
+          if (field === 'type') {
+            /* An entrance fee has no per-child figure, so switching the type
+               must not leave a basis behind that would price as zero. */
+            const unitBasis = isValidUnitBasis({ surcharge_type: value }, fee.unitBasis)
+              ? fee.unitBasis
+              : 'per_person';
+            return { ...fee, type: value, unitBasis };
+          }
+          return { ...fee, [field]: value };
+        })
+      };
+    }));
+  };
+
+  /* One fee amount for one season. A blank box means the fee is not charged in
+     that season; the other seasons keep their own figures. `map` is which
+     figure of the fee is being edited - the visitor amount, or the child amount
+     a property that splits its gate price by age charges instead. */
+  const handleLinkedFeeAmountChange = (tempId, feeKey, seasonKey, value, map = 'amounts') => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        linkedFees: (item.linkedFees || []).map((fee) => (
+          fee.key === feeKey
+            ? { ...fee, [map]: { ...(fee[map] || {}), [seasonKey]: clampNonNegative(value) } }
+            : fee
+        ))
+      };
+    }));
   };
 
   /* The list column shows the same one-season-at-a-time view, but it is a
@@ -1637,16 +2480,23 @@ export const LibraryItems = () => {
   const handleSubmitAllItems = async (e) => {
     e.preventDefault();
 
-    const missingDestination = itemsToSave.find((item) => !String(item.destinationRegion || '').trim());
+    /* A property's locality is its supplier's city, so an accommodation item is
+       not asked for one it would only duplicate. */
+    const supplierLocality = supplierDestination();
+    const missingDestination = itemsToSave.find((item) => (
+      /accommodation/i.test(String(item.category || ''))
+        ? !supplierLocality && !String(item.destinationRegion || '').trim()
+        : !String(item.destinationRegion || '').trim()
+    ));
     if (missingDestination) {
-      showToast('Destination or Region is required for every Library Item', 'warning');
+      showToast('A destination is required: set the supplier city or fill Destination / Locality', 'warning');
       return;
     }
     const missingAccommodationArea = itemsToSave.find(
       (item) => /accommodation/i.test(String(item.category || '')) && !String(item.destinationArea || '').trim()
     );
     if (missingAccommodationArea) {
-      showToast('Parent Destination / Region is required for every accommodation Library Item', 'warning');
+      showToast('Destination Area is required for every accommodation Library Item', 'warning');
       return;
     }
 
@@ -1684,7 +2534,8 @@ export const LibraryItems = () => {
           account_holder_name: supplierForm.accountHolderName,
           bank_account_number: supplierForm.bankAccountNumber,
           branch_code: supplierForm.branchCode,
-          swift_code: supplierForm.swiftCode
+          swift_code: supplierForm.swiftCode,
+          ...(starColumnReady ? { star_rating: starRatingOf(supplierForm.starRating) } : {})
         };
 
         const { data: createdSup, error: supErr } = await supabase
@@ -1713,6 +2564,40 @@ export const LibraryItems = () => {
           showToast(`Library Item ${i + 1} requires a name`, 'warning');
           return;
         }
+        if (roomsReady && itemsToSave[i].category === 'Accommodation') {
+          const roomNames = (itemsToSave[i].roomTypes || [])
+            .map(room => String(room.name || '').trim())
+            .filter(Boolean);
+          if (!roomNames.length) {
+            showToast(`Accommodation Item ${i + 1} requires at least one room type`, 'warning');
+            return;
+          }
+          if (new Set(roomNames.map(name => name.toLowerCase())).size !== roomNames.length) {
+            showToast(`Accommodation Item ${i + 1} has two room types with the same name`, 'warning');
+            return;
+          }
+          /* A villa on the occupancy ladder is only quotable at a party size it
+             has a price for. Save the ladder complete, or the itinerary refuses
+             that party later with no explanation the operator ever gave it. */
+          if (dbFeatures.occupancyPricing) {
+            const roomRows = (itemsToSave[i].roomTypes || [])
+              .filter(room => String(room.name || '').trim());
+            for (const seasonRow of itemsToSave[i].seasons || []) {
+              const room = roomRows.find(entry => entry.key === seasonRow.roomKey) || roomRows[0] || null;
+              if (!isOccupancyRoom(room, itemsToSave[i])) continue;
+              const ladder = occupancyLadderFromEdit(occupancySizesForRoom(room), seasonRow);
+              const problem = occupancyLadderError(
+                { occupancy_rates: ladder },
+                Math.max(1, parseInt(room.maxOccupancy, 10) || 2)
+              );
+              if (problem) {
+                const charge = seasonRow.optionName ? ` / ${seasonRow.optionName}` : '';
+                showToast(`Accommodation Item ${i + 1}, ${room.name} — ${seasonRow.seasonName || 'Base Season'}${charge}: ${problem}`, 'warning');
+                return;
+              }
+            }
+          }
+        }
         if (itemsToSave[i].category === 'Transfers' && dbFeatures.transferType && !itemsToSave[i].transferType) {
           showToast(`Transfer Item ${i + 1} requires a Transfer Type`, 'warning');
           return;
@@ -1721,8 +2606,15 @@ export const LibraryItems = () => {
           showToast(`Activity / Tour Item ${i + 1} requires a Tour Type`, 'warning');
           return;
         }
-        if (isTourStyleCategory(itemsToSave[i].category) && !isFlightCategory(itemsToSave[i].category) && !itemsToSave[i].vehicleType) {
-          showToast(`${itemsToSave[i].category} Item ${i + 1} requires a Vehicle Type`, 'warning');
+        if (isTransportCategory(itemsToSave[i].category) && dbFeatures.transportType && !itemsToSave[i].transportType) {
+          showToast(`Transport Item ${i + 1} requires a Transport Type`, 'warning');
+          return;
+        }
+        /* Only a transfer has to name its vehicle. An activity is bought for the
+           thing that happens, and a boat trip, a quad tour or a park walk is not a
+           road vehicle, so requiring the label blocked saves of real tours. */
+        if (itemsToSave[i].category === 'Transfers' && !itemsToSave[i].vehicleType) {
+          showToast(`Transfers Item ${i + 1} requires a Vehicle Type`, 'warning');
           return;
         }
         if (isCarRentalCategory(itemsToSave[i].category)) {
@@ -1755,38 +2647,77 @@ export const LibraryItems = () => {
 
       // Save all Library Items
       for (const itemData of itemsToSave) {
-        const maxOcc = Math.max(1, parseInt(itemData.maxOccupancy) || 2);
-        const maxAdults = Math.max(1, parseInt(itemData.maxAdults) || maxOcc);
+        /* A property's headline capacity is the widest room it sells. The
+           itinerary allocates travellers into room types, but the library row
+           still has to answer "how many can this place take" for the list and
+           for older pricing paths. */
+        const roomList = (itemData.category === 'Accommodation' && roomsReady ? (itemData.roomTypes || []) : [])
+          .filter(room => String(room.name || '').trim());
+        const roomCapacity = roomList.length
+          ? (() => {
+              const widest = Math.max(...roomList.map(room => Math.max(1, parseInt(room.maxOccupancy) || 1)));
+              const stated = roomList.map(room => parseInt(room.maxChildren, 10)).filter(Number.isFinite);
+              return {
+                maxOccupancy: widest,
+                maxAdults: Math.max(...roomList.map(room => Math.max(1, parseInt(room.maxAdults) || 1))),
+                /* A room with no child cap takes a child in any bed, so the
+                   property headline says so too. Reporting 0 here would read as
+                   "this lodge takes no children". */
+                maxChildren: stated.length < roomList.length ? widest : Math.max(0, ...stated)
+              };
+            })()
+          : null;
+        const maxOcc = roomCapacity?.maxOccupancy || Math.max(1, parseInt(itemData.maxOccupancy) || 2);
+        const maxAdults = Math.min(maxOcc, roomCapacity?.maxAdults || Math.max(1, parseInt(itemData.maxAdults) || maxOcc));
         const sharingRules = itemData.sharingCapacityRules || ensureSharingRules(maxAdults, maxOcc, []);
-        const maxChildren = sharingRules.length > 0 ? Math.max(...sharingRules.map(r => parseInt(r.maxChildren) || 0)) : 0;
+        const maxChildren = roomCapacity
+          ? roomCapacity.maxChildren
+          : (sharingRules.length > 0 ? Math.max(...sharingRules.map(r => parseInt(r.maxChildren) || 0)) : 0);
         const isTourStyle = isTourStyleCategory(itemData.category);
         const isFlight = isFlightCategory(itemData.category);
         const isMeals = isMealsCategory(itemData.category);
         const isExtras = isExtrasCategory(itemData.category);
         const isCarRental = isCarRentalCategory(itemData.category);
         const isGuide = isGuideCategory(itemData.category);
+        const isAccommodationItem = /accommodation/i.test(String(itemData.category || ''));
+        const itemLocality = isAccommodationItem
+          ? (supplierLocality || String(itemData.destinationRegion || '').trim())
+          : String(itemData.destinationRegion || '').trim();
         const pricingModel = isTourStyle
           ? (itemData.pricingModel || (itemData.category === 'Flights / Charter' ? 'per_person' : 'per_vehicle'))
-          : (itemData.category === 'Accommodation' || isTrainCategory(itemData.category) ? (itemData.pricingModel || 'per_person') : (isCarRental ? 'per_vehicle' : 'per_person'));
+          : (itemData.category === 'Accommodation' || isTrainCategory(itemData.category)
+            ? (itemData.pricingModel || 'per_person')
+            : (isCarRental
+              ? 'per_vehicle'
+              : (isExtras ? (itemData.pricingModel === 'per_unit' ? 'per_unit' : 'per_person') : 'per_person')));
 
         const itemPayload = {
           company_id: companyId,
           supplier_id: targetSupplierId,
           name: itemData.name,
-          destination_region: String(itemData.destinationRegion || '').trim(),
-          destination_area: /accommodation/i.test(String(itemData.category || ''))
+          destination_region: itemLocality,
+          destination_area: isAccommodationItem
             ? String(itemData.destinationArea || '').trim()
             : null,
           category: itemData.category,
-          sub_category: isFlight ? itemData.category : (isTourStyle ? (itemData.vehicleType || itemData.category) : itemData.category),
+          sub_category: itemData.category === 'Transfers' ? (itemData.vehicleType || itemData.category) : itemData.category,
           transfer_type: itemData.category === 'Transfers' && dbFeatures.transferType ? (itemData.transferType || null) : null,
           tour_type: itemData.category === 'Activities / Tours' && dbFeatures.tourType ? (itemData.tourType || null) : null,
+          transport_type: isTransportCategory(itemData.category) && dbFeatures.transportType ? (itemData.transportType || null) : null,
+          /* A tour that runs for one guest says so by leaving this blank, so an
+             empty field writes NULL rather than a zero someone has to read. */
+          ...(dbFeatures.minPaxToRun
+            ? { min_pax_to_run: itemData.category === 'Activities / Tours' ? (minPaxToRunOf(itemData) || null) : null }
+            : {}),
           ...(itemData.category === 'Flights / Charter'
             ? {
                 flight_number: itemData.flightNumber || null,
                 airline_name: itemData.airlineName || null,
                 departure_city: itemData.departureCity || null,
-                arrival_city: itemData.arrivalCity || null
+                arrival_city: itemData.arrivalCity || null,
+                /* Gated on the probe: a workspace without the column would have
+                   the whole flight payload rejected. */
+                ...(dbFeatures.staffOptions ? { guide_flight_offered: !!itemData.guideFlightOffered } : {})
               }
             : {}),
           ...(isTrainCategory(itemData.category)
@@ -1803,7 +2734,11 @@ export const LibraryItems = () => {
             ? {
                 meal_type: itemData.mealType || 'Breakfast',
                 menu_type: itemData.menuType || 'a_la_carte',
-                meal_gratuity_percent: parseFloat(itemData.mealGratuityPercent) || 0
+                meal_gratuity_percent: parseFloat(itemData.mealGratuityPercent) || 0,
+                ...(dbFeatures.staffOptions ? {
+                  guide_meal_offered: !!itemData.guideMealOffered,
+                  driver_meal_offered: !!itemData.driverMealOffered
+                } : {})
               }
             : {}),
           ...(isDriverEligibleCategory(itemData.category) && dbFeatures.driverOption
@@ -1826,12 +2761,18 @@ export const LibraryItems = () => {
           max_adults: isTourStyle ? maxOcc : maxAdults,
           max_children: isTourStyle ? 0 : maxChildren,
           sharing_capacity_rules: isTourStyle ? [] : sharingRules,
+          children_own_room_policy: itemData.childrenOwnRoomPolicy || 'child_rates',
           child_age_ranges: isTourStyle
             ? [{ id: 'child', name: `Child (up to ${parseInt(itemData.childAge) || 12} yrs)`, ageFrom: 0, ageTo: (parseInt(itemData.childAge) || 12) }]
-            : (itemData.childAgeRanges || []),
+            : (isExtras && pricingModel === 'per_unit' ? [] : (itemData.childAgeRanges || [])),
           images: itemData.imageUrls,
                 ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
-                  ? { guide_driver_room_offered: !!itemData.guideDriverOffered }
+                  ? {
+                      guide_driver_room_offered: !!itemData.guideDriverOffered,
+                      ...(dbFeatures.guideMinRooms
+                        ? { guide_min_rooms: Math.max(1, parseInt(itemData.guideMinRooms, 10) || 1) }
+                        : {})
+                    }
                   : {}),
                 ...(itemData.category === 'Accommodation'
                   ? { tour_leader_room_offered: !!itemData.tourLeaderRoomOffered, tour_leader_min_rooms: parseInt(itemData.tourLeaderMinRooms) || 1 }
@@ -1839,13 +2780,13 @@ export const LibraryItems = () => {
           ...(dbFeatures.feeType
             ? {
                 /* Base categories no longer carry a bundled fee: entrance fees
-                   and conservation levies are separate Surcharge Fees items, so
+                   and conservation levies are separate Fees & Tickets items, so
                    the legacy switch is pinned off for everything else. */
                 fee_type: 'none',
                 conservation_levy_basis: 'per_night'
               }
             : {}),
-          ...(dbFeatures.surchargeFees && itemData.category === SURCHARGE_CATEGORY
+          ...(dbFeatures.surchargeFees && isSurchargeItem(itemData)
             ? {
                 surcharge_type: itemData.surchargeType || 'entrance_fee',
                 surcharge_charge_basis: CHARGE_BASIS.some((b) => b.id === itemData.surchargeChargeBasis)
@@ -1904,9 +2845,105 @@ export const LibraryItems = () => {
           targetItemId = newItem.id;
         }
 
+        /* Room types are synced before the rates so every rate row can point at
+           the row it prices. Editing removes the rooms the operator deleted
+           (their rates were just replaced) and updates the rest in place, so an
+           itinerary line keeps the room id it was sold with. */
+        const roomIdByKey = new Map();
+        if (roomList.length) {
+          if (editingDbId) {
+            const { data: existingRooms, error: existingRoomsErr } = await supabase
+              .from('library_item_room_types')
+              .select('id')
+              .eq('item_id', targetItemId);
+            if (existingRoomsErr) throw existingRoomsErr;
+            const keepIds = roomList.map(room => room.id).filter(Boolean);
+            const staleIds = (existingRooms || [])
+              .map(room => room.id)
+              .filter(id => !keepIds.includes(id));
+            if (staleIds.length) {
+              const { error: staleRoomsErr } = await supabase
+                .from('library_item_room_types')
+                .delete()
+                .in('id', staleIds);
+              if (staleRoomsErr) throw staleRoomsErr;
+            }
+          }
+
+          for (let roomIndex = 0; roomIndex < roomList.length; roomIndex += 1) {
+            const room = roomList[roomIndex];
+            const occupancy = Math.max(1, parseInt(room.maxOccupancy) || 1);
+            const roomPayload = {
+              company_id: companyId,
+              item_id: targetItemId,
+              name: String(room.name).trim(),
+              description: String(room.description || '').trim() || null,
+              max_occupancy: occupancy,
+              max_adults: Math.min(occupancy, Math.max(1, parseInt(room.maxAdults) || occupancy)),
+              max_children: childCapPayload(room, occupancy),
+              ...(dbFeatures.occupancyPricing
+                ? { pricing_model: roomPricingModelOf(room, itemData) }
+                : {}),
+              sort_order: roomIndex,
+              is_active: true
+            };
+            if (room.id) {
+              const { error: roomErr } = await supabase
+                .from('library_item_room_types')
+                .update(roomPayload)
+                .eq('id', room.id);
+              if (roomErr) throw roomErr;
+              roomIdByKey.set(room.key || room.id, room.id);
+            } else {
+              const { data: insertedRoom, error: roomErr } = await supabase
+                .from('library_item_room_types')
+                .insert([roomPayload])
+                .select('id')
+                .single();
+              if (roomErr) throw roomErr;
+              roomIdByKey.set(room.key, insertedRoom.id);
+            }
+          }
+        }
+
         // Insert Seasons Pricing Matrices (Car Rental uses its own group-based rates below)
         if (!isCarRental && itemData.seasons.length > 0) {
           const ratesPayload = itemData.seasons.map(s => {
+            /* A fee row carries its own figure and nothing else. The adult,
+               child and room columns stay null on purpose: they are not read by
+               the fee engine, so a stray or legacy number in one of them would
+               make an unpriced fee look priced, and a "per adult"/"per unit"
+               fee would fall through to it as a hidden fallback. */
+            if (isSurchargeItem(itemData)) {
+              return {
+                item_id: targetItemId,
+                option_name: s.seasonName || 'Base Season',
+                season_name: s.seasonName || 'Base Season',
+                meal_plan: null,
+                currency: itemData.currency,
+                valid_from: s.validFrom || null,
+                valid_to: s.validTo || null,
+                price_1_adult: null,
+                price_2_adults: null,
+                price_3_plus_adults: null,
+                child_rates_breakdown: {},
+                single_supplement: null,
+                child_discount: null,
+                single_room_rate: null,
+                double_twin_rate: null,
+                effective_single_rate: null,
+                rate_basis: 'per_person',
+                child_sharing_policy: '',
+                unit_price: null,
+                ...(dbFeatures.feeType ? surchargeRateFees(itemData, s, { feeChildRate: dbFeatures.feeChildRate }) : {}),
+                /* The guide's own place at the gate. A fee that buys a thing (a
+                   unit, a vehicle) sells no head, so nothing is written and a
+                   figure left over from a per-person basis cannot be read back. */
+                ...(dbFeatures.guideDriver && feeBasisChargesHeads(itemData.surchargeUnitBasis || 'per_person')
+                  ? { guide_rate: moneyOrNull(s.guideRate) }
+                  : {})
+              };
+            }
             if (isGuide) {
               return {
                 item_id: targetItemId,
@@ -1964,7 +3001,11 @@ export const LibraryItems = () => {
             }
             if (isExtras) {
               const adultRate = moneyOrNull(s.adultRate);
-              const childRate = childEntry(s.childRate);
+              /* A per-unit extra sells the service, not a seat on it: the figure
+                 is charged once however many guests take it, so it is stored on
+                 the flat basis the pricing engines divide across the party. */
+              const extrasBasis = pricingModel === 'per_unit' ? 'per_unit' : 'per_person';
+              const childRate = extrasBasis === 'per_unit' ? null : childEntry(s.childRate);
               return {
                 item_id: targetItemId,
                 option_name: s.seasonName || 'Base Season',
@@ -1982,7 +3023,7 @@ export const LibraryItems = () => {
                 single_room_rate: null,
                 double_twin_rate: null,
                 effective_single_rate: null,
-                rate_basis: 'per_person',
+                rate_basis: extrasBasis,
                 child_sharing_policy: '',
                 unit_price: adultRate
               };
@@ -2028,7 +3069,7 @@ export const LibraryItems = () => {
                 ...(dbFeatures.tieredPricing && isTiered ? { tiered_pricing: tiers } : {}),
                 ...(dbFeatures.feeType
                   ? {
-                      /* Only a Surcharge Fees item writes the fee columns, and only the
+                      /* Only a Fees & Tickets item writes the fee columns, and only the
                       columns its own rate basis needs. Base categories no longer carry a
                       bundled fee at all. */
                       ...(surchargeRateFees(itemData, s))
@@ -2036,8 +3077,18 @@ export const LibraryItems = () => {
                   : {}),
                 ...(isFlight
                   ? {
-                      taxes_and_surcharges: moneyOrNull(s.taxesAndSurcharges)
+                      taxes_and_surcharges: moneyOrNull(s.taxesAndSurcharges),
+                      /* The guide's seat on this flight. Blank means the crew
+                         pays the fare the clients pay. */
+                      ...(dbFeatures.guideDriver ? { guide_rate: moneyOrNull(s.guideRate) } : {})
                     }
+                  : {}),
+                /* A touring guide who comes along is charged a place on the
+                   activity from the same tariff, so the figure belongs to the
+                   season beside the adult rate. Only an activity sells places
+                   that way - a per-vehicle hire buys the vehicle, not heads. */
+                ...(dbFeatures.guideDriver && itemData.category === 'Activities / Tours' && !isPerVehicle
+                  ? { guide_rate: moneyOrNull(s.guideRate) }
                   : {})
               };
             }
@@ -2071,7 +3122,21 @@ export const LibraryItems = () => {
                 unit_price: adultRate
               };
             }
-            const isFlatRoom = pricingModel === 'per_room';
+            const rateRoom = roomList.find(entry => entry.key === s.roomKey) || roomList[0] || null;
+            /* The room states its own contract, so one property can price its
+               standard rooms per person sharing and its villas by occupancy. */
+            const roomModel = roomPricingModelOf(rateRoom, itemData);
+            const isFlatRoom = roomModel === 'per_room';
+            const occupancyPriced = dbFeatures.occupancyPricing && roomModel === OCCUPANCY_BASIS;
+            /* A disabled price box is not a price. If the room cannot take a
+               second or third adult, or cannot take children, or has no weekend
+               nights ticked, the row is written as "not offered" even if an
+               older value is still sitting in form state. */
+            const capacity = priceCapacityFor(itemData, rateRoom?.key || '');
+            const canShare = capacity.maxAdults >= 2;
+            const canTakeThirdAdult = capacity.maxAdults >= 3;
+            const takesChildren = capacityTakesChildren(capacity);
+            const weekendDays = weekendDaysOf(s);
             const roomRate = moneyOrNull(s.roomRate);
             /* A flat rate is quoted for the room, so it covers everyone who
                sleeps in it up to its occupancy. A party of one still occupies
@@ -2080,15 +3145,34 @@ export const LibraryItems = () => {
                had one, so they fall back to the room rate. */
             const flatSingleRate = moneyOrNull(s.singleRoomRate) ?? roomRate;
             const p1Adult = isFlatRoom ? flatSingleRate : moneyOrNull(s.price1Adult);
-            const p2Adults = isFlatRoom ? roomRate : moneyOrNull(s.price2Adults);
+            const p2Adults = isFlatRoom ? roomRate : (canShare ? moneyOrNull(s.price2Adults) : null);
             /* The 3+ adult figure is whatever the operator typed, including 0 or
                blank. It used to fall back to the 2-adult rate whenever it was 0 or
                empty, which silently restored the old price on every save and made
                "this property does not take a third adult" impossible to record. A
                blank box is now stored as null (not offered); a typed 0 stays 0. */
-            const p3PlusAdults = isFlatRoom ? roomRate : moneyOrNull(s.price3PlusAdults);
-            const childRatesMap = isFlatRoom ? {} : (s.childRates || {});
-            const discount = isFlatRoom ? null : moneyOrNull(s.childDiscount);
+            const p3PlusAdults = isFlatRoom ? roomRate : (canTakeThirdAdult ? moneyOrNull(s.price3PlusAdults) : null);
+            const childRatesMap = isFlatRoom || !takesChildren ? {} : (s.childRates || {});
+            const discount = isFlatRoom || !takesChildren ? null : moneyOrNull(s.childDiscount);
+            /* A villa on the occupancy ladder is priced by its bands alone. The
+               adult, child and supplement columns stay null so nothing on the row
+               can be read as a price the contract never quoted. */
+            const ladderSizes = occupancySizesForRoom(rateRoom);
+            const occupancyLadder = occupancyPriced ? occupancyLadderFromEdit(ladderSizes, s) : null;
+            const ladderAdult = occupancyPriced ? null : p1Adult;
+            const ladderSharing = occupancyPriced ? null : p2Adults;
+            const ladderThird = occupancyPriced ? null : p3PlusAdults;
+            const tlTiers = tierLadderPayload(s.tourLeaderTiers);
+            const guideTiers = tierLadderPayload(s.guideTiers);
+            const driverTiers = tierLadderPayload(s.driverTiers);
+            /* The rate card stores one waiver count and the optional ladder
+               column carries it as a zero-supplement tier, so every pricing
+               path reads the same rule. Zero waivers clears the ladder. The
+               notes marker keeps the rule on a database without the column. */
+            const waiverCount = !isFlatRoom && canShare
+              ? Math.max(0, parseInt(s.singleSupplementWaiver, 10) || 0)
+              : 0;
+            const singleSuppTiers = waiverLadder(waiverCount);
 
             return {
               item_id: targetItemId,
@@ -2101,24 +3185,77 @@ export const LibraryItems = () => {
               currency: itemData.currency,
               valid_from: s.validFrom || null,
               valid_to: s.validTo || null,
-              price_1_adult: p1Adult,
-              price_2_adults: p2Adults,
-              price_3_plus_adults: p3PlusAdults,
+              price_1_adult: ladderAdult,
+              price_2_adults: ladderSharing,
+              price_3_plus_adults: ladderThird,
               child_rates_breakdown: childRatesMap,
               single_supplement: null,
               child_discount: discount,
-              single_room_rate: p1Adult,
-              double_twin_rate: p2Adults,
-              effective_single_rate: p1Adult,
-              rate_basis: isFlatRoom ? 'per_room' : 'per_person_sharing',
+              single_room_rate: ladderAdult,
+              double_twin_rate: ladderSharing,
+              effective_single_rate: ladderAdult,
+              rate_basis: occupancyPriced
+                ? OCCUPANCY_BASIS
+                : (isFlatRoom ? 'per_room' : 'per_person_sharing'),
+              ...(dbFeatures.occupancyPricing ? { occupancy_rates: occupancyLadder } : {}),
               child_sharing_policy: isFlatRoom ? 'room_rate_divided' : 'sharing_with_adults',
-              unit_price: isFlatRoom ? roomRate : (p2Adults ?? p1Adult ?? null),
+              unit_price: isFlatRoom ? roomRate : (occupancyPriced ? null : (p2Adults ?? p1Adult ?? null)),
+              /* A room contracted at several nightly prices by length of stay:
+                 the band rides on the row beside the charge type, so one room
+                 is still one library item. Blank on both sides prices every
+                 stay, which is what every older row means. */
+              ...(dbFeatures.nightBands && itemData.category === 'Accommodation'
+                ? { min_nights: wholeOrNull(s.minNights), max_nights: wholeOrNull(s.maxNights) }
+                : {}),
+              /* Weekend pricing is per NIGHT, not per stay: the picked weekdays
+                 and the price those nights carry ride on the same rate row as
+                 the normal figure, so the itinerary charges each night from its
+                 own date without duplicating the room. */
+              ...(dbFeatures.weekendRates && itemData.category === 'Accommodation'
+                ? {
+                    weekend_days: occupancyPriced || !weekendDays.length ? null : weekendDays,
+                    weekend_price: occupancyPriced || !weekendDays.length ? null : moneyOrNull(s.weekendPrice)
+                  }
+                : {}),
                 ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
-                  ? { guide_rate: moneyOrNull(s.guideRate), driver_rate: moneyOrNull(s.driverRate) }
+                  ? {
+                      guide_rate: moneyOrNull(s.guideRate),
+                      driver_rate: moneyOrNull(s.driverRate),
+                      ...(dbFeatures.guideDriverTiers
+                        ? {
+                            guide_tiers: guideTiers.length ? guideTiers : null,
+                            driver_tiers: driverTiers.length ? driverTiers : null
+                          }
+                        : {})
+                    }
                   : {}),
                 ...(itemData.category === 'Accommodation'
-                  ? { tour_leader_rate: moneyOrNull(s.tourLeaderRate) }
+                  ? {
+                      tour_leader_rate: moneyOrZero(s.tourLeaderRate),
+                      ...(dbFeatures.tourLeaderTiers ? { tour_leader_tiers: tlTiers.length ? tlTiers : null } : {}),
+                      ...(dbFeatures.singleSupplementTiers
+                        ? { single_supplement_tiers: !isFlatRoom && singleSuppTiers.length ? singleSuppTiers : null }
+                        : {}),
+                      ...(!isFlatRoom && waiverCount > 0 ? { notes: withWaiverNote(null, waiverCount) } : {})
+                    }
                   : {}),
+              ...(roomList.length
+                ? (() => {
+                    /* The rate belongs to one room type; its name and capacity
+                       are copied onto the row so a package snapshot, a partner
+                       quotation or a rate card can print the room without a
+                       second lookup. */
+                    const room = rateRoom;
+                    const occupancy = Math.max(1, parseInt(room.maxOccupancy) || 1);
+                    return {
+                      room_type_id: roomIdByKey.get(room.key) || null,
+                      room_type: room.name,
+                      room_max_occupancy: occupancy,
+                      room_max_adults: Math.min(occupancy, Math.max(1, parseInt(room.maxAdults) || occupancy)),
+                      room_max_children: childCapPayload(room, occupancy)
+                    };
+                  })()
+                : {}),
               ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
                 ? { guide_meal_plan: s.guideMealPlan || itemData.mealPlan, driver_meal_plan: s.driverMealPlan || itemData.mealPlan }
                 : {}),
@@ -2163,6 +3300,121 @@ export const LibraryItems = () => {
             if (carErr) throw carErr;
           }
         }
+
+        /* Park fees / conservation levies typed on the property. Each one is
+           stored as a linked Fees & Tickets item so the itinerary prices it as
+           its own line and carries it with the accommodation. The fee's terms
+           are shared, but its amount belongs to one season: each priced season
+           gets its own rate row, and the same season resolution that prices the
+           room also finds the fee row that covers the trip. */
+        if (itemData.category === 'Accommodation' && dbFeatures.surchargeFees && dbFeatures.feeType) {
+          /* A fee follows the season, not the room: the same season priced for
+             several rooms is still one season to the fee, so it gets one rate
+             row per season window rather than one per room. */
+          const seenSeasonKeys = new Set();
+          const seasonGroups = accommodationSeasonGroupsFor(itemData.seasons).filter((group) => {
+            const key = feeSeasonKey(group.seasonName, group.validFrom, group.validTo);
+            if (seenSeasonKeys.has(key)) return false;
+            seenSeasonKeys.add(key);
+            return true;
+          });
+          const rateSeasons = seasonGroups.length
+            ? seasonGroups
+            : [{ seasonName: 'Base Season', validFrom: '', validTo: '' }];
+          const keptFeeIds = [];
+
+          for (const fee of itemData.linkedFees || []) {
+            /* A blank amount means the fee is not charged in that season. Only
+               priced seasons get a rate row; a fee with no priced season is not
+               a fee at all, so a half-started row is dropped and an existing
+               one is detached with the removed rows below. A typed 0 stays 0. */
+            const amounts = fee.amounts && typeof fee.amounts === 'object' ? fee.amounts : null;
+            const childAmounts = fee.childAmounts && typeof fee.childAmounts === 'object' ? fee.childAmounts : null;
+            const pricedSeasons = rateSeasons
+              .map((group) => {
+                const key = feeSeasonKey(group.seasonName, group.validFrom, group.validTo);
+                const raw = amounts
+                  ? (Object.prototype.hasOwnProperty.call(amounts, key) ? amounts[key] : '')
+                  : fee.amount;
+                /* A child figure rides on the season's own row and never makes
+                   one: a season with only a child amount is a season with no
+                   fee, because nothing bills a child on its own. */
+                const childRaw = childAmounts
+                  ? (Object.prototype.hasOwnProperty.call(childAmounts, key) ? childAmounts[key] : '')
+                  : '';
+                return { group, amount: moneyOrNull(raw), childAmount: moneyOrNull(childRaw) };
+              })
+              .filter((entry) => entry.amount !== null);
+            if (!pricedSeasons.length) continue;
+
+            const feePayload = {
+              company_id: companyId,
+              /* A fee can be billed by a park authority rather than the property,
+                 so an existing fee keeps its own supplier; only a fee created
+                 from this form starts on the property's supplier. */
+              ...(fee.dbId ? {} : { supplier_id: targetSupplierId }),
+              name: String(fee.name || '').trim() || surchargeTypeLabel(fee.type),
+              destination_region: itemLocality || 'Unknown',
+              destination_area: String(itemData.destinationArea || '').trim() || null,
+              category: SURCHARGE_CATEGORY,
+              sub_category: SURCHARGE_CATEGORY,
+              description: null,
+              currency: itemData.currency,
+              pricing_model: 'per_person',
+              surcharge_type: fee.type || 'entrance_fee',
+              surcharge_charge_basis: fee.chargeBasis === 'per_night' ? 'per_night' : 'once_off',
+              surcharge_unit_basis: isValidUnitBasis({ surcharge_type: fee.type }, fee.unitBasis) ? fee.unitBasis : 'per_person',
+              surcharge_chargeable: fee.chargeable !== false,
+              linked_item_id: targetItemId
+            };
+
+            let feeId = fee.dbId;
+            if (feeId) {
+              const { error: feeErr } = await supabase
+                .from('library_items')
+                .update(feePayload)
+                .eq('id', feeId);
+              if (feeErr) throw feeErr;
+              const { error: delErr } = await supabase.from('item_rates').delete().eq('item_id', feeId);
+              if (delErr) throw delErr;
+            } else {
+              const { data: createdFee, error: feeErr } = await supabase
+                .from('library_items')
+                .insert([feePayload])
+                .select()
+                .single();
+              if (feeErr) throw feeErr;
+              feeId = createdFee.id;
+            }
+            keptFeeIds.push(feeId);
+
+            const feeRates = pricedSeasons.map(({ group, amount, childAmount }) => feeRatePayload({
+              itemId: feeId,
+              currency: itemData.currency,
+              seasonName: group.seasonName,
+              validFrom: group.validFrom,
+              validTo: group.validTo,
+              type: fee.type,
+              unitBasis: fee.unitBasis,
+              amount,
+              childAmount: dbFeatures.feeChildRate ? childAmount : undefined
+            }));
+            const { error: feeRateErr } = await supabase.from('item_rates').insert(feeRates);
+            if (feeRateErr) throw feeRateErr;
+          }
+
+          /* A fee row the operator removed is detached rather than deleted: the
+             fee stays in the library for any itinerary that already priced it,
+             but it no longer travels with this property. */
+          const removedFeeIds = (itemData.linkedFeeOriginalIds || []).filter((id) => !keptFeeIds.includes(id));
+          if (removedFeeIds.length) {
+            const { error: removedErr } = await supabase
+              .from('library_items')
+              .update({ linked_item_id: null })
+              .in('id', removedFeeIds);
+            if (removedErr) throw removedErr;
+          }
+        }
       }
 
       const isEditing = Object.keys(editingItems).length > 0;
@@ -2200,7 +3452,7 @@ export const LibraryItems = () => {
   };
 
   // Convert a DB library item (with merged item_rates) into the inline form template
-  const buildItemFromRecord = (item) => {
+  const buildItemFromRecord = (item, linkedFees = [], linkedFeeOriginalIds = []) => {
     const rates = item.item_rates || [];
     const isTourStyle = isTourStyleCategory(item.category);
     const pricingModel = item.pricing_model || (item.category === 'Accommodation' ? 'per_person' : (item.category === 'Transfers' ? 'per_vehicle' : 'per_person'));
@@ -2209,6 +3461,31 @@ export const LibraryItems = () => {
     const childBands = Array.isArray(item.child_age_ranges) && item.child_age_ranges.length > 0
       ? item.child_age_ranges
       : createNewItemTemplate().childAgeRanges;
+
+    /* A property carries its room types; every season row is priced for one of
+       them. A database without the lodging migration (or an item saved before
+       it) reads back as one room, so the editor is the same shape either way. */
+    const isAccommodation = item.category === 'Accommodation';
+    const storedRooms = isAccommodation ? normalizeRoomTypes(item.room_types) : [];
+    const derivedRooms = isAccommodation && !storedRooms.length ? roomsFromRates(rates) : [];
+    const roomList = !isAccommodation
+      ? []
+      : (storedRooms.length ? storedRooms : (derivedRooms.length ? derivedRooms : [newRoomTemplate('Standard Room')]));
+    const roomKeyForRate = (rate) => roomForRate(rate, roomList)?.key || roomList[0]?.key || '';
+
+    /* The smallest party a villa sells to is the first band its own rate rows
+       price, so "from N pax" reloads what the operator typed rather than the
+       default. A standard room keeps the default untouched. */
+    const occupancyFloorForRoom = (room) => {
+      const bands = rates
+        .filter((rate) => roomKeyForRate(rate) === room.key)
+        .flatMap((rate) => normalizeOccupancyLadder(rate.occupancy_rates));
+      if (!bands.length) return 2;
+      return Math.max(1, Math.min(...bands.map((band) => band.minPax)));
+    };
+    const roomListWithFloor = roomList.map((room) => (
+      isOccupancyRoom(room, { pricingModel }) ? { ...room, occupancyFrom: occupancyFloorForRoom(room) } : room
+    ));
 
     const defaultChildRates = {};
 
@@ -2231,7 +3508,6 @@ export const LibraryItems = () => {
           price2Adults: 0,
           price3PlusAdults: 0,
           childRates: {},
-          singleSupplement: 0,
           childDiscount: 0,
           guideMealPlan: 'Bed & Breakfast',
           driverMealPlan: 'Bed & Breakfast',
@@ -2280,9 +3556,14 @@ export const LibraryItems = () => {
           price2Adults: 0,
           price3PlusAdults: 0,
           childRates: {},
-          singleSupplement: 0,
           childDiscount: 0,
-          guideRate: 0,
+          /* An activity's guide figure is read with its zero intact: 0 is the
+             deal that admits the guide free, and losing it on reload would turn
+             a free place into a charged one on the next save. A flight keeps the
+             older loading, where 0 and blank bill the same fare. */
+          guideRate: item.category === 'Activities / Tours'
+            ? moneyLoadKeepZero(r.guide_rate)
+            : (isFlightCategory(item.category) ? moneyLoad(r.guide_rate) : 0),
           driverRate: 0,
           guideMealPlan: 'Bed & Breakfast',
           driverMealPlan: 'Bed & Breakfast',
@@ -2307,7 +3588,6 @@ export const LibraryItems = () => {
           childRates: r.child_rates_breakdown || defaultChildRates,
           fastTrackAdultRate: moneyLoad(r.fast_track_adult_rate),
           fastTrackChildRates: r.fast_track_child_rates_breakdown || defaultChildRates,
-          singleSupplement: 0,
           childDiscount: 0,
           guideRate: 0,
           driverRate: 0
@@ -2316,6 +3596,12 @@ export const LibraryItems = () => {
       return {
         seasonName: r.season_name || r.option_name || 'Base Season',
         optionName: r.meal_plan || '',
+        roomKey: roomKeyForRate(r),
+        minNights: r.min_nights ?? '',
+        maxNights: r.max_nights ?? '',
+        weekendDays: weekendDaysOf(r),
+        weekendPrice: moneyLoad(r.weekend_price),
+        occupancyRates: occupancyBandsForEdit(r),
         validFrom: r.valid_from || '',
         validTo: r.valid_to || '',
         roomRate: isFlat ? moneyLoad(r.unit_price ?? r.price_2_adults ?? r.double_twin_rate) : moneyLoad(r.single_room_rate),
@@ -2324,24 +3610,39 @@ export const LibraryItems = () => {
         price2Adults: moneyLoad(r.price_2_adults ?? r.double_twin_rate),
         price3PlusAdults: moneyLoad(r.price_3_plus_adults),
         childRates: isFlat ? {} : (r.child_rates_breakdown || defaultChildRates),
-        singleSupplement: moneyLoad(r.single_supplement),
+        singleSupplementWaiver: (() => {
+          const waived = waiverFromLadder(r);
+          return waived > 0 ? String(waived) : '';
+        })(),
         childDiscount: isFlat ? '' : moneyLoad(r.child_discount),
-        guideRate: moneyLoad(r.guide_rate),
+        /* A fee's guide figure bills 0 as "the guide enters free", so it loads
+           with its zero intact. A room's guide bed keeps the older loading: rows
+           written before the zero-aware boxes hold a 0 that was the editor's
+           default rather than a deal, and honouring it would quietly make guide
+           beds free across the existing library. */
+        guideRate: isSurchargeItem(item) ? moneyLoadKeepZero(r.guide_rate) : moneyLoad(r.guide_rate),
+        guideTiers: tierLadderFromRow(r.guide_tiers),
         driverRate: moneyLoad(r.driver_rate),
-        tourLeaderRate: moneyLoad(r.tour_leader_rate),
-  tourLeaderRate: moneyLoad(r.tour_leader_rate),
+        driverTiers: tierLadderFromRow(r.driver_tiers),
+        tourLeaderRate: moneyLoadKeepZero(r.tour_leader_rate),
+        tourLeaderTiers: tierLadderFromRow(r.tour_leader_tiers),
         guideMealPlan: r.guide_meal_plan || r.meal_plan || 'Bed & Breakfast',
         driverMealPlan: r.driver_meal_plan || r.meal_plan || 'Bed & Breakfast',
         entranceFeePerson: moneyLoad(r.entrance_fee_per_person),
+        /* 0 is a contracted free child; blank is the park not splitting by age,
+           so the two must not collapse into each other on reload. */
+        entranceFeeChild: moneyLoadKeepZero(r.entrance_fee_per_child),
         entranceFeeVehicle: moneyLoad(r.entrance_fee_per_vehicle),
         levyAdultRate: moneyLoad(r.conservation_levy_per_adult),
         levyChildRate: moneyLoad(r.conservation_levy_per_child),
+        unitRate: moneyLoad(r.unit_price),
         taxesAndSurcharges: moneyLoad(r.taxes_and_surcharges)
       };
     }) : [{
       seasonName: 'Base Season',
       validFrom: '',
       validTo: '',
+      ...(isAccommodation ? { roomKey: roomList[0]?.key || '' } : {}),
       ...emptySeasonMoney()
     }];
 
@@ -2386,12 +3687,14 @@ export const LibraryItems = () => {
       destinationArea: item.destination_area || '',
       identifierCode: item.identifier_code || '',
       identifierDestinationRegion: item.destination_region || item.location || '',
-      category: item.category || 'Accommodation',
+      category: normalizeCategoryName(item.category) || 'Accommodation',
       currency: item.currency || 'ZAR',
       mealPlan: rates.find(r => r.meal_plan)?.meal_plan || 'Bed & Breakfast',
-      vehicleType: isTourStyle ? (item.sub_category || '') : '',
+      vehicleType: item.category === 'Transfers' ? (item.sub_category || '') : '',
       tourType: item.tour_type || '',
+      minPaxToRun: item.min_pax_to_run ?? '',
       transferType: item.category === 'Transfers' ? (item.transfer_type || '') : '',
+      transportType: item.transport_type || '',
       flightNumber: item.flight_number || '',
       airlineName: item.airline_name || '',
       departureCity: item.departure_city || '',
@@ -2403,6 +3706,9 @@ export const LibraryItems = () => {
       mealType: item.meal_type || 'Breakfast',
       menuType: item.menu_type || 'a_la_carte',
       mealGratuityPercent: parseFloat(item.meal_gratuity_percent) || 0,
+      guideMealOffered: isMealsCategory(item.category) && item.guide_meal_offered === true,
+      driverMealOffered: isMealsCategory(item.category) && item.driver_meal_offered === true,
+      guideFlightOffered: isFlightCategory(item.category) && item.guide_flight_offered === true,
       feeType: 'none',
       levyBasis: 'per_night',
       surchargeType: item.surcharge_type || 'entrance_fee',
@@ -2415,10 +3721,25 @@ export const LibraryItems = () => {
       maxOccupancy: maxOcc,
       maxAdults,
       maxChildren: Math.max(0, parseInt(item.max_children) || 0),
-      sharingCapacityRules: (Array.isArray(item.sharing_capacity_rules) && item.sharing_capacity_rules.length > 0)
-        ? item.sharing_capacity_rules
-        : ensureSharingRules(maxAdults, maxOcc, []),
+      sharingCapacityRules: (() => {
+        const stored = (Array.isArray(item.sharing_capacity_rules) && item.sharing_capacity_rules.length > 0)
+          ? item.sharing_capacity_rules
+          : null;
+        if (!stored) return ensureSharingRules(maxAdults, maxOcc, []);
+        if (isAccommodation && roomList.length > 0) {
+          const currentCeiling = roomCeilingOf(roomList) || maxOcc;
+          const stale = staleAutoCeilingOf(stored, currentCeiling);
+          if (stale !== null) {
+            return rebaseSharingRules(roomAdultsOf(roomList), stale, currentCeiling, stored);
+          }
+        }
+        return stored;
+      })(),
       guideDriverOffered: item.guide_driver_room_offered === true,
+      childrenOwnRoomPolicy: ['child_rates', 'adult_rates', 'single_room_rate'].includes(item.children_own_room_policy)
+        ? item.children_own_room_policy
+        : 'child_rates',
+    guideMinRooms: item.guide_min_rooms || 1,
     tourLeaderRoomOffered: item.tour_leader_room_offered === true,
     tourLeaderMinRooms: item.tour_leader_min_rooms || 1,
       driverRequired: isDriverEligibleCategory(item.category) && item.driver_required === true,
@@ -2433,12 +3754,60 @@ export const LibraryItems = () => {
       contractName: item.contract_name || '',
       childAgeRanges: childBands,
       carGroups,
-      seasons
+      roomTypes: roomListWithFloor,
+      seasons,
+      linkedFees,
+      linkedFeeOriginalIds
     };
   };
 
-  const handleEditItem = (item) => {
-    const template = buildItemFromRecord(item);
+  const handleEditItem = async (item) => {
+    let linkedFees = [];
+    let linkedFeeOriginalIds = [];
+    if (item.category === 'Accommodation' && dbFeatures.surchargeFees && dbFeatures.feeType) {
+      try {
+        const { data: feeItems } = await supabase
+          .from('library_items')
+          .select('*')
+          .eq('linked_item_id', item.id);
+        const feeRows = (feeItems || []).filter(isSurchargeItem);
+        if (feeRows.length) {
+          /* The fee amount is entered per property season. The season list is
+             taken from the accommodation's own rate rows, deduped across rooms,
+             so a renamed or redated season can still find the figure it was
+             saved with. */
+          const seenSeasons = new Set();
+          const feeSeasons = (item.item_rates || []).reduce((groups, rate) => {
+            const seasonName = rate.season_name || rate.option_name || 'Base Season';
+            const validFrom = rate.valid_from || '';
+            const validTo = rate.valid_to || '';
+            const key = feeSeasonKey(seasonName, validFrom, validTo);
+            if (seenSeasons.has(key)) return groups;
+            seenSeasons.add(key);
+            groups.push({ seasonName, validFrom, validTo });
+            return groups;
+          }, []);
+          const feeIds = feeRows.map((fee) => fee.id);
+          const { data: feeRates } = await supabase
+            .from('item_rates')
+            .select('*')
+            .in('item_id', feeIds);
+          const ratesByItem = {};
+          (feeRates || []).forEach((rate) => {
+            if (!ratesByItem[rate.item_id]) ratesByItem[rate.item_id] = [];
+            ratesByItem[rate.item_id].push(rate);
+          });
+          linkedFees = feeRows.map((fee) => feeEditorRowFromRecord(
+            { ...fee, item_rates: ratesByItem[fee.id] || [] },
+            feeSeasons
+          ));
+          linkedFeeOriginalIds = feeIds;
+        }
+      } catch {
+        // A database without the fee columns behaves as if the property had none.
+      }
+    }
+    const template = buildItemFromRecord(item, linkedFees, linkedFeeOriginalIds);
     setItemsToSave([template]);
     setEditingItems({ [template.tempId]: item.id });
     setSelectedSupplierId(item.supplier_id || item.supplier?.id || '');
@@ -2603,7 +3972,10 @@ export const LibraryItems = () => {
                   >
                     <option value="">Select supplier...</option>
                     {suppliers.map(s => (
-                      <option key={s.id} value={s.id}>{s.name} ({s.category || 'Supplier'})</option>
+                      /* No category suffix: a supplier's category reflects only
+                         the first item it was created from, so showing it would
+                         wrongly suggest the supplier only offers that service. */
+                      <option key={s.id} value={s.id}>{s.name}</option>
                     ))}
                   </SearchableSelect>
                 </div>
@@ -2916,6 +4288,11 @@ export const LibraryItems = () => {
               {/* DYNAMIC LIBRARY ITEM CARDS */}
               {itemsToSave.map((item, itemIdx) => {
                 const isTourStyle = isTourStyleCategory(item.category);
+                /* With room types, the widest room answers "how many in one
+                   room"; without them the item's own ceiling still does. */
+                const roomCeiling = item.category === 'Accommodation' && roomsReady
+                  ? (Math.max(0, ...(item.roomTypes || []).map(room => parseInt(room.maxOccupancy) || 0)) || 2)
+                  : (parseInt(item.maxOccupancy) || 2);
                 return (
                 <div
                   key={item.tempId}
@@ -2986,16 +4363,34 @@ export const LibraryItems = () => {
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.25rem', marginBottom: '1.25rem' }}>
                     <div>
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
-                        Destination or Region *
+                        {/accommodation/i.test(String(item.category || '')) ? 'Destination' : 'Destination / Locality *'}
                       </label>
-                      <input
-                        type="text"
-                        className="pricing-select"
-                        placeholder="e.g. Windhoek / Etosha National Park"
-                        required
-                        value={item.destinationRegion || ''}
-                        onChange={(e) => handleItemFieldChange(item.tempId, 'destinationRegion', e.target.value)}
-                      />
+                      {/accommodation/i.test(String(item.category || '')) ? (
+                        <input
+                          type="text"
+                          className="pricing-select"
+                          readOnly
+                          aria-readonly="true"
+                          placeholder="Set the supplier's city"
+                          value={supplierDestination() || item.destinationRegion || ''}
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          className="pricing-select"
+                          placeholder="e.g. Windhoek / Etosha National Park"
+                          required
+                          value={item.destinationRegion || ''}
+                          onChange={(e) => handleItemFieldChange(item.tempId, 'destinationRegion', e.target.value)}
+                        />
+                      )}
+                      <small style={{ display: 'block', marginTop: '0.3rem', color: '#64748b' }}>
+                        {/accommodation/i.test(String(item.category || ''))
+                          ? (supplierDestination()
+                            ? 'Taken from the supplier — a property sits where its supplier does, so the locality is not asked again here.'
+                            : 'The supplier has no city yet. Set it in the supplier record; until then the stored locality is kept.')
+                          : 'The specific place this item sits in. Shown in the library list and on rate cards, used by search, and it seeds the identifier code.'}
+                      </small>
                     </div>
                     <div>
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
@@ -3014,18 +4409,20 @@ export const LibraryItems = () => {
                   {/accommodation/i.test(String(item.category || '')) && (
                     <div style={{ marginBottom: '1.25rem' }}>
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
-                        Parent Destination / Region *
+                        Destination Area *
                       </label>
                       <input
                         type="text"
                         className="pricing-select"
-                        placeholder="e.g. Cape Town (use the same parent area for nearby places)"
+                        placeholder="e.g. Garden Route (the same area for every property nearby)"
                         required
                         value={item.destinationArea || ''}
                         onChange={(e) => handleItemFieldChange(item.tempId, 'destinationArea', e.target.value)}
                       />
                       <small style={{ display: 'block', marginTop: '0.3rem', color: '#64748b' }}>
-                        Used to validate accommodation alternatives and group splits. Keep the specific locality in Destination or Region above.
+                        The town comes from the supplier. This is the wider area key used to judge whether
+                        another property is a valid alternative and how traveller groups split by destination —
+                        type it identically on every property in that area.
                       </small>
                     </div>
                   )}
@@ -3034,7 +4431,7 @@ export const LibraryItems = () => {
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.25rem', marginBottom: '1.25rem' }}>
                     <div>
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
-                        Library Item Name *
+                        {/accommodation/i.test(String(item.category || '')) ? 'Property Name *' : 'Library Item Name *'}
                       </label>
                       <input
                         type="text"
@@ -3057,14 +4454,30 @@ export const LibraryItems = () => {
                                 ? 'e.g., Spa Treatment / Laundry Service / Wi-Fi Pass'
                                 : (isCarRentalCategory(item.category)
                                 ? 'e.g., Self-Drive (Group C) — Toyota Starlet'
+                                : /accommodation/i.test(String(item.category || ''))
+                                ? 'e.g., Oudtshoorn Lodge / Safari Camp'
+                                : isTransportCategory(item.category)
+                                ? 'e.g., 30-Seat Bus Hire / Mini Coach / Closed Truck'
                                 : 'e.g., Standard Room / Safari Transfer / Game Drive'))))))))}
                         required
                         value={item.name}
                         onChange={(e) => handleItemFieldChange(item.tempId, 'name', e.target.value)}
                       />
+                      {/accommodation/i.test(String(item.category || '')) && (
+                        <small style={{ display: 'block', marginTop: '0.3rem', color: '#64748b' }}>
+                          The property itself — the lodge, camp or guesthouse. Its room types go in the card below, so do not name it after a room.
+                        </small>
+                      )}
                     </div>
 
-                    {isTourStyle && !isFlightCategory(item.category) ? (
+                    {/* Only a transfer names its vehicle. A Transport item IS the
+                        vehicle - its name, seat capacity, hire type and the per
+                        vehicle price matrix already say which one is bought - and an
+                        activity is a thing that happens: a boat trip, a quad bike, a
+                        walk into a park. Plenty have no road vehicle at all, so the
+                        required label asked every tour for a vehicle it does not
+                        have. */}
+                    {item.category === 'Transfers' ? (
                       <div>
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Vehicle Type *
@@ -3072,7 +4485,7 @@ export const LibraryItems = () => {
                         <input
                           type="text"
                           className="pricing-select"
-                          placeholder={item.category === 'Transfers' ? 'e.g. Land Cruiser / Safari Minivan' : 'e.g. Safari Vehicle / Boat / Van'}
+                          placeholder="e.g. Land Cruiser / Safari Minivan"
                           value={item.vehicleType}
                           onChange={(e) => handleVehicleTypeChange(item.tempId, e.target.value)}
                         />
@@ -3103,8 +4516,8 @@ export const LibraryItems = () => {
                             checked={!!item.driverRequired}
                             onChange={(e) => {
                               handleItemFieldChange(item.tempId, 'driverRequired', e.target.checked);
-                              handleItemFieldChange(item.tempId, 'driverMeals', e.target.checked ? getDefaultDriverMeals(item.category, item.transferType) : []);
-                              handleItemFieldChange(item.tempId, 'driverAccommodation', e.target.checked ? getDefaultDriverAccommodation(item.category, item.transferType) : false);
+                              handleItemFieldChange(item.tempId, 'driverMeals', e.target.checked ? getDefaultDriverMeals(item.category, driverHireType(item)) : []);
+                              handleItemFieldChange(item.tempId, 'driverAccommodation', e.target.checked ? getDefaultDriverAccommodation(item.category, driverHireType(item)) : false);
                             }}
                           />
                           🚗 Dedicated Driver Required
@@ -3192,21 +4605,6 @@ export const LibraryItems = () => {
                   </div>
 
                   {/* GUIDE / DRIVER ROOM RATE TOGGLE (Accommodation only) */}
-                  {item.category === 'Accommodation' && !dbFeatures.guideDriver && (
-                    <div style={{
-                      background: '#fefce8',
-                      border: '1px solid #facc15',
-                      borderRadius: '10px',
-                      padding: '0.75rem 1.15rem',
-                      marginBottom: '1.25rem',
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      color: '#854d0e'
-                    }}>
-                      Guide/Driver room rates will be available after the database migration is applied
-                      (20260829_guide_driver_room_rates.sql).
-                    </div>
-                  )}
                   {item.category === 'Accommodation' && dbFeatures.guideDriver && (
                     <div style={{
                       background: item.guideDriverOffered ? '#fffbeb' : '#f8fafc',
@@ -3228,20 +4626,35 @@ export const LibraryItems = () => {
                           </span>
                           <span style={{ fontSize: '0.74rem', color: item.guideDriverOffered ? '#a16207' : '#64748b' }}>
                             {item.guideDriverOffered
-                              ? 'Enter separate guide & driver room rates in each season below.'
+                              ? 'Enter the guide and driver rates and each room rule per season. The Min Client Rooms above gates both rates.'
                               : 'Not offered — guide & driver automatically use the Single Room rate.'}
                           </span>
                         </div>
                       </div>
-                      <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
-                        <input
-                          type="checkbox"
-                          checked={item.guideDriverOffered || false}
-                          onChange={(e) => handleItemFieldChange(item.tempId, 'guideDriverOffered', e.target.checked)}
-                          style={{ width: '17px', height: '17px', accentColor: '#d97706', cursor: 'pointer' }}
-                        />
-                        Hotel offers Guide/Driver rate
-                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                        <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={item.guideDriverOffered || false}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'guideDriverOffered', e.target.checked)}
+                            style={{ width: '17px', height: '17px', accentColor: '#d97706', cursor: 'pointer' }}
+                          />
+                          Hotel offers Guide/Driver rate
+                        </label>
+                        {item.guideDriverOffered && dbFeatures.guideMinRooms && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 600 }}>Min Client Rooms:</span>
+                            <input
+                              type="number"
+                              min="1"
+                              style={{ width: '60px', padding: '0.25rem 0.5rem', fontSize: '0.82rem' }}
+                              className="pricing-select"
+                              value={item.guideMinRooms ?? 1}
+                              onChange={(e) => handleItemFieldChange(item.tempId, 'guideMinRooms', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                            />
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                   {item.category === 'Accommodation' && (
@@ -3369,6 +4782,27 @@ export const LibraryItems = () => {
                           />
                         </div>
                       </div>
+
+                      {/* THE GUIDE'S SEAT. Suppliers fly the crew on the same
+                         flight often enough that it needs saying on the item;
+                         the itinerary then offers the ticket as a guide-only
+                         line beside the clients' seats. */}
+                      {dbFeatures.staffOptions && (
+                        <div style={{ marginTop: '1rem', paddingTop: '0.9rem', borderTop: '1px solid #f1f5f9' }}>
+                          <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={item.guideFlightOffered || false}
+                              onChange={(e) => handleItemFieldChange(item.tempId, 'guideFlightOffered', e.target.checked)}
+                              style={{ width: '17px', height: '17px', accentColor: '#6366f1', cursor: 'pointer' }}
+                            />
+                            <UserCheck size={15} color="#6366f1" /> The supplier also sells the guide a seat
+                          </label>
+                          <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginTop: '0.4rem', lineHeight: 1.45 }}>
+                            Dropping this flight on a day offers a second line for the guide alone, at the Guide Fare on the season or, when that is blank, at the fare the clients pay. The clients are never charged for it.
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -3502,6 +4936,39 @@ export const LibraryItems = () => {
                           <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Optional service gratuity added to the fare</span>
                         </div>
                       </div>
+
+                      {/* CREW MEALS. The guide details dialog on the itinerary
+                         offers the meals ticked here, so the operator never has
+                         to remember which restaurant takes the crew. */}
+                      {dbFeatures.staffOptions && (
+                        <div style={{ marginTop: '1rem', paddingTop: '0.9rem', borderTop: '1px solid #f1f5f9' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '1.1rem', flexWrap: 'wrap' }}>
+                            <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={item.guideMealOffered || false}
+                                onChange={(e) => handleItemFieldChange(item.tempId, 'guideMealOffered', e.target.checked)}
+                                style={{ width: '17px', height: '17px', accentColor: '#f59e0b', cursor: 'pointer' }}
+                              />
+                              <UserCheck size={15} color="#f59e0b" /> Guide meal
+                            </label>
+                            <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={item.driverMealOffered || false}
+                                onChange={(e) => handleItemFieldChange(item.tempId, 'driverMealOffered', e.target.checked)}
+                                style={{ width: '17px', height: '17px', accentColor: '#0ea5e9', cursor: 'pointer' }}
+                              />
+                              <Car size={15} color="#0ea5e9" /> Driver meal
+                            </label>
+                          </div>
+                          <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginTop: '0.4rem', lineHeight: 1.45 }}>
+                            {item.guideMealOffered
+                              ? 'The guide details dialog offers this meal, priced at its Guide Rate. Tick "Driver meal" too and the driver is charged a line of their own at the Driver Rate.'
+                              : 'Unticked meals are never offered to the guide. While no meal in the library is ticked, the dialog still lists every meal so an untagged library keeps working.'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -3526,7 +4993,7 @@ export const LibraryItems = () => {
 
                       {!dbFeatures.transferType && (
                         <div style={{ background: '#fefce8', border: '1px solid #facc15', borderRadius: '6px', padding: '0.5rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.74rem', fontWeight: 600, color: '#854d0e' }}>
-                          Transfer Type will be saved after the database migration is applied (20260829_transfer_type.sql).
+                          Transfer Type isn't available in this workspace yet, so transfers are saved as a standard transfer.
                         </div>
                       )}
 
@@ -3582,13 +5049,13 @@ export const LibraryItems = () => {
                           <Compass size={18} color="#10b981" /> Tour Type <span style={{ color: '#ef4444' }}>*</span>
                         </h4>
                         <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                          This labels the service in the itinerary builder (Half Day, Full Day, Escorted Dinner / Lunch, or Overland Transfer).
+                          This labels the service in the itinerary builder (Short Experience, Half Day, Full Day, Escorted Dinner / Lunch, or Overland Transfer).
                         </span>
                       </div>
 
                       {!dbFeatures.tourType && (
                         <div style={{ background: '#fefce8', border: '1px solid #facc15', borderRadius: '6px', padding: '0.5rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.74rem', fontWeight: 600, color: '#854d0e' }}>
-                          Tour Type will be saved after the database migration is applied.
+                          Tour Type isn't available in this workspace yet, so tours are saved without a type.
                         </div>
                       )}
 
@@ -3620,8 +5087,318 @@ export const LibraryItems = () => {
                           );
                         })}
                       </div>
+
+                      {/* A tour that needs a crowd to depart is a different product
+                          from one that runs whoever walks up, and the supplier states
+                          it once for the item, not per season. */}
+                      {dbFeatures.minPaxToRun && (
+                        <div style={{ marginTop: '1rem', paddingTop: '0.9rem', borderTop: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: '0.7rem', flexWrap: 'wrap' }}>
+                          <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b' }} htmlFor={`min-pax-${item.tempId}`}>
+                            Minimum guests to run
+                          </label>
+                          <input
+                            id={`min-pax-${item.tempId}`}
+                            type="number"
+                            min="0"
+                            step="1"
+                            placeholder="none"
+                            className="pricing-select"
+                            style={{ width: '110px' }}
+                            value={item.minPaxToRun ?? ''}
+                            onChange={(e) => handleItemFieldChange(item.tempId, 'minPaxToRun', e.target.value)}
+                          />
+                          <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                            Leave blank when the supplier runs it for any party size.
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
+
+                  {/* TRANSPORT TYPE SELECTOR (Transport only) */}
+                  {isTransportCategory(item.category) && (
+                    <div style={{
+                      background: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '12px',
+                      padding: '1.25rem',
+                      marginBottom: '1.5rem',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                    }}>
+                      <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                        <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <BusFront size={18} color="#0ea5e9" /> Transport Type <span style={{ color: '#ef4444' }}>*</span>
+                        </h4>
+                        <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                          What the vehicle is hired for. It decides what the itinerary allows for the driver on the day.
+                        </span>
+                      </div>
+
+                      {!dbFeatures.transportType && (
+                        <div style={{ background: '#fefce8', border: '1px solid #facc15', borderRadius: '6px', padding: '0.5rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.74rem', fontWeight: 600, color: '#854d0e' }}>
+                          Transport Type isn't available in this workspace yet, so transport is saved without a type.
+                        </div>
+                      )}
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.6rem' }}>
+                        {transportTypes.map(tt => {
+                          const selected = item.transportType === tt.id;
+                          return (
+                            <button
+                              key={tt.id}
+                              type="button"
+                              onClick={() => {
+                                handleItemFieldChange(item.tempId, 'transportType', tt.id);
+                                if (item.driverRequired) {
+                                  handleItemFieldChange(item.tempId, 'driverMeals', getDefaultDriverMeals(item.category, tt.id));
+                                  handleItemFieldChange(item.tempId, 'driverAccommodation', getDefaultDriverAccommodation(item.category, tt.id));
+                                }
+                              }}
+                              style={{
+                                background: selected ? '#f0f9ff' : '#f8fafc',
+                                border: selected ? '2px solid #0ea5e9' : '1px solid #e2e8f0',
+                                borderRadius: '10px',
+                                padding: '0.75rem 0.85rem',
+                                textAlign: 'left',
+                                cursor: 'pointer',
+                                transition: 'all 0.15s ease'
+                              }}
+                            >
+                              <span style={{ fontWeight: 700, fontSize: '0.85rem', color: selected ? '#0369a1' : '#1e293b', display: 'block' }}>
+                                {tt.icon} {tt.label} {selected && '✓'}
+                              </span>
+                              <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginTop: '0.2rem', lineHeight: 1.35 }}>
+                                {tt.description}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* PROPERTY, ROOM TYPES & STAR GRADING CARD */}
+                  {item.category === 'Accommodation' && roomsReady && (() => {
+                    const rooms = item.roomTypes || [];
+                    const activeKey = activeRoomKeyFor(item);
+                    const currentGrade = supplierStarValue();
+                    /* Legacy accommodation rows were backfilled with the old item
+                       name, which used to be the room type, so the property and its
+                       one room read the same. Name the property after the lodge. */
+                    const propertyName = String(item.name || '').trim().toLowerCase();
+                    const roomNameMatchesProperty = !!propertyName && rooms.some(
+                      (room) => String(room.name || '').trim().toLowerCase() === propertyName
+                    );
+                    const numberCell = (roomKey, label, field, value, min, blankLabel = '') => (
+                      <div>
+                        <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.2rem' }}>{label}</label>
+                        <input
+                          type="number"
+                          min={min}
+                          max="30"
+                          className="pricing-select"
+                          style={{ width: '100%', padding: '0.35rem 0.45rem', fontSize: '0.85rem', fontWeight: 700, textAlign: 'center' }}
+                          placeholder={blankLabel || undefined}
+                          value={value === null || value === undefined ? '' : value}
+                          onChange={(e) => handleUpdateRoom(item.tempId, roomKey, field, e.target.value)}
+                        />
+                      </div>
+                    );
+                    return (
+                      <div style={{
+                        background: '#ffffff',
+                        border: '1px solid #dbeafe',
+                        borderRadius: '12px',
+                        padding: '1.25rem',
+                        marginBottom: '1.5rem',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.02)'
+                      }}>
+                        <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
+                          <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <BedDouble size={18} color="#0369a1" /> Property, room types &amp; grading
+                          </h4>
+                          <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                            One supplier, one property, several room types. Each room carries its own seasons and rates below;
+                            the itinerary asks which room the travellers are in.
+                          </span>
+                        </div>
+
+                        {roomNameMatchesProperty && (
+                          <div style={{
+                            background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '9px',
+                            padding: '0.6rem 0.8rem', marginBottom: '1rem', fontSize: '0.76rem',
+                            color: '#92400e', lineHeight: 1.45
+                          }}>
+                            This property carries the same name as one of its rooms. Rename the property
+                            above to the lodge or guesthouse itself (e.g. “Oudtshoorn Lodge”) and keep the
+                            room name here as the type it sells.
+                          </div>
+                        )}
+
+                        {/* Star grading — a property grade, not a room one. */}
+                        <div style={{
+                          display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem',
+                          background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '9px',
+                          padding: '0.7rem 0.9rem', marginBottom: '1rem'
+                        }}>
+                          <div style={{ flex: '1', minWidth: '220px' }}>
+                            <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#92400e', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              <Star size={14} color="#d97706" /> Star grading
+                            </span>
+                            <span style={{ fontSize: '0.72rem', color: '#a16207', display: 'block', marginTop: '0.15rem' }}>
+                              A grade for the property (the supplier), not for one room — every room here inherits it.
+                            </span>
+                          </div>
+                          {starColumnReady ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.1rem' }}>
+                              {STAR_GRADES.map((grade) => (
+                                <button
+                                  key={grade}
+                                  type="button"
+                                  title={currentGrade === grade ? `${grade}-star (click to clear)` : `${grade}-star`}
+                                  aria-label={`${grade}-star`}
+                                  onClick={() => handleStarGradeChange(currentGrade === grade ? null : grade)}
+                                  style={{
+                                    background: 'none', border: 'none', cursor: 'pointer', lineHeight: 1,
+                                    fontSize: '1.4rem', padding: '0.1rem 0.12rem',
+                                    color: currentGrade && grade <= currentGrade ? '#f59e0b' : '#cbd5e1'
+                                  }}
+                                >
+                                  ★
+                                </button>
+                              ))}
+                              <button
+                                type="button"
+                                onClick={() => handleStarGradeChange(null)}
+                                style={{
+                                  marginLeft: '0.45rem', fontSize: '0.72rem', padding: '0.2rem 0.55rem',
+                                  border: '1px solid #fcd34d', background: currentGrade ? '#fff' : '#fef3c7',
+                                  color: '#92400e', borderRadius: '6px', cursor: 'pointer', fontWeight: 600
+                                }}
+                              >
+                                Not graded
+                              </button>
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: '0.74rem', color: '#92400e' }}>
+                              Star grading needs its migration before it can be saved.
+                            </span>
+                          )}
+                        </div>
+
+                        {/* One row per room type the property sells. */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                          {rooms.map((room) => {
+                            return (
+                              <div
+                                key={room.key}
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'minmax(150px, 1.4fr) repeat(3, minmax(74px, 0.55fr)) minmax(190px, 1fr) auto',
+                                  gap: '0.5rem',
+                                  alignItems: 'end',
+                                  background: '#f8fafc',
+                                  border: `1px solid ${room.key === activeKey ? '#7dd3fc' : '#e2e8f0'}`,
+                                  borderRadius: '8px',
+                                  padding: '0.55rem 0.65rem'
+                                }}
+                              >
+                                <div>
+                                  <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.2rem' }}>Room type</label>
+                                  <input
+                                    type="text"
+                                    className="pricing-select"
+                                    style={{ width: '100%', padding: '0.35rem 0.45rem', fontSize: '0.85rem', fontWeight: 600 }}
+                                    placeholder="e.g. Garden Suite"
+                                    value={room.name}
+                                    onChange={(e) => handleUpdateRoom(item.tempId, room.key, 'name', e.target.value)}
+                                  />
+                                </div>
+                                {numberCell(room.key, 'Sleeps', 'maxOccupancy', room.maxOccupancy, 1)}
+                                {numberCell(room.key, 'Max adults', 'maxAdults', room.maxAdults, 1)}
+                                {numberCell(room.key, 'Max children', 'maxChildren', room.maxChildren, 0, 'any')}
+                                {dbFeatures.occupancyPricing && (
+                                <div>
+                                  <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.2rem' }}>Charged by</label>
+                                  <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                                    <select
+                                      className="pricing-select"
+                                      style={{ flex: 1, padding: '0.35rem 0.4rem', fontSize: '0.78rem' }}
+                                      value={roomPricingModelOf(room, item)}
+                                      onChange={(e) => handleUpdateRoom(item.tempId, room.key, 'pricingModel', e.target.value)}
+                                    >
+                                      <option value="per_person_sharing">Per person sharing</option>
+                                      <option value="per_room">Whole room</option>
+                                      <option value={OCCUPANCY_BASIS}>Per person by occupancy</option>
+                                    </select>
+                                    {isOccupancyRoom(room, item) && (
+                                      <label style={{ fontSize: '0.68rem', color: '#64748b', display: 'flex', alignItems: 'center', gap: '0.25rem', whiteSpace: 'nowrap' }}>
+                                        from
+                                        <input
+                                          type="number"
+                                          min={1}
+                                          max={room.maxOccupancy}
+                                          className="pricing-select"
+                                          style={{ width: '3.2rem', padding: '0.3rem 0.35rem', fontSize: '0.78rem' }}
+                                          value={room.occupancyFrom ?? 2}
+                                          onChange={(e) => handleUpdateRoom(item.tempId, room.key, 'occupancyFrom', e.target.value)}
+                                        />
+                                        pax
+                                      </label>
+                                    )}
+                                  </div>
+                                </div>
+                                )}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', paddingBottom: '0.05rem' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => setActiveRoomByItem(prev => ({ ...prev, [item.tempId]: room.key }))}
+                                    style={{
+                                      fontSize: '0.7rem', fontWeight: 600, padding: '0.3rem 0.5rem', borderRadius: '6px',
+                                      cursor: 'pointer', whiteSpace: 'nowrap',
+                                      border: `1px solid ${room.key === activeKey ? '#0369a1' : '#cbd5e1'}`,
+                                      background: room.key === activeKey ? '#e0f2fe' : '#fff',
+                                      color: room.key === activeKey ? '#0369a1' : '#475569'
+                                    }}
+                                  >
+                                    {room.key === activeKey ? 'Pricing below' : 'Price this room'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    title="Remove room type"
+                                    aria-label="Remove room type"
+                                    disabled={rooms.length <= 1}
+                                    onClick={() => handleRemoveRoom(item.tempId, room.key)}
+                                    style={{
+                                      background: 'none', border: 'none', padding: '0.2rem', cursor: rooms.length <= 1 ? 'not-allowed' : 'pointer',
+                                      color: rooms.length <= 1 ? '#cbd5e1' : '#ef4444'
+                                    }}
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.55rem' }}>
+                          <button
+                            type="button"
+                            className="secondary-btn"
+                            style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                            onClick={() => handleAddRoom(item.tempId)}
+                          >
+                            <Plus size={13} /> Add room type
+                          </button>
+                          <span style={{ fontSize: '0.72rem', color: '#64748b', lineHeight: 1.4 }}>
+                            Leave Max children blank when the property does not tell adults and children apart - the room
+                            then takes any mix up to its Sleeps. Type a number only for a room that caps them, and 0 for
+                            one that takes no children.
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* MAXIMUM OCCUPANCY & CAPACITY CARD */}
                   {isTourStyle ? (
@@ -3635,14 +5412,20 @@ export const LibraryItems = () => {
                     }}>
                       <div style={{ marginBottom: '1rem', borderBottom: '1px solid #f1f5f9', paddingBottom: '0.75rem' }}>
                         <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                          {item.category === 'Flights / Charter' ? <Plane size={18} color="#6366f1" /> : <Bus size={18} color="#3b82f6" />} {item.category === 'Transfers' ? 'Vehicle Capacity' : item.category === 'Flights / Charter' ? 'Seat Capacity' : 'Transport Capacity'}
+                          {item.category === 'Flights / Charter'
+                            ? <Plane size={18} color="#6366f1" />
+                            : isTransportCategory(item.category)
+                              ? <BusFront size={18} color="#0ea5e9" />
+                              : <Bus size={18} color="#3b82f6" />} {item.category === 'Transfers' || isTransportCategory(item.category) ? 'Vehicle Capacity' : item.category === 'Flights / Charter' ? 'Seat Capacity' : 'Transport Capacity'}
                         </h4>
                         <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
                           {item.category === 'Transfers'
                             ? 'Maximum number of passengers (pax) allowed in this vehicle.'
                             : item.category === 'Flights / Charter'
                               ? 'Maximum number of passengers (pax) seats on this flight.'
-                              : 'Maximum number of passengers (pax) per activity / tour departure.'}
+                              : isTransportCategory(item.category)
+                                ? 'Seats in this vehicle. A Transport item is hired whole, so the party that fits is the party it prices.'
+                                : 'Maximum number of passengers (pax) per activity / tour departure.'}
                         </span>
                       </div>
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'flex-end', gap: '0.6rem', flexWrap: 'wrap' }}>
@@ -3652,7 +5435,7 @@ export const LibraryItems = () => {
                           <input
                             type="number"
                             min="1"
-                            max="60"
+                            max={isTransportCategory(item.category) ? '90' : '60'}
                             className="pricing-select"
                             style={{ width: '100%', padding: '0.4rem 0.6rem', fontSize: '0.95rem', fontWeight: 700, textAlign: 'center', marginTop: '0.35rem' }}
                             value={item.maxOccupancy}
@@ -3694,6 +5477,14 @@ export const LibraryItems = () => {
                     </div>
 
                     {/* Overall Capacity Ceilings Grid */}
+                    {item.category === 'Accommodation' && roomsReady ? (
+                      <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1.25rem', fontSize: '0.78rem', color: '#1e40af', lineHeight: 1.5 }}>
+                        <strong>Room ceilings come from the room types above.</strong> The property accepts up to{' '}
+                        <strong>{Math.max(0, ...(item.roomTypes || []).map(room => parseInt(room.maxOccupancy) || 0)) || 2} guests</strong> in one room.
+                        Each room&rsquo;s own sleeps / adults / children limits are set on its room type; the itinerary allocates travellers into
+                        the room they are priced in. The child sharing rules below stay property-wide because they follow the supplier contract.
+                      </div>
+                    ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.25rem' }}>
 
                       {/* Max Total Capacity */}
@@ -3766,6 +5557,7 @@ export const LibraryItems = () => {
                       </div>
 
                     </div>
+                    )}
 
                     {/* Conditional Sharing Capacity Controller */}
                     <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem', marginBottom: '1.25rem' }}>
@@ -3781,9 +5573,8 @@ export const LibraryItems = () => {
                       </div>
 
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        {(item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, item.maxOccupancy || 2, [])).map((rule) => {
-                          const currentAdults = rule.adults;
-                          const maxAllowedForThisRow = Math.max(0, (parseInt(item.maxOccupancy) || 2) - currentAdults);
+                        {(item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, item.maxOccupancy || 2, [])).map((rule) => {                          const currentAdults = rule.adults;
+                          const maxAllowedForThisRow = Math.max(0, roomCeiling - currentAdults);
                           const childrenVal = Math.min(maxAllowedForThisRow, Math.max(0, parseInt(rule.maxChildren) || 0));
                           const effectiveTotal = currentAdults + childrenVal;
 
@@ -3848,6 +5639,28 @@ export const LibraryItems = () => {
                       </div>
                     </div>
 
+                    {/* Children in their own room: a property-wide contract term
+                        the room engine enforces when no adult shares the room. */}
+                    {/accommodation|train/i.test(String(item.category || '')) && (
+                      <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.85rem 1rem', marginBottom: '1.25rem' }}>
+                        <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.25rem' }}>
+                          Children in Their Own Room
+                        </label>
+                        <span style={{ fontSize: '0.72rem', color: '#64748b', display: 'block', marginBottom: '0.5rem' }}>
+                          Applies when a room holds children only — children sharing with adults always pay their child band rates.
+                        </span>
+                        <SearchableSelect
+                          className="pricing-select"
+                          value={item.childrenOwnRoomPolicy || 'child_rates'}
+                          onChange={(e) => handleItemFieldChange(item.tempId, 'childrenOwnRoomPolicy', e.target.value)}
+                        >
+                          <option value="child_rates">Charge child band rates</option>
+                          <option value="adult_rates">Charge standard adult rates (1 child: single rate · 2: sharing rate each)</option>
+                          <option value="single_room_rate">Charge one single room rate for the whole room</option>
+                        </SearchableSelect>
+                      </div>
+                    )}
+
                     {/* Capacity Summary Badge */}
                     <div style={{
                       padding: '0.75rem 1rem',
@@ -3871,7 +5684,7 @@ export const LibraryItems = () => {
                           );
                         })}
                         <div style={{ marginTop: '0.2rem', color: '#15803d', fontWeight: 600 }}>
-                          • {isTrainCategory(item.category) ? 'Cabin Ceiling' : 'Room Ceiling'}: <strong>{item.maxOccupancy || 2} Total Guests</strong>
+                          • {isTrainCategory(item.category) ? 'Cabin Ceiling' : 'Room Ceiling'}: <strong>{roomCeiling} Total Guests</strong>
                         </div>
                       </div>
                     </div>
@@ -4050,7 +5863,7 @@ export const LibraryItems = () => {
                   ) : null}
 
                   {/* PRICING MODEL SELECTOR */}
-                  {!isMealsCategory(item.category) && !isGuideCategory(item.category) && !isTicketCategory(item.category) && !isExtrasCategory(item.category) && !isCarRentalCategory(item.category) && (
+                  {!isMealsCategory(item.category) && !isGuideCategory(item.category) && !isTicketCategory(item.category) && !isCarRentalCategory(item.category) && (
                   <div style={{
                     background: '#f8fafc',
                     border: '1px solid #e2e8f0',
@@ -4067,21 +5880,43 @@ export const LibraryItems = () => {
                       <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                         <Tag size={16} color="#00665c" /> {isFlightCategory(item.category)
                           ? 'Flight Pricing Model:'
-                          : (isTourStyle
-                            ? (item.category === 'Transfers' ? 'Transfer Pricing Type:' : 'Activity / Tour Pricing Type:')
+                          : (isExtrasCategory(item.category)
+                            ? 'Extras Charged:'
+                            : (isTourStyle
+                            ? (item.category === 'Transfers' ? 'Transfer Pricing Type:' : isTransportCategory(item.category) ? 'Vehicle Hire Pricing Type:' : 'Activity / Tour Pricing Type:')
                             : (item.category === 'Accommodation' ? 'Accommodation Pricing Model:'
-                              : (isTrainCategory(item.category) ? 'Train Journey Pricing Model:' : 'Pricing Type:')))}
+                              : (isTrainCategory(item.category) ? 'Train Journey Pricing Model:' : 'Pricing Type:'))))}
                       </span>
                       <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
                         {isFlightCategory(item.category)
                           ? 'Choose whether the fare is quoted per person or per charter (whole flight).'
-                          : (isTourStyle
+                          : (isExtrasCategory(item.category)
+                            ? 'Choose whether the extra is bought once for the service itself, or for every guest taking it.'
+                            : (isTourStyle
                             ? 'Choose how the rate is quoted: per vehicle, per person, or tiered by pax count.'
-                            : 'Choose whether rates are quoted per person sharing or as a flat room/unit price.')}
+                            : 'Choose whether rates are quoted per person sharing or as a flat room/unit price.'))}
                       </span>
                     </div>
 
-                    {isFlightCategory(item.category) ? (
+                    {isExtrasCategory(item.category) ? (
+                      <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
+                        {[{ id: 'per_unit', label: '✨ Service only (per unit)' }, { id: 'per_person', label: '👥 Per person' }].map(opt => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => handleItemFieldChange(item.tempId, 'pricingModel', opt.id)}
+                            style={{
+                              padding: '0.4rem 0.9rem', fontSize: '0.8rem', fontWeight: 700, borderRadius: '6px', border: 'none', cursor: 'pointer', transition: 'all 0.15s ease',
+                              background: (item.pricingModel || 'per_person') === opt.id ? '#ffffff' : 'transparent',
+                              color: (item.pricingModel || 'per_person') === opt.id ? '#db2777' : '#64748b',
+                              boxShadow: (item.pricingModel || 'per_person') === opt.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : isFlightCategory(item.category) ? (
                       <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
                         {[{ id: 'per_person', label: 'Per Person' }, { id: 'per_vehicle', label: 'Per Charter (Whole Flight)' }].map(opt => (
                           <button
@@ -4162,13 +5997,13 @@ export const LibraryItems = () => {
                   </div>
                   )}
 
-                  {/* SURCHARGES ARE THEIR OWN ITEMS, NOT A SWITCH ON A BASE ITEM.
+                  {/* FEES & TICKETS ARE THEIR OWN ITEMS, NOT A SWITCH ON A BASE ITEM.
                       An entrance fee or conservation levy used to be a toggle on
                       Accommodation / Transfers, which put the price on the base
                       item's seasonal matrix where the itinerary never read it.
                       Each fee is now a library item in its own right, so it gets
                       its own supplier, its own price and its own line. */}
-                  {item.category === SURCHARGE_CATEGORY ? (
+                  {isSurchargeItem(item) ? (
                     <div style={{
                       background: '#fff7ed',
                       border: '1px solid #fed7aa',
@@ -4177,10 +6012,10 @@ export const LibraryItems = () => {
                       marginBottom: '1.5rem'
                     }}>
                       <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#9a3412', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <Tag size={16} color="#ea580c" /> Surcharge fee setup
+                        <Tag size={16} color="#ea580c" /> Fee & ticket setup
                       </span>
                       <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.2rem' }}>
-                        This item is a surcharge, so it becomes its own line on the itinerary with its own price. Link it to the accommodation
+                        This item is a fee or ticket, so it becomes its own line on the itinerary with its own price. Link it to the accommodation
                         it belongs to and it is added automatically with that property.
                       </span>
 
@@ -4620,7 +6455,7 @@ export const LibraryItems = () => {
                             : (isTicketCategory(item.category)
                             ? 'Seasonal Ticket Fares (Per Person)'
                             : (isExtrasCategory(item.category)
-                            ? 'Seasonal Extras Fares (Per Person)'
+                            ? `Seasonal Extras Fares (${item.pricingModel === 'per_unit' ? 'Service Only — Per Unit' : 'Per Person'})`
                             : (isTourStyle
                             ? `Seasonal Price Matrices (${item.pricingModel === 'tiered' ? 'Tiered by Pax Count' : item.pricingModel === 'per_vehicle' ? 'Flat Vehicle Rate' : 'Per Person Rates'})`
                             : `Seasonal Pricing Matrices ${item.pricingModel === 'per_room' ? '(Flat Room Rates)' : '(Per Person Rates)'}`))))}
@@ -4641,7 +6476,6 @@ export const LibraryItems = () => {
                         <div style={{ fontWeight: 700, color: '#b45309', marginBottom: '0.2rem' }}>🍽️ Meal Fares:</div>
                         <div>• <strong>Adult Rate:</strong> per person meal price.</div>
                         <div>• <strong>Child Rate:</strong> per child meal price.</div>
-                        <div>• <strong>Guide / Driver Rate:</strong> separate meal prices for the guide and driver when included.</div>
                         {parseFloat(item.mealGratuityPercent) > 0 && (
                           <div>• <strong>Gratuity:</strong> {item.mealGratuityPercent}% added on top of the fare.</div>
                         )}
@@ -4660,11 +6494,23 @@ export const LibraryItems = () => {
                     {isExtrasCategory(item.category) && (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
                         <div style={{ fontWeight: 700, color: '#ec4899', marginBottom: '0.2rem' }}>✨ Extras Fares:</div>
-                        <div>• <strong>Adult Rate:</strong> per person extra service price.</div>
-                        <div>• <strong>Child Rate:</strong> per child extra service price.</div>
-                        <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
-                          Extras are always quoted per person.
-                        </div>
+                        {item.pricingModel === 'per_unit' ? (
+                          <>
+                            <div>• <strong>Unit Price:</strong> charged once for the service — a meet-and-greet, a boat hire, a private viewing — however many guests take it.</div>
+                            <div>• Repeating the line on the itinerary (or its quantity) is the only thing that multiplies it. Guests never do.</div>
+                            <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
+                              This extra is charged per unit, so children pay nothing extra for it.
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div>• <strong>Adult Rate:</strong> per person extra service price.</div>
+                            <div>• <strong>Child Rate:</strong> per child extra service price.</div>
+                            <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
+                              This extra is charged per person, so every guest takes it.
+                            </div>
+                          </>
+                        )}
                       </div>
                     )}
                     {isFlightCategory(item.category) && (
@@ -4678,7 +6524,7 @@ export const LibraryItems = () => {
                         </div>
                       </div>
                     )}
-                    {item.category === SURCHARGE_CATEGORY && (
+                    {isSurchargeItem(item) && (
                       <div style={{ background: '#ffffff', border: '1px solid #fed7aa', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#7c2d12', lineHeight: '1.45' }}>
                         <div style={{ fontWeight: 700, color: '#c2410c', marginBottom: '0.2rem' }}>
                           {(item.surchargeType || 'entrance_fee') === 'entrance_fee' ? 'Entrance Fee Rates' : 'Conservation Levy Rates'}
@@ -4727,7 +6573,15 @@ export const LibraryItems = () => {
                         </div>
                       )
                     ) : (isFlightCategory(item.category) || isMealsCategory(item.category) || isGuideCategory(item.category) || isTicketCategory(item.category) || isExtrasCategory(item.category)) ? null : (
-                    item.pricingModel === 'per_room' ? (
+                    roomModelFor(item) === OCCUPANCY_BASIS ? (
+                      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
+                        <div style={{ fontWeight: 700, color: '#7c2d12', marginBottom: '0.2rem' }}>🏡 Villa Rate by Party Size:</div>
+                        <div>Contract quotes one per-person-per-night figure for each party the {isTrainCategory(item.category) ? 'cabin' : 'room'} sleeps. Everyone in it pays that figure &mdash; adult or child alike.</div>
+                        <div style={{ color: '#9a3412', fontWeight: 600, marginTop: '0.25rem' }}>
+                          Price every party size the supplier sells. A size left blank is a size this villa cannot be quoted for.
+                        </div>
+                      </div>
+                    ) : roomModelFor(item) === 'per_room' ? (
                       <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#475569', lineHeight: '1.45' }}>
                         <div style={{ fontWeight: 700, color: '#166534', marginBottom: '0.2rem' }}>{isTrainCategory(item.category) ? '💡 Flat Cabin Rate Model:' : '💡 Flat Room Rate Model:'}</div>
                         <div>Contract charges a fixed rate per {isTrainCategory(item.category) ? 'cabin per night' : 'room/unit per night'} for up to <strong>{item.maxOccupancy || 2} Total Guests</strong> (regardless of adult or child mix).</div>
@@ -4748,7 +6602,9 @@ export const LibraryItems = () => {
                     ))}
 
                     {item.category === 'Accommodation' && (() => {
-                      const groups = accommodationSeasonGroupsFor(item.seasons);
+                      const rooms = item.roomTypes || [];
+                      const activeRoomKey = activeRoomKeyFor(item);
+                      const groups = accommodationSeasonGroupsFor(item.seasons, activeRoomKey);
                       const currentGroup = groups[activeSeasonIndexOf(item.tempId, groups)];
                       const activeGroup = currentGroup || groups[0] || null;
                       const chargeLabels = (activeGroup?.memberIndices || [])
@@ -4756,9 +6612,33 @@ export const LibraryItems = () => {
                       const optionNames = [...new Set(chargeLabels.filter(Boolean))];
                       return (
                         <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
+                          {rooms.length > 1 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem', paddingBottom: '0.6rem', borderBottom: '1px solid #ede9fe' }}>
+                              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#5b21b6' }}>Pricing room:</span>
+                              {rooms.map((room) => {
+                                const selected = room.key === activeRoomKey;
+                                return (
+                                  <button
+                                    key={room.key}
+                                    type="button"
+                                    onClick={() => setActiveRoomByItem(prev => ({ ...prev, [item.tempId]: room.key }))}
+                                    style={{
+                                      padding: '0.22rem 0.7rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600,
+                                      border: `1px solid ${selected ? '#0d7478' : '#ddd6fe'}`,
+                                      background: selected ? '#f0fdfa' : '#fff',
+                                      color: selected ? '#0d7478' : '#5b21b6'
+                                    }}
+                                  >
+                                    {room.name || 'Untitled room'}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
                           <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#5b21b6', marginBottom: '0.2rem' }}>Charge types</div>
                           <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.6rem', lineHeight: 1.45 }}>
                             One season is priced at several charge types (room only, half board, full board with activities). Add a charge type to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; below and set its prices in the matrix — on a drop the itinerary asks which season and charge type applies.
+                            {dbFeatures.nightBands && ' A charge type priced by the length of stay uses the same name again with its own night band, so it remains one charge type with an extra row.'}
                           </div>
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.6rem' }}>
                             {optionNames.length === 0
@@ -4803,7 +6683,7 @@ export const LibraryItems = () => {
                          season-first: the visible season shows one charge type at
                          a time, and the chips below switch between them. */
                       const isAccom = item.category === 'Accommodation';
-                      const accGroups = isAccom ? accommodationSeasonGroupsFor(item.seasons) : null;
+                      const accGroups = isAccom ? accommodationSeasonGroupsFor(item.seasons, activeRoomKeyFor(item)) : null;
                       const activeGroupIdx = isAccom
                         ? activeSeasonIndexOf(item.tempId, accGroups)
                         : activeSeasonIndexOf(item.tempId, item.seasons);
@@ -4817,7 +6697,71 @@ export const LibraryItems = () => {
                       const headerName = isAccom ? activeGroup?.seasonName : season.seasonName;
                       const navSeasons = isAccom ? accGroups : item.seasons;
                       const bands = item.childAgeRanges || [];
-                      const isFlatRoom = item.pricingModel === 'per_room';
+                      /* Capacity decides which price boxes are live: a room
+                         that cannot take two adults has no sharing rate, one
+                         that cannot take three has no extra-adult rate, and a
+                         room with no child slots has no child prices. */
+                      const seasonRoomKey = isAccom ? (activeGroup?.roomKey || activeRoomKeyFor(item)) : '';
+                      const roomModel = roomModelFor(item, seasonRoomKey);
+                      const isFlatRoom = roomModel === 'per_room';
+                      /* A villa on the occupancy ladder replaces the whole adult
+                         and child matrix with one box per party size, so the two
+                         are never on screen at once and cannot disagree. */
+                      const occupancyPricedRoom = isAccom && dbFeatures.occupancyPricing && roomModel === OCCUPANCY_BASIS;
+                      const occupancySizes = occupancyPricedRoom
+                        ? occupancySizesForRoom(activeRoomFor(item, seasonRoomKey))
+                        : [];
+                      const occupancyProblem = occupancyPricedRoom
+                        ? occupancyLadderError(
+                          { occupancy_rates: occupancyLadderFromEdit(occupancySizes, season) },
+                          Math.max(1, parseInt(activeRoomFor(item, seasonRoomKey)?.maxOccupancy, 10) || 2)
+                        )
+                        : '';
+                      const capacity = priceCapacityFor(item, seasonRoomKey);
+                      /* A fee is one figure with one basis: the fee box at the
+                         bottom of this card is the only thing the itinerary
+                         charges. The per-person adult/child matrix below has no
+                         meaning for it, so it is greyed out rather than left
+                         editable - a number typed there is money that never
+                         reaches a quote but makes an unpriced fee look priced. */
+                      const isFeeItem = isSurchargeItem(item);
+                      const feeOnlyNote = 'A fee is priced by its own figure in the fee box below.';
+                      /* Only the categories that buy per head - meals, entries and
+                         extras - contract a child price the itinerary actually
+                         charges, and rooms price a child sharing with an adult.
+                         Everything else sells SPACE: a seat on a transfer, a place
+                         on a tour, a berth on a train, a charter, a rental car. A
+                         child occupies as much of it as an adult and is charged the
+                         adult figure, so a child rate typed there prints on a rate
+                         card but never reaches a quote. The supplier sends those
+                         figures, so the box stays visible and greyed with the reason
+                         rather than disappearing. */
+                      const childRatesCharged = isAccom
+                        || chargesChildRate({ category: item.category, pricing_model: item.pricingModel });
+                      const spaceChildNote = 'A child pays the adult rate: this line sells space, and a child takes the same space as an adult.';
+                      const canShare = !isFeeItem && capacity.maxAdults >= 2;
+                      const canTakeThirdAdult = !isFeeItem && capacity.maxAdults >= 3;
+                      const takesChildren = !isFeeItem && childRatesCharged && capacityTakesChildren(capacity);
+                      /* A space-selling category keeps showing the child fare the
+                         supplier quoted - it is a real figure, it prints on the rate
+                         card, the itinerary simply does not bill it. A room with no
+                         child slots has no figure to show, so that box stays blank. */
+                      const childRatesShown = takesChildren || (!isFeeItem && !childRatesCharged);
+                      const singleRateLive = !isFeeItem;
+                      const rateOffCaption = isFeeItem ? 'Not used by a fee' : 'Not used by this room';
+                      const childOffCaption = !childRatesCharged
+                        ? 'Charged at the adult rate'
+                        : rateOffCaption;
+                      const shareOffTitle = isFeeItem ? feeOnlyNote : 'This room cannot take two adults';
+                      const thirdOffTitle = isFeeItem ? feeOnlyNote : 'This room cannot take three adults';
+                      const childOffTitle = isFeeItem
+                        ? feeOnlyNote
+                        : (!childRatesCharged ? spaceChildNote : 'This room has no child slots');
+                      /* The fee block inside this season is keyed by the season
+                         it belongs to, so its amount box edits that season only. */
+                      const feeSeason = isAccom && activeGroup
+                        ? feeSeasonKey(activeGroup.seasonName, activeGroup.validFrom, activeGroup.validTo)
+                        : '';
 
                       return (
                         <div key={seasonIdx} style={{ background: '#fff', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1rem' }}>
@@ -4869,7 +6813,7 @@ export const LibraryItems = () => {
                           </div>
 
                           {/* Season Name & Dates */}
-                          <div style={{ display: 'grid', gridTemplateColumns: item.category === 'Accommodation' ? '1.2fr 1fr 1fr 1.1fr' : '2fr 1fr 1fr', gap: '1rem', marginBottom: isAccom ? '0.75rem' : '1rem' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: item.category === 'Accommodation' ? (dbFeatures.nightBands ? '1.2fr 1fr 1fr 1.1fr 0.7fr 0.7fr' : '1.2fr 1fr 1fr 1.1fr') : '2fr 1fr 1fr', gap: '1rem', marginBottom: isAccom ? '0.75rem' : '1rem' }}>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Season Name</label>
                               <input type="text" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
@@ -4887,6 +6831,24 @@ export const LibraryItems = () => {
                                   value={season.optionName || ''}
                                   onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'optionName', e.target.value)} />
                               </div>
+                            )}
+                            {item.category === 'Accommodation' && dbFeatures.nightBands && (
+                              <>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Nights from</label>
+                                  <input type="number" min="1" step="1" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                                    placeholder="every stay"
+                                    value={season.minNights ?? ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'minNights', e.target.value)} />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Nights to</label>
+                                  <input type="number" min="1" step="1" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
+                                    placeholder="open ended"
+                                    value={season.maxNights ?? ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'maxNights', e.target.value)} />
+                                </div>
+                              </>
                             )}
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Valid From</label>
@@ -4906,12 +6868,21 @@ export const LibraryItems = () => {
                             </div>
                           </div>
 
+                          {isAccom && dbFeatures.nightBands && (
+                            <p style={{ fontSize: '0.74rem', color: '#64748b', margin: '0 0 0.9rem', lineHeight: 1.45 }}>
+                              Night band: leave both boxes blank when the room has one price for every stay. Fill them in when the price changes with
+                              the length of stay &mdash; 1&ndash;3 nights at one figure, 4+ at another. It stays the same room and the same charge type,
+                              not a second library item.
+                            </p>
+                          )}
+
                           {/* Charge types of this season — pick which one the
                               prices below belong to. */}
                           {isAccom && activeGroup && (
                             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
                               <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b' }}>Charge type:</span>
                               {activeGroup.memberIndices.map((idx) => {
+                                const band = nightBandLabel(item.seasons[idx]);
                                 const label = (item.seasons[idx]?.optionName || item.mealPlan || 'Default board').trim() || 'Default board';
                                 const selected = idx === activeMemberIdx;
                                 return (
@@ -4926,7 +6897,7 @@ export const LibraryItems = () => {
                                       color: selected ? '#0d7478' : '#5b21b6'
                                     }}
                                   >
-                                    {label}
+                                    {band ? `${label} · ${band}` : label}
                                   </button>
                                 );
                               })}
@@ -5031,7 +7002,12 @@ export const LibraryItems = () => {
                                 </div>
                               </div>
                               <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
-                                Options include guide &amp; driver meals. A {item.currency} {(parseFloat(item.mealGratuityPercent) || 0) > 0 ? (parseFloat(item.mealGratuityPercent) || 0) + '% gratuity will be added to the fare.' : ''}
+                                {(parseFloat(item.mealGratuityPercent) || 0) > 0
+                                  ? `A ${parseFloat(item.mealGratuityPercent)}% gratuity is added on top of the fare.`
+                                  : 'No gratuity is added to this fare.'}
+                                {dbFeatures.staffOptions && !item.guideMealOffered && !item.driverMealOffered
+                                  ? ' This meal is not on the crew manifest yet — tick "Guide meal" or "Driver meal" in Meal Details above to offer it in the guide details dialog.'
+                                  : ''}
                               </div>
                             </div>
                           ) : isTicketCategory(item.category) ? (
@@ -5149,24 +7125,29 @@ export const LibraryItems = () => {
                           ) : isExtrasCategory(item.category) ? (
                             <div style={{ background: '#fdf2f8', border: '1px solid #fbcfe8', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                Extra Service Fare ({item.currency}) — Per Person
+                                {item.pricingModel === 'per_unit'
+                                  ? `Extra Service Fare (${item.currency}) — Service only (per unit)`
+                                  : `Extra Service Fare (${item.currency}) — Per Person`}
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    Adult Rate ({item.currency})
+                                    {item.pricingModel === 'per_unit' ? 'Unit Price' : 'Adult Rate'} ({item.currency})
                                   </label>
                                   <input
                                     type="number"
                                     min="0"
                                     className="pricing-select"
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder="e.g. 850"
+                                    placeholder={item.pricingModel === 'per_unit' ? 'e.g. 3500' : 'e.g. 850'}
                                     value={season.adultRate !== undefined ? season.adultRate : ''}
                                     onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                   />
-                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per adult</span>
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
+                                    {item.pricingModel === 'per_unit' ? 'Charged once for the whole service' : 'Charged per adult'}
+                                  </span>
                                 </div>
+                                {item.pricingModel === 'per_unit' ? null : (
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                                     Child Rate ({item.currency})
@@ -5182,9 +7163,12 @@ export const LibraryItems = () => {
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
                                 </div>
+                                )}
                               </div>
                               <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
-                                Extras are always quoted per person. Set the child rate if children pay a different price.
+                                {item.pricingModel === 'per_unit'
+                                  ? 'Charged once for the service itself, however many guests take it. Only repeating the line multiplies it, and no guest - adult or child - is priced on it.'
+                                  : 'Charged for every guest taking the extra. Set the child rate if children pay a different price.'}
                               </div>
                             </div>
                           ) : isFlightCategory(item.category) ? (
@@ -5218,12 +7202,16 @@ export const LibraryItems = () => {
                                     type="number"
                                     min="0"
                                     className="pricing-select"
-                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder="e.g. 4500"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%', ...(!childRatesCharged ? disabledPriceInputStyle : {}) }}
+                                    placeholder={childRatesCharged ? 'e.g. 4500' : 'Recorded, not charged'}
+                                    title={childRatesCharged ? undefined : spaceChildNote}
+                                    disabled={!childRatesCharged}
                                     value={season.childRate !== undefined ? season.childRate : ''}
                                     onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'childRate')}
                                   />
-                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Charged per child</span>
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
+                                    {childRatesCharged ? 'Charged per child' : 'Not charged — a child takes a seat'}
+                                  </span>
                                 </div>
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
@@ -5240,6 +7228,27 @@ export const LibraryItems = () => {
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>Fuel surcharge, airport fees, etc.</span>
                                 </div>
+                                {item.guideFlightOffered && dbFeatures.staffOptions && (
+                                  <div>
+                                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                      Guide Fare ({item.currency})
+                                    </label>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      className="pricing-select"
+                                      style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
+                                      placeholder={item.pricingModel === 'per_vehicle' ? 'e.g. 8500' : 'same as adult'}
+                                      value={season.guideRate !== undefined ? season.guideRate : ''}
+                                      onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'guideRate')}
+                                    />
+                                    <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
+                                      {item.pricingModel === 'per_vehicle'
+                                        ? 'One seat on the charter. Blank charges the adult fare.'
+                                        : "The guide's own seat. Blank charges the fare the clients pay."}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
 
                               <div style={{ maxWidth: '220px', marginTop: '1rem' }}>
@@ -5251,7 +7260,9 @@ export const LibraryItems = () => {
                                   min="1"
                                   max="17"
                                   className="pricing-select"
-                                  style={{ padding: '0.45rem 0.75rem', fontSize: '0.95rem', width: '100%' }}
+                                  style={{ padding: '0.45rem 0.75rem', fontSize: '0.95rem', width: '100%', ...(!childRatesCharged ? disabledPriceInputStyle : {}) }}
+                                  title={childRatesCharged ? undefined : spaceChildNote}
+                                  disabled={!childRatesCharged}
                                   value={item.childAge || 12}
                                   onChange={(e) => handleItemFieldChange(item.tempId, 'childAge', e.target.value)}
                                 />
@@ -5437,7 +7448,10 @@ export const LibraryItems = () => {
                                 </div>
                               )}
 
-                              {/* Child Rate (Optional) */}
+                              {/* Child Rate (Optional) - recorded for the rate card,
+                                  charged only on the categories that buy per head. A
+                                  transfer or tour sells seats, so a child pays the
+                                  adult fare and this box is greyed with the reason. */}
                               <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.75rem', marginTop: '1rem', flexWrap: 'wrap' }}>
                                 <div style={{ maxWidth: '200px', flex: '1' }}>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
@@ -5447,8 +7461,10 @@ export const LibraryItems = () => {
                                     type="number"
                                     min="0"
                                     className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
-                                    placeholder="Leave blank for no child rate"
+                                    style={{ padding: '0.35rem', ...(!childRatesCharged ? disabledPriceInputStyle : {}) }}
+                                    placeholder={childRatesCharged ? 'Leave blank for no child rate' : 'Recorded, not charged'}
+                                    title={childRatesCharged ? undefined : spaceChildNote}
+                                    disabled={!childRatesCharged}
                                     value={season.childRate !== undefined ? season.childRate : ''}
                                     onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'childRate')}
                                   />
@@ -5462,18 +7478,86 @@ export const LibraryItems = () => {
                                     min="1"
                                     max="17"
                                     className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
+                                    style={{ padding: '0.35rem', ...(!childRatesCharged ? disabledPriceInputStyle : {}) }}
+                                    title={childRatesCharged ? undefined : spaceChildNote}
+                                    disabled={!childRatesCharged}
                                     value={item.childAge || 12}
                                     onChange={(e) => handleItemFieldChange(item.tempId, 'childAge', e.target.value)}
                                   />
                                 </div>
                               </div>
                               <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.5rem' }}>
-                                Child rate applies to passengers up to {item.childAge || 12} years old. Children below 1 year usually travel free — confirm with supplier contract.
+                                {childRatesCharged
+                                  ? `Child rate applies to passengers up to ${item.childAge || 12} years old. Children below 1 year usually travel free — confirm with supplier contract.`
+                                  : spaceChildNote}
                               </div>
+
+                              {/* The supplier's tariff often quotes the guide's own
+                                  place on an activity alongside the guest price. It is
+                                  a seasonal figure like the adult rate, and only an
+                                  activity sold per head has one to sell. */}
+                              {item.category === 'Activities / Tours' && dbFeatures.guideDriver && item.pricingModel !== 'per_vehicle' && (
+                                <div style={{ maxWidth: '220px', marginTop: '1rem' }}>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Guide Rate ({item.currency})
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem', width: '100%' }}
+                                    placeholder="Blank = not charged"
+                                    value={season.guideRate !== undefined ? season.guideRate : ''}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'guideRate')}
+                                  />
+                                  <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
+                                    What the supplier charges for the guide on this activity. 0 = free.
+                                  </span>
+                                </div>
+                              )}
                             </div>
                           ) : (
-                          isFlatRoom ? (
+                          occupancyPricedRoom ? (
+                            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '8px', padding: '1rem' }}>
+                              <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.35rem' }}>
+                                Rate per Person per Night ({item.currency}) — by guests in the {isTrainCategory(item.category) ? 'cabin' : 'room'}
+                              </label>
+                              <div style={{ fontSize: '0.74rem', color: '#9a3412', marginBottom: '0.7rem', lineHeight: 1.45 }}>
+                                Type the supplier sheet as it reads: one figure for each party this {isTrainCategory(item.category) ? 'cabin' : 'room'} sleeps.
+                                Every guest pays that figure, adult or child, so there is no child rate and no single supplement to add.
+                              </div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(112px, 1fr))', gap: '0.6rem' }}>
+                                {occupancySizes.map((pax) => (
+                                  <div key={`occ-${pax}`}>
+                                    <span style={{ fontSize: '0.74rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.2rem' }}>
+                                      {pax} {pax === 1 ? 'guest' : 'guests'}
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      className="pricing-select"
+                                      style={{ width: '100%', padding: '0.35rem', fontWeight: 700 }}
+                                      placeholder={item.currency}
+                                      value={occupancyRateOf(season, pax)}
+                                      onChange={(e) => handleOccupancyRateChange(item.tempId, seasonIdx, pax, e.target.value)}
+                                      step={moneyStep}
+                                      onBlur={(e) => snapOccupancyMoney(e, item.tempId, seasonIdx, pax)}
+                                    />
+                                    <span style={{ fontSize: '0.66rem', color: '#c2410c', display: 'block' }}>each / night</span>
+                                  </div>
+                                ))}
+                              </div>
+                              <div style={{ fontSize: '0.72rem', color: '#9a3412', marginTop: '0.6rem', lineHeight: 1.45 }}>
+                                Sold from {occupancySizes[0]} to {occupancySizes[occupancySizes.length - 1]} guests.
+                                {occupancySizes.length > 1 && ' A fuller party pays less each because the same house is split more ways.'}
+                              </div>
+                              {occupancyProblem && (
+                                <div style={{ fontSize: '0.74rem', color: '#b91c1c', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '0.5rem 0.7rem', marginTop: '0.6rem', lineHeight: 1.45 }}>
+                                  {occupancyProblem}
+                                </div>
+                              )}
+                            </div>
+                          ) : isFlatRoom ? (
                             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.35rem' }}>
                                 {isTrainCategory(item.category) ? 'Cabin / Unit Rate per Night' : 'Room / Unit Rate per Night'} ({item.currency})
@@ -5512,7 +7596,7 @@ export const LibraryItems = () => {
                                 </div>
                               </div>
                             </div>
-                          ) : (
+                          ) : isFeeItem ? null : (
                             <>
                               {/* Adults Pricing */}
                               <div style={{ marginBottom: '1rem' }}>
@@ -5525,36 +7609,42 @@ export const LibraryItems = () => {
                                     <input
                                       type="number"
                                       className="pricing-select"
-                                      style={{ padding: '0.35rem' }}
-                                      placeholder={`Price (${item.currency})`}
-                                      value={season.price1Adult}
+                                      style={{ padding: '0.35rem', ...(!singleRateLive ? disabledPriceInputStyle : {}) }}
+                                      placeholder={singleRateLive ? `Price (${item.currency})` : 'Not used'}
+                                      title={singleRateLive ? undefined : feeOnlyNote}
+                                      disabled={!singleRateLive}
+                                      value={singleRateLive ? season.price1Adult : ''}
                                       onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price1Adult', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'price1Adult')}
                                     />
-                                    <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>1 Adult Single rate</span>
+                                    <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{singleRateLive ? '1 Adult Single rate' : 'Not used by a fee'}</span>
                                   </div>
                                   <div>
                                     <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>2 Adults (Double/Twin)</span>
                                     <input
                                       type="number"
                                       className="pricing-select"
-                                      style={{ padding: '0.35rem' }}
-                                      placeholder={`Price (${item.currency})`}
-                                      value={season.price2Adults}
+                                      style={{ padding: '0.35rem', ...(!canShare ? disabledPriceInputStyle : {}) }}
+                                      placeholder={canShare ? `Price (${item.currency})` : 'Not used'}
+                                      title={canShare ? undefined : shareOffTitle}
+                                      disabled={!canShare}
+                                      value={canShare ? season.price2Adults : ''}
                                       onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price2Adults', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'price2Adults')}
                                     />
-                                    <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Per Person Sharing (PPS)</span>
+                                    <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{canShare ? 'Per Person Sharing (PPS)' : rateOffCaption}</span>
                                   </div>
                                   <div>
                                     <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>3+ Adults (Per Person)</span>
                                     <input
                                       type="number"
                                       className="pricing-select"
-                                      style={{ padding: '0.35rem' }}
-                                      placeholder={`Price (${item.currency})`}
-                                      value={season.price3PlusAdults !== undefined ? season.price3PlusAdults : ''}
+                                      style={{ padding: '0.35rem', ...(!canTakeThirdAdult ? disabledPriceInputStyle : {}) }}
+                                      placeholder={canTakeThirdAdult ? `Price (${item.currency})` : 'Not used'}
+                                      title={canTakeThirdAdult ? undefined : thirdOffTitle}
+                                      disabled={!canTakeThirdAdult}
+                                      value={canTakeThirdAdult && season.price3PlusAdults !== undefined ? season.price3PlusAdults : ''}
                                       onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'price3PlusAdults', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'price3PlusAdults')}
                                     />
-                                    <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Extra adult sharing</span>
+                                    <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{canTakeThirdAdult ? 'Extra adult sharing' : rateOffCaption}</span>
                                   </div>
                                 </div>
                               </div>
@@ -5565,6 +7655,9 @@ export const LibraryItems = () => {
                                   <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.5rem' }}>
                                     Children Pricing per Age Range (Per Person — {item.currency})
                                   </label>
+                                  {!childRatesCharged && (
+                                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '0.5rem' }}>{spaceChildNote}</div>
+                                  )}
                                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                                     {bands.map((band) => (
                                       <div key={band.id}>
@@ -5574,12 +7667,14 @@ export const LibraryItems = () => {
                                         <input
                                           type="number"
                                           className="pricing-select"
-                                          style={{ padding: '0.35rem' }}
-                                          placeholder={`Price (${item.currency})`}
-                                          value={season.childRates?.[band.id] !== undefined ? season.childRates[band.id] : ''}
+                                          style={{ padding: '0.35rem', ...(!takesChildren ? disabledPriceInputStyle : {}) }}
+                                          placeholder={childRatesShown ? `Price (${item.currency})` : 'Not used'}
+                                          title={takesChildren ? undefined : childOffTitle}
+                                          disabled={!takesChildren}
+                                          value={childRatesShown && season.childRates?.[band.id] !== undefined ? season.childRates[band.id] : ''}
                                           onChange={(e) => handleChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)} step={moneyStep} onBlur={(e) => snapBandRate(e, item.tempId, seasonIdx, band.id, handleChildRateChange)}
                                         />
-                                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Sharing with adult/s</span>
+                                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{takesChildren ? 'Sharing with adult/s' : childOffCaption}</span>
                                       </div>
                                     ))}
                                   </div>
@@ -5594,18 +7689,329 @@ export const LibraryItems = () => {
                                 <input
                                   type="number"
                                   className="pricing-select"
-                                  style={{ padding: '0.35rem' }}
-                                  placeholder="e.g. 10%"
-                                  value={season.childDiscount}
+                                  style={{ padding: '0.35rem', ...(!takesChildren ? disabledPriceInputStyle : {}) }}
+                                  placeholder={childRatesShown ? 'e.g. 10%' : 'Not used'}
+                                  title={takesChildren ? undefined : childOffTitle}
+                                  disabled={!takesChildren}
+                                  value={childRatesShown ? season.childDiscount : ''}
                                   onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'childDiscount', e.target.value)}
                                 />
+                                {!takesChildren && (
+                                  <span style={{ fontSize: '0.68rem', color: '#94a3b8', display: 'block', marginTop: '0.2rem' }}>{childOffCaption}</span>
+                                )}
                               </div>
+
+                              {/* The single rate already sets the supplement: it is the
+                                  gap to the sharing rate. A contract only decides how
+                                  many single rooms are waived before that applies. */}
+                              {item.category === 'Accommodation' && (() => {
+                                const single = parseFloat(season.price1Adult);
+                                const sharing = parseFloat(season.price2Adults);
+                                const ratesReady = canShare && Number.isFinite(single) && single > 0 && Number.isFinite(sharing) && sharing > 0;
+                                const supplement = ratesReady ? Math.max(0, single - sharing) : 0;
+                                const waiver = canShare ? Math.max(0, parseInt(season.singleSupplementWaiver, 10) || 0) : 0;
+                                return (
+                                  <div style={{ marginTop: '1rem', paddingTop: '0.85rem', borderTop: '1px dashed #cbd5e1' }}>
+                                    <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
+                                      Single Supplement Waiver
+                                    </label>
+                                    <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: '0.6rem' }}>
+                                      {!canShare
+                                        ? 'This room cannot be shared, so there is no single supplement to waive.'
+                                        : ratesReady
+                                          ? <>The supplement is worked out from the adult rates: <strong>{item.currency} {supplement.toLocaleString()}</strong> per single room / night ({item.currency} {single.toLocaleString()} single &minus; {item.currency} {sharing.toLocaleString()} sharing).</>
+                                          : 'Enter the 1 Adult and 2 Adults rates above to work out the single supplement.'}
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                      <div>
+                                        <span style={{ fontSize: '0.72rem', color: '#475569', fontWeight: 600, display: 'block', marginBottom: '0.2rem' }}>
+                                          Waive the supplement for the first
+                                        </span>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="1"
+                                          className="pricing-select"
+                                          style={{ padding: '0.35rem', width: '90px', ...(!canShare ? disabledPriceInputStyle : {}) }}
+                                          placeholder={canShare ? '0' : 'Not used'}
+                                          title={canShare ? undefined : 'This room cannot be shared'}
+                                          disabled={!canShare}
+                                          value={canShare ? (season.singleSupplementWaiver ?? '') : ''}
+                                          onChange={(e) => handleSingleSupplementWaiverChange(item.tempId, seasonIdx, e.target.value)}
+                                        />
+                                      </div>
+                                      <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 600, paddingBottom: '0.4rem' }}>
+                                        single room{waiver === 1 ? '' : 's'}
+                                      </span>
+                                    </div>
+                                    <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '0.35rem' }}>
+                                      {!canShare
+                                        ? 'A room that takes one adult is always charged the single rate.'
+                                        : waiver > 0
+                                          ? `The first ${waiver} single room${waiver === 1 ? ' is' : 's are'} charged the sharing rate. From single room ${waiver + 1} the single rate applies. Counted per night, per property, in room order.`
+                                          : '0 waives nothing: every single room is charged the single rate. Enter 1, 2, ... to waive that many single rooms before the single rate applies.'}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </>
                           ))}
 
-                          {/* Surcharge Fee Inputs (per season). Only a Surcharge Fees item has these; the
+                          {/* Weekend nights are per room type: the supplier
+                              decides which nights are weekend, so they are
+                              picked here instead of assuming Sat/Sun. A villa
+                              on an occupancy ladder is not: its band already is
+                              the price for that night, and a weekend figure
+                              typed beside it would price nothing. */}
+                          {item.category === 'Accommodation' && dbFeatures.weekendRates && !occupancyPricedRoom && (() => {
+                            const days = (Array.isArray(season.weekendDays) ? season.weekendDays : [])
+                              .map((value) => parseInt(value, 10))
+                              .filter((value) => value >= 1 && value <= 7)
+                              .sort((a, b) => a - b);
+                            const price = parseFloat(season.weekendPrice) || 0;
+                            const normal = parseFloat(season.roomRate) || parseFloat(season.price2Adults) || 0;
+                            const weekendDisabled = days.length === 0;
+                            const dayNames = WEEKEND_DAY_OPTIONS
+                              .filter((day) => days.includes(day.value))
+                              .map((day) => day.short)
+                              .join(', ');
+                            const toggleDay = (value) => {
+                              const next = days.includes(value)
+                                ? days.filter((day) => day !== value)
+                                : [...days, value].sort((a, b) => a - b);
+                              handleSeasonValueChange(item.tempId, seasonIdx, 'weekendDays', next);
+                            };
+                            return (
+                              <div style={{ background: '#fdf4ff', border: '1px solid #f0abfc', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
+                                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#86198f', display: 'block', marginBottom: '0.35rem' }}>
+                                  Weekend Rate — per Room per Night ({item.currency})
+                                </label>
+                                <div style={{ fontSize: '0.74rem', color: '#7e22ce', marginBottom: '0.55rem', lineHeight: 1.45 }}>
+                                  Tick the nights this contract treats as weekend, then enter the figure those nights carry.
+                                  Weekend pricing is per night, so a single booking can mix the normal and weekend price.
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.65rem' }}>
+                                  {WEEKEND_DAY_OPTIONS.map((day) => {
+                                    const selected = days.includes(day.value);
+                                    return (
+                                      <button
+                                        key={day.value}
+                                        type="button"
+                                        title={day.label}
+                                        aria-pressed={selected}
+                                        onClick={() => toggleDay(day.value)}
+                                        style={{
+                                          padding: '0.25rem 0.7rem', borderRadius: '999px', cursor: 'pointer',
+                                          fontSize: '0.75rem', fontWeight: 600,
+                                          border: `1px solid ${selected ? '#a21caf' : '#e9d5ff'}`,
+                                          background: selected ? '#fae8ff' : '#fff',
+                                          color: selected ? '#86198f' : '#7e22ce'
+                                        }}
+                                      >
+                                        {day.short}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '320px' }}>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="pricing-select"
+                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, ...(weekendDisabled ? disabledPriceInputStyle : {}) }}
+                                    placeholder={weekendDisabled ? 'Tick weekend nights first' : (normal > 0 ? `e.g. ${normal}` : 'e.g. 3200')}
+                                    title={weekendDisabled ? 'Tick at least one weekend night to set a weekend price' : undefined}
+                                    disabled={weekendDisabled}
+                                    value={weekendDisabled ? '' : (season.weekendPrice !== undefined ? season.weekendPrice : '')}
+                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'weekendPrice', e.target.value)}
+                                    step={moneyStep}
+                                    onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'weekendPrice')}
+                                  />
+                                  <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Room / Night</span>
+                                </div>
+                                <div style={{ fontSize: '0.7rem', color: '#7e22ce', marginTop: '0.4rem', lineHeight: 1.45 }}>
+                                  {days.length === 0
+                                    ? 'Tick at least one weekend night to set a weekend price. Until then every night is charged the normal rate above.'
+                                    : price <= 0
+                                      ? 'No weekend price entered, so every night is charged the normal rate above.'
+                                      : `${dayNames} nights are charged ${item.currency} ${price.toLocaleString()} instead of the normal nightly rate. A single room keeps its own contracted single rate when one is entered.`}
+                                </div>
+                              </div>
+                            );
+                          })()}
+
+                          {/* Park fees and conservation levies belong to the
+                              season they are charged in. The fee's name, type and
+                              basis are shared across the property; the amount box
+                              edits this season only, and a blank box means the fee
+                              is not charged in this season. */}
+                          {isAccom && activeGroup && (
+                            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                <div>
+                                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#9a3412', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    <Receipt size={16} color="#ea580c" /> Park fees &amp; conservation levies
+                                  </span>
+                                  <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.2rem' }}>
+                                    {dbFeatures.surchargeFees && dbFeatures.feeType
+                                      ? `Amounts below apply to ${activeGroup.seasonName || 'this season'}${activeGroup.validFrom ? ` (${activeGroup.validFrom} to ${activeGroup.validTo || 'open'})` : ''}. Leave a fee blank in a season it is not charged.`
+                                      : 'Park fees and conservation levies aren\u2019t available in this workspace yet.'}
+                                  </span>
+                                </div>
+                                {dbFeatures.surchargeFees && dbFeatures.feeType && (
+                                  <button
+                                    type="button"
+                                    className="secondary-btn"
+                                    style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap' }}
+                                    onClick={() => handleAddLinkedFee(item.tempId)}
+                                  >
+                                    <Plus size={13} /> Add fee
+                                  </button>
+                                )}
+                              </div>
+
+                              {dbFeatures.surchargeFees && dbFeatures.feeType && (item.linkedFees || []).map((fee) => {
+                                const feeType = fee.type || 'entrance_fee';
+                                const chargedLabel = (fee.chargeBasis === 'per_night') ? 'per night' : 'once for the whole stay';
+                                const amount = fee.amounts && Object.prototype.hasOwnProperty.call(fee.amounts, feeSeason)
+                                  ? fee.amounts[feeSeason]
+                                  : (fee.amounts ? '' : (fee.amount ?? ''));
+                                const unitBasis = fee.unitBasis || 'per_person';
+                                /* Only "per person" bills both ages, so it is the
+                                   one basis with a child figure to record. */
+                                const showChildAmount = dbFeatures.feeChildRate && unitBasis === 'per_person';
+                                const childAmount = fee.childAmounts && Object.prototype.hasOwnProperty.call(fee.childAmounts, feeSeason)
+                                  ? fee.childAmounts[feeSeason]
+                                  : '';
+                                return (
+                                  <div key={fee.key} style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid #fed7aa' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.6rem' }}>
+                                      <div>
+                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Fee name</label>
+                                        <input
+                                          type="text"
+                                          className="pricing-select"
+                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                          placeholder={surchargeTypeLabel(feeType)}
+                                          value={fee.name}
+                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'name', e.target.value)}
+                                        />
+                                      </div>
+                                      <div>
+                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Fee type</label>
+                                        <SearchableSelect
+                                          className="pricing-select"
+                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                          value={feeType}
+                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'type', e.target.value)}
+                                        >
+                                          {SURCHARGE_TYPES.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                        </SearchableSelect>
+                                      </div>
+                                      <div>
+                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Charged</label>
+                                        <SearchableSelect
+                                          className="pricing-select"
+                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                          value={fee.chargeBasis || 'once_off'}
+                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'chargeBasis', e.target.value)}
+                                        >
+                                          {CHARGE_BASIS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                        </SearchableSelect>
+                                      </div>
+                                      <div>
+                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Rate is per</label>
+                                        <SearchableSelect
+                                          className="pricing-select"
+                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                          value={fee.unitBasis || 'per_person'}
+                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'unitBasis', e.target.value)}
+                                        >
+                                          {unitBasesFor({ surcharge_type: feeType }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                        </SearchableSelect>
+                                      </div>
+                                      <div>
+                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>
+                                          Amount ({item.currency}) — {activeGroup.seasonName || 'this season'}
+                                        </label>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          className="pricing-select"
+                                          style={{ padding: '0.4rem 0.55rem', width: '100%', fontWeight: 700 }}
+                                          placeholder="Blank = not charged"
+                                          value={amount}
+                                          onChange={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, e.target.value)}
+                                          step={moneyStep}
+                                          onBlur={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, applyInputRounding(e.target.value, amountSettings.inputRounding))}
+                                        />
+                                      </div>
+                                      {showChildAmount && (
+                                        <div>
+                                          <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>
+                                            Child amount ({item.currency}) — {activeGroup.seasonName || 'this season'}
+                                          </label>
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            className="pricing-select"
+                                            style={{ padding: '0.4rem 0.55rem', width: '100%', fontWeight: 700 }}
+                                            placeholder="Blank = adult amount"
+                                            value={childAmount}
+                                            onChange={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, e.target.value, 'childAmounts')}
+                                            step={moneyStep}
+                                            onBlur={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, applyInputRounding(e.target.value, amountSettings.inputRounding), 'childAmounts')}
+                                          />
+                                          <span style={{ fontSize: '0.66rem', color: '#9a3412', display: 'block', marginTop: '0.15rem' }}>
+                                            Some properties charge a child less at the gate. Blank bills a child the adult amount.
+                                          </span>
+                                        </div>
+                                      )}
+                                      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: '0.2rem' }}>
+                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.76rem', fontWeight: 600, color: '#7c2d12', cursor: 'pointer' }}>
+                                          <input
+                                            type="checkbox"
+                                            checked={fee.chargeable !== false}
+                                            onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'chargeable', e.target.checked)}
+                                            style={{ width: '15px', height: '15px', accentColor: '#ea580c', cursor: 'pointer' }}
+                                          />
+                                          Chargeable
+                                        </label>
+                                        <span style={{ fontSize: '0.68rem', color: '#9a3412', marginTop: '0.15rem' }}>
+                                          {fee.chargeable !== false
+                                            ? `Added to the client total, ${chargedLabel}.`
+                                            : 'Shown for reference only, excluded from the total.'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginTop: '0.45rem', flexWrap: 'wrap' }}>
+                                      <span style={{ fontSize: '0.7rem', color: '#9a3412' }}>
+                                        Fee details are shared across seasons; this amount applies to {activeGroup.seasonName || 'this season'} only.
+                                      </span>
+                                      <button
+                                        type="button"
+                                        className="secondary-btn"
+                                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.74rem', color: '#b91c1c', borderColor: '#fca5a5' }}
+                                        onClick={() => handleRemoveLinkedFee(item.tempId, fee.key)}
+                                      >
+                                        Remove fee
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {dbFeatures.surchargeFees && dbFeatures.feeType && (item.linkedFees || []).length === 0 && (
+                                <div style={{ marginTop: '0.7rem', fontSize: '0.74rem', color: '#9a3412' }}>
+                                  No park fee or conservation levy on this property. Add one only if the supplier bills it on top of the room rate.
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Fee Inputs (per season). Only a Fees & Tickets item has these; the
                               unit basis decides which single figure is collected. */}
-                          {item.category === SURCHARGE_CATEGORY && (() => {
+                          {isSurchargeItem(item) && (() => {
                             const basis = item.surchargeChargeBasis || 'once_off';
                             const unit = item.surchargeUnitBasis || 'per_person';
                             const isEntrance = (item.surchargeType || 'entrance_fee') === 'entrance_fee';
@@ -5629,25 +8035,51 @@ export const LibraryItems = () => {
                                 <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>{hint}</span>
                               </div>
                             );
-                            /* A per_vehicle entrance fee is the only basis that reads the
-                               per-vehicle column; per_child is the only one that reads the
-                               per-child column. Anything else uses the per-person figure. */
+                            /* One box per figure this fee actually bills, and
+                               nothing else. A fee that buys a thing (a unit, a
+                               vehicle) has no head to price, so a child or a
+                               guide box beside it would be money the itinerary
+                               never charges; "per adult" bills adults alone, so
+                               only the adult figure is asked for. */
+                            const perHead = feeBasisChargesHeads(unit);
+                            const splitsAge = unit === 'per_person';
+                            const visitorLabel = unit === 'per_adult' ? 'Adult Rate' : 'Per Person Rate';
                             let fields;
-                            if (isEntrance) {
-                              fields = unit === 'per_vehicle'
-                                ? [moneyField('entranceFeeVehicle', `Per Vehicle Rate`, `Charged once per vehicle, ${when}`, 'e.g. 1200')]
-                                : [moneyField('entranceFeePerson', `Per Person Rate`, `Charged per visitor, ${when}`, 'e.g. 850')];
+                            if (unit === 'per_unit') {
+                              fields = [moneyField('unitRate', `Per Unit Rate`, `Charged once for the unit, ${when}`, 'e.g. 1500')];
+                            } else if (isEntrance && unit === 'per_vehicle') {
+                              fields = [moneyField('entranceFeeVehicle', `Per Vehicle Rate`, `Charged once per vehicle, ${when}`, 'e.g. 1200')];
+                            } else if (isEntrance) {
+                              fields = [
+                                moneyField('entranceFeePerson', visitorLabel, `Charged per visitor, ${when}`, 'e.g. 850'),
+                                ...(dbFeatures.feeChildRate && splitsAge
+                                  ? [moneyField('entranceFeeChild', 'Child Rate', `Charged per child in place of the visitor figure, ${when}. Blank = the park does not price children separately and a child pays the adult amount.`, 'e.g. 430')]
+                                  : [])
+                              ];
                             } else {
                               fields = unit === 'per_child'
                                 ? [moneyField('levyChildRate', `Child Rate`, `Charged per child, ${when}`, 'e.g. 60')]
-                                : [moneyField('levyAdultRate', `Adult Rate`, `Charged per adult, ${when}`, 'e.g. 120')];
+                                : [
+                                    moneyField('levyAdultRate', `Adult Rate`, `Charged per adult, ${when}`, 'e.g. 120'),
+                                    ...(splitsAge
+                                      ? [moneyField('levyChildRate', 'Child Rate', `Charged per child in place of the adult figure, ${when}. Blank or 0 = a child pays nothing on this levy.`, 'e.g. 60')]
+                                      : [])
+                                  ];
+                            }
+                            if (perHead && dbFeatures.guideDriver) {
+                              fields.push(moneyField(
+                                'guideRate',
+                                "Guide Rate",
+                                `The guide's own place on this fee, ${when}. Blank charges the visitor amount; 0 admits the guide free.`,
+                                'e.g. 0'
+                              ));
                             }
                             return (
                               <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
                                 <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#9a3412', display: 'block', marginBottom: '0.5rem' }}>
                                   {(isEntrance ? 'Entrance Fee' : 'Conservation Levy') + ' Rates (' + item.currency + ') — ' + when}
                                 </label>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '480px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '0.75rem', maxWidth: '720px' }}>
                                   {fields}
                                 </div>
                                 <div style={{ fontSize: '0.74rem', color: '#7c2d12', marginTop: '0.45rem' }}>
@@ -5663,8 +8095,11 @@ export const LibraryItems = () => {
                           {/* Guide & Driver Room Rates (Accommodation, offered hotels only) */}
                           {item.category === 'Accommodation' && item.guideDriverOffered && dbFeatures.guideDriver && (
                             <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
-                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#92400e', display: 'block', marginBottom: '0.5rem' }}>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#92400e', display: 'block', marginBottom: '0.35rem' }}>
                                 🚌 Guide & Driver Room Rates (per night — {item.currency})
+                              </span>
+                              <span style={{ fontSize: '0.7rem', color: '#92400e', display: 'block', marginBottom: '0.6rem' }}>
+                                Both rates apply from {Math.max(1, parseInt(item.guideMinRooms, 10) || 1)} client room{Math.max(1, parseInt(item.guideMinRooms, 10) || 1) === 1 ? '' : 's'} booked — set that in the Min Client Rooms box above. A room rule below replaces it with the hotel’s own ladder.
                               </span>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
                                 <div>
@@ -5678,7 +8113,7 @@ export const LibraryItems = () => {
                                     value={season.guideRate !== undefined ? season.guideRate : ''}
                                     onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'guideRate')}
                                   />
-                                  <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = fall back to Single rate</span>
+                                  <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = free room · blank = normal Single rate</span>
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
                                     Guide Meal Plan (same as clients)
                                   </span>
@@ -5704,7 +8139,7 @@ export const LibraryItems = () => {
                                     value={season.driverRate !== undefined ? season.driverRate : ''}
                                     onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'driverRate')}
                                   />
-                                  <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = fall back to Single rate</span>
+                                  <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = free room · blank = normal Single rate</span>
                                   <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
                                     Driver Meal Plan (same as clients)
                                   </span>
@@ -5720,6 +8155,67 @@ export const LibraryItems = () => {
                                   </SearchableSelect>
                                 </div>
                               </div>
+                              {dbFeatures.guideDriverTiers && (
+                                <>
+                                  <TierLadderEditor
+                                    legend="Guide room rule (optional)"
+                                    roomLabel="Guide"
+                                    currency={item.currency}
+                                    tiers={season.guideTiers || []}
+                                    tone="amber"
+                                    moneyStep={moneyStep}
+                                    onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'guideTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1))}
+                                    onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'guideTiers', tierIdx, field, value)}
+                                    onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'guideTiers', tierIdx)}
+                                  />
+                                  <TierLadderEditor
+                                    legend="Driver room rule (optional)"
+                                    roomLabel="Driver"
+                                    currency={item.currency}
+                                    tiers={season.driverTiers || []}
+                                    tone="amber"
+                                    moneyStep={moneyStep}
+                                    onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'driverTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1))}
+                                    onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'driverTiers', tierIdx, field, value)}
+                                    onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'driverTiers', tierIdx)}
+                                  />
+                                </>
+                              )}
+                            </div>
+                          )}
+                          {item.category === 'Accommodation' && item.tourLeaderRoomOffered && (
+                            <div style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#0f766e', display: 'block', marginBottom: '0.5rem' }}>
+                                🧭 Tour Leader Room Rate (per night — {item.currency})
+                              </span>
+                              <div style={{ maxWidth: '300px' }}>
+                                <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, display: 'block' }}>Rate</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  className="pricing-select"
+                                  style={{ padding: '0.35rem' }}
+                                  placeholder={`Rate (${item.currency})`}
+                                  value={season.tourLeaderRate !== undefined ? season.tourLeaderRate : ''}
+                                  onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'tourLeaderRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'tourLeaderRate')}
+                                />
+                                <span style={{ fontSize: '0.68rem', color: '#0f766e', display: 'block' }}>
+                                  Enter 0 for a free tour leader room. Leave blank to charge the normal Single rate.
+                                </span>
+                              </div>
+
+                              {dbFeatures.tourLeaderTiers && (
+                                <TierLadderEditor
+                                  legend="Tiered pricing (optional)"
+                                  roomLabel="Tour Leader"
+                                  currency={item.currency}
+                                  tiers={season.tourLeaderTiers || []}
+                                  moneyStep={moneyStep}
+                                  onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'tourLeaderTiers', item.tourLeaderMinRooms || 1)}
+                                  onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'tourLeaderTiers', tierIdx, field, value)}
+                                  onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'tourLeaderTiers', tierIdx)}
+                                />
+                              )}
                             </div>
                           )}
 
@@ -5736,7 +8232,7 @@ export const LibraryItems = () => {
                            name and dates, default board basis. An option's extra
                            charge types are added on top of it with the charge-type
                            helper. */
-                        handleAddSeasonRow(item.tempId, '');
+                        handleAddSeasonRow(item.tempId, '', item.category === 'Accommodation' ? activeRoomKeyFor(item) : '');
                       }}
                     >
                       <Plus size={13} /> Add Season
@@ -5892,8 +8388,7 @@ export const LibraryItems = () => {
 
                       {!dbFeatures.contracts && (
                         <div style={{ background: '#fefce8', border: '1px solid #facc15', borderRadius: '6px', padding: '0.5rem 0.75rem', marginTop: '0.6rem', fontSize: '0.74rem', fontWeight: 600, color: '#854d0e' }}>
-                          Contract attachment will be saved after the database migration is applied
-                          (20260829_contract_documents.sql).
+                          Contract attachment isn't available in this workspace yet.
                         </div>
                       )}
 
@@ -6048,7 +8543,14 @@ export const LibraryItems = () => {
                         </div>
                       )}
                       <div>
-                        {item.destination_region && <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0d7478', display: 'block', marginBottom: '0.15rem' }}>{item.destination_region}{item.destination_area ? ` · ${item.destination_area}` : ''}</span>}
+                        {itemDestinationLabel(item) ? (
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#0d7478', display: 'block', marginBottom: '0.15rem' }}>{itemDestinationLabel(item)}</span>
+                        ) : (
+                          /* An item with no destination cannot be found by destination in
+                             the itinerary and package pickers, so the list says which ones
+                             still need one rather than leaving the line blank. */
+                          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#b45309', display: 'block', marginBottom: '0.15rem' }}>No destination set</span>
+                        )}
                         <span
                           onClick={() => setDetailItem(item)}
                           title="Click to view every season's pricing"
@@ -6056,7 +8558,22 @@ export const LibraryItems = () => {
                         >
                           {item.name}{item.identifier_code && <span style={{ color: '#0d7478' }}> - {item.identifier_code}</span>}
                         </span>
-                        {isTourStyle && item.sub_category && item.sub_category !== 'Transfers' && (
+                        {item.category === 'Accommodation' && (item.room_types || []).length > 0 && (
+                          <span style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginTop: '0.25rem' }}>
+                            {item.room_types.map((room) => (
+                              <span
+                                key={room.id || room.name}
+                                title={`${room.name} — sleeps ${room.maxOccupancy}`}
+                                style={{ fontSize: '0.68rem', fontWeight: 600, color: '#0369a1', background: '#e0f2fe', border: '1px solid #bae6fd', borderRadius: '5px', padding: '0.08rem 0.4rem' }}
+                              >
+                                {room.name} · sleeps {room.maxOccupancy}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                        {/* Only a transfer names a vehicle on its card; an activity
+                            says what it is with its tour type instead. */}
+                        {item.category === 'Transfers' && item.sub_category && item.sub_category !== 'Transfers' && (
                             <span style={{ display: 'inline-block', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
                               🚐 {item.sub_category} · {item.max_occupancy || 4} pax
                             </span>
@@ -6066,6 +8583,22 @@ export const LibraryItems = () => {
                               {tourTypes.find(t => t.id === item.tour_type)?.icon || '🧭'} {(tourTypes.find(t => t.id === item.tour_type)?.label || item.tour_type)}
                             </span>
                           )}
+                          {minPaxToRunOf(item) > 0 && (
+                            <span
+                              title={`The supplier will not run this without at least ${minPaxToRunOf(item)} guests`}
+                              style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#9a3412', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '5px', padding: '0.1rem 0.45rem' }}
+                            >
+                              Min {minPaxToRunOf(item)} pax
+                            </span>
+                          )}
+                          {isTransportCategory(item.category) && item.transport_type && (() => {
+                            const hire = transportTypes.find(t => t.id === item.transport_type);
+                            return (
+                              <span style={{ display: 'inline-block', marginLeft: '0.35rem', marginTop: '0.25rem', fontSize: '0.72rem', fontWeight: 700, color: '#0369a1', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
+                                {hire?.icon || '🚌'} {hire?.label || item.transport_type}
+                              </span>
+                            );
+                          })()}
                         {transType && (
                           <span style={{ display: 'inline-block', marginLeft: '0.35rem', fontSize: '0.72rem', fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '5px', padding: '0.1rem 0.45rem' }}>
                             {transType.icon} {transType.label}
@@ -6123,6 +8656,15 @@ export const LibraryItems = () => {
                     <span style={{ fontWeight: 600, color: '#334155', fontSize: '0.9rem' }}>
                       {item.supplier?.name || 'Unassigned'}
                     </span>
+                    {starRatingOf(item.supplier?.star_rating) && (
+                      <div
+                        title={`${starLabel(item.supplier.star_rating)} hotel`}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.1rem', color: '#b45309', fontSize: '0.78rem', fontWeight: 700 }}
+                      >
+                        <span>{starGlyphs(item.supplier.star_rating)}</span>
+                        <span style={{ fontSize: '0.7rem', fontWeight: 600 }}>{starLabel(item.supplier.star_rating)}</span>
+                      </div>
+                    )}
                   </td>
                   <td>
                     <span className="status-badge active" style={{ background: '#f8fafc', color: catObj?.color || '#334155', border: '1px solid #e2e8f0' }}>
@@ -6137,7 +8679,11 @@ export const LibraryItems = () => {
                   <td>
                     <div style={{ fontSize: '0.85rem', color: '#475569' }}>
                       {isTicketCategory(item.category) || isExtrasCategory(item.category) || isCarRentalCategory(item.category) ? (
-                        <div style={{ fontWeight: 600, color: isExtrasCategory(item.category) ? '#db2777' : (isCarRentalCategory(item.category) ? '#0e7490' : '#0f766e') }}>{(isCarRentalCategory(item.category)) ? 'Per Vehicle' : 'Per Person'}</div>
+                        <div style={{ fontWeight: 600, color: isExtrasCategory(item.category) ? '#db2777' : (isCarRentalCategory(item.category) ? '#0e7490' : '#0f766e') }}>
+                          {(isCarRentalCategory(item.category))
+                            ? 'Per Vehicle'
+                            : (isExtrasCategory(item.category) && item.pricing_model === 'per_unit' ? 'Service Only' : 'Per Person')}
+                        </div>
                       ) : (
                         <>
                           <div>Max Occ: <strong>{item.max_occupancy || 2} Persons</strong></div>
@@ -6157,7 +8703,7 @@ export const LibraryItems = () => {
                   <td>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
                       {/* Pricing model badge */}
-                      {item.category === SURCHARGE_CATEGORY && (
+                      {isSurchargeItem(item) && (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#c2410c', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
                           {(item.surcharge_type || 'entrance_fee') === 'entrance_fee' ? 'Entrance Fees' : 'Conservation Levy'}
                           {item.surcharge_charge_basis === 'per_night' ? ' (Per Night)' : ''}
@@ -6200,7 +8746,7 @@ export const LibraryItems = () => {
                         </span>
                       ) : isExtrasCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#db2777', background: '#fdf2f8', border: '1px solid #f9a8d4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          ✨ Per Person
+                          ✨ {item.pricing_model === 'per_unit' ? 'Service only (per unit)' : 'Per Person'}
                         </span>
                       ) : isCarRentalCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0e7490', background: '#ecfeff', border: '1px solid #67e8f9', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
@@ -6228,11 +8774,46 @@ export const LibraryItems = () => {
                           const childBands = item.child_age_ranges || [];
                           const hasBreakdown = Object.keys(childRatesMap).length > 0 && childBands.length > 0;
                           const guideDriverOffered = item.guide_driver_room_offered === true;
+                          const guideMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
                           const singleRate = isFlat ? flatRate : (p1 || 0);
-                          const guideRate = parseFloat(rate.guide_rate) || 0;
-                          const driverRate = parseFloat(rate.driver_rate) || 0;
-                          const guideEff = guideDriverOffered && guideRate > 0 ? guideRate : singleRate;
-                          const driverEff = guideDriverOffered && driverRate > 0 ? driverRate : singleRate;
+                          /* Guide/driver: a typed 0 is a free room; a blank rate
+                             means the property charges its normal single rate. */
+                          const guideRateConfigured = rate.guide_rate !== null && rate.guide_rate !== undefined && rate.guide_rate !== '';
+                          const driverRateConfigured = rate.driver_rate !== null && rate.driver_rate !== undefined && rate.driver_rate !== '';
+                          const guideRate = guideRateConfigured ? (parseFloat(rate.guide_rate) || 0) : singleRate;
+                          const driverRate = driverRateConfigured ? (parseFloat(rate.driver_rate) || 0) : singleRate;
+                          const guideTiers = normaliseStaffTiers(rate.guide_tiers);
+                          const driverTiers = normaliseStaffTiers(rate.driver_tiers);
+                          const guideEff = guideDriverOffered ? guideRate : singleRate;
+                          const driverEff = guideDriverOffered ? driverRate : singleRate;
+                          const guideRateText = (value) => `${item.currency} ${Number(value).toLocaleString()}`;
+                          const guideTierSummary = staffTierSummary(
+                            staffRoomLadder({ offered: true, tiers: guideTiers, minRooms: guideMinRooms, rate: guideRate }),
+                            guideRateText,
+                            'guide room'
+                          );
+                          const driverTierSummary = staffTierSummary(
+                            staffRoomLadder({ offered: true, tiers: driverTiers, minRooms: guideMinRooms, rate: driverRate }),
+                            guideRateText,
+                            'driver room'
+                          );
+                          /* Tour leader: a 0 is a free room, so the preview keeps a
+                             configured 0 instead of falling back to the single rate. */
+                          const tourLeaderOffered = item.tour_leader_room_offered === true;
+                          const tlLadder = (Array.isArray(rate.tour_leader_tiers) ? rate.tour_leader_tiers : [])
+                            .filter(t => t && t.rate !== null && t.rate !== undefined && t.rate !== '' && Number.isFinite(Number(t.rate)))
+                            .map(t => ({
+                              minRooms: Number(t?.minClientRooms ?? t?.min_rooms) || 0,
+                              rooms: Number(t?.rooms) || 1,
+                              rate: Number(t.rate)
+                            }))
+                            .sort((a, b) => a.minRooms - b.minRooms);
+                          const tlRateConfigured = rate.tour_leader_rate !== null && rate.tour_leader_rate !== undefined && rate.tour_leader_rate !== '';
+                          const tlBaseRate = tlRateConfigured ? (parseFloat(rate.tour_leader_rate) || 0) : singleRate;
+                          /* The preview states each band's client-room range,
+                             so 1–10 rooms at one rate and 11+ at another read
+                             as two explicit lines rather than one headline. */
+                          const tlTierSummary = staffTierSummary(tlLadder, guideRateText, 'TL room');
                           const itemMealPlan = item.item_rates?.find(r => r.meal_plan)?.meal_plan || '—';
                           const guideMealPlan = rate.guide_meal_plan || itemMealPlan;
                           const driverMealPlan = rate.driver_meal_plan || itemMealPlan;
@@ -6320,9 +8901,9 @@ export const LibraryItems = () => {
                               ) : isExtrasCategory(item.category) ? (
                                 <>
                                   <div style={{ color: '#db2777', fontWeight: 600 }}>
-                                    <strong>Adult:</strong> {item.currency} {transferAdultRate.toLocaleString()} / person
+                                    <strong>{item.pricing_model === 'per_unit' ? 'Service:' : 'Adult:'}</strong> {item.currency} {transferAdultRate.toLocaleString()}{item.pricing_model === 'per_unit' ? ' / service' : ' / person'}
                                   </div>
-                                  {transferChildRate > 0 && (
+                                  {item.pricing_model !== 'per_unit' && transferChildRate > 0 && (
                                     <div style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
                                       <strong>Child:</strong> {item.currency} {transferChildRate.toLocaleString()} / child
                                     </div>
@@ -6411,23 +8992,31 @@ export const LibraryItems = () => {
                                 <div style={{ color: '#b45309', fontSize: '0.7rem', marginTop: '0.15rem', background: '#fffbeb', border: '1px solid #fde68a', padding: '0.2rem 0.4rem', borderRadius: '4px', display: 'flex', flexWrap: 'wrap', gap: '0 0.5rem' }}>
                                   {guideDriverOffered ? (
                                     <span>
-                                      Guide: {item.currency} {guideEff.toLocaleString()} ({guideMealPlan}) | Driver: {item.currency} {driverEff.toLocaleString()} ({driverMealPlan})
+                                      Guide: {guideTiers.length > 0
+                                        ? guideTierSummary
+                                        : `${item.currency} ${guideEff.toLocaleString()} (${guideMealPlan}${guideMinRooms > 1 ? ` · min ${guideMinRooms} client rooms` : ''})`}
+                                      {' | '}
+                                      Driver: {driverTiers.length > 0
+                                        ? driverTierSummary
+                                        : `${item.currency} ${driverEff.toLocaleString()} (${driverMealPlan}${guideMinRooms > 1 ? ` · min ${guideMinRooms} client rooms` : ''})`}
                                     </span>
                                   ) : (
                                     <span>
                                       Guide/Driver: defaults to Single ({item.currency} {singleRate.toLocaleString()})
-                               {item.category === 'Accommodation' && item.tour_leader_room_offered && (
-                                 <div style={{ color: '#0f766e', fontSize: '0.7rem', marginTop: '0.15rem', background: '#f0fdfa', border: '1px solid #99f6e4', padding: '0.2rem 0.4rem', borderRadius: '4px' }}>
-                                   Tour Leader: {item.currency} {(parseFloat(rate.tour_leader_rate) || singleRate).toLocaleString()} (Min {item.tour_leader_min_rooms || 1} client rooms)
-                                 </div>
-                               )}
                                     </span>
+                                  )}
+                                  {tourLeaderOffered && (
+                                    <div style={{ color: '#0f766e', fontSize: '0.7rem', marginTop: '0.15rem', background: '#f0fdfa', border: '1px solid #99f6e4', padding: '0.2rem 0.4rem', borderRadius: '4px' }}>
+                                      {tlLadder.length > 0
+                                        ? <>Tour Leader: {tlTierSummary}</>
+                                        : <>Tour Leader: {item.currency} {tlBaseRate.toLocaleString()} (Min {item.tour_leader_min_rooms || 1} client rooms)</>}
+                                    </div>
                                   )}
                                 </div>
                               )}
-                              {/* A Surcharge Fees item shows its fee figures here, on its own rate
+                              {/* A Fees & Tickets item shows its fee figures here, on its own rate
                                   rows, keyed off the surcharge type rather than a legacy flag. */}
-                              {item.category === SURCHARGE_CATEGORY && (item.surcharge_type || 'entrance_fee') === 'entrance_fee' && ((parseFloat(rate.entrance_fee_per_person) || 0) > 0 || (parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0) && (
+                              {isSurchargeItem(item) && (item.surcharge_type || 'entrance_fee') === 'entrance_fee' && ((parseFloat(rate.entrance_fee_per_person) || 0) > 0 || (parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0) && (
                                 <div style={{ color: '#c2410c', fontWeight: 600, marginTop: '0.15rem' }}>
                                   {(parseFloat(rate.entrance_fee_per_person) || 0) > 0 && (
                                     <span><strong>Entrance / Person:</strong> {item.currency} {(parseFloat(rate.entrance_fee_per_person) || 0).toLocaleString()}</span>
@@ -6438,7 +9027,7 @@ export const LibraryItems = () => {
                                   )}
                                 </div>
                               )}
-                              {item.category === SURCHARGE_CATEGORY && (item.surcharge_type || 'entrance_fee') !== 'entrance_fee' && ((parseFloat(rate.conservation_levy_per_adult) || 0) > 0 || (parseFloat(rate.conservation_levy_per_child) || 0) > 0) && (
+                              {isSurchargeItem(item) && (item.surcharge_type || 'entrance_fee') !== 'entrance_fee' && ((parseFloat(rate.conservation_levy_per_adult) || 0) > 0 || (parseFloat(rate.conservation_levy_per_child) || 0) > 0) && (
                                 <div style={{ color: '#c2410c', fontWeight: 600, marginTop: '0.15rem' }}>
                                   {(parseFloat(rate.conservation_levy_per_adult) || 0) > 0 && (
                                     <span><strong>Levy Adult{item.surcharge_charge_basis === 'per_night' ? ' / Night' : ''}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_adult) || 0).toLocaleString()}</span>

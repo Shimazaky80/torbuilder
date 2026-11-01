@@ -386,6 +386,10 @@
 
 .service-placement-modal {
   max-width: 560px;
+  /* The overlay centres without scrolling, so a long day list used to push the
+     Add-service button past the bottom of the screen and out of reach. */
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
 }
 
 .placement-subtitle {
@@ -458,6 +462,85 @@
   font-size: 0.76rem;
 }
 
+/* One control set for "which days", because a 25-day itinerary would otherwise
+   render twenty-five boxes and push the Add button off the screen. */
+.placement-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.7rem 0 0;
+}
+
+.placement-mode-row button {
+  padding: 0.42rem 0.8rem;
+  border: 1px solid #dbe5ec;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.placement-mode-row button.active {
+  border-color: #0d7478;
+  background: #f0fdfa;
+  color: #0d7478;
+}
+
+.placement-range-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.7rem 0 0;
+}
+
+.placement-range-row label {
+  color: #475569;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.placement-range-row .sidebar-select {
+  width: 108px;
+}
+
+.placement-range-row .secondary-btn {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.76rem;
+}
+
+.placement-quick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.55rem 0 0;
+}
+
+.placement-quick-row button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #0d7478;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.placement-summary {
+  margin: 0.65rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #dbe5ec;
+  border-left: 3px solid #0d7478;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 .placement-inline-field {
   display: flex;
   align-items: center;
@@ -496,6 +579,16 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.5rem;
+}
+
+/* Only reached once the operator chooses individual nights, and always scrollable
+   so the dialog stays the same height however long the tour is. */
+.placement-day-grid.capped {
+  max-height: 13.5rem;
+  overflow-y: auto;
+  margin-top: 0.6rem;
+  padding-right: 0.3rem;
+  align-content: start;
 }
 
 .placement-day-option {
@@ -579,6 +672,420 @@
   font-weight: 700;
   margin-top: 0.25rem;
   margin-top: 1rem;
+}
+
+/* --- Traveller roster and room selection ---------------------------------
+   Every traveller is listed with their current room. The operator picks the
+   target room once (card click or Select), then moves people with the arrow
+   button or by dragging them; the per-traveller dropdown is gone. */
+
+.room-alloc-roster-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.room-alloc-roster-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.room-alloc-count {
+  color: #64748b;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.room-alloc-target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed #99f6e4;
+  border-radius: 8px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.room-alloc-target-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.room-alloc-target.is-empty {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.room-allocation-modal-shell .room-alloc-target .room-alloc-autofill {
+  flex: 0 0 auto;
+  padding: 0.24rem 0.5rem;
+  border: 1px solid #0d7478;
+  border-radius: 999px;
+  background: #0d7478;
+  color: #fff;
+  font-size: 0.64rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.room-allocation-modal-shell .room-alloc-target .room-alloc-autofill:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.room-alloc-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.room-alloc-bulk-count {
+  color: #64748b;
+  font-size: 0.67rem;
+  font-weight: 700;
+}
+
+.room-alloc-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.room-allocation-modal-shell .room-alloc-bulk-actions button {
+  padding: 0.24rem 0.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 0.63rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.room-allocation-modal-shell .room-alloc-bulk-actions button:hover:not(:disabled) {
+  border-color: #0d7478;
+  color: #0d7478;
+}
+
+.room-allocation-modal-shell .room-alloc-bulk-actions button:disabled {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  color: #cbd5e1;
+  cursor: not-allowed;
+}
+
+.room-allocation-modal-shell .room-alloc-bulk-actions .room-alloc-bulk-move {
+  border-color: #0d7478;
+  background: #0d7478;
+  color: #fff;
+}
+
+.room-allocation-modal-shell .room-alloc-bulk-actions .room-alloc-bulk-move:hover:not(:disabled) {
+  background: #0b6266;
+  color: #fff;
+}
+
+.room-alloc-check {
+  flex: 0 0 auto;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  accent-color: #0d7478;
+  cursor: pointer;
+}
+
+.room-alloc-check:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.room-alloc-search {
+  width: 100%;
+  margin-top: 0.6rem;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  font-size: 0.76rem;
+}
+
+.room-alloc-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+  padding-right: 0.15rem;
+  max-height: 340px;
+  overflow-y: auto;
+  border-radius: 9px;
+}
+
+.room-alloc-roster.is-drop-target {
+  outline: 2px dashed #0d7478;
+  outline-offset: 2px;
+}
+
+.room-alloc-traveller {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.42rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.room-alloc-traveller:hover {
+  border-color: #94a3b8;
+}
+
+.room-alloc-traveller.is-bedded {
+  background: #f8fafc;
+}
+
+.room-alloc-traveller.is-selected {
+  border-color: #0d7478;
+  background: #f0fdfa;
+  box-shadow: 0 0 0 2px rgba(13, 116, 120, 0.16);
+}
+
+.room-alloc-traveller.is-other-property {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.room-alloc-traveller.is-dragging {
+  opacity: 0.45;
+}
+
+.room-alloc-avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 50%;
+  background: #e6f5f4;
+  color: #0d7478;
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.room-alloc-traveller-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+
+.room-alloc-traveller-name {
+  color: #1e293b;
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-alloc-traveller-meta {
+  color: #64748b;
+  font-size: 0.67rem;
+  font-weight: 600;
+}
+
+.room-alloc-pill {
+  flex: 0 0 auto;
+  padding: 0.16rem 0.45rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 0.63rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.room-alloc-pill.is-unallocated {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.room-alloc-pill.is-bedded {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+  color: #0d7478;
+}
+
+.room-alloc-pill.is-other {
+  border-color: #ddd6fe;
+  background: #f5f3ff;
+  color: #6d28d9;
+}
+
+/* The arrow button and the room-level Select button must override the generic
+   content-body button rule, hence the extra class in each selector. */
+.room-allocation-modal-shell .room-alloc-traveller .room-alloc-move {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #0d7478;
+  cursor: pointer;
+}
+
+.room-allocation-modal-shell .room-alloc-traveller .room-alloc-move:hover:not(:disabled) {
+  border-color: #0d7478;
+  background: #f0fdfa;
+}
+
+.room-allocation-modal-shell .room-alloc-traveller .room-alloc-move:disabled {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  color: #cbd5e1;
+  cursor: not-allowed;
+}
+
+.room-allocation-modal-shell .room-alloc-room .room-alloc-select {
+  padding: 0.22rem 0.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 0.64rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.room-allocation-modal-shell .room-alloc-room .room-alloc-select.is-active {
+  border-color: #0d7478;
+  background: #0d7478;
+  color: #fff;
+}
+
+.room-alloc-empty {
+  padding: 1rem 0.75rem;
+  border: 1px solid #bbf7d0;
+  border-radius: 9px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.room-alloc-help {
+  margin: 0.55rem 0 0;
+  color: #94a3b8;
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.room-alloc-notice {
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.room-alloc-room {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child > div.is-active {
+  border-color: #0d7478;
+  box-shadow: 0 0 0 2px rgba(13, 116, 120, 0.18);
+}
+
+.room-allocation-modal-shell > div:nth-child(2) > div:nth-child(2) > div:last-child > div:last-child > div.is-drag-over {
+  border-color: #0d7478;
+  background: #f0fdfa;
+  box-shadow: 0 0 0 3px rgba(13, 116, 120, 0.2);
+}
+
+.room-alloc-drop-hint {
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px dashed #0d7478;
+  border-radius: 7px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.room-alloc-occupant {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: grab;
+}
+
+.room-alloc-occupant:active {
+  cursor: grabbing;
+}
+
+.room-allocation-modal-shell .room-alloc-occupant button {
+  padding: 0 0.15rem;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.room-allocation-modal-shell .room-alloc-occupant button:hover {
+  color: #be123c;
 }
 
 .room-apply-summary strong,

@@ -1,4 +1,6 @@
 /* Per-category supplier voucher details shared by preview, email, and print. */
+import { starLabel } from './starGrading';
+
 export const voucherDetailLines = (sv) => {
   const cat = sv.category || '';
   const lines = ['Confirmation Status: OK'];
@@ -17,7 +19,20 @@ export const voucherDetailLines = (sv) => {
     if (sv.capacity !== '' && sv.capacity !== null && sv.capacity !== undefined) {
       lines.push(`Capacity: ${sv.capacity}`);
     }
+  } else if (/transport/i.test(cat)) {
+    /* A hired vehicle has no flight to meet, so the voucher carries the pick-up,
+       the vehicle and how many seats were booked. */
+    const time = (sv.time || sv.startTime || '').trim();
+    if (time) lines.push(`Pick up time: ${time}`);
+    const vehicle = (sv.vehicleType || '').trim();
+    if (vehicle) lines.push(`Vehicle type: ${vehicle}`);
+    if (sv.capacity !== '' && sv.capacity !== null && sv.capacity !== undefined) {
+      lines.push(`Capacity: ${sv.capacity}`);
+    }
   } else if (/accommodation/i.test(cat)) {
+    /* Hotel grade, when the property has one, so the voucher and the client's
+       itinerary describe the hotel the same way. */
+    if (starLabel(sv.supplierStar)) lines.push(`Star grading: ${starLabel(sv.supplierStar)}`);
     const room = (sv.roomType || '').trim();
     if (room) lines.push(`Room type: ${room}`);
     if (sv.maxOccupancy !== '' && sv.maxOccupancy !== null && sv.maxOccupancy !== undefined) {

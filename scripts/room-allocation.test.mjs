@@ -14,9 +14,14 @@ import {
   accommodationRegionOf,
   canJoinExistingAccommodationDestination,
   joinAccommodationSplitGroup,
+  roomCapacityOfService,
+  roomOverflow,
+  serviceRoomCapacity,
   validateDayAccommodation,
-  validateAccommodationServiceInDay
+  validateAccommodationServiceInDay,
+  withRoomCapacity
 } from '../src/lib/roomAllocationHelper.js';
+import { roomTypesOf, soldRoomCapacity } from '../src/lib/roomTypes.js';
 
 let failures = 0;
 const check = (label, actual, expected) => {
@@ -56,9 +61,42 @@ const accommodation = (key, extra = {}) => ({
 const alternativeHtml = renderModal({
   item: { ...accommodation('alt', { isOptional: true }), name: 'Alt Hotel', item_rates: [] }
 });
-check('alternative modal offers the entire party', alternativeHtml.includes('Travellers To Allocate (2)'), true);
+check('alternative modal offers the entire party', alternativeHtml.includes('2 pax · 2 unallocated'), true);
 check('alternative modal lists both travellers', alternativeHtml.includes('Misael') && alternativeHtml.includes('Zoya'), true);
+check('alternative modal asks for a room before moving anyone', alternativeHtml.includes('Add a room, then select it to move travellers in.'), true);
 check('alternative cannot be treated as a group split', alternativeHtml.includes('Group split'), false);
+
+/* The sidebar is a full roster: every traveller carries their current bed
+   status, and one room is selected as the target for the arrow/drag move. */
+const allocatedHtml = renderModal({
+  item: {
+    ...accommodation('alloc', { item_rates: [] }),
+    name: 'Lodge',
+    roomAllocations: [{ roomId: 1, allocatedTravellers: [travellers[0]] }]
+  }
+});
+check('roster counts the whole party', allocatedHtml.includes('2 pax · 1 unallocated'), true);
+check('roster names the selected room', allocatedHtml.includes('Selected room: Room 1'), true);
+check('roster shows the current room of an allocated traveller', allocatedHtml.includes('class="room-alloc-pill is-bedded">Room 1<'), true);
+check('roster shows an unallocated status', allocatedHtml.includes('class="room-alloc-pill is-unallocated">Unallocated<'), true);
+check('roster exposes an arrow move to the selected room', allocatedHtml.includes('aria-label="Move Zoya Knapp to Room 1"'), true);
+check('roster keeps a search box for large parties', allocatedHtml.includes('placeholder="Search traveller..."'), true);
+check('roster offers a checkbox per traveller', allocatedHtml.includes('type="checkbox"') && allocatedHtml.includes('aria-label="Select Zoya Knapp"'), true);
+check('roster offers bulk selection of unallocated travellers', allocatedHtml.includes('Select all unallocated'), true);
+check('selected room can be auto-filled in one click', allocatedHtml.includes('>Auto-fill<'), true);
+check('no auto-fill without a room to fill', alternativeHtml.includes('>Auto-fill<'), false);
+
+/* Dropping accommodation creates the line before the dialog opens. If the
+   dialog is cancelled the line is removed again, so a day with no
+   accommodation is valid; a line left behind without beds is not. */
+check('an unallocated dropped property blocks the night', validateDayAccommodation(
+  { services: [accommodation('dropped', { name: 'Dropped Camp' })] },
+  travellers
+).isValid, false);
+check('a cancelled drop leaves the night saveable', validateDayAccommodation(
+  { services: [] },
+  travellers
+).isValid, true);
 check('modal item preserves the alternative flag', buildRoomModalItem({
   service: accommodation('alt', { isOptional: true }),
   base: { name: 'Alt Hotel' }
@@ -87,7 +125,9 @@ const splitHtml = renderModal({
   beddedElsewhere: [travellers[0]]
 });
 check('split dialog offers remaining traveller', splitHtml.includes('Zoya Knapp'), true);
-check('split dialog hides traveler housed by the first property', splitHtml.includes('Misael Villalobos'), false);
+check('split dialog lists the sibling traveller with their bed', splitHtml.includes('Misael Villalobos'), true);
+check('split dialog marks the sibling bed as another property', splitHtml.includes('class="room-alloc-pill is-other">Other property<'), true);
+check('split dialog refuses to move the sibling traveller', splitHtml.includes('Already has a bed in another property on this night'), true);
 check('split dialog does not offer to move a sibling traveler', splitHtml.includes('assigning moves the bed here'), false);
 check('split reports one traveller still required', splitHtml.includes('1 Unallocated'), true);
 check('partial split night remains incomplete', validateDayAccommodation(
@@ -447,6 +487,218 @@ check('flight voucher includes flight number and flight time', voucherDetailLine
   flightNumber: 'AB123',
   flightTime: '12:20'
 }).filter((line) => line === 'Flight number: AB123' || line === 'Flight departure / arrival time: 12:20').length, 2);
+
+/* Room capacity is beds AND bed types. A three-bed room contracted to two
+   adults must refuse a third adult, even though the total has room for them. */
+const bayRoom = {
+  id: 'room-standard',
+  name: 'Standard Room',
+  max_occupancy: 3,
+  max_adults: 2,
+  max_children: 1
+};
+const bayCapacity = soldRoomCapacity({ rooms: [bayRoom], roomTypeId: 'room-standard' });
+check('sold room capacity comes from the room record', bayCapacity.maxOccupancy, 3);
+check('sold room capacity states the adult beds', bayCapacity.maxAdults, 2);
+check('sold room capacity states the child beds', bayCapacity.maxChildren, 1);
+const snapshotCapacity = soldRoomCapacity({
+  rooms: [],
+  rate: { room_max_occupancy: 2, room_max_adults: 1, room_max_children: 1 }
+});
+check('a reloaded line falls back to the rate snapshot', snapshotCapacity.maxOccupancy, 2);
+check('the rate snapshot keeps the adult cap', snapshotCapacity.maxAdults, 1);
+const legacyCapacity = soldRoomCapacity({ rooms: [], rate: null, fallback: 3 });
+check('a legacy total alone is still honoured', legacyCapacity.maxOccupancy, 3);
+check('a legacy total invents no adult cap', legacyCapacity.maxAdults, null);
+
+const davinciTravellers = [
+  { id: 'd1', name: 'Lucas', surname: 'Silva', age: 41 },
+  { id: 'd2', name: 'Beatriz', surname: 'Oliveira', age: 38 },
+  { id: 'd3', name: 'Gabriel', surname: 'Santos', age: 45 }
+];
+const typedService = {
+  key: 'davinci',
+  itemId: 'davinci',
+  category: 'Accommodation',
+  name: 'DaVinci Hotel',
+  maxOccupancy: 3,
+  maxAdults: 2,
+  maxChildren: 1,
+  roomAllocations: [{ roomId: 1, allocatedTravellers: davinciTravellers }]
+};
+const threeAdultNight = validateDayAccommodation({ services: [typedService] }, davinciTravellers);
+check('three adults in a two-adult room are over capacity', threeAdultNight.isValid, false);
+check('the guard names the adult cap', threeAdultNight.reason.includes('adult capacity'), true);
+check('the guard reports one bed over', threeAdultNight.overCapacityCount, 1);
+check('two adults in the same room remain valid', validateDayAccommodation({
+  services: [{ ...typedService, roomAllocations: [{ roomId: 1, allocatedTravellers: davinciTravellers.slice(0, 2) }] }]
+}, davinciTravellers.slice(0, 2)).isValid, true);
+const familyTravellers = [davinciTravellers[0], davinciTravellers[1], { id: 'c1', name: 'Kid', surname: 'Silva', age: 7 }];
+check('two adults plus one child fit the three beds', validateDayAccommodation({
+  services: [{ ...typedService, roomAllocations: [{ roomId: 1, allocatedTravellers: familyTravellers }] }]
+}, familyTravellers).isValid, true);
+check('a child beyond the child cap is refused', validateDayAccommodation({
+  services: [{
+    ...typedService,
+    maxChildren: 0,
+    roomAllocations: [{ roomId: 1, allocatedTravellers: familyTravellers }]
+  }]
+}, familyTravellers).reason.includes('child capacity'), true);
+
+/* A property that does not tell adults and children apart states no child cap.
+   That is a different contract from a room that takes no children, and the
+   allocator has to keep them apart or a family villa refuses every family. */
+const openVillaRoom = { id: 'room-villa', name: 'Luxury Villa', max_occupancy: 6, max_adults: 6, max_children: null };
+const openVillaCapacity = soldRoomCapacity({ rooms: [openVillaRoom], roomTypeId: 'room-villa' });
+check('an unstated child cap is not read as no child beds', openVillaCapacity.maxChildren, null);
+check('an unstated cap still caps the room at its beds', openVillaCapacity.maxOccupancy, 6);
+const openVillaSnapshot = soldRoomCapacity({
+  rooms: [],
+  rate: { room_max_occupancy: 6, room_max_adults: 6, room_max_children: null }
+});
+check('a reloaded villa line invents no child cap', openVillaSnapshot.maxChildren, null);
+
+const houseful = [...davinciTravellers.slice(0, 2), { id: 'c1', name: 'Ana', surname: 'Silva', age: 6 }, { id: 'c2', name: 'Beto', surname: 'Silva', age: 9 }];
+const inOneRoom = (maxChildren) => ({
+  services: [{
+    key: 'villa',
+    itemId: 'villa',
+    category: 'Accommodation',
+    name: 'Luxury Villa',
+    maxOccupancy: 6,
+    maxAdults: 6,
+    maxChildren,
+    roomAllocations: [{ roomId: 1, allocatedTravellers: houseful }]
+  }]
+});
+check('two adults and two children share a villa that does not split them',
+  validateDayAccommodation(inOneRoom(null), houseful).isValid, true);
+check('the same four are refused by a villa typed zero children',
+  validateDayAccommodation(inOneRoom(0), houseful).reason.includes('child capacity'), true);
+check('and refused again once the villa caps them at one',
+  validateDayAccommodation(inOneRoom(1), houseful).reason.includes('child capacity'), true);
+check('an unstated cap leaves the overflow at zero children',
+  roomOverflow({ allocatedTravellers: houseful }, roomCapacityOfService({ maxOccupancy: 6, maxAdults: 6, maxChildren: null })).overChildren, 0);
+check('a stated cap counts the children over it',
+  roomOverflow({ allocatedTravellers: houseful }, roomCapacityOfService({ maxOccupancy: 6, maxAdults: 6, maxChildren: 1 })).overChildren, 1);
+check('a line without adult caps keeps the total-only rule', validateDayAccommodation({
+  services: [{
+    key: 'legacy',
+    category: 'Accommodation',
+    name: 'Legacy Lodge',
+    maxOccupancy: 3,
+    roomAllocations: [{ roomId: 1, allocatedTravellers: davinciTravellers }]
+  }]
+}, davinciTravellers).isValid, true);
+
+/* A saved line only carries the room id; the library carries its beds. */
+const davinciLibrary = [{
+  id: 'davinci',
+  name: 'DaVinci Hotel',
+  room_types: [bayRoom],
+  item_rates: [{ room_type_id: 'room-standard', room_max_occupancy: 3, room_max_adults: 2, room_max_children: 1 }]
+}];
+const reloadedService = { itemId: 'davinci', category: 'Accommodation', roomTypeId: 'room-standard', maxOccupancy: 3 };
+const reloadedCapacity = serviceRoomCapacity(reloadedService, davinciLibrary);
+check('a reloaded line finds its adult cap in the library', reloadedCapacity.maxAdults, 2);
+check('the enriched line carries the adult cap', withRoomCapacity(reloadedService, davinciLibrary).maxAdults, 2);
+const reloadedOverflow = roomOverflow({ allocatedTravellers: davinciTravellers }, roomCapacityOfService(withRoomCapacity(reloadedService, davinciLibrary)));
+check('the overflow counts the adult breach', reloadedOverflow.overAdults, 1);
+check('the resolved room list reads the snake-case room rows', roomTypesOf({ room_types: [bayRoom] })[0].key, 'room-standard');
+
+const typedModalHtml = renderModal({
+  item: {
+    ...accommodation('davinci', { item_rates: [] }),
+    name: 'DaVinci Hotel',
+    maxOccupancy: 3,
+    maxAdults: 2,
+    maxChildren: 1
+  }
+});
+check('the dialog states the adult and child beds', typedModalHtml.includes('Contract Capacity: 2 adults + 1 child · 3 pax / Room'), true);
+
+/* A property that does not split its guests by age states no child cap, and the
+   dialog must not dress that up as a room that turns children away. */
+const openVillaModalHtml = renderModal({
+  item: {
+    ...accommodation('villa', { item_rates: [] }),
+    name: 'Luxury Villa',
+    maxOccupancy: 6,
+    maxAdults: 6,
+    maxChildren: null
+  }
+});
+check('an unsplit villa is sold on its beds alone', openVillaModalHtml.includes('Contract Capacity: 6 pax / Room'), true);
+check('an unsplit villa never reads as adults only', /adults only|0 children/.test(openVillaModalHtml), false);
+const adultsOnlyModalHtml = renderModal({
+  item: {
+    ...accommodation('studio', { item_rates: [] }),
+    name: 'Studio',
+    maxOccupancy: 2,
+    maxAdults: 2,
+    maxChildren: 0
+  }
+});
+check('a room typed zero children says so', adultsOnlyModalHtml.includes('Contract Capacity: adults only · 2 pax / Room'), true);
+
+const libraryModalItem = buildRoomModalItem({
+  base: {
+    id: 'davinci',
+    name: 'DaVinci Hotel',
+    category: 'Accommodation',
+    room_types: [bayRoom],
+    item_rates: []
+  },
+  service: { itemId: 'davinci', category: 'Accommodation', roomTypeId: 'room-standard', maxOccupancy: 3 }
+});
+check('the dialog takes the sold room adult beds', libraryModalItem.maxAdults, 2);
+check('the dialog takes the sold room child beds', libraryModalItem.maxChildren, 1);
+
+/* Children in their own room: a property either charges the standard adult
+   rates or one single room rate for the whole children-only room. Mixed rooms
+   keep the child band rates. */
+const kidA = { id: 'k1', name: 'Liam', surname: 'Dube', age: 8 };
+const kidB = { id: 'k2', name: 'Zanele', surname: 'Dube', age: 6 };
+const kidC = { id: 'k3', name: 'Tebogo', surname: 'Dube', age: 11 };
+const ownRoomItem = (policy) => ({
+  category: 'Accommodation',
+  children_own_room_policy: policy,
+  child_age_ranges: [{ id: 'child', name: 'Child', ageFrom: 0, ageTo: 12 }],
+  item_rates: [{
+    currency: 'ZAR',
+    price_1_adult: 1000,
+    price_2_adults: 700,
+    price_3_plus_adults: 650,
+    child_rates_breakdown: { child: 350 }
+  }]
+});
+const kidsRoom = (kids) => [{ roomId: 1, allocatedTravellers: kids }];
+const roomBuyOf = (result) => result.rooms[0].buyCost;
+
+const twoKidsDefault = calculateRoomCharges(ownRoomItem('child_rates'), kidsRoom([kidA, kidB]), 'ZAR', 0);
+check('two children alone keep child band rates by default', roomBuyOf(twoKidsDefault), 700);
+
+const twoKidsAdult = calculateRoomCharges(ownRoomItem('adult_rates'), kidsRoom([kidA, kidB]), 'ZAR', 0);
+check('two children alone price at the adult sharing rate each', roomBuyOf(twoKidsAdult), 1400);
+check('two children alone name the adult rate in the description', twoKidsAdult.rooms[0].rateDescription.includes('Adult Sharing Rate'), true);
+
+const threeKidsAdult = calculateRoomCharges(ownRoomItem('adult_rates'), kidsRoom([kidA, kidB, kidC]), 'ZAR', 0);
+check('three children alone follow the adult ladder (2 sharing + 1 extra)', roomBuyOf(threeKidsAdult), 2050);
+
+const soloKidAdult = calculateRoomCharges(ownRoomItem('adult_rates'), kidsRoom([kidA]), 'ZAR', 0);
+check('one child alone prices at the adult single rate', roomBuyOf(soloKidAdult), 1000);
+
+const twoKidsSingle = calculateRoomCharges(ownRoomItem('single_room_rate'), kidsRoom([kidA, kidB]), 'ZAR', 0);
+check('two children alone charge one single room rate', roomBuyOf(twoKidsSingle), 1000);
+
+const threeKidsSingle = calculateRoomCharges(ownRoomItem('single_room_rate'), kidsRoom([kidA, kidB, kidC]), 'ZAR', 0);
+check('three children alone still charge one single room rate', roomBuyOf(threeKidsSingle), 1000);
+
+const soloKidSingle = calculateRoomCharges(ownRoomItem('single_room_rate'), kidsRoom([kidA]), 'ZAR', 0);
+check('one child alone under single-room policy charges the single rate', roomBuyOf(soloKidSingle), 1000);
+
+const mixedAdult = calculateRoomCharges(ownRoomItem('adult_rates'), kidsRoom([travellers[0], kidA]), 'ZAR', 0);
+check('a child sharing with an adult keeps the child band rate', roomBuyOf(mixedAdult), 1050);
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll checks passed.');
 process.exit(failures ? 1 : 0);

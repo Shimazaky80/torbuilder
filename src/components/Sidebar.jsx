@@ -5,6 +5,7 @@ import { useNavigationGuard } from '../context/NavigationGuardContext';
 import { 
   LayoutDashboard, 
   Users, 
+  UserCog,
   Building2, 
   Package, 
   Backpack, 
@@ -27,6 +28,7 @@ const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: '/dashboard' },
   { id: 'clients', label: 'Clients', icon: Users, path: '/clients' },
   { id: 'suppliers', label: 'Suppliers', icon: Building2, path: '/suppliers' },
+  { id: 'guide-team', label: 'Guide Team', icon: UserCog, path: '/guide-team' },
   { id: 'library-items', label: 'Library Items', icon: Package, path: '/library-items' },
   { id: 'packages', label: 'Packages', icon: Backpack, path: '/packages' },
   { id: 'itineraries', label: 'Itineraries', icon: Map, path: '/itineraries' },

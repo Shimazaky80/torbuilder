@@ -1,7 +1,7 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
-  ArrowLeft, Backpack, Baby, CalendarDays, Check, ChevronDown, Download, FileText,
+  ArrowLeft, Backpack, Baby, CalendarDays, Check, ChevronDown, Download, FileText, MapPin,
   GripVertical, Plus, RefreshCw, Save, Search, Trash2, UtensilsCrossed, X
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -39,6 +39,7 @@ packageRateForDates,
   vehicleColumnPools,
   vehicleVectorPrice
 } from '../lib/packagePricing';
+import { singleSupplementLadderSummary } from '../lib/singleSupplement';
 import {
   guideChargeTotal,
   guideLabel,
@@ -48,19 +49,58 @@ import {
 import GuideServiceTypeModal from '../components/GuideServiceTypeModal';
 import GuideDetailsModal from '../components/GuideDetailsModal';
 import AccommodationChargeModal from '../components/AccommodationChargeModal';
-import { accommodationHasChoices, rateOptionLabel } from '../lib/accommodationOptions';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { accommodationHasChoices, nightBandLabel, rateOptionLabel } from '../lib/accommodationOptions';
+import { starRatingOf, withStarGrade } from '../lib/starGrading';
+import { supplierColumns } from '../lib/supplierStarColumn';
+import { fetchRoomTypesForItems } from '../lib/roomTypeTable';
+import { LIBRARY_ITEM_PACKAGE_FIELDS, LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK } from '../lib/libraryItemFields';
+import { itemDestinationLabel } from '../lib/libraryItemDetail';
+import { destinationClause, destinationsOf, fetchDestinationCatalog, matchesDestinations } from '../lib/destinationFilter';
+import MultiSelectFilter from '../components/MultiSelectFilter';
+
+/* The guide & driver meal flags and the flight's guide ticket are the newest
+   library columns. PostgREST rejects a named select whole when one column in it
+   does not exist yet, so the query is built with them and rebuilt without: a
+   workspace that has not applied the migration still opens its packages, and
+   the guide dialog simply offers every meal again.
+
+   The caller supplies a builder rather than a finished query because supabase
+   needs the projection before any filter can be chained onto it. */
+const selectLibraryItems = async (buildQuery) => {
+  const withCrewFlags = await buildQuery(LIBRARY_ITEM_PACKAGE_FIELDS);
+  return withCrewFlags.error ? buildQuery(LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK) : withCrewFlags;
+};
+
 
 const uuid = packageKey;
 
 const round = (value) => Math.round((Number(value) || 0) * 100) / 100;
 const money = (value, code) => `${code} ${round(value).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const nameOf = (client) => client?.name || 'Unnamed client';
+/* A package line names its property with the hotel's star grading, the same way
+   the itinerary and vouchers do. The grade rides on the service while the package
+   is open and is read back from the library item after a reload. */
+const packageServiceStar = (service, library) => {
+  if (!service) return null;
+  if (service.supplier_star_rating !== undefined && service.supplier_star_rating !== null) {
+    return starRatingOf(service.supplier_star_rating);
+  }
+  const item = (library || []).find((entry) => String(entry.id) === String(service.item_id));
+  return starRatingOf(item?.supplier_star_rating);
+};
+const packageServiceSupplier = (service, library) => {
+  const name = String(service?.supplier_name || '').trim();
+  if (!name) return '';
+  const star = /accommodation/i.test(String(service?.category || ''))
+    ? packageServiceStar(service, library)
+    : null;
+  return withStarGrade(name, star);
+};
 /* Bands read smallest party first. Every band is the operator's: the vehicles only ever
    suggest party sizes, so there is nothing for a rebuild to take back off them. */
-const byBandMin = (a, b) => packageBandPax(a) - packageBandPax(b);const currencyMatches = (rate, code) => !code || String(rate?.currency || '').toUpperCase() === String(code).toUpperCase();
-const destinationsOf = (item) => [...new Set([
-  item?.destination_region, item?.destination_area, item?.location
-].map((destination) => String(destination || '').trim()).filter(Boolean))];
+const byBandMin = (a, b) => packageBandPax(a) - packageBandPax(b);
+const currencyMatches = (rate, code) => !code || String(rate?.currency || '').toUpperCase() === String(code).toUpperCase();
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[char]));
@@ -72,7 +112,7 @@ const initialForm = {
 };
 const DEFAULT_CATEGORIES = [
   'Accommodation', 'Transfers', 'Activities / Tours', 'Flights / Charter',
-  'Meals', 'Guide', 'Trains', 'Tickets', 'Extras', 'Car Rental'
+  'Meals', 'Guide', 'Trains', 'Tickets', 'Extras', 'Car Rental', 'Transport'
 ];
 
 /* Sidebar card presentation. The package picker deliberately mirrors the
@@ -82,7 +122,16 @@ const DEFAULT_CATEGORIES = [
    that applies is worked out from the package validity dates (see
    packageRateForDates) and an operator should not have to choose it by hand.
    A season can still be overridden on the day row itself after the item lands. */
-const SIDEBAR_FLAT_BASES = new Set(['per_vehicle', 'per_trip', 'per_room', 'flat']);
+const SIDEBAR_FLAT_BASES = new Set(['per_vehicle', 'per_trip', 'per_room', 'per_unit', 'flat']);
+
+/* The window a season row actually spans. An out-of-season price always names
+   the dates it covers, so nobody has to guess which year they are being charged. */
+const seasonWindowLabel = (rate) => {
+  const from = String(rate?.valid_from || '').slice(0, 10);
+  const to = String(rate?.valid_to || '').slice(0, 10);
+  if (!from && !to) return 'undated';
+  return `${from || 'open'} to ${to || 'open'}`;
+};
 
 const basisOfRate = (rate, item) => rate?.rate_basis || item?.pricing_model || 'per_person';
 
@@ -129,7 +178,10 @@ export const PackageBuilder = () => {
   const [destinationCatalog, setDestinationCatalog] = useState([]);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
-  const [destinationFilter, setDestinationFilter] = useState('');
+  /* Several islands can be on the list at once — a package normally covers more
+     than one stop, and re-picking a single-value dropdown for each leg is how an
+     operator loses the first one. */
+  const [destinationFilters, setDestinationFilters] = useState([]);
   const [results, setResults] = useState([]);
 const [selectedDay, setSelectedDay] = useState(0);
 const [tab, setTab] = useState('itinerary');
@@ -138,9 +190,18 @@ const [tab, setTab] = useState('itinerary');
 const [bandScope, setBandScope] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  /* Newer season columns are written on the same insert as the season itself, where an
+     unknown column rejects the whole payload. They stay off until the database proves it
+     has them, so an unmigrated package still saves. */
+  const [dbFeatures, setDbFeatures] = useState({ singleRooms: false, roomTypes: false });
   /* Pricing Protection, read from the same tenant setting the itinerary builder uses,
      so a package and an itinerary price the same superseded season the same way. */
   const [protectionPercent, setProtectionPercent] = useState(0);
+  /* An item whose seasons do not cover the package validity dates is not added on a
+     silent uplift. The add parks here, the operator sees which season is standing in
+     and for how long, and the percentage that line is then protected at is typed into
+     the same dialog. Settings keeps its own figure; this one applies to the line. */
+  const [seasonPrompt, setSeasonPrompt] = useState(null);
   const [lastSaved, setLastSaved] = useState('');
   const [exportDialog, setExportDialog] = useState(false);
   /* The export audience is one of three, never a fallback from one into another: the
@@ -187,6 +248,25 @@ const [bandScope, setBandScope] = useState('');
       if (profileError) throw profileError;
       if (!profile?.company_id) throw new Error('Your account is not linked to a company.');
       setCompanyId(profile.company_id);
+
+      /* Whether this database can store the per-season single-room override. A
+         probe against the optional column fails when it is absent; the save
+         then keeps writing the party-size heuristic instead. */
+      try {
+        const { error } = await supabase.from('package_validity_periods').select('single_rooms').limit(1);
+        setDbFeatures({ singleRooms: !error });
+      } catch {
+        // Probe unavailable; keep the override off.
+      }
+      /* Whether package lines can record the room type they were sold as. Until
+         the lodging migration is applied the columns are absent, and inserting
+         them would fail the whole save. */
+      try {
+        const { error } = await supabase.from('package_day_items').select('room_type_id').limit(1);
+        setDbFeatures((current) => ({ ...current, roomTypes: !error }));
+      } catch {
+        // Probe unavailable; keep room types off.
+      }
 
       const [pkgRes, dayRes, periodRes, paxRes, billingRes, vehicleTypesRes] = await Promise.all([
         supabase.from('packages').select('*').eq('id', packageId).eq('company_id', profile.company_id).single(),
@@ -241,7 +321,7 @@ const [bandScope, setBandScope] = useState('');
       setForm(packageForm);
       setProtectionPercent(Math.max(0, Number(billingRes.data?.price_protection_percent) || 0));
       setDays(loadedDays);
-      setPeriods((periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement })));
+      setPeriods((periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms })));
       setPaxOptions(paxRes.data || []);
       setVehicleTypes((vehicleTypesRes.data || []).filter(Boolean));
       setClients(loadedClients);
@@ -249,27 +329,31 @@ const [bandScope, setBandScope] = useState('');
       setLastSaved(JSON.stringify({
         form: packageForm,
         days: loadedDays,
-        periods: (periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement })),
+        periods: (periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms })),
         paxOptions: paxRes.data || []
       }));
 
       const usedIds = [...new Set((itemRes.data || []).map((item) => item.item_id).filter(Boolean))];
       if (usedIds.length) {
         const [itemsRes, ratesRes] = await Promise.all([
-          supabase.from('library_items').select('id, name, category, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active, meal_type, menu_type, guide_meals, guide_accommodation, guide_driver_room_offered').in('id', usedIds),
+          selectLibraryItems((fields) => supabase.from('library_items').select(fields).in('id', usedIds)),
           supabase.from('item_rates').select('*').in('item_id', usedIds)
         ]);
         if (itemsRes.error) throw itemsRes.error;
         if (ratesRes.error) throw ratesRes.error;
         const supplierIds = [...new Set((itemsRes.data || []).map((item) => item.supplier_id).filter(Boolean))];
         const suppliersRes = supplierIds.length
-          ? await supabase.from('suppliers').select('id, name').in('id', supplierIds)
+          ? await supabase.from('suppliers').select(await supplierColumns('id, name')).in('id', supplierIds)
           : { data: [], error: null };
         if (suppliersRes.error) throw suppliersRes.error;
         const supplierNames = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.name]));
+        const supplierStars = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.star_rating]));
+        const roomsByItem = await fetchRoomTypesForItems(usedIds);
         setLibrary((itemsRes.data || []).map((item) => ({
           ...item,
           supplier_name: supplierNames.get(item.supplier_id) || '',
+          supplier_star_rating: supplierStars.get(item.supplier_id) || null,
+          room_types: roomsByItem.get(item.id) || [],
           item_rates: (ratesRes.data || []).filter((rate) => rate.item_id === item.id)
         })));
       } else {
@@ -291,16 +375,12 @@ const [bandScope, setBandScope] = useState('');
     let active = true;
     const loadDestinations = async () => {
       if (!companyId) return;
-      const { data, error } = await supabase.from('library_items')
-        .select('destination_region, destination_area, location')
-        .eq('company_id', companyId)
-        .eq('is_active', true)
-        .limit(1000);
+      const { destinations, error } = await fetchDestinationCatalog(companyId);
       if (error) {
         showToast(`Could not load package destination filters: ${error.message}`, 'error');
         return;
       }
-      if (active) setDestinationCatalog((data || []).flatMap(destinationsOf));
+      if (active) setDestinationCatalog(destinations);
     };
     loadDestinations();
     return () => { active = false; };
@@ -316,26 +396,35 @@ const [bandScope, setBandScope] = useState('');
       }
       try {
         const safe = term.replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-        let query = supabase.from('library_items')
-          .select('id, name, category, description, currency, pricing_model, supplier_id, max_occupancy, destination_region, destination_area, location, max_adults, max_children, child_age_ranges, is_active, meal_type, menu_type, guide_meals, guide_accommodation, guide_driver_room_offered')
-          .eq('company_id', companyId).eq('is_active', true)
-          .order('name').limit(50);
-        if (categoryFilter) query = query.eq('category', categoryFilter);
-        if (term.length >= 2) query = query.or(`name.ilike.%${safe}%,description.ilike.%${safe}%,destination_region.ilike.%${safe}%,destination_area.ilike.%${safe}%,location.ilike.%${safe}%`);
-        const { data, error } = await query;
+        const destinations = destinationClause(destinationFilters);
+        const { data, error } = await selectLibraryItems((fields) => {
+          let query = supabase.from('library_items').select(fields)
+            .eq('company_id', companyId).eq('is_active', true);
+          if (categoryFilter) query = query.eq('category', categoryFilter);
+          if (term.length >= 2) query = query.or(`name.ilike.%${safe}%,description.ilike.%${safe}%,destination_region.ilike.%${safe}%,destination_area.ilike.%${safe}%,location.ilike.%${safe}%`);
+          /* Filtered on the server, because the search only ever brings back a
+             page of items — narrowing that page locally would hide islands that
+             are contracted but happened to fall past the limit. */
+          if (destinations) query = query.or(destinations);
+          return query.order('name').limit(50);
+        });
         if (error) throw error;
         const ids = (data || []).map((item) => item.id);
         const suppliers = [...new Set((data || []).map((item) => item.supplier_id).filter(Boolean))];
         const [ratesRes, suppliersRes] = await Promise.all([
           ids.length ? supabase.from('item_rates').select('*').in('item_id', ids) : { data: [], error: null },
-          suppliers.length ? supabase.from('suppliers').select('id, name').in('id', suppliers) : { data: [], error: null }
+          suppliers.length ? supabase.from('suppliers').select(await supplierColumns('id, name')).in('id', suppliers) : { data: [], error: null }
         ]);
         if (ratesRes.error) throw ratesRes.error;
         if (suppliersRes.error) throw suppliersRes.error;
         const supplierNames = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.name]));
+        const supplierStars = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.star_rating]));
+        const roomsByItem = await fetchRoomTypesForItems(ids);
         const merged = (data || []).map((item) => ({
           ...item,
           supplier_name: supplierNames.get(item.supplier_id) || '',
+          supplier_star_rating: supplierStars.get(item.supplier_id) || null,
+          room_types: roomsByItem.get(item.id) || [],
           item_rates: (ratesRes.data || []).filter((rate) => rate.item_id === item.id)
         }));
         if (!active) return;
@@ -349,7 +438,7 @@ const [bandScope, setBandScope] = useState('');
       active = false;
       clearTimeout(timer);
     };
-  }, [search, categoryFilter, companyId, showToast]);
+  }, [search, categoryFilter, destinationFilters, companyId, showToast]);
 
   const categoryOptions = useMemo(() => [...new Set([
     ...DEFAULT_CATEGORIES,
@@ -371,14 +460,14 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
      that produced three competing totals. The currency is set by the first service added
      and reported next to the search box. */
   const visibleResults = useMemo(() => results.filter((item) => {
-    if (destinationFilter && !destinationsOf(item).includes(destinationFilter)) return false;
+    if (!matchesDestinations(item, destinationFilters)) return false;
     /* An item with no rate in the package's currency cannot be priced into this package at
        all, so it is hidden rather than listed as unavailable: with one currency per package
        it is clutter, not information. Before the first service is added there is no currency
        yet, and everything stays visible so the first pick can set it. */
     if (packageCurrency && !(item.item_rates || []).some((entry) => currencyMatches(entry, packageCurrency))) return false;
     return true;
-  }), [results, destinationFilter, packageCurrency]);
+  }), [results, destinationFilters, packageCurrency]);
 
   const selectedClients = useMemo(() => clients.filter((client) => form.assignedClientIds.includes(client.id)), [clients, form.assignedClientIds]);
   const visibleClients = useMemo(() => {
@@ -560,6 +649,10 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           tier_key: service.tier_key || null,
           replaces_item_key: service.replaces_item_key || null,
           rate_snapshot: service.rate_snapshot || {},
+          ...(dbFeatures.roomTypes ? {
+            room_type_id: service.room_type_id || null,
+            room_type: service.room_type || null
+          } : {}),
           /* Kept on the line so a protected price stays explainable after the save,
              exactly as it is on the itinerary. */
           price_protection_percent: Number(service.price_protection_percent) || 0,
@@ -588,7 +681,8 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
             valid_to: period.valid_to,
             name: period.name || null,
             accommodation_per_person: period.accommodation_per_person ?? null,
-            single_supplement: period.single_supplement ?? 0
+            single_supplement: period.single_supplement ?? 0,
+            ...(dbFeatures.singleRooms ? { single_rooms: period.single_rooms ?? null } : {})
           }))
         );
         if (periodError) throw periodError;
@@ -637,12 +731,13 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
          zero, so a blank field is stored as zero rather than null. Zero reads as "no override"
          everywhere (the figure is derived from the accommodation instead), which is what the
          operator meant by clearing the field. */
-      const savedPeriods = validPeriods.map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement }) => ({
+      const savedPeriods = validPeriods.map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }) => ({
         valid_from,
         valid_to,
         name,
         accommodation_per_person,
-        single_supplement: single_supplement ?? 0
+        single_supplement: single_supplement ?? 0,
+        single_rooms: dbFeatures.singleRooms ? (single_rooms ?? null) : null
       }));
       setDays(savedDays);
       setPeriods(savedPeriods);
@@ -656,7 +751,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, showToast]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, showToast]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -672,14 +767,32 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       || eligible[0];
   };
 
-  /* An item joins the package on a season that spans the package validity dates. When
-     no season does, the same Pricing Protection the itinerary builder applies stands
-     in: the closest prior season is uplifted and the line is stored with the
-     protection on it, so the operator is told rather than silently quoted an
-     out-of-date rate. Only a genuine dead end (no usable season at all) is refused. */
-  const seasonFor = (item, rate) => packageSeasonResolution({
-    item, rate, periods, currencyCode: rate?.currency || item?.currency || '', protectionPercent
+  /* The percentage a package line is priced at. A line that was dropped with its
+     own answer in the add dialog - or one saved unprotected at zero - keeps that
+     figure; only a line with no percentage of its own follows today's Settings.
+     This is the same rule the itinerary builder prices its lines by. An item joins
+     the package on a season that spans the package validity dates; when none does,
+     the add is confirmed first, and the percentage agreed in that dialog is the one
+     the line is priced at. */
+  const effectiveProtectionPercent = (scope = {}) => {
+    if (typeof scope.agreedProtectionPercent === 'number') return Math.max(0, scope.agreedProtectionPercent);
+    const stored = scope.service?.price_protection_percent;
+    if (stored !== undefined && stored !== null) return Math.max(0, Number(stored) || 0);
+    return protectionPercent;
+  };
+  const seasonFor = (item, rate, scope = {}) => packageSeasonResolution({
+    item, rate, periods, currencyCode: rate?.currency || item?.currency || '', protectionPercent: effectiveProtectionPercent(scope)
   });
+  /* The row a line is stored with: whichever season the resolver actually priced
+     from. A protected line carries its uplifted snapshot; a stale one carries the
+     old row whole, so reading the line back names the season it was charged from
+     instead of the first row the currency happened to return. */
+  const seasonStoredRate = (season, fallbackRate) => (season.status === 'protected' || season.status === 'stale') && season.rate
+    ? season.rate
+    : fallbackRate;
+  /* A season standing in for one that does not cover the package is said out
+     loud, whether it arrived with the protection uplift or with none. */
+  const seasonToastKind = (season) => (season.status === 'protected' || season.status === 'stale' ? 'warning' : 'info');
   const addService = (item, rateId, dayIndex = selectedDay, scope = {}) => {
     const rate = rateId
       ? (item.item_rates || []).find((entry) => entry.id === rateId) || rateForDates(item)
@@ -717,16 +830,40 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       showToast(capacityError, 'warning');
       return;
     }
-    const season = seasonFor(item, rate);
+    const season = seasonFor(item, rate, scope);
     if (!season.canAdd) {
       showToast(season.message, 'warning');
       return;
     }
-    /* The stored rate is the protected one, so every later read of this line prices
-       from the uplifted figure rather than re-deriving the un-uplifted season. */
-    const storedRate = season.status === 'protected' ? season.rate : rate;
+    /* No season covers the package dates, so this line would be charged from a
+       substitute. Ask before it lands, with the percentage to protect it at in the
+       same dialog, and re-enter the add with that answer. */
+    if (season.status === 'protected' || season.status === 'stale') {
+      setSeasonPrompt({
+        item,
+        rateId: rate.id,
+        dayIndex,
+        scope,
+        season,
+        protectionPercent: season.protectionPercent || protectionPercent || 0,
+        onAccept: (pct) => addService(item, rate.id, dayIndex, { ...scope, agreedProtectionPercent: pct })
+      });
+      return;
+    }
+    /* The stored rate is the season the resolver priced from, so every later read
+       of this line uses that figure rather than re-deriving another row. */
+    const storedRate = seasonStoredRate(season, rate);
     const unitCost = Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0;
     const isStayItem = /accommodation/i.test(String(item.category || ''));
+    /* The room this line is sold as. A property with several room types prices
+       and sleeps differently per room, so the room chosen in the charge dialog
+       rides on the line: its name prints on the document and its capacity sizes
+       the room count. */
+    const roomTypeId = scope.roomTypeId || storedRate.room_type_id || null;
+    const roomTypeName = scope.roomType || storedRate.room_type || '';
+    const roomMaxOccupancy = isStayItem
+      ? (Number(scope.roomMaxOccupancy) || Number(storedRate.room_max_occupancy) || 0)
+      : 0;
     /* A guide line prices the flat per-trip sum of the chosen service types. The
        guide's own contract figure (unit_cost / price_1_adult) is 0, so the line
        is built from the selected survey rates and stored so it survives a reload. */
@@ -738,15 +875,18 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       item_name: item.name,
       category: item.category || '',
       supplier_name: item.supplier_name || '',
+      supplier_star_rating: starRatingOf(item.supplier_star_rating),
       currency_code: rate.currency || item.currency || 'ZAR',
       rate_basis: guideTotal !== null ? 'per_trip' : (rate.rate_basis || item.pricing_model || 'per_person'),
       unit_cost: guideTotal !== null ? guideTotal : unitCost,
       unit_price: guideTotal !== null ? guideTotal : unitCost,
       quantity: isStayItem
-        ? accommodationRoomPlan({ ...item, rate_id: rate.id }, item, autoPattern).roomCount
+        ? accommodationRoomPlan({ ...item, rate_id: rate.id, rate_snapshot: storedRate, room_max_occupancy: roomMaxOccupancy || null }, item, autoPattern).roomCount
         : 1,
       is_included: true,
-      vehicle_capacity: Number(item.max_occupancy) || Number(rate.max_occupancy) || 0,
+      vehicle_capacity: roomMaxOccupancy || Number(item.max_occupancy) || Number(rate.max_occupancy) || 0,
+      room_type_id: roomTypeId,
+      room_type: roomTypeName,
       /* A band scope on the itinerary tab makes this line belong to that band alone, which
          is how a band gets an extra excursion without every other band paying for it. */
       tier_key: scope.tier_key || null,
@@ -759,7 +899,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       guide_for_item_key: null,
       guide_charge_type: null
     };
-    if (season.message) showToast(season.message, season.status === 'protected' ? 'warning' : 'info');
+    if (season.message) showToast(season.message, seasonToastKind(season));
     setDays((previous) => {
       if (!previous.length) return [{ day_number: 1, notes: '', services: [service] }];
       return previous.map((day, index) => index === dayIndex
@@ -777,23 +917,27 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
   const guideDetailsDefaultsFor = (dayIndex, guideKey) => {
     const day = days[dayIndex];
     const details = (day?.services || []).filter((service) => service.guide_for_item_key === guideKey);
-    const byKind = (category) => details.find((service) => {
-      const cat = String(service.category || '');
-      return category === 'meal'
-        ? /meal/i.test(cat)
-        : /accommodation/i.test(cat);
-    });
-    const meal = byKind('meal');
+    /* The driver's copy of a meal is the same item at another price, so the
+       guide's line is what the picker holds. Lunch and dinner are looked for
+       separately, so a guide fed both ways comes back with both restored. */
+    const guideMeals = details.filter((service) => (
+      /meal/i.test(String(service.category || ''))
+      && (service.guide_charge_type || 'guide') !== 'driver'
+    ));
+    const mealOccasion = (service) => String(
+      (library.find((entry) => entry.id === service.item_id) || {}).meal_type
+      || service.item_name
+      || ''
+    ).toLowerCase();
+    const pickMeal = (occasion) => (guideMeals.find((service) => mealOccasion(service).includes(occasion)) || {}).item_id || '';
     const overnights = details.filter((service) => {
       const cat = String(service.category || '');
       return /accommodation/i.test(cat);
     });
-    const lunch = meal ? details.find((service) => /lunch/i.test(service.item_name || '')) : null;
-    const dinner = meal ? details.find((service) => /dinner/i.test(service.item_name || '')) : null;
     const chargeTypes = overnights.map((service) => service.guide_charge_type || 'guide');
     return {
-      lunchItemId: lunch?.item_id || (meal ? '' : ''),
-      dinnerItemId: dinner?.item_id || '',
+      lunchItemId: pickMeal('lunch'),
+      dinnerItemId: pickMeal('dinner'),
       overnightItemId: overnights[0]?.item_id || '',
       riderCharge: chargeTypes.includes('driver') && chargeTypes.includes('guide')
         ? 'both'
@@ -814,7 +958,13 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     const pending = accomChargeModal;
     if (!pending) return;
     setAccomChargeModal(null);
-    addService(pending.item, choice.rateId, pending.dayIndex, { ...pending.scope, accommodationChargeChosen: true });
+    addService(pending.item, choice.rateId, pending.dayIndex, {
+      ...pending.scope,
+      accommodationChargeChosen: true,
+      roomTypeId: choice.roomTypeId || null,
+      roomType: choice.roomType || '',
+      roomMaxOccupancy: choice.roomMaxOccupancy || 0
+    });
   };
 
   const applyGuideDetails = (dayIndex, guideKey, plan) => {
@@ -822,11 +972,16 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     if (!day) return;
     const guideService = (day.services || []).find((service) => service.item_key === guideKey);
     /* Re-applying replaces the existing detail lines so reopening the dialog never
-       stacks a second lunch on top of the first. plan.overnight is an ARRAY of
-       lines — one per charged party when the operator bills guide AND driver —
-       and each line carries who it charges (guide_charge_type) so the dialog
-       reopens with the same choice. */
-    const lines = [plan.lunch, plan.dinner, ...(Array.isArray(plan.overnight) ? plan.overnight : plan.overnight ? [plan.overnight] : [])]
+       stacks a second lunch on top of the first. Every answer is an ARRAY of
+       lines — a meal the driver is flagged on writes a guide line and a driver
+       line, an overnight one per charged party — and each carries who it charges
+       (guide_charge_type) so the dialog reopens with the same choice. */
+    const linesOf = (value) => (Array.isArray(value) ? value : value ? [value] : []);
+    const lines = [
+      ...linesOf(plan.lunch),
+      ...linesOf(plan.dinner),
+      ...linesOf(plan.overnight)
+    ]
       .filter(Boolean)
       .map((detail) => {
         const item = detail.item;
@@ -834,7 +989,9 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           item_key: uuid(),
           item_id: item.id,
           rate_id: (item.item_rates || [])[0]?.id || null,
-          item_name: item.name,
+          /* Two parties eating the same meal are two prices, so the driver's copy
+             says whose it is instead of reading as a duplicate line. */
+          item_name: detail.who === 'driver' ? `${item.name} (driver)` : item.name,
           category: item.category || '',
           supplier_name: item.supplier_name || item.supplier?.name || '',
           currency_code: packageCurrency,
@@ -851,8 +1008,8 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           protected_season_name: '',
           guide_service_types: null,
           /* The overnight is always charged to the guide & driver alone; the
-             checkbox governs only the meal lines. */
-          guide_only: detail.who ? true : plan.guideOnly,
+             checkbox governs the meal lines, whoever eats them. */
+          guide_only: detail.forced === true ? true : plan.guideOnly,
           guide_for_item_key: guideKey,
           guide_charge_type: detail.who || null
         };
@@ -882,7 +1039,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         showToast(season.message, 'warning');
         return;
       }
-      if (season.message) showToast(season.message, season.status === 'protected' ? 'warning' : 'info');
+      if (season.message) showToast(season.message, seasonToastKind(season));
     }
     setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
       ...day,
@@ -893,7 +1050,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         const rate = item?.item_rates?.find((entry) => entry.id === value);
         if (!rate) return service;
         const season = seasonFor(item, rate);
-        const storedRate = season.status === 'protected' ? season.rate : rate;
+        const storedRate = seasonStoredRate(season, rate);
         const guideTypes = Array.isArray(service.guide_service_types) ? service.guide_service_types : [];
         const guideTotal = guideTypes.length ? guideChargeTotal(storedRate, guideTypes) : null;
         const unitCost = guideTotal !== null
@@ -907,9 +1064,10 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           unit_cost: unitCost,
           unit_price: unitCost,
           quantity: isStay(service)
-            ? accommodationRoomPlan({ ...item, rate_id: rate.id }, item, autoPattern).roomCount
+            ? accommodationRoomPlan({ ...item, rate_id: rate.id, rate_snapshot: storedRate }, item, autoPattern).roomCount
             : service.quantity,
-          vehicle_capacity: Number(item.max_occupancy) || Number(rate.max_occupancy) || service.vehicle_capacity || 0,
+          vehicle_capacity: Number(rate.room_max_occupancy) || Number(item.max_occupancy) || Number(rate.max_occupancy) || service.vehicle_capacity || 0,
+          ...(isStay(service) ? { room_type_id: rate.room_type_id || null, room_type: rate.room_type || '' } : {}),
           rate_snapshot: storedRate,
           price_protection_percent: season.protectionPercent || 0,
           protected_season_name: season.status === 'protected' ? season.seasonName : ''
@@ -966,13 +1124,13 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           showToast(season.message, 'warning');
           return service;
         }
-        const storedRate = season.status === 'protected' ? season.rate : liveRate;
+        const storedRate = seasonStoredRate(season, liveRate);
         const guideTypes = Array.isArray(service.guide_service_types) ? service.guide_service_types : [];
         const guideTotal = guideTypes.length ? guideChargeTotal(storedRate, guideTypes) : null;
         const unitCost = guideTotal !== null
           ? guideTotal
           : (Number(storedRate.unit_cost) || Number(storedRate.price_1_adult) || Number(storedRate.unit_price) || 0);
-        if (season.message) showToast(season.message, season.status === 'protected' ? 'warning' : 'info');
+        if (season.message) showToast(season.message, seasonToastKind(season));
         return {
           ...service,
           rate_id: liveRate.id,
@@ -980,6 +1138,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           currency_code: liveRate.currency || item.currency || service.currency_code,
           unit_cost: unitCost,
           unit_price: unitCost,
+          quantity: isStay(service)
+            ? accommodationRoomPlan({ ...item, rate_id: liveRate.id, rate_snapshot: storedRate }, item, autoPattern).roomCount
+            : service.quantity,
+          vehicle_capacity: Number(liveRate.room_max_occupancy) || Number(item.max_occupancy) || Number(liveRate.max_occupancy) || service.vehicle_capacity || 0,
+          ...(isStay(service) ? { room_type_id: liveRate.room_type_id || null, room_type: liveRate.room_type || '' } : {}),
           rate_snapshot: storedRate,
           price_protection_percent: season.protectionPercent || 0,
           protected_season_name: season.status === 'protected' ? season.seasonName : ''
@@ -1190,10 +1353,16 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       const vehicles = included.filter((service) => packageIsTransport(service, library));
       const others = included.filter((service) => !packageIsTransport(service, library));
       const vehicleLines = vehicles.length ? (options.showVehicleOptions
-        ? vehicles.map((service) => `<li>${escapeHtml(service.item_name)}${service.supplier_name ? ` — ${escapeHtml(service.supplier_name)}` : ''}</li>`).join('')
+        ? vehicles.map((service) => { const supplier = packageServiceSupplier(service, library); return `<li>${escapeHtml(service.item_name)}${supplier ? ` — ${escapeHtml(supplier)}` : ''}</li>`; }).join('')
         : `<li>${escapeHtml(packageTransportSummary(vehicles, library))}</li>`) : '';
       const otherLines = others
-        .map((service) => `<li>${escapeHtml(service.item_name)}${service.supplier_name ? ` — ${escapeHtml(service.supplier_name)}` : ''}</li>`).join('');
+        .map((service) => {
+          const supplier = packageServiceSupplier(service, library);
+          const room = /accommodation/i.test(String(service.category || '')) && service.room_type
+            ? ` (${escapeHtml(service.room_type)})`
+            : '';
+          return `<li>${escapeHtml(service.item_name)}${room}${supplier ? ` — ${escapeHtml(supplier)}` : ''}</li>`;
+        }).join('');
       const services = `${vehicleLines}${otherLines}`;
       return `<section><h2>Day ${index + 1}</h2>${day.notes ? `<p>${escapeHtml(day.notes)}</p>` : ''}${services ? `<ul>${services}</ul>` : ''}</section>`;
     }).join('');
@@ -1234,21 +1403,39 @@ const childRange = packageChildAgeRange(form.childAgeRange);
           ? Number(period.accommodation_per_person)
           : (accommodationPerPersonForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
         /* Derived from the accommodation's own contract when the season carries no override,
-           so the reader always sees a supplement rather than a zero that reads as no charge. */
+           so the reader always sees a supplement rather than a zero that reads as no charge.
+           The contract ladders still price the party's singles in order, and the season's
+           manual single-room count (if any) replaces the party-size heuristic. */
+        const seasonSupplement = singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null });
         const single = (period?.single_supplement != null && period.single_supplement !== 0)
           ? Number(period.single_supplement)
-          : (singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
+          : (seasonSupplement.total ?? 0);
         const seasonLine = period
           ? `${period?.name ? `${escapeHtml(period.name)} · ` : ''}Season ${seasonIndex + 1}${period?.valid_from && period?.valid_to ? ` · ${escapeHtml(period.valid_from)} \u2192 ${escapeHtml(period.valid_to)}` : ''}`
           : 'No season set';
-        const columns = presentationPricingColumns({ codes, bands: grid.bands, pools: pool.pools, perPersonFixed: pool.perPersonFixed, accommodation, singleSupplement: single, roomCapacity });
+        const columns = presentationPricingColumns({ codes, bands: grid.bands, pools: pool.pools, perPersonFixed: pool.perPersonFixed, accommodation, singleSupplement: single, singleSupplementTiers: seasonSupplement.tiers, singleRoomsOverride: period?.single_rooms ?? null, roomCapacity });
+        /* The flat supplement row can only carry one figure; when the contract is a
+           ladder it names what the ladder actually charges in single-room order. */
+        const ladder = singleSupplementLadderSummary(seasonSupplement.tiers, single);
+        const ladderBits = [];
+        if (seasonSupplement.tiers.length) {
+          if (ladder.waived > 0) ladderBits.push(`first ${ladder.waived} single room${ladder.waived === 1 ? '' : 's'} waived`);
+          if (ladder.nextSupplement != null) {
+            ladderBits.push(ladder.waived > 0
+              ? `from single ${ladder.waived + 1}: ${money(ladder.nextSupplement, packageCurrency)}`
+              : `single 1 costs ${money(ladder.nextSupplement, packageCurrency)}`);
+          } else {
+            ladderBits.push(`beyond that: ${money(ladder.beyond, packageCurrency)}`);
+          }
+        }
+        const supplementNote = ladderBits.length ? ` · contract ladder: ${ladderBits.join(' · ')}` : '';
         const travellerCells = columns.map(({ pax }) => `<td class="sum-cell sum-trav"><span class="sum-pax">${pax} pax</span></td>`).join('');
         const priceCells = columns.map(({ each }) => `<td class="sum-cell"><span class="sum-price">${money(price(each), packageCurrency)}</span></td>`).join('');
         return `<table class="price-summary"><tbody>
           <tr><td class="lab">Travel seasons</td><td class="sum-date" colspan="${columns.length}">${seasonLine}</td></tr>
           <tr><td class="lab">Travellers</td>${travellerCells}</tr>
           <tr><td class="lab">Price per person sharing</td>${priceCells}</tr>
-          <tr><td class="lab">Single supplement</td><td class="sum-flat sum-flat-amber" colspan="${columns.length}"><strong>${money(price(single), packageCurrency)}</strong><span class="sum-flat-from">per person, when you want your own room</span></td></tr>
+          <tr><td class="lab">Single supplement</td><td class="sum-flat sum-flat-amber" colspan="${columns.length}"><strong>${money(price(single), packageCurrency)}</strong><span class="sum-flat-from">per person, when you want your own room${supplementNote}</span></td></tr>
           <tr><td class="lab">Child price</td><td class="sum-flat sum-flat-child" colspan="${columns.length}">${childText}</td></tr>
         </tbody></table>`;
       }).join('');
@@ -1300,7 +1487,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
   };
 
   const updateForm = (field, value) => setForm((previous) => ({ ...previous, [field]: value }));
-  const addPeriod = () => setPeriods((previous) => [...previous, { valid_from: '', valid_to: '', name: '', accommodation_per_person: null, single_supplement: 0 }]);
+  const addPeriod = () => setPeriods((previous) => [...previous, { valid_from: '', valid_to: '', name: '', accommodation_per_person: null, single_supplement: 0, single_rooms: null }]);
   const changePeriod = (index, field, value) => setPeriods((previous) => previous.map((period, rowIndex) =>
     rowIndex === index ? { ...period, [field]: value } : period));
   const removePeriod = (index) => setPeriods((previous) => previous.filter((_, rowIndex) => rowIndex !== index));
@@ -1338,20 +1525,38 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             <strong>Item type</strong>
             <div className="category-filters">{categoryOptions.map((category) => <button key={category} type="button" className={`category-chip ${categoryFilter === category ? 'active' : ''}`} onClick={() => setCategoryFilter((current) => current === category ? '' : category)}>{category}</button>)}</div>
           </div>
-          <label className="package-filter-section package-destination-filter"><strong>Destination / island</strong><select value={destinationFilter} onChange={(event) => setDestinationFilter(event.target.value)}><option value="">All destinations</option>{destinationOptions.map((destination) => <option key={destination} value={destination}>{destination}</option>)}</select></label>
-          {(categoryFilter || destinationFilter || search) && <button type="button" className="clear-filters-btn" onClick={() => { setCategoryFilter(''); setDestinationFilter(''); setSearch(''); }}>Clear filters</button>}
+          <MultiSelectFilter
+            className="package-filter-section"
+            label="Destination / island"
+            options={destinationOptions}
+            value={destinationFilters}
+            onChange={setDestinationFilters}
+            placeholder="All destinations"
+            searchPlaceholder="Search destinations…"
+            emptyText="No contracted item has a destination recorded yet."
+          />
+          {(categoryFilter || destinationFilters.length || search) && <button type="button" className="clear-filters-btn" onClick={() => { setCategoryFilter(''); setDestinationFilters([]); setSearch(''); }}>Clear filters</button>}
           <p className="package-help">{markupPercent > 0 ? `Contract rates are copied, then the assigned partner markup of ${markupPercent}% is applied to every price.` : 'Rates are copied at their contract amount. Assign a partner on the Client partner tab to apply that client markup.'}</p>
           <div className="package-library-results">
             {visibleResults.map((item) => {
               const eligibleRates = (item.item_rates || []).filter((entry) => currencyMatches(entry, packageCurrency));
               const rate = rateForDates(item);
               const coverage = seasonFor(item, rate);
-              const basis = basisOfRate(rate, item);
+              /* The card shows the row the add will actually price from. With no
+                 covering season the resolver stands a prior year in - uplifted when
+                 a protection percentage is set, unchanged when it is not - and in
+                 both cases that row, not the first one the currency returns, is
+                 the figure the operator is looking at. */
+              const shownRate = (coverage.status === 'protected' || coverage.status === 'stale') && coverage.rate
+                ? coverage.rate
+                : rate;
+              const basis = basisOfRate(shownRate, item);
               /* The same capacity the band engine reads, so the number on the card is the
                  number that decides which band this vehicle opens up. */
-              const vehicleCapacity = packageVehicleCapacity(item, rate);
-              const addToDay = () => addService(item, rate?.id, selectedDay, bandScope ? { tier_key: bandScope } : {});
-              return <article key={item.id} className={`package-library-card ${!rate ? 'unavailable' : ''}`} draggable={!!rate} onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'library', itemId: item.id, rateId: rate?.id }))} onDoubleClick={addToDay}>
+              const vehicleCapacity = packageVehicleCapacity(item, shownRate);
+              const destination = itemDestinationLabel(item);
+              const addToDay = () => addService(item, shownRate?.id, selectedDay, bandScope ? { tier_key: bandScope } : {});
+              return <article key={item.id} className={`package-library-card ${!shownRate ? 'unavailable' : ''}`} draggable={!!shownRate} onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'library', itemId: item.id, rateId: shownRate?.id }))} onDoubleClick={addToDay}>
                 <div className="package-library-top">
                   <span className="package-library-name">{item.name}</span>
                   <GripVertical size={16} className="package-library-grip" />
@@ -1359,26 +1564,45 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                 <div className="package-library-meta">
                   <span className="item-cat-tag">{item.category || 'General'}</span>
                   {vehicleCapacity > 0 && <span className="item-capacity-tag" title={`Seats ${vehicleCapacity} travellers, so a band is offered up to ${vehicleCapacity} pax`}>Max: {vehicleCapacity}</span>}
-                  {rate
-                    ? <span className="item-price-tag">{money(contractPriceOf(rate), rate.currency || item.currency || 'ZAR')} <span style={{ color: '#94a3b8', fontWeight: 500 }}>{basisLabelOf(basis)}</span></span>
+                  {shownRate
+                    ? <span className="item-price-tag">{money(contractPriceOf(shownRate), shownRate.currency || item.currency || 'ZAR')} <span style={{ color: '#94a3b8', fontWeight: 500 }}>{basisLabelOf(basis)}</span></span>
                     : <span className="item-price-tag missing">No rate{eligibleRates.length ? ' in this currency' : ''}</span>}
                 </div>
+                {/* Where the item actually is: a guide, vehicle or property in the wrong
+                    town is not a cheaper alternative, and the destination filter above can
+                    only ever list items that recorded one — so an item without one says so
+                    here instead of simply never appearing. */}
+                <div
+                  className={`library-item-destination ${destination ? '' : 'missing'}`}
+                  title={destination
+                    ? `Located in ${destination}`
+                    : 'No destination recorded on this library item — set it in Library Items so it can be found by destination.'}
+                >
+                  <MapPin size={12} />
+                  <span>{destination || 'No destination set'}</span>
+                </div>
                 <div className="package-library-supplier">
-                  {item.supplier_name || ''}
+                  {/accommodation/i.test(String(item.category || ''))
+                    ? withStarGrade(item.supplier_name || '', item.supplier_star_rating)
+                    : (item.supplier_name || '')}
                   {SIDEBAR_FLAT_BASES.has(String(basis)) && <span className="basis-tag">{basisLabelOf(basis)}</span>}
-                  {rate && /accommodation/i.test(String(item.category || '')) && (() => {
-                    const opt = rateOptionLabel(rate, item);
-                    const season = rate.season_name || rate.option_name || '';
-                    const from = rate.valid_from ? String(rate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
-                    const to = rate.valid_to ? String(rate.valid_to).slice(0, 10).replaceAll('-', '/') : '';
-                    const label = [season, opt, (from && to) ? `${from}-${to}` : ''].filter(Boolean).join(' · ');
+                  {shownRate && /accommodation/i.test(String(item.category || '')) && (() => {
+                    const opt = rateOptionLabel(shownRate, item);
+                    const season = shownRate.season_name || shownRate.option_name || '';
+                    const from = shownRate.valid_from ? String(shownRate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
+                    const to = shownRate.valid_to ? String(shownRate.valid_to).slice(0, 10).replaceAll('-', '/') : '';
+                    const label = [shownRate.room_type, season, opt, nightBandLabel(shownRate), (from && to) ? `${from}-${to}` : ''].filter(Boolean).join(' · ');
                     return label ? <span className="basis-tag" style={{ color: '#5b21b6', background: '#f5f3ff', borderColor: '#ddd6fe' }}>{label}</span> : null;
                   })()}
                   {(coverage.status !== 'ok' && coverage.status !== 'open') && <span className="basis-tag package-library-flag warn" title={coverage.message}>
-                    {coverage.status === 'protected' ? `Protection ${coverage.protectionPercent}%` : coverage.status === 'blocked' ? 'No matching season' : 'Season mismatch'}
+                    {coverage.status === 'protected'
+                      ? `⚠ ${coverage.seasonName || 'Prior'} ${seasonWindowLabel(shownRate)} +${coverage.protectionPercent}%`
+                      : coverage.status === 'stale'
+                        ? `⚠ ${coverage.seasonName || 'Old'} ${seasonWindowLabel(shownRate)} · no protection`
+                        : coverage.status === 'blocked' ? 'No matching season' : 'Season mismatch'}
                   </span>}
                 </div>
-                <button type="button" className="secondary-btn package-library-add" onClick={addToDay} disabled={!rate}>Add to day {selectedDay + 1}</button>
+                <button type="button" className="secondary-btn package-library-add" onClick={addToDay} disabled={!shownRate}>Add to day {selectedDay + 1}</button>
               </article>;
             })}
             {search.trim().length > 0 && search.trim().length < 2 && <p>Enter at least 2 characters to search.</p>}
@@ -1428,9 +1652,11 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             {scopedServicesFor(days[selectedDay]).map((service) => {
               const rawIndex = rawIndexOf(selectedDay, service);
               const item = itemForService(service);
-              const coverage = seasonFor(item, rateForService(service));
+              const coverage = seasonFor(item, rateForService(service), { service });
               const roomPlan = isStay(service) ? roomPlanFor(service) : null;
-              const capacity = Number(item?.max_occupancy || service.vehicle_capacity) || 0;
+              const capacity = isStay(service)
+                ? (Number(service.vehicle_capacity) || Number(item?.max_occupancy) || 0)
+                : (Number(item?.max_occupancy || service.vehicle_capacity) || 0);
               const capacitySummary = capacity
                 ? isStay(service)
                   ? `Max ${capacity} per room`
@@ -1449,7 +1675,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
               const serviceCurrency = service.currency_code || packageCurrency;
               return <article key={service.item_key || `${service.id || service.item_id}-${rawIndex}`} className={`package-canvas-service ${bandOnly ? 'band-only' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: selectedDay, fromIndex: rawIndex }))}>
                 <GripVertical size={16} className="package-grip" />
-                <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}</small>
+                <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{isStay(service) && service.room_type ? ` · ${service.room_type}` : ''}</small>
                   {bandOnly
                     ? <small className="package-band-flag">this band only</small>
                     : (service.tier_key && <small className="package-band-flag other">{packageBandLabel(mergedBands.find((band) => band.item_key === service.tier_key) || {})} only</small>)}
@@ -1460,12 +1686,18 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                     const season = rate.season_name || rate.option_name || 'Contract rate';
                     const from = rate.valid_from ? String(rate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
                     const to = rate.valid_to ? String(rate.valid_to).slice(0, 10).replaceAll('-', '/') : '';
-                    const label = [season, opt, (from && to) ? `${from}-${to}` : ''].filter(Boolean).join(' · ');
+                    const label = [rate.room_type, season, opt, nightBandLabel(rate), (from && to) ? `${from}-${to}` : ''].filter(Boolean).join(' · ');
                     return <option key={rate.id} value={rate.id}>{label} · {rate.currency} {Number(rate.unit_cost || rate.price_1_adult || rate.unit_price || 0).toFixed(2)}</option>;
                   })}
                   </select>}
-                  {Number(service.price_protection_percent) > 0
-                    ? <small className="package-season-warning protected" title={service.rate_snapshot?.protection_note || 'Pricing Protection applied'}>{service.protected_season_name ? `Pricing Protection applied — ${service.protected_season_name} season +${service.price_protection_percent}%` : `Pricing Protection applied +${service.price_protection_percent}%`}</small>
+                  {Number(service.price_protection_percent) > 0 ? (() => {
+                    const stampWindow = seasonWindowLabel(service.rate_snapshot);
+                    const stampSeason = service.protected_season_name || service.rate_snapshot?.season_name || 'prior season';
+                    const stampDates = stampWindow === 'undated' ? '' : ` (${stampWindow})`;
+                    return <small className="package-season-warning protected" title={`Pricing Protection applied: +${service.price_protection_percent}% added to the "${stampSeason}" season${stampDates} because no season covers this package's validity dates.`}>
+                      ⚑ Protected +{service.price_protection_percent}% · {stampSeason}{stampDates}
+                    </small>;
+                  })()
                     : !coverage.ok && <small className="package-season-warning" title={coverage.message}>{coverage.message}</small>}
                   {Number(service.price_protection_percent) > 0 && <small className="package-protected-flag">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} includes the protection uplift</small>}
                   {Array.isArray(service.guide_service_types) && service.guide_service_types.length > 0 && (
@@ -1531,6 +1763,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         derivedSingleSupplement={derivedSingleSupplement}
         singleSupplementOverride={hasSupplementOverride}
         singleSupplement={singleSupplementForDisplay}
+        singleRoomsAvailable={dbFeatures.singleRooms}
       />}
       {tab === 'summary' && <PricingSummaryTab
         vehicleTypes={vehicleTypes}
@@ -1619,7 +1852,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             {days.length ? days.map((day, dayIndex) => <section key={day.id || `preview-${dayIndex}`}>
               <strong>Day {dayIndex + 1}</strong>
               {(day.services || []).map((service, serviceIndex) => <div className="package-preview-item" key={`${service.id || service.item_id}-${serviceIndex}`}>
-                <span>{service.item_name}<small>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}{service.is_included === false ? ' · optional' : ''}{packageIsTransport(service, library) && !service.tier_key ? ' · vehicle ladder, party picks one' : ''}</small></span>
+                <span>{service.item_name}<small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{service.is_included === false ? ' · optional' : ''}{packageIsTransport(service, library) && !service.tier_key ? ' · vehicle ladder, party picks one' : ''}</small></span>
                 <span className="package-preview-price">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} A- {service.quantity || 1}</span>
                 <button type="button" className="package-icon-button" aria-label={`Remove ${service.item_name} from the package`} onClick={() => removeService(dayIndex, serviceIndex)}><Trash2 size={14} /></button>
               </div>)}
@@ -1671,6 +1904,51 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       onConfirm={confirmAccommodationCharge}
       onCancel={() => setAccomChargeModal(null)}
     />}
+    {/* No season covers the package validity dates, so this line is not a quote from
+        the contract - it is a stand-in. The dialog says which season stands in and
+        over which dates, and takes the percentage the line is then protected at. It
+        starts on the Settings figure and only prices this line; Settings is untouched. */}
+    {seasonPrompt && (() => {
+      const promptPct = Math.max(0, Number(seasonPrompt.protectionPercent) || 0);
+      return (
+        <ConfirmDialog
+          title={seasonPrompt.season.status === 'stale'
+            ? 'Charge this package from an old season?'
+            : 'No season covers this package'}
+          message={seasonPrompt.season.message}
+          detail={promptPct > 0
+            ? `Pricing Protection adds ${promptPct}% to that season's figures, so the line is charged a protected price rather than the old contract amount. Leave it at 0 to charge the figure exactly as the supplier last quoted it.`
+            : 'With no percentage the line is charged that season\'s contract figure exactly as it stands, and the package is priced on out-of-date money until the current season is loaded.'}
+          confirmLabel={promptPct > 0 ? `Apply ${promptPct}% and add` : 'Add anyway'}
+          cancelLabel="Don't add"
+          onConfirm={() => {
+            const apply = seasonPrompt.onAccept;
+            setSeasonPrompt(null);
+            apply?.(promptPct);
+          }}
+          onCancel={() => setSeasonPrompt(null)}
+        >
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', fontSize: '0.85rem', color: '#334155' }}>
+            <span className="form-label" style={{ margin: 0 }}>Pricing Protection %</span>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="0.5"
+              className="input"
+              style={{ maxWidth: '140px' }}
+              value={seasonPrompt.protectionPercent}
+              onChange={(event) => setSeasonPrompt((prompt) => (prompt
+                ? { ...prompt, protectionPercent: event.target.value }
+                : prompt))}
+            />
+            <small style={{ color: '#64748b', fontWeight: 400 }}>
+              Settings has {protectionPercent || 0}%. This applies to the lines added from this dialog.
+            </small>
+          </label>
+        </ConfirmDialog>
+      );
+    })()}
     {guideDetailsModal && (function renderGuideDetails() {
       const day = days[guideDetailsModal.dayIndex];
       const guideLine = (day?.services || []).find((service) => service.item_key === guideDetailsModal.guideKey);

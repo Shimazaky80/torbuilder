@@ -24,8 +24,10 @@ import {
   XCircle,
   Filter,
   CreditCard,
-  ChevronDown
+  Star
 } from 'lucide-react';
+import { STAR_GRADES, starRatingOf, starGlyphs, starLabel, isAccommodationSupplier } from '../lib/starGrading';
+import { supplierStarColumn } from '../lib/supplierStarColumn';
 
 export const Suppliers = () => {
   const [suppliers, setSuppliers] = useState([]);
@@ -42,6 +44,15 @@ export const Suppliers = () => {
 
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState(null);
+  /* The star grading column ships with its own migration, so the editor only
+     appears once the column exists — otherwise saving a supplier would fail. */
+  const [starColumnReady, setStarColumnReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    supplierStarColumn().then((ready) => { if (active) setStarColumnReady(ready); });
+    return () => { active = false; };
+  }, []);
 
   const { showToast } = useToast();
   const navigate = useNavigate();
@@ -56,6 +67,7 @@ export const Suppliers = () => {
   const [form, setForm] = useState({
     name: '',
     category: 'Accommodation',
+    starRating: '',
     contactPerson: '',
     email: '',
     phone: '',
@@ -148,6 +160,7 @@ export const Suppliers = () => {
     setForm({
       name: '',
       category: 'Accommodation',
+      starRating: '',
       contactPerson: '',
       email: '',
       phone: '',
@@ -171,6 +184,7 @@ export const Suppliers = () => {
     setForm({
       name: supplier.name || '',
       category: supplier.category || 'Accommodation',
+      starRating: supplier.star_rating ? String(supplier.star_rating) : '',
       contactPerson: supplier.contact_person || '',
       email: supplier.email || '',
       phone: supplier.phone || '',
@@ -213,6 +227,11 @@ export const Suppliers = () => {
         company_id: profile.company_id,
         name: form.name,
         category: form.category,
+        /* Only a hotel carries a grade; switching the category away clears it so
+           a transport supplier never keeps a stale star rating. */
+        ...(starColumnReady
+          ? { star_rating: isAccommodationSupplier(form) ? starRatingOf(form.starRating) : null }
+          : {}),
         contact_person: form.contactPerson,
         email: form.email,
         phone: form.phone,
@@ -358,6 +377,49 @@ export const Suppliers = () => {
                       </SearchableSelect>
                     </div>
                   </div>
+
+                  {starColumnReady && isAccommodationSupplier(form) && (
+                    <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '0.85rem 1rem' }}>
+                      <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#92400e', display: 'block', marginBottom: '0.45rem' }}>
+                        Star grading
+                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                        {STAR_GRADES.map((grade) => {
+                          const active = Number(form.starRating) === grade;
+                          return (
+                            <button
+                              key={grade}
+                              type="button"
+                              aria-pressed={active}
+                              title={active ? `Clear the ${grade}-star grading` : `${grade}-star hotel`}
+                              onClick={() => setForm({ ...form, starRating: active ? '' : grade })}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.15rem',
+                                background: active ? '#f59e0b' : '#fff',
+                                color: active ? '#fff' : '#b45309',
+                                border: `1px solid ${active ? '#d97706' : '#fcd34d'}`,
+                                borderRadius: '8px',
+                                padding: '0.35rem 0.5rem',
+                                cursor: 'pointer',
+                                fontSize: '0.82rem',
+                                fontWeight: 700
+                              }}
+                            >
+                              <Star size={15} fill={active ? '#fff' : 'none'} /> {grade}
+                            </button>
+                          );
+                        })}
+                        <span style={{ fontSize: '0.8rem', color: '#92400e', fontWeight: 700 }}>
+                          {form.starRating ? `${starLabel(form.starRating)} hotel` : 'Not graded'}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.74rem', color: '#92400e', marginTop: '0.4rem', lineHeight: 1.5 }}>
+                        The grade belongs to the property, so every accommodation item from this supplier carries it into the itinerary, vouchers and client documents. Click the selected star again to clear it.
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
@@ -664,6 +726,15 @@ export const Suppliers = () => {
                   <span className="status-badge active" style={{ background: '#f1f5f9', color: '#334155', border: '1px solid #e2e8f0' }}>
                     {supplier.category || 'General'}
                   </span>
+                  {starRatingOf(supplier.star_rating) && (
+                    <div
+                      title={`${starLabel(supplier.star_rating)} hotel`}
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.2rem', color: '#b45309', fontSize: '0.82rem', fontWeight: 700 }}
+                    >
+                      <span>{starGlyphs(supplier.star_rating)}</span>
+                      <span style={{ fontSize: '0.72rem', fontWeight: 600 }}>{starLabel(supplier.star_rating)}</span>
+                    </div>
+                  )}
                 </td>
                 <td>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', color: '#475569', fontSize: '0.85rem' }}>

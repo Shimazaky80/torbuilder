@@ -5,6 +5,8 @@ import {
   vehicleColumnPools,
   vehicleVectorPrice
 } from '../lib/packagePricing';
+import { singleSupplementLadderSummary } from '../lib/singleSupplement';
+import { nightBandLabel } from '../lib/accommodationOptions';
 
 const MAX_COLUMNS = 6;
 
@@ -28,6 +30,12 @@ const dateLabel = (date) => {
   if (!date) return '';
   const [, month, day] = String(date).split('-');
   return `${day} ${Number(month)}`;
+};
+const nightsBetween = (from, to) => {
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  return Math.max(1, Math.round((end - start) / 86400000));
 };
 
 export const PricingSeasonsTab = ({
@@ -53,7 +61,8 @@ export const PricingSeasonsTab = ({
   setActiveSeason,
   accommodationPerPerson = null,
   derivedAccommodation = { total: null, rows: [], derived: false, unresolved: [] },
-  derivedSingleSupplement = { total: null, rows: [], derived: false, unresolved: [] }
+  derivedSingleSupplement = { total: null, rows: [], derived: false, unresolved: [] },
+  singleRoomsAvailable = true
 }) => {
   const [tripFrom, setTripFrom] = useState('');
   const [tripTo, setTripTo] = useState('');
@@ -65,6 +74,7 @@ export const PricingSeasonsTab = ({
   );
 
   const hasTripDates = Boolean(tripFrom && tripTo);
+  const tripNights = hasTripDates ? nightsBetween(tripFrom, tripTo) : null;
   const resolvedSeason = useMemo(() => {
     if (!hasTripDates) return null;
     return (periods || []).find((period) =>
@@ -86,6 +96,24 @@ export const PricingSeasonsTab = ({
     : (derivedSingleSupplement.total ?? 0);
   const supplementDerived = !hasSupplementOverride && derivedSingleSupplement.total != null;
 
+  /* A contract ladder prices the trip's single rooms in order, so the flat cell -
+     which can only show one figure - names what the ladder actually does. The
+     party columns on the Presentation tab carry the per-single share. */
+  const ladderTiers = derivedSingleSupplement.tiers || [];
+  const ladderSummary = singleSupplementLadderSummary(ladderTiers, singleSupplement);
+  const ladderNote = !ladderTiers.length ? '' : (() => {
+    const parts = [];
+    if (ladderSummary.waived > 0) parts.push(`first ${ladderSummary.waived} single room${ladderSummary.waived === 1 ? '' : 's'} waived`);
+    if (ladderSummary.nextSupplement != null) {
+      parts.push(ladderSummary.waived > 0
+        ? `from single ${ladderSummary.waived + 1}: ${money(ladderSummary.nextSupplement, currency)}`
+        : `single 1 costs ${money(ladderSummary.nextSupplement, currency)}`);
+    } else {
+      parts.push(`beyond that: ${money(ladderSummary.beyond, currency)}`);
+    }
+    return `Contract ladder: ${parts.join(' · ')}. Counted per single room, per night.`;
+  })();
+
   const sharedPoolOf = (code) => Number(pool.pools[code]) || 0;
 
   /* The accommodation lines, resolved one at a time against the trip dates. Each lodge
@@ -106,7 +134,7 @@ export const PricingSeasonsTab = ({
   }, [days, library]);
 
   const accommodationResolutions = useMemo(() => accommodationLines.map(({ service, item }) => ({
-    ...accommodationRatesForTrip(service, item, tripFrom, tripTo),
+    ...accommodationRatesForTrip(service, item, tripFrom, tripTo, tripNights),
     item,
     service
   })), [accommodationLines, tripFrom, tripTo]);
@@ -191,7 +219,14 @@ export const PricingSeasonsTab = ({
           <label><span>Ends</span><input type="date" value={activePeriod?.valid_to || ''} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'valid_to', event.target.value)} /></label>
           <label><span>Accommodation per person <small>sharing</small></span><input type="number" min="0" step="0.01" value={activePeriod?.accommodation_per_person ?? ''} placeholder={derivedAccommodation.total != null ? `derived: ${money(derivedAccommodation.total, currency)}` : 'derived from the season below'} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'accommodation_per_person', event.target.value === '' ? null : Number(event.target.value))} /></label>
           <label><span>Single supplement <small>per person</small></span><input type="number" min="0" step="0.01" value={hasSupplementOverride ? Number(activePeriod.single_supplement) : ''} placeholder={derivedSingleSupplement.total != null ? `derived: ${money(derivedSingleSupplement.total, currency)}` : '0.00'} onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'single_supplement', event.target.value === '' ? null : Number(event.target.value))} /></label>
+          <label><span>Single rooms <small>assumed</small></span><input type="number" min="0" step="1" disabled={!singleRoomsAvailable} value={activePeriod?.single_rooms ?? ''} placeholder="auto from party size" onChange={(event) => activePeriodIndex >= 0 && onChangePeriod(activePeriodIndex, 'single_rooms', event.target.value === '' ? null : Math.max(0, Math.round(Number(event.target.value) || 0)))} /></label>
         </div>
+        {singleRoomsAvailable ? (
+          <p className="ps-note">Single rooms is the manual override for a quote priced before room allocations exist: the party&rsquo;s price assumes that many single rooms in every column. Clear it to work the count out from the party size. When the package is added to an itinerary, the itinerary&rsquo;s own room allocations decide the singles instead.</p>
+        ) : (
+          <p className="ps-note">The single-room override isn&rsquo;t available in this workspace yet; singles are worked out from the party size.</p>
+        )}
+        {!!ladderNote && <p className="ps-note">{ladderNote}</p>}
         {!resolvedSeason && <button type="button" className="ps-icon-button" aria-label={`Remove ${seasonLabel(activePeriod, activePeriodIndex)}`} onClick={() => onRemovePeriod(activePeriodIndex)}><Trash2 size={15} /> Remove this season</button>}
       </div>}
       <div className="ps-trip">
@@ -268,6 +303,7 @@ export const PricingSeasonsTab = ({
                   {supplementDerived && <span className="ps-stamp ps-stamp-ok">derived</span>}
                   {hasSupplementOverride && <span className="ps-stamp">locked on the season</span>}
                   <span className="ps-flat-from">per person · identical for every vehicle column · charged only on the accommodation · switches with the season</span>
+                  {!!ladderNote && <span className="ps-flat-from">{ladderNote}</span>}
                 </div>
               </td>
             </tr>
@@ -318,7 +354,8 @@ export const PricingSeasonsTab = ({
               ? ' Locked on this season; clear the field to read it from the accommodation again.'
               : (derivedSingleSupplement.total != null
                 ? <> Read off the accommodation line{derivedSingleSupplement.rows.length === 1 ? '' : 's'}: <b>{derivedSingleSupplement.rows.map((row) => row.name).join(', ')}</b>. Override it in the editor to lock the season's own figure.</>
-                : ' Enter a figure here to publish a supplement.')}</div>
+                : ' Enter a figure here to publish a supplement.')}
+            {!!ladderNote && <> {ladderNote}</>}</div>
         </div>
         <div className="ps-ov ps-ov-locked">
           <h4>Unit pool (vehicle + shared)<span className="ps-stamp ps-stamp-same">annual</span></h4>
@@ -367,13 +404,14 @@ export const PricingSeasonsTab = ({
             const windows = accommodation && row.item
               ? accommodationRatesForTrip(row.service, row.item, null, null).rates
               : [];
+            const bandOfRate = (entry) => nightBandLabel((row.item?.item_rates || []).find((itemRate) => itemRate.id === entry.id));
             return <tr key={`svc-${key}`}>
               <td><b>{row.service.item_name || row.item?.name || 'Service'}</b><small>day {row.dayIndex + 1}{row.item?.supplier_name ? ` · ${row.item.supplier_name}` : ''}</small></td>
               <td>{basisBadge(row)}</td>
               <td>{vehiclePills(row)}</td>
               <td>{accommodation
                 ? (windows.length
-                  ? <span className="ps-pills">{windows.map((rate) => <span key={`${rate.id}-${rate.from || 'open'}-${rate.to || 'open'}`} className="ps-pill ps-pill-season">{rate.name}{rate.from ? ` · ${rate.from}` : ''}{rate.to ? ` → ${rate.to}` : ''}</span>)}</span>
+                  ? <span className="ps-pills">{windows.map((rate) => <span key={`${rate.id}-${rate.from || 'open'}-${rate.to || 'open'}`} className="ps-pill ps-pill-season">{rate.name}{bandOfRate(rate) ? ` · ${bandOfRate(rate)}` : ''}{rate.from ? ` · ${rate.from}` : ''}{rate.to ? ` → ${rate.to}` : ''}</span>)}</span>
                   : <span className="ps-pill ps-pill-none">seasonal · no contract windows</span>)
                 : <span className="ps-pill">annual</span>}</td>
               <td><div className="ps-snapshot">

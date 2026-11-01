@@ -19,16 +19,40 @@ import {
   SURCHARGE_TYPES,
   UNIT_BASES,
   isSurchargeChargeable,
+  isSurchargeItem,
   surchargeBasisOf,
   surchargeTypeOf,
   surchargeUnitBasisOf
 } from './surchargeFees';
+import { normaliseSingleSupplementLadder, stripWaiverNote, waiverFromLadder } from './singleSupplement';
+import { collapseOccupancyLadder, isOccupancyBasis, isOccupancyTiered } from './occupancyPricing';
+import { nightBandLabel, weekendDaysLabel, weekendPriceOf } from './accommodationOptions';
+import { normaliseStaffTiers, staffTierBands } from './staffRoomTiers';
+import { starGlyphs } from './starGrading';
+
+/* The destination an item is picked by: the region (for a property, the city its
+   supplier is in) narrowed by its area. `location` is the older single field and
+   stands in when no region was ever set. An item with none of them returns '', so
+   a picker can say the destination is unknown instead of printing nothing and
+   leaving the operator to wonder where the item went. Any library select that
+   feeds a picker has to name all three columns, or every card reads
+   "No destination set". */
+export const itemDestinationLabel = (item = {}) => {
+  const region = item.destination_region || item.destinationRegion || item.location
+    || item.destination_area || item.destinationArea;
+  const area = item.destination_area || item.destinationArea;
+  return [region, area]
+    .map((part) => String(part || '').trim())
+    .filter((part, index, all) => part && all.indexOf(part) === index)
+    .join(' \u00b7 ');
+};
 
 export const libraryItemKind = (category) => {
   const value = String(category || '').trim();
-  if (value === SURCHARGE_CATEGORY) return 'surcharge';
+  if (isSurchargeItem({ category: value })) return 'surcharge';
   if (value === 'Accommodation') return 'accommodation';
   if (value === 'Transfers') return 'transfers';
+  if (value === 'Transport') return 'transport';
   if (value === 'Activities / Tours') return 'activities';
   if (value === 'Flights / Charter') return 'flights';
   if (value === 'Meals') return 'meals';
@@ -43,6 +67,7 @@ export const libraryItemKind = (category) => {
 const CATEGORY_LABELS = {
   accommodation: 'Accommodation',
   transfers: 'Transfers',
+  transport: 'Transport',
   activities: 'Activities / Tours',
   flights: 'Flights / Charter',
   meals: 'Meals',
@@ -60,6 +85,7 @@ const CATEGORY_LABELS = {
 const BASIS_LABELS = {
   per_person: 'per person',
   per_person_sharing: 'per person sharing',
+  per_person_occupancy: 'per person by occupancy',
   per_room: 'per room',
   per_vehicle: 'per vehicle',
   per_trip: 'per trip',
@@ -77,6 +103,16 @@ const TICKET_TYPE_LABELS = {
 
 const MENU_LABELS = { a_la_carte: 'À la carte', buffet: 'Buffet' };
 
+/* What a hired vehicle is engaged for. The transport_type column is the only
+   place the four jobs are told apart, and the driver's meals and overnight follow
+   from it, so the rate card names the job it was priced for. */
+const TRANSPORT_TYPE_LABELS = {
+  tour_activity: 'Tour / activity transport',
+  transfer: 'Transfer',
+  overland: 'Overland',
+  at_disposal: 'At disposal'
+};
+
 const GUIDE_SERVICES = [
   ['guide_transfer_rate', 'Transfer'],
   ['guide_half_day_rate', 'Half day'],
@@ -91,7 +127,7 @@ const GUIDE_SERVICES = [
 const LEGACY_PRICE_KEYS = [
   'price_1_adult', 'price_2_adults', 'price_3_plus_adults', 'unit_price', 'unit_cost',
   'child_discount', 'taxes_and_surcharges', 'fuel_surcharge',
-  'entrance_fee_per_person', 'entrance_fee_per_vehicle',
+  'entrance_fee_per_person', 'entrance_fee_per_vehicle', 'entrance_fee_per_child',
   'conservation_levy_per_adult', 'conservation_levy_per_child',
   'conservation_levy_adult', 'conservation_levy_child',
   'guide_rate', 'driver_rate', 'guide_transfer_rate', 'guide_half_day_rate',
@@ -112,6 +148,7 @@ const LEGACY_LABELS = {
   entrance_fee_per_vehicle: 'Entrance fee / vehicle',
   conservation_levy_per_adult: 'Conservation levy / adult',
   conservation_levy_per_child: 'Conservation levy / child',
+  entrance_fee_per_child: 'Entrance fee / child',
   conservation_levy_adult: 'Conservation levy / adult',
   conservation_levy_child: 'Conservation levy / child',
   guide_rate: 'Guide rate',
@@ -174,8 +211,26 @@ const factsFor = ({ kind, item, bands, rates }) => {
   };
 
   if (kind === 'accommodation') {
-    push('Max occupancy', item.max_occupancy);
-    push('Max adults', item.max_adults);
+    /* A property sells rooms, not a single occupancy figure. When its room
+       types are loaded they are the readable fact; the property-wide columns
+       are the legacy shape of a one-room property. */
+    const rooms = Array.isArray(item.room_types) ? item.room_types : (Array.isArray(item.roomTypes) ? item.roomTypes : []);
+    if (rooms.length) {
+      /* A villa room is sold by how many sleep in it, and the number of beds the
+         ladder prices is the capacity an operator can actually sell. */
+      push('Room types', rooms
+        .map((room) => {
+          const name = room.name || 'Room';
+          const beds = room.maxOccupancy ?? room.max_occupancy ?? 1;
+          return isOccupancyBasis(room.pricingModel ?? room.pricing_model)
+            ? `${name} (sleeps ${beds}, priced per person by occupancy)`
+            : `${name} (sleeps ${beds})`;
+        })
+        .join(' \u00b7 '));
+    } else {
+      push('Max occupancy', item.max_occupancy);
+      push('Max adults', item.max_adults);
+    }
     if (bands.length) push('Child age tiers', bands.map(bandLabel).join(' \u00b7 '));
     /* The default board is not a library_items column: every season row carries
        its own board, and the first one that has a figure is the item default. */
@@ -209,6 +264,16 @@ const factsFor = ({ kind, item, bands, rates }) => {
     push('Flight', item.flight_number);
   }
 
+  if (kind === 'transport') {
+    /* A transport item is the vehicle itself, so the card says which vehicle and
+       what it is engaged for — the two facts that decide the hire price. The
+       vehicle label is optional: an item that never carried one stores its own
+       category here, and repeating the heading as a fact says nothing. */
+    const vehicle = String(item.sub_category || '').trim();
+    push('Vehicle', vehicle && vehicle !== String(item.category || '').trim() ? vehicle : '');
+    push('Hired for', TRANSPORT_TYPE_LABELS[item.transport_type] || item.transport_type);
+  }
+
   return facts;
 };
 
@@ -239,6 +304,20 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
 
   if (kind === 'accommodation' || kind === 'trains') {
     const noun = kind === 'trains' ? 'Cabin' : 'Room';
+    if (isOccupancyTiered(rate)) {
+      /* A villa is contracted on how many sleep in it. Every head in the room
+         pays the band its own occupant count selects, so the card prints the
+         ladder and nothing else: no adult/child split (a child pays the band)
+         and no single supplement (a party of two pays the 2 pax figure, it is
+         not charged a penalty for leaving beds empty). */
+      collapseOccupancyLadder(rate).forEach((band) => {
+        const size = band.minPax === band.maxPax
+          ? `${band.minPax} pax`
+          : `${band.minPax}\u2013${band.maxPax} pax`;
+        push(size, `${money(band.rate)} per person / night`);
+      });
+      return rows;
+    }
     if (basis === 'per_room') {
       /* A flat rate is quoted for the room/cabin as a whole. The single-occupancy
          figure is the second number the flat mode needs, and it is only worth a
@@ -259,25 +338,61 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
         ?? (priced(rate.unit_price) && !sameAmount(rate.unit_price, p1) ? rate.unit_price : null);
       if (priced(p2)) push('2 adults sharing (PPS)', money(p2));
       if (priced(rate.price_3_plus_adults)) push('3+ adults (per person)', money(rate.price_3_plus_adults));
-      if (priced(rate.single_supplement)) push('Single supplement', money(rate.single_supplement));
+      /* The single rate above already states what a lone guest pays, so the card
+         does not repeat the gap to the sharing rate as a "single supplement".
+         What the contract adds is how many single rooms are waived before that
+         single rate applies — the only supplement figure the library stores. */
+      const supplierLadder = normaliseSingleSupplementLadder(rate);
+      const waivedRooms = waiverFromLadder(rate);
+      if (waivedRooms > 0) {
+        push(
+          'Single supplement',
+          waivedRooms === 1
+            ? 'waived for the first single room'
+            : `waived for the first ${waivedRooms} single rooms`
+        );
+      }
+      /* Older contracts may still carry charged tiers. Print those — the waived
+         rooms are already named above. */
+      let coveredSingles = 0;
+      supplierLadder.forEach((tier) => {
+        const from = coveredSingles + 1;
+        if (tier.supplement !== 0) {
+          push(
+            from === tier.singles ? `Single room ${tier.singles}` : `Single rooms ${from}\u2013${tier.singles}`,
+            money(tier.supplement)
+          );
+        }
+        coveredSingles = tier.singles;
+      });
       if (priced(rate.child_discount)) push('Child discount', `${rate.child_discount}%`);
+    }
+    /* A weekend price is a per-night figure beside the normal one, on the
+       nights the contract names - not a second charge type. */
+    const weekendNights = weekendDaysLabel(rate);
+    const weekendPrice = weekendPriceOf(rate);
+    if (weekendNights && priced(weekendPrice)) {
+      push(`Weekend rate (${weekendNights})`, `${money(weekendPrice)} / ${noun.toLowerCase()} / night`);
     }
   }
 
-  if (kind === 'transfers' || kind === 'activities' || kind === 'flights') {
-    /* A transfer / activity is sold three ways: a flat rate per vehicle, a rate
-       banded by party size, or a straight per-person fare. The rows follow the
-       loaded basis rather than a fixed column order, so a per-vehicle contract
-       never prints its figure under a "1 adult" label. */
+  if (kind === 'transfers' || kind === 'transport' || kind === 'activities' || kind === 'flights') {
+    /* A transfer / transport / activity is sold three ways: a flat rate per
+       vehicle, a rate banded by party size, or a straight per-person fare. The
+       rows follow the loaded basis rather than a fixed column order, so a
+       per-vehicle contract never prints its figure under a "1 adult" label. */
+    /* A hired vehicle is bought whole, so a transport card names the vehicle; the
+       older categories keep the generic "unit" wording they have always printed. */
+    const unitNoun = kind === 'transport' ? 'vehicle' : 'unit';
     if (basis === 'per_vehicle') {
       const vehiclePrices = Object.entries(rate.prices_by_vehicle || {})
         .map(([code, value]) => [vehicleName(code), vehiclePriceLabel(value, money)])
         .filter(([, label]) => label !== null);
       if (vehiclePrices.length) {
-        vehiclePrices.forEach(([label, value]) => push(label, `${value} / unit`));
+        vehiclePrices.forEach(([label, value]) => push(label, `${value} / ${unitNoun}`));
       } else {
         const flat = firstPriced([rate.unit_price, rate.price_1_adult, rate.adult_rate]);
-        if (priced(flat)) push(kind === 'flights' ? 'Charter (per flight)' : 'Per unit', money(flat));
+        if (priced(flat)) push(kind === 'flights' ? 'Charter (per flight)' : kind === 'transport' ? 'Per vehicle' : 'Per unit', money(flat));
       }
     } else if (basis === 'tiered') {
       const tiers = (Array.isArray(rate.tiered_pricing) ? rate.tiered_pricing : [])
@@ -292,11 +407,30 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
       const adult = firstPriced([rate.price_1_adult, rate.unit_price, rate.adult_rate]);
       if (priced(adult)) push('Per person', money(adult));
     }
+
+    /* The seat the supplier sells the guide is a fare of its own, so the card
+       names it beside the clients' price instead of leaving the operator to work
+       it out. Only a flight the supplier offers the guide on prints it. A charter
+       prices the whole aircraft, so there only a typed crew figure can price one
+       seat; on a per-person flight the clients' fare is the fallback. */
+    if (kind === 'flights' && (item.guide_flight_offered === true || priced(rate.guide_rate))) {
+      const clientsFare = basis === 'per_vehicle'
+        ? null
+        : firstPriced([rate.price_1_adult, rate.unit_price, rate.adult_rate]);
+      const crewFare = firstPriced([rate.guide_rate, clientsFare]);
+      if (priced(crewFare)) push('Guide seat', `${money(crewFare)} / person`);
+    }
+
+    /* An activity's own tariff can price the guide's place too - a game drive
+       charges for every seat it fills, including the guide's. */
+    if (kind === 'activities' && priced(rate.guide_rate)) {
+      push("Guide's place", `${money(rate.guide_rate)} / person`);
+    }
   }
 
   if (kind === 'meals' || kind === 'extras') {
     const adult = firstPriced([rate.price_1_adult, rate.unit_price, rate.adult_rate]);
-    if (priced(adult)) push('Per person', money(adult));
+    if (priced(adult)) push(basis === 'per_unit' ? 'Per unit (whole service)' : 'Per person', money(adult));
   }
 
   if (kind === 'tickets') {
@@ -329,7 +463,18 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
       if (priced(rate.entrance_fee_per_person)) {
         push(unit === 'per_unit' ? 'Per unit' : unit === 'per_adult' ? 'Per adult' : 'Per person', money(rate.entrance_fee_per_person));
       }
+      /* An entrance fee with a child figure is one the park splits by age; with
+         none, a child walks in on the visitor price and there is nothing to
+         print. */
+      if (priced(rate.entrance_fee_per_child) && unit !== 'per_unit' && unit !== 'per_vehicle') {
+        push('Per child', money(rate.entrance_fee_per_child));
+      }
       if (priced(rate.entrance_fee_per_vehicle)) push('Per vehicle', money(rate.entrance_fee_per_vehicle));
+    }
+    /* The crew place at the gate, on either fee type, whenever the contract
+       gives one a price of its own. */
+    if (priced(rate.guide_rate) && unit !== 'per_unit' && unit !== 'per_vehicle') {
+      push("Guide's place", money(rate.guide_rate));
     }
   }
 
@@ -359,6 +504,26 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
   return rows;
 };
 
+/* One row per client-room band, so the card states the range each rate covers
+   ("1–10 client rooms", then "11+") instead of a bare threshold. A tier states
+   the TOTAL rooms included, so a band that adds rooms names how many. */
+const ladderRows = ({ label, ladder, roomLabel, meals, money }) => staffTierBands(ladder).map((band) => {
+  const range = band.maxRooms === null ? `${band.minRooms}+` : `${band.minRooms}\u2013${band.maxRooms}`;
+  const rooms = `${band.rooms} ${roomLabel}${band.rooms === 1 ? '' : 's'}${band.added > 0 && band.rooms > band.added ? ` (${band.added} more)` : ''}`;
+  return {
+    label: `${label} (${range} client rooms)`,
+    value: `${rooms} @ ${money(band.rate)}${meals ? ` \u00b7 ${meals}` : ''}`
+  };
+});
+
+const staffTierRows = (label, tiers, meals, money) => ladderRows({
+  label,
+  ladder: tiers,
+  roomLabel: `${label.toLowerCase()} room`,
+  meals,
+  money
+});
+
 const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
   const sections = [];
 
@@ -378,7 +543,10 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
       sections.push({ key: 'child', title: kind === 'trains' ? 'Child rate' : 'Child sharing rates', rows: standard });
     }
   } else if (kind !== 'guide' && kind !== 'surcharge') {
-    const standard = childRows({ map: rate.child_rates_breakdown, bands, money, kind, legacy: rate.child_rate });
+    /* A service charged once for itself bills no head at all, so a child figure
+       against it is a rate-card number nothing will ever invoice. */
+    const perUnit = basisOf(rate, item) === 'per_unit';
+    const standard = perUnit ? [] : childRows({ map: rate.child_rates_breakdown, bands, money, kind, legacy: rate.child_rate });
     if (standard.length) sections.push({ key: 'child', title: 'Child rate', rows: standard });
     if (kind === 'tickets') {
       const fastTrack = childRows({ map: rate.fast_track_child_rates_breakdown, bands, money, kind, legacy: rate.fast_track_child_rate });
@@ -390,32 +558,100 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
     const board = rate.meal_plan || item.meal_plan;
     const guideMeals = rate.guide_meal_plan || board;
     const driverMeals = rate.driver_meal_plan || board;
-    if (priced(rate.guide_rate) || priced(rate.driver_rate) || item.guide_driver_room_offered || priced(rate.tour_leader_rate) || item.tour_leader_room_offered) {
+    /* A tour leader room can be free, so a 0 is a configured price here; only a
+       missing rate reads as "charge the single rate". */
+    const tlConfigured = has(rate.tour_leader_rate);
+    const tlTiers = normaliseStaffTiers(rate.tour_leader_tiers);
+    /* Guide and driver have their own ladders, mirroring the TL deal. */
+    const guideTiers = normaliseStaffTiers(rate.guide_tiers);
+    const driverTiers = normaliseStaffTiers(rate.driver_tiers);
+    if (priced(rate.guide_rate) || priced(rate.driver_rate) || item.guide_driver_room_offered || guideTiers.length || driverTiers.length || tlConfigured || item.tour_leader_room_offered) {
       const rows = [];
-      if (priced(rate.guide_rate) || item.guide_driver_room_offered) {
-        rows.push({ label: 'Guide', value: `${priced(rate.guide_rate) ? money(rate.guide_rate) : '\u2014'}${guideMeals ? ` \u00b7 ${guideMeals}` : ''}` });
+      if (guideTiers.length) {
+        rows.push(...staffTierRows('Guide', guideTiers, guideMeals, money));
+      } else if (priced(rate.guide_rate) || item.guide_driver_room_offered) {
+        /* The guide bed follows the same contract shape as the TL deal: the
+           property's guide rate only applies once its minimum client rooms are
+           booked, and a blank rate falls back to the single rate. Print both the
+           threshold and the figure actually charged instead of a dash. */
+        const guideMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
+        const guideConfigured = priced(rate.guide_rate);
+        const guideSingle = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
+        const guideHeadline = guideConfigured ? rate.guide_rate : guideSingle;
+        const guideLabel = guideConfigured
+          ? (guideMinRooms > 1 ? `Guide (from ${guideMinRooms} client rooms)` : 'Guide')
+          : (guideMinRooms > 1 ? `Guide (single rate until ${guideMinRooms} client rooms)` : 'Guide (single rate)');
+        rows.push({ label: guideLabel, value: `${guideHeadline !== null ? money(guideHeadline) : '\u2014'}${guideMeals ? ` \u00b7 ${guideMeals}` : ''}` });
       }
-      if (priced(rate.driver_rate) || item.guide_driver_room_offered) {
-        rows.push({ label: 'Driver', value: `${priced(rate.driver_rate) ? money(rate.driver_rate) : '\u2014'}${driverMeals ? ` \u00b7 ${driverMeals}` : ''}` });
+      if (driverTiers.length) {
+        rows.push(...staffTierRows('Driver', driverTiers, driverMeals, money));
+      } else if (priced(rate.driver_rate) || item.guide_driver_room_offered) {
+        const driverMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
+        const driverConfigured = priced(rate.driver_rate);
+        const driverSingle = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
+        const driverHeadline = driverConfigured ? rate.driver_rate : driverSingle;
+        const driverLabel = driverConfigured
+          ? (driverMinRooms > 1 ? `Driver (from ${driverMinRooms} client rooms)` : 'Driver')
+          : (driverMinRooms > 1 ? `Driver (single rate until ${driverMinRooms} client rooms)` : 'Driver (single rate)');
+        rows.push({ label: driverLabel, value: `${driverHeadline !== null ? money(driverHeadline) : '\u2014'}${driverMeals ? ` \u00b7 ${driverMeals}` : ''}` });
       }
-      if (priced(rate.tour_leader_rate) || item.tour_leader_room_offered) {
-        rows.push({ label: 'Tour Leader', value: `${priced(rate.tour_leader_rate) ? money(rate.tour_leader_rate) : '\u2014'}${board ? ` \u00b7 ${board}` : ''}` });
+      if (tlConfigured || item.tour_leader_room_offered || tlTiers.length) {
+        const boardSuffix = board ? ` \u00b7 ${board}` : '';
+        if (tlTiers.length) {
+          /* A ladder replaces the flat TL rate. One row per client-room band
+             keeps the "how many client rooms include how many TL rooms, at
+             what rate" readable instead of hiding it in a trailing sentence. */
+          rows.push(...ladderRows({
+            label: 'Tour Leader',
+            ladder: tlTiers,
+            roomLabel: 'TL room',
+            meals: board,
+            money
+          }));
+        } else {
+          /* No ladder: one TL room is included from the item's threshold, priced
+             at the TL rate or — when that box was left blank — at the Single
+             rate the pricing engine falls back to. Printing a dash there hides
+             the figure the client is actually charged. */
+          const minRooms = Math.max(1, Number(item.tour_leader_min_rooms) || 1);
+          const singleRate = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
+          const headline = tlConfigured ? rate.tour_leader_rate : singleRate;
+          const fallback = !tlConfigured && priced(singleRate) ? ' \u00b7 single rate' : '';
+          rows.push({
+            label: `Tour Leader (from ${minRooms} client room${minRooms === 1 ? '' : 's'})`,
+            value: `${headline !== null ? money(headline) : '\u2014'}${boardSuffix}${fallback}`
+          });
+        }
       }
       sections.push({ key: 'guide-driver', title: 'Guide & driver', rows });
     }
   }
 
-  if (kind === 'meals' && (priced(rate.guide_rate) || priced(rate.driver_rate))) {
+  /* A meal the crew is booked on prints the figure the guide or driver is
+     actually charged: the contracted crew rate, or the adult fare it falls back
+     to when that box was left blank. */
+  if (kind === 'meals') {
+    const adult = firstPriced([rate.price_1_adult, rate.unit_price]);
+    const crewRow = (label, crewRate) => {
+      const configured = priced(crewRate);
+      const headline = configured ? crewRate : adult;
+      return {
+        label,
+        value: `${headline !== null ? money(headline) : '\u2014'} / person${!configured && priced(adult) ? ' \u00b7 adult fare' : ''}`
+      };
+    };
     const rows = [];
-    if (priced(rate.guide_rate)) rows.push({ label: 'Guide', value: `${money(rate.guide_rate)} / person` });
-    if (priced(rate.driver_rate)) rows.push({ label: 'Driver', value: `${money(rate.driver_rate)} / person` });
-    sections.push({ key: 'guide-driver', title: 'Guide & driver', rows });
+    if (item.guide_meal_offered === true || priced(rate.guide_rate)) rows.push(crewRow('Guide', rate.guide_rate));
+    if (item.driver_meal_offered === true || priced(rate.driver_rate)) rows.push(crewRow('Driver', rate.driver_rate));
+    if (rows.length) sections.push({ key: 'guide-driver', title: 'Guide & driver', rows });
   }
 
   const chips = [
+    rate.room_type,
     `${rate.valid_from || 'open'}\u2013${rate.valid_to || 'open'}`,
     kind === 'surcharge' ? null : BASIS_LABELS[basisOf(rate, item)],
-    rate.meal_plan
+    rate.meal_plan,
+    nightBandLabel(rate)
   ].filter(Boolean);
 
   return {
@@ -423,7 +659,7 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
     title: rate.season_name || rate.option_name || `Season ${index + 1}`,
     chips,
     sections,
-    notes: rate.notes || ''
+    notes: stripWaiverNote(rate.notes)
   };
 };
 
@@ -468,12 +704,15 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
   const seasons = rates.map((rate, index) => seasonCard({ item, rate, index, kind, money, bands, vehicleName }));
 
   const basis = String(item.pricing_model || '').toLowerCase();
+  /* A graded hotel carries its stars wherever the property is named, on screen
+     and in every export of this card. */
+  const supplierChip = item.supplier?.name
+    ? [item.supplier.name, starGlyphs(item.supplier.star_rating)].filter(Boolean).join(' \u00b7 ')
+    : '';
   const chips = [
     { kind: 'category', text: CATEGORY_LABELS[kind] },
-    item.supplier?.name ? { kind: 'supplier', text: item.supplier.name } : null,
-    [item.destination_region, item.destination_area].filter(Boolean).join(' \u00b7 ')
-      ? { kind: 'destination', text: [item.destination_region, item.destination_area].filter(Boolean).join(' \u00b7 ') }
-      : null,
+    supplierChip ? { kind: 'supplier', text: supplierChip } : null,
+    itemDestinationLabel(item) ? { kind: 'destination', text: itemDestinationLabel(item) } : null,
     currency ? { kind: 'currency', text: currency } : null,
     kind === 'surcharge' ? null : BASIS_LABELS[basis] ? { kind: 'basis', text: BASIS_LABELS[basis] } : null
   ].filter(Boolean);

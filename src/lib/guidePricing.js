@@ -1,5 +1,6 @@
 import { rateForTravel } from './priceValidity';
 import { travellersPlusTlCount } from './roomAllocationHelper';
+import { staffRoomLadder, staffRoomRates, staffRateValue } from './staffRoomTiers';
 
 export const getGuideShareDivisor = (travellers = []) => {
   const n = travellersPlusTlCount(travellers);
@@ -69,10 +70,30 @@ export const guideRateFor = (rate = {}, type) => {
 };
 
 /* The summed per-trip charge for a selected set of service types.
-   Only charged when guide_needed is true (or undefined/not explicitly false). */
-export const guideChargeTotal = (rate = {}, types = [], guideNeeded = true) => {
+   Only charged when guide_needed is true (or undefined/not explicitly false).
+
+   `upliftPercent` belongs to the PERSON guiding, not to the season: a senior
+   guide costs more than the destination's contract figure while sharing it.
+   Left at 0 the sum is the contract money untouched, so every existing caller —
+   and every guide with no one named on the line — is unchanged. */
+export const guideChargeTotal = (rate = {}, types = [], guideNeeded = true, upliftPercent = 0) => {
   if (guideNeeded === false) return 0;
-  return guideSelection(types).reduce((sum, type) => sum + guideRateFor(rate, type), 0);
+  const base = guideSelection(types).reduce((sum, type) => sum + guideRateFor(rate, type), 0);
+  const percent = Number(upliftPercent);
+  if (!Number.isFinite(percent) || percent <= 0) return base;
+  return Math.round(base * (1 + percent / 100) * 100) / 100;
+};
+
+/* The uplift a line must be priced at, read from the line itself.
+
+   The percentage travels on the guide snapshot written when the person was
+   picked, so a reprice or a season change keeps the same person's uplift without
+   the directory being loaded - and a guide retuned in the directory tomorrow
+   cannot rewrite a figure that has already been sold. */
+export const lineGuideUpliftPercent = (service) => {
+  const snapshot = service?.guideSnapshot ?? service?.guide_snapshot;
+  const stored = Number(snapshot?.uplift_percent ?? service?.guideUpliftPercent);
+  return Number.isFinite(stored) && stored > 0 ? stored : 0;
 };
 
 /* Human-readable summary of the selected service types, e.g. "Half Day · Dinner Transfer". */
@@ -89,13 +110,12 @@ export const numberOf = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-/* The per-night/meal amount a supporting property charges for the guide. An
-   explicit rate wins; 0 means "fall back to the single rate" (guide_driver_room_rates).
-   Only charged when guide_needed is true. */
+/* The per-night amount a supporting property charges for the guide. A typed 0
+   is a free bed; a blank rate falls back to the single rate. Only charged when
+   guide_needed is true. */
 export const guideRoomRate = (rate = {}, guideNeeded = true) => {
   if (guideNeeded === false) return 0;
-  return numberOf(rate?.guide_rate) || numberOf(rate?.single_room_rate) || numberOf(rate?.effective_single_rate)
-    || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price);
+  return staffRateValue(rate?.guide_rate, singleOvernightRate(rate));
 };
 
 /* A meal served to the guide is charged at the meal item's guide_rate; 0 means
@@ -103,6 +123,61 @@ export const guideRoomRate = (rate = {}, guideNeeded = true) => {
 export const guideMealRate = (rate = {}, guideNeeded = true) => {
   if (guideNeeded === false) return 0;
   return numberOf(rate?.guide_rate) || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price);
+};
+
+/* The driver is billed the same way, off the same rate row. A crew member who
+   eats the clients' fare has no separate figure, so the adult price stands. */
+export const driverMealRate = (rate = {}, guideNeeded = true) => {
+  if (guideNeeded === false) return 0;
+  return numberOf(rate?.driver_rate) || numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price);
+};
+
+/* Whether a meal belongs on the crew manifest at all. The supplier states it on
+   the item, not on a season, so one meal can be guide-only, driver-only or both.
+   An untagged library (nothing flagged anywhere) still feeds the guide - see
+   guideMealChoices - so the flag gates the LIST, never the money. */
+export const mealAcceptsGuide = (item) => item?.guide_meal_offered === true;
+
+export const mealAcceptsDriver = (item) => item?.driver_meal_offered === true;
+
+/* A flight the supplier also sells the guide a seat on. The guide's ticket is a
+   line of its own, priced at the rate row's guide_rate and falling back to the
+   fare the clients pay. */
+export const flightOffersGuideTicket = (item) => item?.guide_flight_offered === true;
+
+/* The guide's seat on a flight. A charter prices the whole aircraft, so only a
+   typed crew fare can price one seat on it; on a per-person flight the fare the
+   clients pay is the fallback. */
+export const guideFlightRate = (rate = {}, { perCharter = false } = {}) => {
+  const typed = numberOf(rate?.guide_rate);
+  if (typed > 0) return typed;
+  return perCharter ? 0 : (numberOf(rate?.price_1_adult) || numberOf(rate?.unit_price));
+};
+
+/* Meals offered to the guide, restricted to the flagged ones - unless the
+   library has not been tagged yet, when every meal stays selectable rather than
+   leaving the operator with an empty picker and a guide who goes hungry.
+   Returns { meals, restricted }: restricted tells the caller to say which list
+   the operator is looking at. */
+export const guideMealChoices = (meals = []) => {
+  const flagged = (Array.isArray(meals) ? meals : []).filter(mealAcceptsGuide);
+  return flagged.length
+    ? { meals: flagged, restricted: true }
+    : { meals: Array.isArray(meals) ? meals : [], restricted: false };
+};
+
+/* What one chosen meal puts on the day: an ARRAY of charged lines. The guide
+   always eats it, and the driver joins when the supplier says the driver eats
+   this one too. Each line says whom it charges, so the builder prices it off
+   that party's rate and the dialog re-opens with the same arrangement. */
+export const crewMealLines = (item) => {
+  if (!item) return [];
+  const rate = (item.item_rates || [])[0] || {};
+  const lines = [{ item, who: 'guide', unitCost: guideMealRate(rate) }];
+  if (mealAcceptsDriver(item)) {
+    lines.push({ item, who: 'driver', unitCost: driverMealRate(rate) });
+  }
+  return lines;
 };
 
 /* ---- Guide & driver overnight (overland) ---------------------------------
@@ -118,8 +193,11 @@ export const guideMealRate = (rate = {}, guideNeeded = true) => {
        guide & driver room, at that property's contracted rates. The clients
        keep their own room and are never charged for the guide's bed.
 
-   0 in guide_rate / driver_rate always means "fall back to the single rate"
-   (the editor spells this out next to the input). */
+   A typed 0 in guide_rate / driver_rate is a free bed; a blank rate means the
+   property charges its normal single rate. Either party may also carry a
+   client-room ladder (guide_tiers / driver_tiers) that includes one or more
+   rooms once enough paying rooms are booked, exactly like the tour leader
+   deal. */
 
 /* Who can be billed for one overnight at a property. */
 export const GUIDE_CHARGE_TYPES = ['guide', 'driver', 'both'];
@@ -146,20 +224,65 @@ export const singleOvernightRate = (rate = {}) => (
   || numberOf(rate?.room_rate)
 );
 
-/* What a property charges to bed the guide for one night. */
-export const guideTravelRate = (rate = {}, guideNeeded = true) => {
-  if (guideNeeded === false) return 0;
-  return numberOf(rate?.guide_rate) || singleOvernightRate(rate);
+/* The client-room threshold a property sets before its guide rate applies.
+   Unset (or a bad value) means 1, so existing contracts are unchanged. */
+export const guideMinClientRooms = (item) => Math.max(1, Number(item?.guide_min_rooms ?? item?.guideMinRooms) || 1);
+
+/* Whether the guide rate is earned. An unknown room count is not a failed
+   threshold — the caller simply cannot judge it. */
+export const guideRateApplies = (clientRooms, minRooms) => {
+  if (clientRooms === undefined || clientRooms === null || clientRooms === '') return true;
+  const rooms = Number(clientRooms);
+  if (!Number.isFinite(rooms)) return true;
+  return rooms >= Math.max(1, Number(minRooms) || 1);
 };
 
-/* What a property charges to bed the driver for one night. */
-export const driverTravelRate = (rate = {}, guideNeeded = true) => {
+/* What a property charges to bed the guide for one night.
+
+   The property may release its contracted guide rate only once enough paying
+   client rooms are booked, and may include more than one guide room through a
+   ladder (see staffRoomTiers). An unknown count (a package quote carries no
+   room allocation) leaves the first included room in force. A room beyond the
+   allowance, or a property that does not offer the deal, is charged the single
+   rate the property would otherwise get. */
+export const guideTravelRate = (rate = {}, guideNeeded = true, { clientRooms, minRooms, tiers } = {}) => {
   if (guideNeeded === false) return 0;
-  return numberOf(rate?.driver_rate) || singleOvernightRate(rate);
+  const ladder = staffRoomLadder({
+    offered: true,
+    tiers,
+    minRooms,
+    rate: staffRateValue(rate?.guide_rate, singleOvernightRate(rate))
+  });
+  return firstStaffBedRate(ladder, clientRooms, singleOvernightRate(rate));
 };
 
-export const overnightRiderRate = (rate = {}, who, guideNeeded = true) => (
-  who === 'driver' ? driverTravelRate(rate, guideNeeded) : guideTravelRate(rate, guideNeeded)
+/* What a property charges to bed the driver for one night. The driver shares
+   the property's Min Client Rooms rule with the guide. */
+export const driverTravelRate = (rate = {}, guideNeeded = true, { clientRooms, minRooms, tiers } = {}) => {
+  if (guideNeeded === false) return 0;
+  const ladder = staffRoomLadder({
+    offered: true,
+    tiers,
+    minRooms,
+    rate: staffRateValue(rate?.driver_rate, singleOvernightRate(rate))
+  });
+  return firstStaffBedRate(ladder, clientRooms, singleOvernightRate(rate));
+};
+
+/* One guide / driver bed per night: the first included room's rate when the
+   property's threshold is reached, otherwise the single rate. An unknown client
+   room count is treated as met, matching the legacy threshold behaviour. */
+const firstStaffBedRate = (ladder, clientRooms, singleRate) => {
+  const known = clientRooms !== undefined && clientRooms !== null && clientRooms !== '';
+  const rooms = known ? Number(clientRooms) : Number.POSITIVE_INFINITY;
+  const included = staffRoomRates(ladder, rooms)[0];
+  return included !== undefined ? included : singleRate;
+};
+
+export const overnightRiderRate = (rate = {}, who, guideNeeded = true, options = {}) => (
+  who === 'driver'
+    ? driverTravelRate(rate, guideNeeded, options)
+    : guideTravelRate(rate, guideNeeded, options)
 );
 
 /* Helper to divide guide charges by travellersPlusTlCount (clients + TL only).

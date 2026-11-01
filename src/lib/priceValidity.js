@@ -18,11 +18,23 @@
  *             loaded - but flagged so the caller can mention it.
  *   protected no season covers the travel dates, so the nearest prior season
  *             is used and the tenant's protection percentage is applied.
+ *   future    no season covers the trip and none can stand in for it, but a
+ *             priced season starts after the trip ends. That price is usable
+ *             only as a pre-season estimate and only when the caller says so;
+ *             by default it is refused rather than silently pricing a line.
+ *   provisional
+ *             month-only timing: no season covers the whole requested month(s),
+ *             but a current season covers part of it. Only returned when the
+ *             caller allows it; the line is valid for travel inside the
+ *             season's share of the window only.
  *
- * Coverage is exact. A season that only overlaps the travel window for part of
- * it is not accepted: the operator has to price the whole itinerary from one
- * season, and a season that expires mid-trip prices some of the nights at last
- * year's figure with nothing on the quote to say so.
+ * Coverage is exact for confirmed dates. A season that only overlaps the travel
+ * window for part of it is not accepted: the operator has to price the whole
+ * itinerary from one season, and a season that expires mid-trip prices some of
+ * the nights at last year's figure with nothing on the quote to say so. A
+ * month-timed quotation is different: the window is what is known, so a season
+ * covering part of it can price the quote for that part, explicitly marked as
+ * provisional and with its validity window recorded on the line.
  *
  * "Nearest prior season" is the most recent row whose calendar period matches the
  * travel period but whose year is behind: a Dec-2027/Jan-2028 season priced
@@ -32,6 +44,8 @@
  * a trip into a season that does not exist yet. When no such row exists there is
  * nothing to protect against and the call is blocked with a clear reason.
  */
+
+import { occupancyLadderOf } from './occupancyPricing';
 
 const DAY_MS = 86400000;
 
@@ -80,6 +94,10 @@ export const sharesCalendarPeriod = (aFrom, aTo, bFrom, bTo) => {
 
 const covers = (fromDay, toDay, winStart, winEnd) => fromDay <= winStart && toDay >= winEnd;
 
+/* How many days of the travel window a row's own pricing window spans. */
+const overlapDays = (window, winStart, winEnd) =>
+  Math.min(window.toDay, winEnd) - Math.max(window.fromDay, winStart) + 1;
+
 /* The span a row claims, honouring a missing bound as "open ended". */
 export const rateWindow = (rate) => {
   const from = parseDay(rate?.valid_from);
@@ -96,6 +114,48 @@ export const rateWindow = (rate) => {
   };
 };
 
+/**
+ * Where a rate row's validity window sits against a travel window.
+ *
+ * The single place a caller should ask "does this season cover the trip?"
+ * before offering a choice, so the drop dialog, the sidebar and the line
+ * badges all describe a window the same way.
+ *
+ *   open         the travel dates are not set yet
+ *   undated      the row carries no validity dates at all
+ *   covers       the row spans the whole trip
+ *   starts_after the row begins after the trip ends (a future season)
+ *   ends_before  the row ended before the trip starts (an expired season)
+ *   starts_during the row begins inside the trip, so the first nights are uncovered
+ *   ends_during  the row expires inside the trip, so the last nights are uncovered
+ */
+export const rateTravelCoverage = (rate, startDate, endDate) => {
+  const window = rateWindow(rate);
+  const winStart = parseDay(startDate);
+  const winEnd = parseDay(endDate) === null ? winStart : parseDay(endDate);
+  const base = {
+    window,
+    validFrom: window.fromIso,
+    validTo: window.toIso,
+    covers: false,
+    daysAhead: 0
+  };
+
+  if (winStart === null) return { ...base, status: 'open' };
+  if (!window.dated) return { ...base, status: 'undated' };
+  if (covers(window.fromDay, window.toDay, winStart, winEnd)) {
+    return { ...base, status: 'covers', covers: true };
+  }
+  if (window.fromDay > winEnd) {
+    return { ...base, status: 'starts_after', daysAhead: window.fromDay - winEnd };
+  }
+  if (window.toDay < winStart) {
+    return { ...base, status: 'ends_before' };
+  }
+  if (window.fromDay > winStart) return { ...base, status: 'starts_during' };
+  return { ...base, status: 'ends_during' };
+};
+
 const rowsForCurrency = (rates, currencyCode) => {
   const all = Array.isArray(rates) ? rates : [];
   if (!all.length) return [];
@@ -108,13 +168,14 @@ const rowsForCurrency = (rates, currencyCode) => {
    the same figure over time. */
 export const rateHasPrice = (rate) => {
   if (!rate) return false;
+  if (occupancyLadderOf(rate).some((band) => band.rate > 0)) return true;
   const fields = [
-    'price_1_adult', 'price_2_adults', 'price_3_plus_adults', 'unit_price',
+    'price_1_adult', 'price_2_adults', 'price_3_plus_adults', 'unit_price', 'unit_cost',
     'single_room_rate', 'double_twin_rate', 'effective_single_rate',
     'adult_rate', 'guide_rate', 'driver_rate', 'vehicle_rate',
     'guide_transfer_rate', 'guide_half_day_rate', 'guide_full_day_rate',
     'guide_overland_rate', 'guide_dinner_rate',
-    'entrance_fee_per_person', 'entrance_fee_per_vehicle',
+    'entrance_fee_per_person', 'entrance_fee_per_vehicle', 'entrance_fee_per_child',
     'conservation_levy_per_adult', 'conservation_levy_per_child'
   ];
   if (fields.some((f) => (parseFloat(rate[f]) || 0) > 0)) return true;
@@ -130,8 +191,15 @@ export const rateHasPrice = (rate) => {
 /* Narrowest covering window wins: a specific week beats a whole-year band. */
 const spanOf = (w) => (w.fromDay === -Infinity || w.toDay === Infinity ? Infinity : w.toDay - w.fromDay);
 
-const pickTightest = (candidates) =>
-  [...candidates].sort((a, b) => spanOf(a.window) - spanOf(b.window))[0];
+const pickTightest = (candidates) => [...candidates].sort((a, b) => {
+  const span = spanOf(a.window) - spanOf(b.window);
+  if (span !== 0) return span;
+  /* Two rows can cover the trip and claim the same number of days - a
+     2026-01-01..2026-12-31 season and a 2026-11-01..2027-10-31 season both span
+     365 days over a November week. The later season is the newer contract, so
+     it wins rather than whichever row the database happened to return first. */
+  return String(b.window.fromIso || '').localeCompare(String(a.window.fromIso || ''));
+})[0];
 
 /**
  * Decide which season prices an itinerary, and whether protection applies.
@@ -142,6 +210,16 @@ const pickTightest = (candidates) =>
  * @param {string}  args.startDate        itinerary travel start (YYYY-MM-DD)
  * @param {string}  args.endDate          itinerary travel end   (YYYY-MM-DD)
  * @param {number}  args.protectionPercent tenant's Pricing Protection (0 = off)
+ * @param {boolean} args.allowFuture      accept a season that starts after the
+ *                                        trip as a pre-season estimate
+ * @param {boolean} args.allowPartial     accept a season covering part of a
+ *                                        month-only window as a provisional
+ *                                        price (never protected)
+ *
+ * Statuses: `ok` a season covers the trip · `protected` a prior-year season
+ * standing in with the tenant's uplift · `stale` the same season with no
+ * uplift set · `future` / `expired` / `partial` an estimate · `provisional`
+ * month-only · `undated` no validity dates · `no_price` nothing usable.
  * @returns {{status:string, rate:object|null, window:object|null,
  *            protectionPercent:number, canAdd:boolean, reason:string,
  *            seasonName:string, validFrom:string, validTo:string,
@@ -152,7 +230,9 @@ export const resolveSeasonForTravel = ({
   currencyCode,
   startDate,
   endDate,
-  protectionPercent = 0
+  protectionPercent = 0,
+  allowFuture = false,
+  allowPartial = false
 } = {}) => {
   const pct = Math.max(0, parseFloat(protectionPercent) || 0);
   const rows = rowsForCurrency(rates, currencyCode).map((rate) => ({ rate, window: rateWindow(rate) }));
@@ -241,7 +321,46 @@ export const resolveSeasonForTravel = ({
         window is NOT accepted: the requirement is that a season matches the
         itinerary exactly, so a trip running off the end of a season has to fall
         through to protection or be blocked rather than being priced by a season
-        that was only correct for some of the nights. */
+        that was only correct for some of the nights.
+
+        The one exception is month-only timing. There the requested window is a
+        range of months and a contract can legitimately change rate mid-month, so
+        no season can be an exact match. A current season that covers part of
+        the window is still a real price for the part it covers; it is returned
+        as 'provisional', can only be used with the caller's consent, and records
+        the exact sub-window the quote is valid for. It is never protected: a
+        season that exists now is not an uplifted substitute for a missing one. */
+  if (allowPartial) {
+    const overlapping = dated
+      .filter((r) => rateHasPrice(r.rate))
+      .filter((r) => r.window.fromDay <= winEnd && r.window.toDay >= winStart);
+    if (overlapping.length) {
+      const best = [...overlapping].sort((a, b) => {
+        const share = overlapDays(b.window, winStart, winEnd) - overlapDays(a.window, winStart, winEnd);
+        if (share !== 0) return share;
+        const span = spanOf(a.window) - spanOf(b.window);
+        if (span !== 0) return span;
+        return String(b.window.fromIso || '').localeCompare(String(a.window.fromIso || ''));
+      })[0];
+      const coverFrom = Math.max(best.window.fromDay, winStart);
+      const coverTo = Math.min(best.window.toDay, winEnd);
+      const seasonName = best.rate.season_name || best.rate.option_name || '';
+      return {
+        ...base,
+        status: 'provisional',
+        rate: best.rate,
+        window: best.window,
+        protectionPercent: 0,
+        canAdd: true,
+        seasonName,
+        validFrom: best.window.fromIso,
+        validTo: best.window.toIso,
+        provisionalFrom: dayToIso(coverFrom),
+        provisionalTo: dayToIso(coverTo),
+        reason: `The ${seasonName || 'selected'} season (${best.window.fromIso || 'open'} to ${best.window.toIso || 'open'}) covers only part of the requested window ${iso(startDate)} - ${iso(endDate)}. Using it prices the line as a provisional quote valid for travel ${dayToIso(coverFrom)} - ${dayToIso(coverTo)}.`
+      };
+    }
+  }
 
   /* 3. Protection is only allowed against a season
         from a PREVIOUS year that shares the period of the year - a price that
@@ -278,21 +397,58 @@ export const resolveSeasonForTravel = ({
         reason: `No season in the pricing matrix covers ${iso(startDate)} - ${iso(endDate)}.`
       };
     }
+    /* Without a percentage there is no uplift standing between this row and the
+       invoice: the trip would be charged last year's contract figure and the
+       line would read as an exact match. So it is reported as its own status and
+       the builder asks, offering the percentage that would make it a fair price.
+       If the operator leaves it at zero the line says so out loud. */
+    const staleName = best.rate.season_name || best.rate.option_name || 'prior';
+    const staleYears = tripYear - yearOf(best.window.fromDay);
     return {
       ...base,
-      status: 'ok',
+      status: 'stale',
       rate: best.rate,
       window: best.window,
       canAdd: true,
-      seasonName: best.rate.season_name || best.rate.option_name || '',
+      seasonName: staleName,
       validFrom: best.window.fromIso,
       validTo: best.window.toIso,
-      staleByYears: tripYear - yearOf(best.window.fromDay),
-      reason: `No season in the pricing matrix covers ${iso(startDate)} - ${iso(endDate)}; the closest prior season price was used without protection because no protection percentage is set.`
+      staleByYears: staleYears,
+      reason: `No season in the pricing matrix covers ${iso(startDate)} - ${iso(endDate)}. The “${staleName}” season ran ${best.window.fromIso || 'open'} to ${best.window.toIso || 'open'}, ${staleYears} year${staleYears === 1 ? '' : 's'} behind the trip, and with no Pricing Protection percentage set it would be charged exactly as it stands.`
     };
   }
 
-  /* 4. Nothing usable - the item cannot be priced for this trip. */
+  /* 4. Nothing covers and nothing can protect. A season that starts AFTER the
+        trip is a future season, not a stale one: its price is the best guess
+        available, but it is an estimate until that season is live. It is only
+        used when the caller explicitly allows it, so an item never quietly
+        lands on the itinerary at a price the supplier has not opened yet. */
+  const ahead = dated
+    .filter((r) => rateHasPrice(r.rate))
+    .filter((r) => r.window.fromDay > winEnd);
+  if (ahead.length) {
+    const best = [...ahead].sort((a, b) => {
+      if (a.window.fromDay !== b.window.fromDay) return a.window.fromDay - b.window.fromDay;
+      return spanOf(a.window) - spanOf(b.window);
+    })[0];
+    const starts = best.window.fromIso || 'a later date';
+    return {
+      ...base,
+      status: 'future',
+      rate: best.rate,
+      window: best.window,
+      protectionPercent: 0,
+      canAdd: allowFuture === true,
+      seasonName: best.rate.season_name || best.rate.option_name || '',
+      validFrom: best.window.fromIso,
+      validTo: best.window.toIso,
+      reason: allowFuture
+        ? `Priced as a pre-season estimate from the season starting ${starts}, because no season covers ${iso(startDate)} - ${iso(endDate)}. The estimate stays provisional until that season is live.`
+        : `No season covers ${iso(startDate)} - ${iso(endDate)}. The nearest priced season starts ${starts}, after the trip, so its price can only be added as a pre-season estimate.`
+    };
+  }
+
+  /* 5. Nothing usable - the item cannot be priced for this trip. */
   const windows = dated
     .map((r) => `  ${r.rate.season_name || r.rate.option_name || 'Season'}: ${r.window.fromIso || 'open'} to ${r.window.toIso || 'open'}`)
     .join('\n');
@@ -312,6 +468,37 @@ export const applyProtection = (amount, protectionPercent) => {
   return base * (1 + pct / 100);
 };
 
+/* How a resolved season is recorded on an itinerary line.
+
+   `estimate` covers every case where the price cannot be an exact match for
+   the travel dates: a season starting after the trip, one that has expired, one
+   from a previous year standing in with no protection uplift, or a pinned row
+   that only partly overlaps. `provisional` is reserved for month-only pricing,
+   where a live season legitimately covers only part of the requested month(s)
+   and the line records the sub-window it does cover. */
+export const ESTIMATE_SEASON_STATUSES = new Set(['future', 'expired', 'partial', 'stale']);
+
+/* The statuses that mean no season prices this trip, so the builder asks before
+   the price lands on a line. The ask is not a dead end: for the ones below
+   marked protectable it carries the Pricing Protection percentage the line will
+   actually be charged at, pre-filled from Settings.
+
+   A future season is deliberately not protectable - uplifting a price that
+   belongs to a year ahead of the trip counts the same year twice - and neither
+   is a month window that only partly overlaps, because that season is live and
+   its figure is right for the days it does cover. */
+export const CONSENT_SEASON_STATUSES = new Set(['protected', 'stale', 'future', 'expired', 'partial']);
+export const PROTECTABLE_SEASON_STATUSES = new Set(['protected', 'stale', 'expired']);
+
+export const seasonLineStatus = (season, protectionPercent = 0) => {
+  const pct = Math.max(0, Number(protectionPercent) || 0);
+  if (pct > 0) return 'protected';
+  if (season?.status === 'undated') return 'undated';
+  if (season?.status === 'provisional') return 'provisional';
+  if (ESTIMATE_SEASON_STATUSES.has(season?.status)) return 'estimate';
+  return 'matched';
+};
+
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 /* Every money column a pricing-matrix rate can hold. Pricing Protection has to
@@ -324,11 +511,11 @@ export const RATE_MONEY_FIELDS = [
   'price_child_0_1', 'price_child_0_5', 'price_child_2_11', 'price_child_6_11',
   'price_child_12_17', 'price_child_12_18',
   'single_supplement', 'single_room_rate', 'double_twin_rate', 'effective_single_rate',
-  'triple_room_rate', 'adult_rate', 'child_rate',
-  'guide_rate', 'driver_rate', 'vehicle_rate', 'fast_track_adult_rate',
+  'triple_room_rate', 'weekend_price', 'adult_rate', 'child_rate',
+  'guide_rate', 'driver_rate', 'vehicle_rate', 'fast_track_adult_rate', 'tour_leader_rate',
   'guide_transfer_rate', 'guide_half_day_rate', 'guide_full_day_rate',
   'guide_overland_rate', 'guide_dinner_rate',
-  'entrance_fee_per_person', 'entrance_fee_per_vehicle',
+  'entrance_fee_per_person', 'entrance_fee_per_vehicle', 'entrance_fee_per_child',
   'conservation_levy_per_adult', 'conservation_levy_per_child'
 ];
 
@@ -366,6 +553,34 @@ export const applyProtectionToRate = (rate, percent) => {
       return Number.isFinite(n) && n > 0 ? { ...band, rate: round2(n * factor) } : band;
     });
   }
+  /* A tour leader ladder prices each included room, so its rates are uplifted
+     with the rest of the row; a free (0) tier stays free. Guide and driver
+     ladders carry the same per-room amounts and follow the same rule. */
+  ['tour_leader_tiers', 'guide_tiers', 'driver_tiers'].forEach((f) => {
+    if (!Array.isArray(rate[f])) return;
+    out[f] = rate[f].map((tier) => {
+      const n = parseFloat(tier?.rate);
+      return Number.isFinite(n) && n > 0 ? { ...tier, rate: round2(n * factor) } : tier;
+    });
+  });
+  /* An occupancy ladder is the only money a villa row carries, so protection
+     means uplifting its bands. The party sizes they are keyed by never move. */
+  if (Array.isArray(rate.occupancy_rates)) {
+    out.occupancy_rates = rate.occupancy_rates.map((band) => {
+      const key = band?.rate === undefined && band?.price !== undefined ? 'price' : 'rate';
+      const n = parseFloat(band?.[key]);
+      return Number.isFinite(n) && n > 0 ? { ...band, [key]: round2(n * factor) } : band;
+    });
+  }
+  /* The single-supplement ladder is a price ladder too: a waived (0) tier stays
+     waived, a charged tier carries the protection uplift. The covered room count
+     is never scaled. */
+  if (Array.isArray(rate.single_supplement_tiers)) {
+    out.single_supplement_tiers = rate.single_supplement_tiers.map((tier) => {
+      const n = parseFloat(tier?.supplement);
+      return Number.isFinite(n) && n > 0 ? { ...tier, supplement: round2(n * factor) } : tier;
+    });
+  }
   return out;
 };
 
@@ -394,7 +609,9 @@ export const rateForTravel = ({
   currencyCode,
   startDate,
   endDate,
-  protectionPercent = 0
+  protectionPercent = 0,
+  allowFuture = false,
+  allowPartial = false
 } = {}) => {
   const all = Array.isArray(rates) ? rates : [];
   if (!all.length) return null;
@@ -403,10 +620,15 @@ export const rateForTravel = ({
     currencyCode,
     startDate,
     endDate,
-    protectionPercent
+    protectionPercent,
+    allowFuture,
+    allowPartial
   });
   if (season.rate) return applyProtectionToRate(season.rate, season.protectionPercent || 0);
   /* Nothing covers the travel dates (undated, or blocked). Return whatever a
-     season-blind reader would have used so the caller still has a figure. */
+     season-blind reader would have used so the caller still has a figure. A
+     future season's row is returned here too, but as a display fallback only:
+     resolveSeasonForTravel still reports canAdd:false unless the caller allowed
+     the estimate. */
   return firstForCurrency(all, currencyCode);
 };

@@ -10,7 +10,7 @@ import { packageBandLabel } from '../lib/packagePricing';
 
 const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false, vehicleColumns: [] });
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
-const flatBasis = (basis) => /per_trip|per_vehicle|per_room|flat/i.test(String(basis || ''));
+const flatBasis = (basis) => /per_trip|per_vehicle|per_room|per_unit|flat/i.test(String(basis || ''));
 const estimatePackage = (pkg) => {
   const days = pkg.package_days || [];
   const allItems = days.flatMap((day) => day.package_day_items || []);
@@ -116,9 +116,10 @@ export const Packages = () => {
       const message = String(e?.message || e);
       const packageTableMissing = e?.code === '42P01'
         || (/public\.packages/i.test(message) && /(does not exist|not found|schema cache)/i.test(message));
+      if (packageTableMissing) console.error('Package tables are not available:', e);
       const userMessage = packageTableMissing
-        ? 'Packages database setup is missing. Apply supabase/migrations/20261111_reusable_packages.sql in Supabase, then refresh this page.'
-        : `Could not load packages: ${message}`;
+        ? 'Packages aren\u2019t set up for this workspace yet. Please contact your administrator.'
+        : 'Could not load packages. Please try again.';
       if (lastLoadError.current !== userMessage) showToast(userMessage, 'error');
       lastLoadError.current = userMessage;
     } finally { setLoading(false); }

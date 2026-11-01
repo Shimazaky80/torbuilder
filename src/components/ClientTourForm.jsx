@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback } from 'react';
 import SearchableSelect from './SearchableSelect';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
-import { UserPlus, Users, Calendar, User, StickyNote, Compass, UserCheck } from 'lucide-react';
+import { UserPlus, Users, Calendar, User, StickyNote, Compass, UserCheck, Clock } from 'lucide-react';
 import ClientForm from './ClientForm';
 import { normaliseTravellerRole } from '../lib/roomAllocationHelper';
+import { PRECISION_EXACT, PRECISION_MONTH, daysBetween, monthOf, monthRangeLabel, monthTimingError, monthWindow } from '../lib/travelTiming';
 
 const TRAVELLER_ROLE_OPTIONS = [
   { value: 'client', label: 'Client' },
@@ -66,6 +67,10 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       role: normaliseTravellerRole(t?.role)
     }));
 
+  const initialMonthMode = initial?.travelDatePrecision === PRECISION_MONTH;
+  const initialMonthFrom = initialMonthMode ? monthOf(initial?.travelStart) : '';
+  const initialMonthTo = initialMonthMode ? (monthOf(initial?.travelEnd) || initialMonthFrom) : '';
+
   const [clients, setClients] = useState([]);
   const [tourTypes, setTourTypes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -77,6 +82,10 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
     clientId: initial?.clientId || '',
     travelStart: initial?.travelStart || '',
     travelEnd: initial?.travelEnd || '',
+    travelDatePrecision: initialMonthMode ? PRECISION_MONTH : PRECISION_EXACT,
+    travelMonthFrom: initialMonthFrom,
+    travelMonthTo: initialMonthTo,
+    durationDays: initialMonthMode && Number(initial?.durationDays) > 0 ? Number(initial.durationDays) : '',
     numTravellers: Math.max(1, initialTravellers.length),
     agencyRef: initial?.agencyRef || '',
     tourType: initial?.tourType || '',
@@ -87,6 +96,8 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
 
   const selectedClient = clients.find((c) => c.id === form.clientId) || null;
   const isAgency = selectedClient?.client_type === 'Travel Agency';
+  const monthMode = form.travelDatePrecision === PRECISION_MONTH;
+  const monthBounds = monthWindow(form.travelMonthFrom, form.travelMonthTo || form.travelMonthFrom);
 
   useEffect(() => {
     let active = true;
@@ -168,6 +179,34 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
     setTravellers((prev) => prev.map((t, i) => (i === index ? { ...t, [field]: value } : t)));
   };
 
+  /* Exact dates and month-only timing are two views of the same window. Switch
+     between them without losing what the operator already entered: months come
+     from the dates, and dates come from the month bounds. */
+  const setTravelPrecision = (precision) => {
+    setForm((prev) => {
+      if (precision === prev.travelDatePrecision) return prev;
+      if (precision === PRECISION_MONTH) {
+        const from = monthOf(prev.travelStart);
+        const to = monthOf(prev.travelEnd) || from;
+        return {
+          ...prev,
+          travelDatePrecision: PRECISION_MONTH,
+          travelMonthFrom: prev.travelMonthFrom || from,
+          travelMonthTo: prev.travelMonthTo || to,
+          durationDays: prev.durationDays
+            || (prev.travelStart && prev.travelEnd ? daysBetween(prev.travelStart, prev.travelEnd) + 1 : '')
+        };
+      }
+      const bounds = monthWindow(prev.travelMonthFrom, prev.travelMonthTo || prev.travelMonthFrom);
+      return {
+        ...prev,
+        travelDatePrecision: PRECISION_EXACT,
+        travelStart: prev.travelStart || bounds.start,
+        travelEnd: prev.travelEnd || bounds.end
+      };
+    });
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -182,14 +221,35 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       return;
     }
 
-    if (!form.travelStart || !form.travelEnd) {
-      showToast('Travel date range is required', 'warning');
-      return;
-    }
+    const monthTiming = form.travelDatePrecision === PRECISION_MONTH;
+    const travelMonthTo = form.travelMonthTo || form.travelMonthFrom;
+    let travelStart = form.travelStart;
+    let travelEnd = form.travelEnd;
+    let durationDays = null;
 
-    if (form.travelEnd < form.travelStart) {
-      showToast('End date cannot be before the start date', 'warning');
-      return;
+    if (monthTiming) {
+      const timingError = monthTimingError({
+        monthFrom: form.travelMonthFrom,
+        monthTo: travelMonthTo,
+        durationDays: form.durationDays
+      });
+      if (timingError) {
+        showToast(timingError, 'warning');
+        return;
+      }
+      const bounds = monthWindow(form.travelMonthFrom, travelMonthTo);
+      travelStart = bounds.start;
+      travelEnd = bounds.end;
+      durationDays = Number(form.durationDays);
+    } else {
+      if (!form.travelStart || !form.travelEnd) {
+        showToast('Travel date range is required', 'warning');
+        return;
+      }
+      if (form.travelEnd < form.travelStart) {
+        showToast('End date cannot be before the start date', 'warning');
+        return;
+      }
     }
 
     const activeTravellers = travellers.slice(0, form.numTravellers);
@@ -202,8 +262,10 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       clientId: form.clientId,
       selectedClient,
       itineraryName: name,
-      travelStart: form.travelStart,
-      travelEnd: form.travelEnd,
+      travelStart,
+      travelEnd,
+      travelDatePrecision: monthTiming ? PRECISION_MONTH : PRECISION_EXACT,
+      durationDays,
       travellers: activeTravellers,
       numAdults: activeTravellers.length - childrenCount(activeTravellers),
       numChildren: childrenCount(activeTravellers),
@@ -359,41 +421,118 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
           )}
         </div>
 
-        {/* ─── Travel Date Range ─── */}
+        {/* ─── Travel Dates ─── */}
         <div style={{
           background: '#f8fafc',
           padding: '1.5rem',
           borderRadius: '12px',
           border: '1px solid #e2e8f0'
         }}>
-          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: '0 0 1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', margin: '0 0 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Calendar size={20} color="#0d7478" /> Travel Dates
           </h3>
-          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-            <div style={{ flex: '1', minWidth: '220px' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
-                From *
-              </label>
-              <input
-                type="date"
-                className="pricing-select"
-                value={form.travelStart}
-                onChange={(e) => setForm({ ...form, travelStart: e.target.value })}
-              />
-            </div>
-            <div style={{ flex: '1', minWidth: '220px' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
-                To *
-              </label>
-              <input
-                type="date"
-                className="pricing-select"
-                min={form.travelStart || undefined}
-                value={form.travelEnd}
-                onChange={(e) => setForm({ ...form, travelEnd: e.target.value })}
-              />
-            </div>
+          <div style={{ display: 'inline-flex', gap: '0.35rem', padding: '0.25rem', background: '#e2e8f0', borderRadius: '9px', marginBottom: '1.25rem' }}>
+            {[
+              { value: PRECISION_EXACT, label: 'Exact dates' },
+              { value: PRECISION_MONTH, label: 'Month(s) only' }
+            ].map((option) => {
+              const active = form.travelDatePrecision === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setTravelPrecision(option.value)}
+                  style={{
+                    border: 'none',
+                    borderRadius: '7px',
+                    padding: '0.45rem 0.9rem',
+                    fontSize: '0.85rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    background: active ? '#ffffff' : 'transparent',
+                    color: active ? '#0d7478' : '#475569',
+                    boxShadow: active ? '0 1px 3px rgba(15, 23, 42, 0.12)' : 'none'
+                  }}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
           </div>
+
+          {monthMode ? (
+            <>
+              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                <div style={{ flex: '1', minWidth: '200px' }}>
+                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
+                    From month *
+                  </label>
+                  <input
+                    type="month"
+                    className="pricing-select"
+                    value={form.travelMonthFrom}
+                    onChange={(e) => setForm({ ...form, travelMonthFrom: e.target.value })}
+                  />
+                </div>
+                <div style={{ flex: '1', minWidth: '200px' }}>
+                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
+                    To month *
+                  </label>
+                  <input
+                    type="month"
+                    className="pricing-select"
+                    min={form.travelMonthFrom || undefined}
+                    value={form.travelMonthTo}
+                    onChange={(e) => setForm({ ...form, travelMonthTo: e.target.value })}
+                  />
+                </div>
+                <div style={{ flex: '0 0 170px', minWidth: '170px' }}>
+                  <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.35rem' }}>
+                    <Clock size={13} /> Tour length (days) *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    className="pricing-select"
+                    value={form.durationDays}
+                    onChange={(e) => setForm({ ...form, durationDays: e.target.value })}
+                  />
+                </div>
+              </div>
+              <p style={{ fontSize: '0.78rem', color: '#475569', margin: '0.85rem 0 0', lineHeight: 1.5 }}>
+                {monthBounds.start
+                  ? `Pricing uses ${monthRangeLabel(form.travelMonthFrom, form.travelMonthTo || form.travelMonthFrom)}: ${monthBounds.start} to ${monthBounds.end}. `
+                  : 'Choose the travel month(s) so the quote can be priced. '}
+                Day dates stay open until the client confirms a departure date; the price holds for any dates inside the selected month(s).
+              </p>
+            </>
+          ) : (
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              <div style={{ flex: '1', minWidth: '220px' }}>
+                <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
+                  From *
+                </label>
+                <input
+                  type="date"
+                  className="pricing-select"
+                  value={form.travelStart}
+                  onChange={(e) => setForm({ ...form, travelStart: e.target.value })}
+                />
+              </div>
+              <div style={{ flex: '1', minWidth: '220px' }}>
+                <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '0.35rem' }}>
+                  To *
+                </label>
+                <input
+                  type="date"
+                  className="pricing-select"
+                  min={form.travelStart || undefined}
+                  value={form.travelEnd}
+                  onChange={(e) => setForm({ ...form, travelEnd: e.target.value })}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ─── Travellers ─── */}

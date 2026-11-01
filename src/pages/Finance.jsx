@@ -460,9 +460,9 @@ export const Finance = () => {
          than silently reporting a sync that never happened. */
       await supabase.from('accounting_sync_log').insert([{
         company_id: companyId, provider, direction: 'live', status: 'error', records_count: 0,
-        message: 'Live sync requires a server-side OAuth integration, which is not configured yet. Use Push to export the ledger.'
+        message: 'Live bank sync isn\u2019t available yet. Use Push to export the ledger.'
       }]).then(() => {}).catch(() => {});
-      showToast('Live sync needs a server-side integration — use Push to export the ledger instead.', 'warning');
+      showToast('Live bank sync isn\u2019t available yet \u2014 use Push to export the ledger instead.', 'warning');
     } finally {
       setBusyProvider(null);
     }
@@ -522,7 +522,7 @@ export const Finance = () => {
     try {
       const { data, error } = await supabase
         .from('itineraries')
-        .select('id, reference_number, itinerary_name, status, travel_start_date, travel_end_date, currency_code, updated_at, clients(name)')
+        .select('id, reference_number, itinerary_name, status, travel_start_date, travel_end_date, travel_date_precision, currency_code, updated_at, clients(name)')
         .eq('company_id', companyId)
         .in('status', ['provisional', 'confirmed'])
         .order('updated_at', { ascending: false });
@@ -675,7 +675,8 @@ export const Finance = () => {
           currencyCode: code,
           startDate: selectedItinerary?.travel_start_date,
           endDate: selectedItinerary?.travel_end_date,
-          protectionPercent: priceProtectionPercent
+          protectionPercent: priceProtectionPercent,
+          allowPartial: selectedItinerary?.travel_date_precision === 'month'
         });
         return rate ? { ...rate, _ageRanges: itineraryAgeRanges.get(String(itemId)) || [] } : null;
       };
@@ -745,6 +746,7 @@ export const Finance = () => {
                 rooms: Array.isArray(it.room_allocations) ? it.room_allocations : [],
                 rate: baseRate,
                 ageRanges: Array.isArray(baseRate?._ageRanges) ? baseRate._ageRanges : [],
+                ownRoomPolicy: it.children_own_room_policy || 'child_rates',
                 markup: Number(it.markup_percentage) || 0,
                 taxRate,
                 fallbackAdults,

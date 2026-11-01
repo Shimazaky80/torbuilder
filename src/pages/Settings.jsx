@@ -525,6 +525,51 @@ export const Settings = () => {
     }
   };
 
+  /* A vehicle type is a pricing axis, not a label: the rate rows hold one price
+     per code, and a quote resolves the smallest type that seats the party. So a
+     deletion must say what that does to work already priced - and the last type
+     cannot go, because with none left no party size resolves a vehicle at all and
+     every transport quote blocks. */
+  const handleDeleteVehicleType = async (vehicleType) => {
+    if (!companyId) return;
+    if (vehicleTypes.length <= 1) {
+      showToast('Keep at least one vehicle type — a quote needs a vehicle to price against.', 'warning');
+      return;
+    }
+    const nextUp = [...vehicleTypes]
+      .filter((t) => t.id !== vehicleType.id && t.max_capacity >= vehicleType.max_capacity)
+      .sort((a, b) => a.max_capacity - b.max_capacity)[0];
+    const ok = await confirm({
+      title: 'Delete vehicle type?',
+      message: `"${vehicleType.name}" (${vehicleType.max_capacity} seats) will be removed and can no longer be chosen for new work.`,
+      detail: nextUp
+        ? `A party that this vehicle seated will now be priced against ${nextUp.name}. Saved packages and itineraries keep the figures they were quoted at, and the prices already stored under "${vehicleType.code}" stay in the rate rows — re-adding a type with the same name brings them back. Use Deactivate instead to hide it without removing it.`
+        : `This is the largest vehicle on file, so a party bigger than ${vehicleTypes.filter((t) => t.id !== vehicleType.id).reduce((max, t) => Math.max(max, t.max_capacity), 0)} travellers will no longer have a vehicle to price against. Saved documents keep their quoted figures. Use Deactivate instead to hide it without removing it.`,
+      confirmLabel: 'Delete vehicle type',
+      destructive: true
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('company_vehicle_types')
+        .delete()
+        .eq('id', vehicleType.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      if (editingVehicleTypeId === vehicleType.id) {
+        setEditingVehicleTypeId(null);
+        setVehicleForm({ name: '', capacity: '' });
+      }
+      await fetchVehicleTypes(companyId);
+      showToast('Vehicle type deleted', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not delete vehicle type', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const openAdd = () => {
     setEditingId(null);
     setForm(emptyForm());
@@ -1106,7 +1151,7 @@ const handleSavePriceProtection = async () => {
             <Truck size={18} color="#0d7478" /> Vehicle Types
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            The vehicles every supplier quote is priced against. A service stores one price per type instead of one row per vehicle, and a quote picks the smallest type that seats the party. Deactivated types stay on saved packages but are hidden from new work.
+            The vehicles every supplier quote is priced against. A service stores one price per type instead of one row per vehicle, and a quote picks the smallest type that seats the party. Deactivated types stay on saved packages but are hidden from new work. Delete removes a type that was added by mistake; deactivate the one a saved package still prices against.
           </p>
         </div>
         <form onSubmit={handleVehicleTypeSubmit} style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
@@ -1177,6 +1222,15 @@ const handleSavePriceProtection = async () => {
                         onClick={() => handleVehicleTypeToggle(vehicleType)}
                       >
                         <Power size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn danger"
+                        title="Delete vehicle type"
+                        disabled={saving}
+                        onClick={() => handleDeleteVehicleType(vehicleType)}
+                      >
+                        <Trash2 size={15} />
                       </button>
                     </div>
                   </td>

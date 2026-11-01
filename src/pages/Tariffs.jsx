@@ -3,8 +3,11 @@ import SearchableSelect from '../components/SearchableSelect';
 import { Download, ExternalLink, FileSpreadsheet, FileText, Plus, Send, Tag } from 'lucide-react';
 import { getLoggedInUserName, supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
+import { withStarGrade } from '../lib/starGrading';
+import { collapseOccupancyLadder, isOccupancyTiered } from '../lib/occupancyPricing';
+import { supplierColumns } from '../lib/supplierStarColumn';
 
-const DEFAULT_CATEGORIES = ['Accommodation', 'Transfers', 'Activities / Tours', 'Flights / Charter', 'Meals', 'Trains', 'Tickets', 'Extras', 'Car Rental'];
+const DEFAULT_CATEGORIES = ['Accommodation', 'Transfers', 'Transport', 'Activities / Tours', 'Flights / Charter', 'Meals', 'Trains', 'Tickets', 'Extras', 'Car Rental'];
 const money = (value, currency) => `${currency || ''} ${Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.trim();
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const isPartnerExcludedCategory = (category) => /^(guide|guide\s*\/\s*driver)$/i.test(String(category || '').trim());
@@ -32,8 +35,10 @@ const rateBasisLabel = (rate, item) => {
   const basis = String(rate.rate_basis || item.pricing_model || 'per_person').toLowerCase();
   if (basis === 'per_vehicle') return 'Per Vehicle';
   if (basis === 'per_trip') return 'Per Trip';
+  if (basis === 'per_unit') return 'Per Service';
   if (basis === 'per_room') return 'Per Room';
   if (basis === 'per_person_sharing') return 'Per Person Sharing';
+  if (basis === 'per_person_occupancy') return 'Per Person by Occupancy';
   if (basis === 'tiered') return 'Per Person';
   return 'Per Person';
 };
@@ -41,6 +46,16 @@ const accommodationPriceLines = (rate, item, currency) => {
   const maxCapacity = Math.max(1, Number(item.max_occupancy) || 1);
   const basis = String(rate.rate_basis || item.pricing_model || 'per_person_sharing').toLowerCase();
   const lines = [];
+  if (isOccupancyTiered(rate)) {
+    /* Every head in the villa pays the band its own occupant count selects, so the
+       tariff prints the ladder and no single/sharing/child lines - none of those
+       figures exist in this contract. */
+    collapseOccupancyLadder(rate).forEach((band) => {
+      const size = band.minPax === band.maxPax ? `${band.minPax} pax` : `${band.minPax}-${band.maxPax} pax`;
+      lines.push(`Per person at ${size}: ${money(band.rate, currency)}`);
+    });
+    return lines;
+  }
   if (basis === 'per_room') {
     const roomRate = positiveRate(rate.unit_price, rate.price_1_adult, rate.single_room_rate);
     if (roomRate) lines.push(`Per person (room rate ÷ max capacity ${maxCapacity}): ${money(roomRate / maxCapacity, currency)}`);
@@ -60,7 +75,7 @@ const allowedRateKeys = new Set([
   'price_child_1_5', 'price_child_2_11', 'price_child_6_11', 'price_child_12_17', 'price_child',
   'single_room_rate', 'double_twin_rate', 'triple_room_rate', 'unit_price', 'adult_rate', 'child_rate',
   'single_supplement', 'taxes_and_surcharges', 'fuel_surcharge', 'entrance_fee_per_person',
-  'entrance_fee_per_vehicle', 'conservation_levy_adult', 'conservation_levy_child',
+  'entrance_fee_per_vehicle', 'entrance_fee_per_child', 'conservation_levy_adult', 'conservation_levy_child',
   'conservation_levy_per_adult', 'conservation_levy_per_child', 'rate', 'price',
   'fast_track_adult_rate', 'guide_rate', 'driver_rate', 'guide_transfer_rate',
   'guide_half_day_rate', 'guide_full_day_rate', 'guide_overland_rate', 'guide_dinner_rate'
@@ -91,6 +106,12 @@ function safeRateSnapshot(rate, markup) {
       rate: applyMarkup(tier.rate, markup)
     }));
   }
+  if (Array.isArray(rate.occupancy_rates)) {
+    result.occupancy_rates = rate.occupancy_rates.map((band) => ({
+      ...band,
+      rate: applyMarkup(band?.rate ?? band?.price, markup)
+    }));
+  }
   return result;
 }
 
@@ -99,7 +120,7 @@ function tariffDocument(tariff, rows, profile) {
   const logo = profile?.logo_data_url ? `<img src="${escapeHtml(profile.logo_data_url)}" alt="Company logo" style="display:block;max-width:180px;max-height:80px;object-fit:contain;margin-bottom:12px">` : '';
   const renderItem = (row) => {
     const item = row.item_snapshot || {};
-    const isTransferOrActivity = /^(transfers|activities \/ tours)$/i.test(row.category || '');
+    const isTransferOrActivity = /^(transfers|transport|activities \/ tours)$/i.test(row.category || '');
     const currency = item.currency || 'ZAR';
     const listText = (value) => Array.isArray(value) ? value.filter(Boolean).join(', ') : String(value || '').trim();
     const details = [
@@ -170,7 +191,7 @@ function tariffDocument(tariff, rows, profile) {
       : '';
     const itemIdentifier = item.identifier_code ? ` - ${escapeHtml(item.identifier_code)}` : '';
     const supplierPrefix = /^accommodation$/i.test(row.category || '') && item.supplier_name
-      ? `${escapeHtml(item.supplier_name)} - `
+      ? `${escapeHtml(withStarGrade(item.supplier_name, item.supplier_star_rating))} - `
       : '';
     return `<h3>${supplierPrefix}${escapeHtml(item.name)}${itemIdentifier} <small>${escapeHtml(row.category)}</small></h3>${capacityLine}${ratesTable}${detailList}`;
   };
@@ -306,7 +327,7 @@ export const Tariffs = () => {
       const itemIds = partnerItems.map((item) => item.id);
       const [{ data: rates, error: ratesError }, { data: suppliers, error: suppliersError }] = await Promise.all([
         itemIds.length ? supabase.from('item_rates').select('*').in('item_id', itemIds) : Promise.resolve({ data: [], error: null }),
-        itemIds.length ? supabase.from('suppliers').select('id, name').in('id', [...new Set(partnerItems.map((item) => item.supplier_id).filter(Boolean))]) : Promise.resolve({ data: [], error: null })
+        itemIds.length ? supabase.from('suppliers').select(await supplierColumns('id, name')).in('id', [...new Set(partnerItems.map((item) => item.supplier_id).filter(Boolean))]) : Promise.resolve({ data: [], error: null })
       ]);
       if (ratesError) throw ratesError;
       if (suppliersError) throw suppliersError;
@@ -317,6 +338,7 @@ export const Tariffs = () => {
         carRates = data || [];
       }
       const supplierNames = new Map((suppliers || []).map((supplier) => [supplier.id, supplier.name]));
+      const supplierStars = new Map((suppliers || []).map((supplier) => [supplier.id, supplier.star_rating]));
       const companyName = companyProfile?.legal_name || '';
       const rateByItem = new Map();
       (rates || []).forEach((rate) => {
@@ -325,7 +347,7 @@ export const Tariffs = () => {
       });
       const snapshotRows = partnerItems.map((item) => {
         const supplierName = supplierNames.get(item.supplier_id) || '';
-        const hideSupplier = /^(transfers|activities \/ tours)$/i.test(item.category) && supplierName.toLowerCase() !== companyName.toLowerCase();
+        const hideSupplier = /^(transfers|transport|activities \/ tours)$/i.test(item.category) && supplierName.toLowerCase() !== companyName.toLowerCase();
         const itemRates = (rateByItem.get(item.id) || []).map((rate) => safeRateSnapshot(rate, client.markup_percentage));
         return {
           tariff_id: tariff.id,
@@ -345,10 +367,12 @@ export const Tariffs = () => {
             pricing_model: item.pricing_model || 'per_person',
             max_occupancy: item.max_occupancy,
             child_age_ranges: item.child_age_ranges || [],
+            children_own_room_policy: item.children_own_room_policy || 'child_rates',
             meal_type: item.meal_type || '',
             menu_type: item.menu_type || '',
             ticket_type: item.ticket_type || '',
             transfer_type: item.transfer_type || '',
+            transport_type: item.transport_type || '',
             train_cabin_name: item.train_cabin_name || '',
             flight_number: item.flight_number || '',
             airline_name: item.airline_name || '',
@@ -356,6 +380,7 @@ export const Tariffs = () => {
             exclusions: item.exclusions || item.exclusions_text || '',
             terms_and_conditions: item.terms_and_conditions || item.terms_conditions || item.terms || '',
             supplier_name: hideSupplier ? '' : supplierName,
+            supplier_star_rating: hideSupplier ? null : (supplierStars.get(item.supplier_id) || null),
             rates: item.category === 'Car Rental'
               ? carRates.filter((rate) => rate.item_id === item.id).map((rate) => ({
                 vehicle_group: rate.vehicle_group,
@@ -446,17 +471,23 @@ export const Tariffs = () => {
     if (itemError) { showToast(itemError.message || 'Could not load supplier details', 'error'); return; }
     const supplierIds = [...new Set((items || []).map((item) => item.supplier_id).filter(Boolean))];
     const { data: suppliers, error: supplierError } = supplierIds.length
-      ? await supabase.from('suppliers').select('id,name').eq('company_id', companyId).in('id', supplierIds)
+      ? await supabase.from('suppliers').select(await supplierColumns('id,name')).eq('company_id', companyId).in('id', supplierIds)
       : { data: [], error: null };
     if (supplierError) { showToast(supplierError.message || 'Could not load supplier details', 'error'); return; }
-    const supplierByItem = new Map((items || []).map((item) => [item.id, (suppliers || []).find((supplier) => supplier.id === item.supplier_id)?.name || '']));
+    const supplierByItem = new Map((items || []).map((item) => [item.id, (suppliers || []).find((supplier) => supplier.id === item.supplier_id) || null]));
     const quotationData = {
       ...quote.quotation_data,
       days: (quote.quotation_data?.days || []).map((day) => ({
         ...day,
         services: (day.services || []).map((service) => ({
           ...service,
-          supplier_name: supplierByItem.get(service.item_id) || service.supplier_name || ''
+          supplier_name: (() => {
+            const supplier = supplierByItem.get(service.item_id);
+            if (!supplier) return service.supplier_name || '';
+            return /accommodation/i.test(String(service.category || ''))
+              ? withStarGrade(supplier.name, supplier.star_rating)
+              : (supplier.name || '');
+          })()
         }))
       }))
     };

@@ -6,6 +6,7 @@ import { ResetPassword } from './pages/ResetPassword';
 import { SuperAdmin } from './pages/SuperAdmin';
 import { Suppliers } from './pages/Suppliers';
 import { Clients } from './pages/Clients';
+import { GuideTeam } from './pages/GuideTeam';
 import { Itineraries } from './pages/Itineraries';
 import { ItineraryBuilder } from './pages/ItineraryBuilder';
 import { Finance } from './pages/Finance';
@@ -51,6 +52,7 @@ function App() {
                         <Route path="super-admin" element={<SuperAdmin />} />
                         <Route path="clients" element={<Clients />} />
                         <Route path="suppliers" element={<Suppliers />} />
+                        <Route path="guide-team" element={<GuideTeam />} />
                         <Route path="services" element={<Navigate to="/library-items" replace />} />
                         <Route path="library-items" element={<LibraryItems />} />
                         <Route path="packages" element={<Packages />} />

@@ -20,7 +20,7 @@ import { useToast } from '../context/ToastContext';
 import RoomAllocationModal from '../components/RoomAllocationModal';
 import { calculateRoomCharges, defaultAutoAllocation } from '../lib/roomAllocationHelper';
 
-const CATEGORIES = ['All', 'Accommodation', 'Transfers', 'Activities / Tours', 'Meals', 'Flights / Charter', 'Trains', 'Tickets', 'Car Rental', 'Extras'];
+const CATEGORIES = ['All', 'Accommodation', 'Transfers', 'Transport', 'Activities / Tours', 'Meals', 'Flights / Charter', 'Trains', 'Tickets', 'Car Rental', 'Extras'];
 const round2 = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const dateLabel = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString() : '—';
@@ -338,6 +338,11 @@ export const PartnerPortal = () => {
         : '';
     const basis = rate.rate_basis || itemRow.item_snapshot?.pricing_model || 'per_person';
     const isAccom = /accommodation/i.test(cat);
+    /* A room-aware contract prices and sleeps by the room the rate belongs to,
+       so the partner line carries that room's capacity and name. */
+    const roomCapacity = isAccom
+      ? (Number(rate.room_max_occupancy) || Number(itemRow.item_snapshot?.max_occupancy) || 2)
+      : (Number(itemRow.item_snapshot?.max_occupancy) || 2);
 
     const newService = {
       key: crypto.randomUUID(),
@@ -357,11 +362,13 @@ export const PartnerPortal = () => {
       childRateBands: rate.child_rates_breakdown || {},
       fastTrackChildRateBands: rate.fast_track_child_rates_breakdown || {},
       childAgeRanges: itemRow.item_snapshot.child_age_ranges || [],
+      childrenOwnRoomPolicy: itemRow.item_snapshot.children_own_room_policy || 'child_rates',
       variant: variantOptions,
       rentalDays: 1,
       quantity: 1,
-      maxOccupancy: itemRow.item_snapshot?.max_occupancy || 2,
-      roomAllocations: isAccom ? defaultAutoAllocation(travellers, itemRow.item_snapshot?.max_occupancy || 2) : []
+      maxOccupancy: roomCapacity,
+      roomType: isAccom ? (rate.room_type || '') : '',
+      roomAllocations: isAccom ? defaultAutoAllocation(travellers, roomCapacity) : []
     };
 
     setServices((prev) => [...prev, newService]);
@@ -380,6 +387,7 @@ export const PartnerPortal = () => {
           category: service.category,
           max_occupancy: service.maxOccupancy,
           child_age_ranges: service.childAgeRanges,
+          children_own_room_policy: service.childrenOwnRoomPolicy,
           item_rates: [service.rateSnapshot]
         };
         const accomCalc = calculateRoomCharges(itemForCalc, service.roomAllocations, service.currency, Math.max(0, Number(markup) || 0));
@@ -410,7 +418,7 @@ export const PartnerPortal = () => {
         || service.tieredPricing?.[service.tieredPricing.length - 1];
       if (tier) baseAdult = (Number(tier.rate) || 0) / totalPax;
       const unitAdult = round2(baseAdult * markupFactor);
-      const flat = ['per_vehicle', 'per_trip', 'per_room', 'flat'].includes(service.basis);
+      const flat = ['per_vehicle', 'per_trip', 'per_room', 'per_unit', 'flat'].includes(service.basis);
       const unitChildren = travellers.filter((person) => person.type === 'child').map((person) => round2(childRateFor(service, Number(person.age)) * markupFactor));
       const total = tier
         ? Number(tier.rate) * markupFactor

@@ -38,6 +38,7 @@ export const accommodationBreakdown = ({
   rooms = [],
   rate = null,
   ageRanges = [],
+  ownRoomPolicy = 'child_rates',
   markup = 0,
   taxRate = 15,
   fallbackAdults = 0,
@@ -63,7 +64,7 @@ export const accommodationBreakdown = ({
   let charge = null;
   if (rate && rms.length) {
     charge = calculateRoomCharges(
-      { item_rates: [rate], child_age_ranges: Array.isArray(ageRanges) ? ageRanges : [] },
+      { item_rates: [rate], child_age_ranges: Array.isArray(ageRanges) ? ageRanges : [], children_own_room_policy: ownRoomPolicy },
       rms,
       undefined,
       Number(markup) || 0

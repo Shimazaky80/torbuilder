@@ -1,8 +1,15 @@
 import { childRateForAge } from './roomAllocationHelper';
+import { isOccupancyTiered, occupancyCeiling, occupancyLadderOf, occupancyRateForPax, pricedCapacity } from './occupancyPricing';
+import { rateCoversNights } from './accommodationOptions';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
-import { contractPaxRate } from './servicePricing';
+import { chargesChildRate, contractPaxRate } from './servicePricing';
 import { buildShareContext } from './staffPricing';
 import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal } from './guidePricing';
+import {
+  combineSingleSupplements,
+  normaliseSingleSupplementLadder,
+  totalSingleSupplement
+} from './singleSupplement';
 
 const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
 const numberOf = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -33,9 +40,22 @@ const rateFor = (service, item) => {
     && Object.keys(service.rate_snapshot).length) {
     return service.rate_snapshot;
   }
-  return item?.item_rates?.find((rate) => rate.id === service.rate_id) || {};
+  return item?.item_rates?.find((rate) => rate.id === service?.rate_id) || {};
 };
-const capacityFor = (item, service) => Math.max(0, numberOf(item?.max_occupancy) || numberOf(service?.vehicle_capacity));
+/* How many travellers one room (or one vehicle) takes. A lodging line names the
+   room it was sold as, and a property's rooms sleep different numbers, so the
+   room's own capacity wins over the property-wide figure. A villa on an occupancy
+   ladder stops at its top band: the beds above the last priced party are not a
+   capacity the engine can quote. */
+const capacityFor = (item, service) => {
+  const rate = rateFor(service, item);
+  const beds = Math.max(0,
+    numberOf(service?.room_max_occupancy)
+    || numberOf(rate?.room_max_occupancy)
+    || numberOf(item?.max_occupancy)
+    || numberOf(service?.vehicle_capacity));
+  return pricedCapacity(rate, beds);
+};
 /* A traveller pattern is a single party size. It used to be adults + children, but a
    child is only ever priced because of the accommodation, so the pattern carries one
    pax count and the child is handled once, in the child price. Legacy rows that still
@@ -48,7 +68,7 @@ const isAccommodation = (item, service) =>
 const isVehicle = (item, service, rate) => {
   const category = String(item?.category || service?.category || '');
   const basis = String(rate?.rate_basis || service?.rate_basis || item?.pricing_model || '').toLowerCase();
-  if (basis === 'per_vehicle' || /transfers?|flights?\s*\/?\s*charter/i.test(category)) return true;
+  if (basis === 'per_vehicle' || /transfers?|transport|flights?\s*\/?\s*charter/i.test(category)) return true;
   return capacityFor(item, service) > 0 && /activities?|tours?|excursions?/i.test(category);
 };
 const currencyOf = (service) => service?.currency_code || 'ZAR';
@@ -171,6 +191,8 @@ export const packageItemSeasonError = (item, rate, periods = []) => packageSeaso
  *   open      the package has no restricted validity range - nothing to check
  *   ok        a season spans every validity range
  *   protected no season spans them; the closest prior season is uplifted
+ *   stale     the closest prior season again, but with no protection percentage
+ *             set, so the package is charged that old contract figure unchanged
  *   blocked   nothing usable, so the item cannot join the package
  */
 export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode = '', protectionPercent = 0 } = {}) => {
@@ -204,6 +226,24 @@ export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode
       rate: applyProtectionToRate(guarded.rate, guarded.protectionPercent),
       seasonName: guarded.seasonName,
       message: `${name}: no season covers ${ranges}. Pricing Protection applied — ${guarded.protectionPercent}% added to the “${guarded.seasonName || 'previous'}” season${years ? ` (${years} year${years === 1 ? '' : 's'} old)` : ''}, which runs ${guarded.validFrom || 'open'} – ${guarded.validTo || 'open'}.`
+    };
+  }
+
+  /* A prior-year season standing in with no percentage set is the same money as
+     the old contract, so it is not a protected price and must not read like one:
+     the package is told which season it is being charged and how far behind the
+     trip that season sits. */
+  const outdated = results.find((result) => result.status === 'stale');
+  if (outdated) {
+    const years = outdated.staleByYears;
+    return {
+      status: 'stale',
+      ok: false,
+      canAdd: true,
+      protectionPercent: 0,
+      rate: outdated.rate || rate || null,
+      seasonName: outdated.seasonName,
+      message: `${name}: no season covers ${ranges} and this company has no Pricing Protection percentage, so the line is charged the “${outdated.seasonName || 'previous'}” season figure exactly as it stands. That season ran ${outdated.validFrom || 'open'} – ${outdated.validTo || 'open'}, ${years} year${years === 1 ? '' : 's'} behind the package. Load the new contract in Library Items, or set a protection percentage on Settings.`
     };
   }
 
@@ -351,7 +391,7 @@ const tierKeyOf = (service) => (service?.tier_key ? String(service.tier_key) : '
 const isTransport = (item, service) => {
   const category = String(item?.category || service?.category || '');
   const basis = String(rateFor(service, item)?.rate_basis || service?.rate_basis || item?.pricing_model || '').toLowerCase();
-  if (/transfers?|flights?\s*\/?\s*charter/i.test(category)) return capacityFor(item, service) > 0;
+  if (/transfers?|transport|flights?\s*\/?\s*charter/i.test(category)) return capacityFor(item, service) > 0;
   return (basis === 'per_vehicle' || basis === 'per_trip') && capacityFor(item, service) > 0;
 };
 
@@ -371,8 +411,13 @@ export const packageIsTransport = (service, library = []) => {
    on the card is the number the band engine will use: an item that is not treated as a
    vehicle here is not going to grow a band, and saying "Max: 3" for it would mislead. */
 export const packageVehicleCapacity = (item, rate) => {
-  if (!item || isAccommodation(item, null)) return 0;
-  return isTransport(item, { rate_basis: rate?.rate_basis }) ? transportCapacity(item, null) : 0;
+  /* A sidebar card has no saved line behind it, but the engine reads a line, so the rate is
+     handed over the way a locked line hands over its own. Passing null used to read the rate
+     of a line that does not exist - and a property's rooms sleep different numbers, so the
+     card has to be the rate's capacity, not the property's. */
+  const line = { rate_snapshot: rate };
+  if (!item || isAccommodation(item, line)) return 0;
+  return isTransport(item, line) ? transportCapacity(item, line) : 0;
 };
 
 /* Layer 1: keep only the smallest vehicle on the day that still seats the party. When
@@ -545,13 +590,35 @@ const amount = (...values) => {
   }
   return fallback;
 };
-const FLAT_BASES = new Set(['per_vehicle', 'per_trip', 'per_room', 'flat']);
+const FLAT_BASES = new Set(['per_vehicle', 'per_trip', 'per_room', 'per_unit', 'flat']);
 
 /* How the contracted rate splits into sharing, single and child figures. Kept in
    one place so the room allocation, the traveller breakdown and the child price
    can never quote different numbers from the same contract. */
-const accommodationTerms = (service, item) => {
+const accommodationTerms = (service, item, pax = null) => {
   const rate = rateFor(service, item);
+  /* A villa or apartment sold on an occupancy ladder has no single sharing rate:
+     what a head pays is set by how many sleep in the room, and every head pays it,
+     adult or child. There is no supplement either - a party of two does not pay a
+     penalty for not filling the villa, it simply pays the 2 pax band. The caller
+     that knows each room's own occupant count prices room by room; the callers that
+     describe one room for the whole party pass its size here. */
+  const occupancyTiered = isOccupancyTiered(rate);
+  const bandRate = occupancyTiered ? occupancyRateForPax(rate, pax) : null;
+  if (occupancyTiered) {
+    const perHead = bandRate || 0;
+    return {
+      rate,
+      occupancyTiered: true,
+      bandRate,
+      flatRoom: false,
+      sharing: perHead,
+      single: perHead,
+      supplement: 0,
+      extraAdult: perHead,
+      flatSingle: perHead
+    };
+  }
   const flatRoom = String(rate.rate_basis || service.rate_basis || '').toLowerCase() === 'per_room';
   const flatSharing = amount(rate.unit_price, rate.double_twin_rate, rate.price_2_adults);
   const sharing = flatRoom
@@ -575,17 +642,58 @@ const accommodationTerms = (service, item) => {
   };
 };
 
+/* The rooms a party is spread across, priced on the contract's own terms.
+   A ladder room is priced room by room, because the band a head pays is set by how
+   many sleep in that room; a party too big for the villa is not a discount waiting
+   to be found, it is a second villa, and the room that cannot be sold at its size
+   blocks the quote. */
+const accommodationRoomCosts = (terms, rooms, pax) => {
+  if (!terms.occupancyTiered) return { total: null, blocked: false };
+  let total = 0;
+  let blocked = false;
+  rooms.forEach((room) => {
+    const occupants = numberOf(room.occupants);
+    const perHead = occupants > 0 ? occupancyRateForPax(terms.rate, occupants) : null;
+    if (perHead === null) {
+      if (occupants > 0) blocked = true;
+      return;
+    }
+    total += perHead * occupants;
+  });
+  return { total: round2(total), blocked, perHead: pax > 0 ? round2(total / pax) : 0 };
+};
+
+/* Why a ladder room cannot be sold to this party, in the operator's terms. The
+   supplier's blank cells mean the room is not offered at that size, so the band has
+   to be refused outright rather than quoted off the nearest figure. */
+const occupancyBlockReason = (terms, rooms, name) => {
+  if (!terms.occupancyTiered) return '';
+  const sizes = [...new Set(rooms.map((room) => numberOf(room.occupants)).filter((n) => n > 0))];
+  const unpriced = sizes.filter((size) => occupancyRateForPax(terms.rate, size) === null);
+  if (!unpriced.length) return '';
+  const size = Math.max(...unpriced);
+  const sold = [...new Set(occupancyLadderOf(terms.rate).map((tier) => `${tier.minPax}-${tier.maxPax}`))].join(', ');
+  return `${name}: this room is not sold at ${size} pax (the ladder covers ${sold || 'no party size'}).`;
+};
+
 export const accommodationRoomPlan = (service, item, pattern = {}) => {
-  const { sharing, supplement } = accommodationTerms(service, item);
-  const capacity = capacityFor(item, service);
   const pax = totalTravellers(pattern);
+  const terms = accommodationTerms(service, item, pax);
+  const { sharing, supplement } = terms;
+  const capacity = capacityFor(item, service);
   const rooms = roomsForPax(pax, capacity);
+  const costs = accommodationRoomCosts(terms, rooms, pax);
+  const name = service?.item_name || item?.name || 'Accommodation';
   return {
     capacity,
     pax,
     roomCount: Math.max(1, rooms.length),
-    sharingPerAdult: round2(sharing),
-    singleSupplement: round2(supplement)
+    /* A blocked room prices at nothing, and the caller must read that as "no quote"
+       rather than as a free night. */
+    sharingPerAdult: round2(costs.blocked ? 0 : (costs.total === null ? sharing : costs.perHead)),
+    singleSupplement: round2(supplement),
+    blocked: costs.blocked === true,
+    blockReason: costs.blocked ? occupancyBlockReason(terms, rooms, name) : ''
   };
 };
 
@@ -633,8 +741,12 @@ export const vehicleBlockReason = (service, item, pax, vehicleTypes = []) => {
    an exact band total, and rounds only the values it displays. Rounding here would make a
    party of 13 pay 3800.03 for a vehicle contracted at 3800.
    Returns null when the rate's price vector is present but BLOCKS this party size - nothing
-   priced for the resolved vehicle, or no vehicle type that seats the party. */
-const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], shareContext = null) => {
+   priced for the resolved vehicle, or no vehicle type that seats the party.
+
+   Pass a child age range to price ONE CHILD's share instead of an adult's. Only the
+   categories that buy per head (meals, entries, extras) contract a child figure; a
+   vehicle, a trip or a room is space, so a child takes the adult share there too. */
+const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], shareContext = null, childRange = null) => {
   const rate = rateFor(service, item);
   const currency = service.currency_code || rate.currency || item?.currency || 'ZAR';
   const pricedItem = {
@@ -677,6 +789,14 @@ const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], sha
   let perTraveller = unitPax || unitCost;
   if (FLAT_BASES.has(basis)) {
     perTraveller = unitPax || unitCost / pax;
+  }
+  /* A child's own share of a per-head line, resolved from the package's declared
+     child range through the same band rule the rooms use - the most expensive band
+     the range spans, never the infant one. A category with no child price for that
+     range keeps the adult share, exactly as the itinerary charges it. */
+  if (childRange && !FLAT_BASES.has(basis) && chargesChildRate(item)) {
+    const child = childBandForRange(rate, item?.child_age_ranges || [], childRange, perTraveller);
+    if (child.known) return child.rate * quantity;
   }
   return perTraveller * quantity;
 };
@@ -745,8 +865,20 @@ export const childBandForRange = (rate, itemAgeRanges = [], childRange = null, s
   return { rate: best.child.rate, known: true, band: best.band, zeroRate: false };
 };
 
-const childAccommodationFor = (service, item, childRange) => {
-  const { sharing, single, supplement } = accommodationTerms(service, item);
+const childAccommodationFor = (service, item, childRange, pax = null) => {
+  const terms = accommodationTerms(service, item, pax);
+  const { sharing, single, supplement } = terms;
+  if (terms.occupancyTiered) {
+    /* The ladder does not ask who the heads are. A child in a villa band pays the
+       band figure, the same as the adult beside them, so there is no child rate and
+       no child supplement to resolve. */
+    return {
+      childAllowed: childRange ? true : null,
+      childAccommodation: round2(sharing),
+      childBasis: 'Occupancy band (every head pays)',
+      childBandName: ''
+    };
+  }
   const child = childBandForRange(rateFor(service, item), item?.child_age_ranges || [], childRange, sharing);
   /* A child is only priced differently because of the accommodation, and the room is
      the one thing that cannot be shared with an adult who is already paying the
@@ -768,30 +900,50 @@ const childAccommodationFor = (service, item, childRange) => {
   };
 };
 
-const accommodationPricing = (service, item, { pax, childRange }) => {
-  const terms = accommodationTerms(service, item);
+const accommodationPricing = (service, item, { pax, childRange, singleRoomsOverride = null }) => {
+  const terms = accommodationTerms(service, item, pax);
   const { flatRoom, sharing, extraAdult } = terms;
   const capacity = capacityFor(item, service);
   const rooms = roomsForPax(pax, capacity);
+  const costs = accommodationRoomCosts(terms, rooms, pax);
 
   let adultTotal = 0;
-  rooms.forEach((room) => {
-    if (!room.occupants) return;
-    if (flatRoom) {
-      adultTotal += room.occupants * sharing;
-      return;
-    }
-    adultTotal += Math.min(room.occupants, 2) * sharing;
-    adultTotal += Math.max(0, room.occupants - 2) * extraAdult;
-  });
+  if (costs.total !== null) {
+    /* Every room priced itself on the ladder, so the party's villa cost is already
+       the sum of those rooms - not a sharing rate multiplied by an adult count. */
+    adultTotal = costs.total;
+  } else {
+    rooms.forEach((room) => {
+      if (!room.occupants) return;
+      if (flatRoom) {
+        adultTotal += room.occupants * sharing;
+        return;
+      }
+      adultTotal += Math.min(room.occupants, 2) * sharing;
+      adultTotal += Math.max(0, room.occupants - 2) * extraAdult;
+    });
+  }
 
   /* A room with a single occupant is not sharing: the property charges it single
      occupancy, so that traveller pays the supplement. Counting those rooms is how an
      odd party - three travellers allocated across rooms that sleep two - is charged
      rather than quietly splitting the shortfall into the sharing rate. The supplement
      is kept out of adultTotal so the sharing price and the "own room" card stay the
-     figures they say they are; it is added once, to the party total. */
-  const singleRooms = rooms.filter((room) => room.occupants === 1).length;
+     figures they say they are; it is added once, to the party total.
+
+     A manual override states how many single rooms the quote assumes, for packages
+     priced before room allocations exist. A contract ladder prices those rooms in
+     order (first singles waived, later ones supplemented); without a ladder every
+     single room pays the base supplement. */
+  const singleRooms = terms.occupancyTiered
+    /* A villa band already is the price for that party size: two people in a villa
+       pay the 2 pax figure and owe nothing further for the empty beds. Counting a
+       single room here would add a supplement the contract never quotes. */
+    ? 0
+    : singleRoomsOverride != null
+      ? Math.max(0, Math.min(pax, Math.round(numberOf(singleRoomsOverride))))
+      : rooms.filter((room) => room.occupants === 1).length;
+  const ladder = normaliseSingleSupplementLadder(terms.rate);
 
   /* These are all per-traveller figures, so the room count must not be applied a
      second time on top of it. adultTotal is already the sum over the allocated
@@ -805,9 +957,16 @@ const accommodationPricing = (service, item, { pax, childRange }) => {
     roomCount: Math.max(1, rooms.length),
     sharingPerAdult: round2(adultTotal / pax),
     singleRooms,
-    forcedSingleSupplement: round2(singleRooms * terms.supplement),
+    forcedSingleSupplement: round2(totalSingleSupplement(ladder, terms.supplement, singleRooms)),
     singleSupplement: round2(terms.supplement),
-    ...childAccommodationFor(service, item, childRange)
+    /* A party this room is not sold at: the band stops below the number of heads
+       that have to sleep here. The quote must be refused, not filled in at the
+       nearest price the ladder happens to publish. */
+    occupancyBlocked: costs.blocked === true,
+    occupancyBlockReason: costs.blocked
+      ? occupancyBlockReason(terms, rooms, service?.item_name || item?.name || 'Accommodation')
+      : '',
+    ...childAccommodationFor(service, item, childRange, pax)
   };
 };
 
@@ -895,11 +1054,17 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
       const item = libraryEntryFor(service, library);
       const name = service.item_name || item?.name || (isAccommodation(item, service) ? 'Accommodation' : 'Service');
       if (isAccommodation(item, service)) {
+        const priced = accommodationPricing(service, item, { pax, childRange });
+        const { occupancyBlockReason, ...roomPricing } = priced;
         accommodationRows.push({
           name,
           supplierName: service.supplier_name || item?.supplier_name || '',
-          ...accommodationPricing(service, item, { pax, childRange })
+          ...roomPricing
         });
+        /* A villa the party cannot be sold in blocks the band the same way an
+           unpriced vehicle column does: the numbers below still come out of the rows
+           that did price, but the band as a whole has no quote. */
+        if (priced.occupancyBlocked) blockedVehicleReasons.push(occupancyBlockReason);
         return;
       }
       const perPerson = unitContributionPerTraveller(service, item, pax, vehicleTypes, resolvedShareContext);
@@ -923,6 +1088,14 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
       unitRows.push({
         name,
         perPerson: round2(perPerson),
+        /* The child card needs this line's share as a CHILD pays it. On the
+           space-selling categories - and on any line with no child price for the
+           declared range - that is the same figure as the adult share, so a
+           package with nothing to discount still prices a child at the adult
+           total. */
+        childPerPerson: round2(unitContributionPerTraveller(
+          service, item, pax, vehicleTypes, resolvedShareContext, packageChildAgeRange(childRange)
+        ) ?? perPerson),
         total: round2(perPerson * pax),
         /* Accommodation figures are zero, not blank: this row genuinely carries no
            room cost, and a blank cell reads as "not worked out yet". */
@@ -934,6 +1107,7 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
 
     const sum = (rows_, field) => round2(rows_.reduce((total, row) => total + numberOf(row[field]), 0));
     const unitPerPerson = sum(unitRows, 'perPerson');
+    const unitChildPerPerson = sum(unitRows, 'childPerPerson');
     const unitTotal = sum(unitRows, 'total');
     const accommodationSharing = sum(accommodationRows, 'sharingPerAdult');
     const childAccommodation = sum(accommodationRows, 'childAccommodation');
@@ -962,6 +1136,10 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
       servable: blockedVehicleReasons.length === 0,
       blockedVehicleReasons,
       unitPerPerson,
+      /* The non-accommodation share as a CHILD pays it, before the room figures.
+         Equal to unitPerPerson whenever no line on the package contracts a child
+         price for the declared range. */
+      unitChildPerPerson,
       accommodationSharing,
       childAccommodation,
       singleSupplement,
@@ -986,7 +1164,7 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
          the supplement is a room charge: leaving the room's sharing rate out of it produced
          a total LOWER than the sharing price it is labelled as being added to. */
       singleSupplementTotal: round2(unitPerPerson + accommodationSharing + singleSupplement),
-      childTotal: round2(unitPerPerson + childAccommodation),
+      childTotal: round2(unitChildPerPerson + childAccommodation),
       /* Nothing is "refusing a child" until a child age range has actually been
          declared; without one nothing is being priced for a child at all. */
       childNotAllowed: packageChildAgeRange(childRange)
@@ -1007,7 +1185,7 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
         adultSharingTotal: applyPackageMarkup(unitPerPerson + accommodationSharing, markupPercent),
         partyTotal: applyPackageMarkup(unitTotal + accommodationSharing * pax + forcedSingleSupplement, markupPercent),
         singleSupplementTotal: applyPackageMarkup(unitPerPerson + accommodationSharing + singleSupplement, markupPercent),
-        childTotal: applyPackageMarkup(unitPerPerson + childAccommodation, markupPercent)
+        childTotal: applyPackageMarkup(unitChildPerPerson + childAccommodation, markupPercent)
       }
     };
   }
@@ -1105,11 +1283,17 @@ export const vehicleColumnPools = ({ days = [], library = [], vehicleTypes = [] 
 
    A party whose size leaves a room with a single occupant pays the single supplement for
    that room, so the supplement is spread over the party and carried on every column's price.
-   It is what makes a 3 pax column dearer than three shares of a 2 pax column. */
-export const presentationPricingColumns = ({ codes = [], bands = {}, pools = {}, perPersonFixed = 0, accommodation = 0, singleSupplement = 0, roomCapacity = 2 } = {}) => (
+   It is what makes a 3 pax column dearer than three shares of a 2 pax column. Where the
+   contracts carry a single-supplement ladder the rooms are priced in order: the first
+   singles may be waived, later tiers carry the amount entered in the library item. A season
+   can state its own single-room count (`singleRoomsOverride`) for quotes priced before room
+   allocations exist; it replaces the party-size heuristic and is clamped to the party. */
+export const presentationPricingColumns = ({ codes = [], bands = {}, pools = {}, perPersonFixed = 0, accommodation = 0, singleSupplement = 0, singleSupplementTiers = [], singleRoomsOverride = null, roomCapacity = 2 } = {}) => (
   (Array.isArray(codes) ? codes : []).flatMap((code) => (bands?.[code] || []).map((pax) => {
-    const singleRooms = roomsForPax(pax, roomCapacity).filter((room) => room.occupants === 1).length;
-    const forced = singleRooms * (Number(singleSupplement) || 0);
+    const singleRooms = singleRoomsOverride != null && singleRoomsOverride !== ''
+      ? Math.max(0, Math.min(pax, Math.round(numberOf(singleRoomsOverride))))
+      : roomsForPax(pax, roomCapacity).filter((room) => room.occupants === 1).length;
+    const forced = totalSingleSupplement(singleSupplementTiers, Number(singleSupplement) || 0, singleRooms);
     return {
       code,
       pax,
@@ -1136,7 +1320,7 @@ export const accommodationRoomCapacity = ({ days = [], library = [] } = {}) => {
    boundaries (D15/D16). A rate with no window is taken to cover every date. The straddle
    rule charges the HIGHEST overlapping sharing rate for all nights, never split, never the
    first night. Returns { rates, overlapping, chosen }. */
-export const accommodationRatesForTrip = (service, item, tripFrom, tripTo) => {
+export const accommodationRatesForTrip = (service, item, tripFrom, tripTo, nights = null, pax = null) => {
   const start = new Date(`${tripFrom}T00:00:00`);
   const end = new Date(`${tripTo}T00:00:00`);
   const fallsInside = (rate) => {
@@ -1144,7 +1328,15 @@ export const accommodationRatesForTrip = (service, item, tripFrom, tripTo) => {
     const to = rate?.valid_to ? new Date(`${rate.valid_to}T00:00:00`) : null;
     return !from || !to || (from <= end && to >= start);
   };
-  const rates = (item?.item_rates || [])
+  /* A room contracted at several nightly prices by length of stay is resolved
+     against the stay itself when that is known, so the preview quotes the band
+     the booking will actually be charged at. Without a stay length every row
+     stays in the contest, exactly as before. */
+  const stayNights = Math.floor(Number(nights) || 0);
+  const allRows = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  const bandedRows = stayNights > 0 ? allRows.filter((rate) => rateCoversNights(rate, stayNights)) : allRows;
+  const rows = bandedRows.length ? bandedRows : allRows;
+  const rates = rows
     .map((rate) => {
       /* The row is priced against its own window: the rate this line was saved with is
          irrelevant to the preview, so each contract season is read on its own terms. The
@@ -1153,7 +1345,11 @@ export const accommodationRatesForTrip = (service, item, tripFrom, tripTo) => {
          pre-load, 0.00) figure for every season on the item. */
       const terms = accommodationTerms(
         { ...(service || {}), rate_id: rate.id, rate_snapshot: undefined },
-        { ...(item || {}), item_rates: [rate] }
+        { ...(item || {}), item_rates: [rate] },
+        /* A villa's per-person figure is set by the party in the room. A season
+           preview without one quotes the fullest band the ladder sells - the
+           per-person price a sharing party actually pays - never a dash. */
+        numberOf(pax) || occupancyCeiling(rate)
       );
       return {
         id: rate.id || rate.season_name || rate.option_name || 'Base Season',
@@ -1162,6 +1358,7 @@ export const accommodationRatesForTrip = (service, item, tripFrom, tripTo) => {
         to: rate.valid_to || null,
         sharing: terms.sharing,
         supplement: terms.supplement,
+        ladder: normaliseSingleSupplementLadder(rate),
         covers: fallsInside(rate)
       };
     });
@@ -1214,15 +1411,21 @@ export const singleSupplementForSeason = ({ days = [], library = [], from = null
     rows.push({
       name: service.item_name || item?.name || 'Accommodation',
       supplement: chosen ? chosen.supplement : null,
+      ladder: chosen?.ladder || [],
       from: chosen?.from || null,
       to: chosen?.to || null
     });
   });
-  if (!rows.length) return { total: null, rows, derived: false, unresolved: [] };
+  if (!rows.length) return { total: null, tiers: [], rows, derived: false, unresolved: [] };
   const unresolved = rows.filter((row) => row.supplement == null).map((row) => row.name);
-  if (unresolved.length) return { total: null, rows, derived: false, unresolved };
+  if (unresolved.length) return { total: null, tiers: [], rows, derived: false, unresolved };
+  /* Every property contributes at each single-room ordinal, so a party with two
+     singles pays the second tier of every property. The union of the ladders is
+     the trip-wide ladder the presentation prices the party's singles against. */
+  const combined = combineSingleSupplements(rows);
   return {
-    total: round2(rows.reduce((sum, row) => sum + Number(row.supplement || 0), 0)),
+    total: combined.base,
+    tiers: combined.tiers,
     rows,
     derived: true,
     unresolved: []

@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import SearchableSelect from './SearchableSelect';
+import React, { useState, useMemo } from 'react';
 import {
   Users,
   BedDouble,
@@ -9,7 +8,7 @@ import {
   AlertTriangle,
   X,
   UserCheck,
-  UserX
+  ArrowRight
 } from 'lucide-react';
 import {
   isAdultTraveller,
@@ -19,9 +18,54 @@ import {
 import { taxWordOf } from '../lib/invoiceDoc';
 import './RoomAllocationModal.css';
 
+/* Saved allocations are matched back to the live traveller objects so the
+   roster shows the same person the itinerary knows, even after a reload. */
+function roomsFromItem(item, travellersList) {  if (!Array.isArray(item?.roomAllocations) || item.roomAllocations.length === 0) return [];
+  return item.roomAllocations.map((rm, idx) => {
+    const occs = (rm.allocatedTravellers || []).map((t) => {
+      const matched = travellersList.find(
+        (tl) => tl.id === t.id || (tl.name === t.name && tl.surname === t.surname)
+      );
+      return matched || t;
+    });
+    return {
+      ...rm,
+      roomId: rm.roomId || idx + 1,
+      allocatedTravellers: occs
+    };
+  });
+}
+
+const occupantCounts = (room) => {
+  const occupants = Array.isArray(room?.allocatedTravellers) ? room.allocatedTravellers : [];
+  const adults = occupants.filter(isAdultTraveller).length;
+  return { total: occupants.length, adults, children: occupants.length - adults };
+};
+
+const roomIsOverCapacity = (room, maxOccupancy, maxAdults, maxChildren) => {
+  const counts = occupantCounts(room);
+  return counts.total > maxOccupancy
+    || (maxAdults !== null && counts.adults > maxAdults)
+    || (maxChildren !== null && counts.children > maxChildren);
+};
+
+/* Why this traveller cannot join this room, or '' when they fit. */
+const roomCapacityBlock = (roomId, room, traveller, maxOccupancy, maxAdults, maxChildren) => {
+  const counts = occupantCounts(room);
+  if (counts.total >= maxOccupancy) return `Room ${roomId} is full (${maxOccupancy} max)`;
+  if (isAdultTraveller(traveller) && maxAdults !== null && counts.adults >= maxAdults) {
+    return `Room ${roomId} has no adult bed left (${maxAdults} adult${maxAdults === 1 ? '' : 's'} max)`;
+  }
+  if (!isAdultTraveller(traveller) && maxChildren !== null && counts.children >= maxChildren) {
+    return `Room ${roomId} has no child bed left (${maxChildren} child${maxChildren === 1 ? '' : 'ren'} max)`;
+  }
+  return '';
+};
+
 export default function RoomAllocationModal({
   isOpen,
   onClose,
+  onCancel,
   onSave,
   item,
   itineraryTravellers = [],
@@ -32,7 +76,35 @@ export default function RoomAllocationModal({
   /* Hooks first, early return last: bailing out before them would change the
      hook count between renders. The caller also mounts this only while open. */
   const open = !!isOpen && !!item;
+  /* Cancelling is distinct from closing after a save: the builder uses it to
+     discard an accommodation line that was only added to open this dialog. */
+  const requestCancel = onCancel || onClose;
   const maxOccupancy = Math.max(1, parseInt(item?.maxOccupancy ?? item?.max_occupancy, 10) || 2);
+  /* A room contract states beds as adults and children, not just a total: a
+     three-bed room that takes two adults may not take three adults. A cap is
+     null when the line predates room-level capacity, and - for children - when
+     the property does not tell adults and children apart at all. */
+  const statedAdults = parseInt(item?.maxAdults, 10);
+  const maxAdults = Number.isFinite(statedAdults) && statedAdults > 0
+    ? Math.min(statedAdults, maxOccupancy)
+    : null;
+  const statedChildren = parseInt(item?.maxChildren, 10);
+  const maxChildren = Number.isFinite(statedChildren) && statedChildren >= 0
+    ? statedChildren
+    : null;
+  /* Only the caps that restrict the room are named. An adult cap equal to its
+     beds restricts nothing, and a property that does not split its guests by
+     age states no child cap, so together they read as the plain total rather
+     than as "adults only" - which would refuse a family the villa takes. */
+  const capacityParts = [];
+  if (maxAdults !== null && maxAdults < maxOccupancy) {
+    capacityParts.push(`${maxAdults} adult${maxAdults === 1 ? '' : 's'}`);
+  }
+  if (maxChildren === 0) capacityParts.push('adults only');
+  else if (maxChildren !== null) capacityParts.push(`${maxChildren} child${maxChildren === 1 ? '' : 'ren'}`);
+  const capacityLabel = capacityParts.length
+    ? `${capacityParts.join(' + ')} · ${maxOccupancy} pax`
+    : `${maxOccupancy} pax`;
   
   const travellersList = useMemo(() => {
     if (Array.isArray(itineraryTravellers) && itineraryTravellers.length > 0) {
@@ -74,29 +146,22 @@ export default function RoomAllocationModal({
     [travellersList, isBeddedElsewhere]
   );
 
-  const [rooms, setRooms] = useState([]);
-
-  // Initialize rooms on open or item change
-  useEffect(() => {
-    if (item?.roomAllocations && Array.isArray(item.roomAllocations) && item.roomAllocations.length > 0) {
-      const existingRooms = item.roomAllocations.map((rm, idx) => {
-        const occs = (rm.allocatedTravellers || []).map((t) => {
-          const matched = travellersList.find(
-            (tl) => tl.id === t.id || (tl.name === t.name && tl.surname === t.surname)
-          );
-          return matched || t;
-        });
-        return {
-          ...rm,
-          roomId: rm.roomId || idx + 1,
-          allocatedTravellers: occs
-        };
-      });
-      setRooms(existingRooms);
-    } else {
-      setRooms([]);
-    }
-  }, [item, travellersList, maxOccupancy]);
+  /* The caller mounts this dialog only while it is open, so the saved
+     allocations are read once as initial state rather than synced by effect. */
+  const initialRooms = useMemo(() => roomsFromItem(item, travellersList), [item, travellersList]);
+  const [rooms, setRooms] = useState(initialRooms);
+  /* One room is always the drop target. Rather than every traveller carrying
+     their own room dropdown, the operator selects a room once and then moves
+     people into it with the arrow button or by dragging them onto the card. */
+  const [selectedRoomId, setSelectedRoomId] = useState(initialRooms[0]?.roomId ?? null);
+  /* Multiple travellers can be ticked or shift-clicked and moved in one go;
+     the arrow button on a row still moves just that traveller. */
+  const [selectedTravellerIds, setSelectedTravellerIds] = useState([]);
+  const [selectionAnchorId, setSelectionAnchorId] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [draggingId, setDraggingId] = useState('');
+  const [dragOverRoomId, setDragOverRoomId] = useState(null);
+  const [moveNotice, setMoveNotice] = useState('');
 
   // Compute unallocated travellers
   const allocatedIds = useMemo(() => {
@@ -127,8 +192,8 @@ export default function RoomAllocationModal({
 
   // Check over capacity rooms
   const overCapacityRooms = useMemo(() => {
-    return rooms.filter((rm) => (rm.allocatedTravellers || []).length > maxOccupancy);
-  }, [rooms, maxOccupancy]);
+    return rooms.filter((rm) => roomIsOverCapacity(rm, maxOccupancy, maxAdults, maxChildren));
+  }, [rooms, maxOccupancy, maxAdults, maxChildren]);
 
   /* A group split starts here: the operator deliberately houses only part of
      the party in this property and adds the next property for the remainder.
@@ -138,45 +203,246 @@ export default function RoomAllocationModal({
   const [splittingGroup, setSplittingGroup] = useState(false);
   const splitPending = !item?.isOptional && splittingGroup && outstandingRequired.length > 0;
 
-  const isValid = useMemo(() => {
-    const problemsOnly = overCapacityRooms.length > 0 || doubleBooked.length > 0;
-    if (splitPending) return !problemsOnly && rooms.length > 0;
-    /* Judged on what THIS property owes, not on the whole assign pool: a split
-       never has to re-house a sibling's beds, and an option never has to house
-       anything at all beyond what it was asked to quote. */
-    return !problemsOnly && outstandingRequired.length === 0;
-  }, [splitPending, overCapacityRooms, doubleBooked, outstandingRequired, rooms]);
-
   // Financial calculations
   const financialSummary = useMemo(() => {
     return calculateRoomCharges(item, rooms, currencyCode, markupPct);
   }, [item, rooms, currencyCode, markupPct]);
 
-  // Handlers
-  const handleAddRoom = () => {
-    setRooms((prev) => [
-      ...prev,
-      { roomId: prev.length + 1, allocatedTravellers: [] }
-    ]);
+  /* A villa sold on an occupancy ladder has no price for every party size, and a
+     room the ladder does not cover is not a cheaper room - it is a room this party
+     cannot be housed in. The dialog refuses the allocation instead of saving a R0
+     night, and says which room and which size. */
+  const unpricedRooms = useMemo(
+    () => financialSummary.unpricedRooms || [],
+    [financialSummary]
+  );
+
+  const isValid = useMemo(() => {
+    const problemsOnly = overCapacityRooms.length > 0 || doubleBooked.length > 0
+      || unpricedRooms.length > 0;
+    if (splitPending) return !problemsOnly && rooms.length > 0;
+    /* Judged on what THIS property owes, not on the whole assign pool: a split
+       never has to re-house a sibling's beds, and an option never has to house
+       anything at all beyond what it was asked to quote. */
+    return !problemsOnly && outstandingRequired.length === 0;
+  }, [splitPending, overCapacityRooms, doubleBooked, outstandingRequired, rooms, unpricedRooms]);
+
+  /* Which room each traveller currently sleeps in, for the status pill and for
+     ordering the roster: unallocated first, then by room, then guests another
+     property already houses. */
+  const roomByTravellerId = useMemo(() => {
+    const map = new Map();
+    rooms.forEach((rm) => {
+      (rm.allocatedTravellers || []).forEach((t) => map.set(t.id, rm.roomId));
+    });
+    return map;
+  }, [rooms]);
+
+  const activeRoom = useMemo(() => {
+    const selected = rooms.find((rm) => rm.roomId === selectedRoomId);
+    if (selected) return selected;
+    return rooms.find((rm) => (rm.allocatedTravellers || []).length < maxOccupancy) || rooms[0] || null;
+  }, [rooms, selectedRoomId, maxOccupancy]);
+  const activeRoomId = activeRoom?.roomId ?? null;
+  const activeRoomOccupants = activeRoom ? (activeRoom.allocatedTravellers || []).length : 0;
+  const activeRoomFull = !!activeRoom && activeRoomOccupants >= maxOccupancy;
+
+  const orderedTravellers = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    const matches = term
+      ? travellersList.filter((t) => `${t.name} ${t.surname}`.toLowerCase().includes(term))
+      : travellersList;
+    const rank = (t) => {
+      if (isBeddedElsewhere.has(t.id)) return 2;
+      return roomByTravellerId.has(t.id) ? 1 : 0;
+    };
+    return [...matches].sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      if (ra === 1) {
+        return (roomByTravellerId.get(a.id) || 0) - (roomByTravellerId.get(b.id) || 0);
+      }
+      return 0;
+    });
+  }, [travellersList, searchTerm, isBeddedElsewhere, roomByTravellerId]);
+
+  const draggingTraveller = useMemo(
+    () => travellersList.find((t) => t.id === draggingId) || null,
+    [travellersList, draggingId]
+  );
+  const rosterIsDropTarget = !!draggingId && roomByTravellerId.has(draggingId);
+
+  const selectedIdSet = useMemo(() => new Set(selectedTravellerIds), [selectedTravellerIds]);
+  const selectedMovableTravellers = useMemo(
+    () => orderedTravellers.filter((t) => selectedIdSet.has(t.id) && !isBeddedElsewhere.has(t.id)),
+    [orderedTravellers, selectedIdSet, isBeddedElsewhere]
+  );
+
+  const toggleTravellerSelection = (travellerId, { range = false } = {}) => {
+    if (isBeddedElsewhere.has(travellerId)) return;
+    if (range && selectionAnchorId && selectionAnchorId !== travellerId) {
+      const visibleIds = orderedTravellers
+        .filter((t) => !isBeddedElsewhere.has(t.id))
+        .map((t) => t.id);
+      const from = visibleIds.indexOf(selectionAnchorId);
+      const to = visibleIds.indexOf(travellerId);
+      if (from !== -1 && to !== -1) {
+        const [lo, hi] = from < to ? [from, to] : [to, from];
+        const rangeIds = visibleIds.slice(lo, hi + 1);
+        setSelectedTravellerIds((prev) => [...new Set([...prev, ...rangeIds])]);
+        return;
+      }
+    }
+    setSelectedTravellerIds((prev) => (
+      prev.includes(travellerId) ? prev.filter((id) => id !== travellerId) : [...prev, travellerId]
+    ));
+    setSelectionAnchorId(travellerId);
   };
 
-  const handleRemoveRoom = (roomId) => {
-    if (rooms.length <= 1) return;
-    setRooms((prev) =>
-      prev.filter((r) => r.roomId !== roomId).map((r, idx) => ({ ...r, roomId: idx + 1 }))
-    );
+  const clearSelection = () => {
+    setSelectedTravellerIds([]);
+    setSelectionAnchorId('');
   };
 
-  const handleAssignTraveller = (traveller, targetRoomId) => {
+  const handleSelectAllUnallocated = () => {
+    /* The whole party, not just what the search box currently shows, so the
+       label cannot mean two different things depending on the filter. */
+    const ids = travellersList
+      .filter((t) => !roomByTravellerId.has(t.id) && !isBeddedElsewhere.has(t.id))
+      .map((t) => t.id);
+    setSelectedTravellerIds(ids);
+    setSelectionAnchorId(ids[ids.length - 1] || '');
+    setMoveNotice(ids.length ? '' : 'No unallocated travellers to select.');
+  };
+
+  const moveBlockedReason = (traveller, targetRoomId = activeRoomId) => {
+    const target = rooms.find((rm) => rm.roomId === targetRoomId);
+    if (isBeddedElsewhere.has(traveller.id)) return 'Already has a bed in another property on this night';
+    if (!target) return 'Add or select a room first';
+    const occs = target.allocatedTravellers || [];
+    if (occs.some((t) => t.id === traveller.id)) return `Already in Room ${target.roomId}`;
+    return roomCapacityBlock(target.roomId, target, traveller, maxOccupancy, maxAdults, maxChildren);
+  };
+
+  const moveTraveller = (traveller, targetRoomId) => {
+    if (!traveller) return false;
+    const blocked = moveBlockedReason(traveller, targetRoomId);
+    if (blocked) {
+      /* Being in the target room is a no-op; anything else is worth saying. */
+      if (!blocked.startsWith('Already in Room')) setMoveNotice(blocked);
+      return false;
+    }
     setRooms((prev) =>
       prev.map((rm) => {
-        const filtered = rm.allocatedTravellers.filter((t) => t.id !== traveller.id);
+        const filtered = (rm.allocatedTravellers || []).filter((t) => t.id !== traveller.id);
         if (rm.roomId === targetRoomId) {
           return { ...rm, allocatedTravellers: [...filtered, traveller] };
         }
         return { ...rm, allocatedTravellers: filtered };
       })
     );
+    setMoveNotice('');
+    return true;
+  };
+
+  /* Bulk move fills the selected room in roster order. Anything that does not
+     fit stays unallocated and is reported, rather than half-applying silently. */
+  const handleMoveSelected = () => {
+    if (!activeRoom) {
+      setMoveNotice('Add or select a room first.');
+      return;
+    }
+    const targetRoomId = activeRoom.roomId;
+    const movers = selectedMovableTravellers.filter(
+      (t) => roomByTravellerId.get(t.id) !== targetRoomId
+    );
+    if (!movers.length) {
+      setMoveNotice('Selected traveller(s) are already in this room.');
+      return;
+    }
+    /* Fill by bed type: three adults must not be crammed into a room that
+       takes two adults just because it has three beds. */
+    const accepted = [];
+    const rejected = [];
+    movers.forEach((traveller) => {
+      const roomAfter = { ...activeRoom, allocatedTravellers: [...(activeRoom.allocatedTravellers || []), ...accepted] };
+      const blocked = roomCapacityBlock(targetRoomId, roomAfter, traveller, maxOccupancy, maxAdults, maxChildren);
+      if (blocked) rejected.push(traveller);
+      else accepted.push(traveller);
+    });
+    setRooms((prev) =>
+      prev.map((rm) => {
+        const kept = (rm.allocatedTravellers || []).filter(
+          (t) => !accepted.some((a) => a.id === t.id)
+        );
+        if (rm.roomId === targetRoomId) {
+          return { ...rm, allocatedTravellers: [...kept, ...accepted] };
+        }
+        return { ...rm, allocatedTravellers: kept };
+      })
+    );
+    clearSelection();
+    setMoveNotice(
+      rejected.length
+        ? `${rejected.length} traveller(s) not moved into Room ${targetRoomId} — it takes ${capacityLabel}.`
+        : ''
+    );
+  };
+
+  /* One click beds the next unallocated travellers in the selected room,
+     stopping at whichever bed the contract runs out of first. */
+  const handleAutoFillRoom = () => {
+    if (!activeRoom) {
+      setMoveNotice('Add or select a room first.');
+      return;
+    }
+    const candidates = travellersList.filter(
+      (t) => !roomByTravellerId.has(t.id) && !isBeddedElsewhere.has(t.id)
+    );
+    const chosen = [];
+    let firstBlocked = '';
+    candidates.forEach((traveller) => {
+      const roomAfter = { ...activeRoom, allocatedTravellers: [...(activeRoom.allocatedTravellers || []), ...chosen] };
+      const blocked = roomCapacityBlock(activeRoom.roomId, roomAfter, traveller, maxOccupancy, maxAdults, maxChildren);
+      if (blocked) firstBlocked = firstBlocked || blocked;
+      else chosen.push(traveller);
+    });
+    if (!chosen.length) {
+      setMoveNotice(firstBlocked || 'No unallocated travellers left to add.');
+      return;
+    }
+    setRooms((prev) =>
+      prev.map((rm) => (
+        rm.roomId === activeRoom.roomId
+          ? { ...rm, allocatedTravellers: [...(rm.allocatedTravellers || []), ...chosen] }
+          : rm
+      ))
+    );
+    clearSelection();
+    setMoveNotice(firstBlocked ? `Room ${activeRoom.roomId} takes ${capacityLabel}.` : '');
+  };
+
+  // Handlers
+  const handleAddRoom = () => {
+    const nextId = rooms.length + 1;
+    setRooms((prev) => [
+      ...prev,
+      { roomId: prev.length + 1, allocatedTravellers: [] }
+    ]);
+    /* Adding a room is almost always followed by filling it. */
+    setSelectedRoomId(nextId);
+    setMoveNotice('');
+  };
+
+  const handleRemoveRoom = (roomId) => {
+    if (rooms.length <= 1) return;
+    const remaining = rooms
+      .filter((r) => r.roomId !== roomId)
+      .map((r, idx) => ({ ...r, roomId: idx + 1 }));
+    setRooms(remaining);
+    if (selectedRoomId === roomId) setSelectedRoomId(remaining[0]?.roomId ?? null);
+    setMoveNotice('');
   };
 
   const handleUnassignTraveller = (travellerId, roomId) => {
@@ -185,12 +451,71 @@ export default function RoomAllocationModal({
         if (rm.roomId === roomId) {
           return {
             ...rm,
-            allocatedTravellers: rm.allocatedTravellers.filter((t) => t.id !== travellerId)
+            allocatedTravellers: (rm.allocatedTravellers || []).filter((t) => t.id !== travellerId)
           };
         }
         return rm;
       })
     );
+    setMoveNotice('');
+  };
+
+  const handleUnassignAnywhere = (travellerId) => {
+    setRooms((prev) =>
+      prev.map((rm) => ({
+        ...rm,
+        allocatedTravellers: (rm.allocatedTravellers || []).filter((t) => t.id !== travellerId)
+      }))
+    );
+    setMoveNotice('');
+  };
+
+  const handleDragStart = (event, travellerId) => {
+    event.dataTransfer.setData('text/plain', travellerId);
+    event.dataTransfer.effectAllowed = 'move';
+    setDraggingId(travellerId);
+  };
+
+  const handleDragEnd = () => {
+    setDraggingId('');
+    setDragOverRoomId(null);
+  };
+
+  const handleRoomDragOver = (event, roomId) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    if (dragOverRoomId !== roomId) setDragOverRoomId(roomId);
+  };
+
+  const handleRoomDragLeave = (event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setDragOverRoomId(null);
+  };
+
+  const handleRoomDrop = (event, roomId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const travellerId = event.dataTransfer.getData('text/plain') || draggingId;
+    setDragOverRoomId(null);
+    setDraggingId('');
+    const traveller = travellersList.find((t) => t.id === travellerId);
+    if (!traveller) return;
+    setSelectedRoomId(roomId);
+    moveTraveller(traveller, roomId);
+  };
+
+  const handleRosterDragOver = (event) => {
+    if (!rosterIsDropTarget) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleRosterDrop = (event) => {
+    const travellerId = event.dataTransfer.getData('text/plain') || draggingId;
+    if (!travellerId) return;
+    event.preventDefault();
+    setDraggingId('');
+    setDragOverRoomId(null);
+    handleUnassignAnywhere(travellerId);
   };
 
   const occupantSummary = `${rooms.length} Room(s), ${requiredTravellers.length} Pax`;
@@ -224,7 +549,7 @@ export default function RoomAllocationModal({
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-bold text-slate-900">Room & Traveller Allocation</h2>
                 <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-teal-50 text-[#0d7478] border border-teal-200">
-                  Contract Max Occupancy: {maxOccupancy} Pax / Room
+                  Contract Capacity: {capacityLabel} / Room
                 </span>
               </div>
               <p className="text-xs text-slate-500 font-medium mt-0.5">
@@ -237,13 +562,17 @@ export default function RoomAllocationModal({
                 <p className="text-[11px] text-[#0d7478] font-semibold mt-0.5">
                   Season: {item._seasonName}
                   {item._seasonFrom && item._seasonTo ? ` (${item._seasonFrom} – ${item._seasonTo})` : ''}
-                  {item._seasonStatus === 'protected' ? ' — closest prior season, Pricing Protection applied' : ''}
+                  {item._seasonStatus === 'protected'
+                    ? ' — closest prior season, Pricing Protection applied'
+                    : item._seasonStatus === 'stale'
+                      ? ' — closest prior season, no Pricing Protection percentage set, so these are its own figures'
+                      : ''}
                 </p>
               )}
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={requestCancel}
             className="p-2 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-200/60 transition"
           >
             <X size={18} />
@@ -297,73 +626,174 @@ export default function RoomAllocationModal({
           {/* 2-Column Grid */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-5">
 
-            {/* Left Column: Unallocated Travellers (4 cols) */}
+            {/* Left Column: Full traveller roster (4 cols). Every traveller is
+                listed with their current room so a large party stays legible;
+                the room is chosen once above, not per traveller. */}
             <div className="md:col-span-4 bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-                <h3 className="font-bold text-xs uppercase tracking-wider text-slate-600 flex items-center gap-2">
-                  <UserX size={15} className={unallocatedTravellers.length > 0 ? 'text-amber-600' : 'text-emerald-600'} />
-                  {unallocatedTravellers.length === 0 ? 'No Travellers Available' : 'Travellers To Allocate'} ({unallocatedTravellers.length})
+              <div className="room-alloc-roster-head">
+                <h3 className="room-alloc-roster-title">
+                  <Users size={15} className="text-[#0d7478]" />
+                  Travellers
                 </h3>
+                <span className="room-alloc-count">
+                  {travellersList.length} pax · {unallocatedTravellers.length} unallocated
+                </span>
               </div>
 
-              <div className="mt-3 space-y-2.5 flex-1 overflow-y-auto max-h-[340px] pr-1">
-                {unallocatedTravellers.length === 0 ? (
-                  <div className="py-8 px-3 text-center text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl flex flex-col items-center gap-1.5">
-                    <CheckCircle2 size={24} className="text-emerald-600" />
-                    <span className="font-semibold">
-                      {requiredTravellers.length === 0 && outstandingRequired.length === 0
-                        ? 'Every traveller already has a bed elsewhere on this night.'
-                        : 'All travellers assigned to rooms!'}
-                    </span>
-                  </div>
-                ) : (
-                  unallocatedTravellers.map((tr) => (
-                    <div
-                      key={tr.id}
-                      className="p-3 bg-white border border-slate-200 rounded-xl flex flex-col gap-2 shadow-sm hover:border-slate-300 transition"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="font-bold text-xs text-slate-900">
-                            {tr.name} {tr.surname}
-                          </div>
-                          <div className="text-[11px] text-slate-500 font-medium">
-                            Age: {tr.age} • {isAdultTraveller(tr) ? 'Adult' : 'Child'}
-                          </div>
-                        </div>
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                          isAdultTraveller(tr) ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-purple-50 text-purple-700 border border-purple-200'
-                        }`}>
-                          {isAdultTraveller(tr) ? 'Adult' : 'Child'}
-                        </span>
-                      </div>
-
-                      {/* A bed held by a sibling of this split: free to move
-                          here, so say so rather than showing it as homeless. */}
-                      {/* Quick Assign Buttons / Select */}
-                      <div className="flex items-center gap-1.5 pt-1.5 border-t border-slate-100">
-                        <span className="text-[10px] text-slate-500 font-medium">Assign:</span>
-                        <SearchableSelect
-                          className="flex-1 bg-slate-50 border border-slate-300 rounded-md text-xs font-medium text-slate-800 px-2 py-1 focus:outline-none focus:border-[#0d7478]"
-                          defaultValue=""
-                          onChange={(e) => {
-                            if (e.target.value) {
-                              handleAssignTraveller(tr, Number(e.target.value));
-                            }
-                          }}
-                        >
-                          <option value="" disabled>Select Room...</option>
-                          {rooms.map((rm) => (
-                            <option key={rm.roomId} value={rm.roomId}>
-                              Room {rm.roomId} ({(rm.allocatedTravellers || []).length}/{maxOccupancy})
-                            </option>
-                          ))}
-                        </SearchableSelect>
-                      </div>
-                    </div>
-                  ))
+              <div className={`room-alloc-target ${activeRoom ? '' : 'is-empty'}`}>
+                <span className="room-alloc-target-text">
+                  <ArrowRight size={13} />
+                  {activeRoom
+                    ? `Selected room: Room ${activeRoom.roomId} · ${activeRoomOccupants}/${maxOccupancy}${activeRoomFull ? ' · full' : ''}`
+                    : 'Add a room, then select it to move travellers in.'}
+                </span>
+                {activeRoom && (
+                  <button
+                    type="button"
+                    className="room-alloc-autofill"
+                    onClick={handleAutoFillRoom}
+                    disabled={activeRoomFull || unallocatedTravellers.length === 0}
+                    title="Fill this room with unallocated travellers"
+                  >
+                    Auto-fill
+                  </button>
                 )}
               </div>
+
+              {isBeddedElsewhere.size > 0 && (
+                <p className="room-alloc-help">
+                  {isBeddedElsewhere.size} traveller{isBeddedElsewhere.size === 1 ? ' already has' : 's already have'} a bed in another property on this night and cannot be moved here.
+                </p>
+              )}
+
+              <input
+                type="search"
+                className="room-alloc-search"
+                placeholder="Search traveller..."
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                aria-label="Search travellers"
+              />
+
+              <div className="room-alloc-bulk">
+                <span className="room-alloc-bulk-count">
+                  {selectedTravellerIds.length > 0
+                    ? `${selectedTravellerIds.length} selected`
+                    : 'Select travellers to move together'}
+                </span>
+                <div className="room-alloc-bulk-actions">
+                  <button
+                    type="button"
+                    className="room-alloc-bulk-all"
+                    onClick={handleSelectAllUnallocated}
+                    disabled={unallocatedTravellers.length === 0}
+                  >
+                    Select all unallocated
+                  </button>
+                  {selectedTravellerIds.length > 0 && (
+                    <button
+                      type="button"
+                      className="room-alloc-bulk-move"
+                      onClick={handleMoveSelected}
+                      disabled={!activeRoom}
+                    >
+                      Move to Room {activeRoomId ?? '—'}
+                    </button>
+                  )}
+                  {selectedTravellerIds.length > 0 && (
+                    <button type="button" className="room-alloc-bulk-clear" onClick={clearSelection}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {moveNotice && (
+                <div className="room-alloc-notice" role="status">{moveNotice}</div>
+              )}
+
+              <div
+                className={`room-alloc-roster ${rosterIsDropTarget ? 'is-drop-target' : ''}`}
+                role="list"
+                aria-label="Travellers"
+                onDragOver={handleRosterDragOver}
+                onDrop={handleRosterDrop}
+              >
+                {orderedTravellers.length === 0 ? (
+                  <div className="room-alloc-empty" style={{ borderColor: '#e2e8f0', background: '#f8fafc', color: '#64748b' }}>
+                    No traveller matches “{searchTerm.trim()}”.
+                  </div>
+                ) : orderedTravellers.map((tr) => {
+                  const roomId = roomByTravellerId.get(tr.id);
+                  const bedded = isBeddedElsewhere.has(tr.id);
+                  const isSelected = selectedIdSet.has(tr.id);
+                  const blockedReason = moveBlockedReason(tr);
+                  const canMove = !blockedReason;
+                  const initials = `${tr.name?.[0] || ''}${tr.surname?.[0] || ''}`.toUpperCase() || '?';
+                  return (
+                    <div
+                      key={tr.id}
+                      role="listitem"
+                      tabIndex={0}
+                      draggable={!bedded}
+                      aria-label={`${tr.name} ${tr.surname}${bedded ? ', bedded in another property' : roomId ? `, Room ${roomId}` : ', unallocated'}`}
+                      className={`room-alloc-traveller ${isSelected ? 'is-selected' : ''} ${roomId ? 'is-bedded' : ''} ${bedded ? 'is-other-property' : ''} ${draggingId === tr.id ? 'is-dragging' : ''}`}
+                      onClick={(event) => toggleTravellerSelection(tr.id, { range: event.shiftKey })}
+                      onDoubleClick={() => { if (canMove) moveTraveller(tr, activeRoomId); }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          if (canMove) moveTraveller(tr, activeRoomId);
+                        } else if (event.key === ' ') {
+                          event.preventDefault();
+                          toggleTravellerSelection(tr.id, { range: event.shiftKey });
+                        }
+                      }}
+                      onDragStart={(event) => handleDragStart(event, tr.id)}
+                      onDragEnd={handleDragEnd}
+                    >
+                      <input
+                        type="checkbox"
+                        className="room-alloc-check"
+                        checked={isSelected}
+                        disabled={bedded}
+                        aria-label={`Select ${tr.name} ${tr.surname}`}
+                        onChange={() => toggleTravellerSelection(tr.id)}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                      <span className="room-alloc-avatar" aria-hidden="true">{initials}</span>
+                      <span className="room-alloc-traveller-main">
+                        <span className="room-alloc-traveller-name">{tr.name} {tr.surname}</span>
+                        <span className="room-alloc-traveller-meta">Age {tr.age} · {isAdultTraveller(tr) ? 'Adult' : 'Child'}</span>
+                      </span>
+                      {bedded ? (
+                        <span className="room-alloc-pill is-other">Other property</span>
+                      ) : roomId ? (
+                        <span className="room-alloc-pill is-bedded">Room {roomId}</span>
+                      ) : (
+                        <span className="room-alloc-pill is-unallocated">Unallocated</span>
+                      )}
+                      <button
+                        type="button"
+                        className="room-alloc-move"
+                        disabled={!canMove}
+                        title={blockedReason || `Move to Room ${activeRoomId}`}
+                        aria-label={`Move ${tr.name} ${tr.surname} to Room ${activeRoomId ?? ''}`.trim()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          moveTraveller(tr, activeRoomId);
+                        }}
+                      >
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="room-alloc-help">
+                Tick or shift-click travellers to move them together, or use a row's arrow. Drag a traveller onto a room, or back here to unallocate.
+              </p>
             </div>
 
             {/* Right Column: Rooms List (8 cols) */}
@@ -373,25 +803,33 @@ export default function RoomAllocationModal({
                   <UserCheck size={15} className="text-[#0d7478]" />
                   Room Allocations
                 </h3>
-                <span className="text-xs text-slate-500 font-medium">Max {maxOccupancy} Guests per Room</span>
+                <span className="text-xs text-slate-500 font-medium">Max {capacityLabel} per Room</span>
               </div>
 
               <div className="space-y-3.5 max-h-[360px] overflow-y-auto pr-1">
+                {rooms.length === 0 && (
+                  <div className="room-alloc-empty" style={{ borderColor: '#e2e8f0', background: '#f8fafc', color: '#64748b' }}>
+                    No rooms yet. Click “Add Room” to create the first one.
+                  </div>
+                )}
                 {rooms.map((rm) => {
                   const occs = rm.allocatedTravellers || [];
-                  const isOver = occs.length > maxOccupancy;
+                  const counts = occupantCounts(rm);
+                  const isOver = roomIsOverCapacity(rm, maxOccupancy, maxAdults, maxChildren);
+                  const isFull = counts.total >= maxOccupancy
+                    || (maxAdults !== null && counts.adults >= maxAdults);
+                  const isActive = rm.roomId === activeRoomId;
+                  const isDropTarget = dragOverRoomId === rm.roomId;
                   const roomCalc = financialSummary.rooms.find((r) => r.roomId === rm.roomId) || {};
 
                   return (
                     <div
                       key={rm.roomId}
-                      className={`p-4 rounded-xl border transition shadow-sm ${
-                        isOver
-                          ? 'bg-rose-50/50 border-rose-300 shadow-rose-100'
-                          : occs.length === maxOccupancy
-                          ? 'bg-emerald-50/30 border-emerald-300'
-                          : 'bg-white border-slate-200'
-                      }`}
+                      className={`room-alloc-room ${isOver ? 'is-over' : ''} ${isActive ? 'is-active' : ''} ${isDropTarget ? 'is-drag-over' : ''}`}
+                      onClick={() => { setSelectedRoomId(rm.roomId); setMoveNotice(''); }}
+                      onDragOver={(event) => handleRoomDragOver(event, rm.roomId)}
+                      onDragLeave={handleRoomDragLeave}
+                      onDrop={(event) => handleRoomDrop(event, rm.roomId)}
                     >
                       {/* Room Card Header */}
                       <div className="flex items-center justify-between pb-2.5 border-b border-slate-200">
@@ -405,24 +843,40 @@ export default function RoomAllocationModal({
                           <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-bold ${
                             isOver
                               ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                              : occs.length === maxOccupancy
+                              : isFull
                               ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                               : 'bg-slate-100 text-slate-700 border border-slate-300'
                           }`}>
                             {isOver
-                              ? `⚠️ ${occs.length}/${maxOccupancy} OVER CAPACITY`
-                              : `${occs.length}/${maxOccupancy} Occupants`}
+                              ? `⚠️ ${counts.total}/${maxOccupancy}${maxAdults !== null ? ` · ${counts.adults}/${maxAdults} adults` : ''} OVER CAPACITY`
+                              : `${counts.total}/${maxOccupancy} Occupants${maxAdults !== null ? ` · ${counts.adults}/${maxAdults} adults` : ''}`}
                           </span>
                         </div>
 
                         <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            className={`room-alloc-select ${isActive ? 'is-active' : ''}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedRoomId(rm.roomId);
+                              setMoveNotice('');
+                            }}
+                            title={isActive ? 'This room receives travellers' : 'Select this room as the move target'}
+                          >
+                            {isActive && <CheckCircle2 size={13} />}
+                            {isActive ? 'Selected' : 'Select'}
+                          </button>
                           <span className="text-xs text-[#0d7478] font-bold bg-teal-50 px-2.5 py-1 rounded-md border border-teal-200">
                             {currencyCode} {roomCalc.sellPrice?.toFixed(2) || '0.00'}
                           </span>
                           {rooms.length > 1 && (
                             <button
                               type="button"
-                              onClick={() => handleRemoveRoom(rm.roomId)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleRemoveRoom(rm.roomId);
+                              }}
                               className="text-slate-400 hover:text-rose-600 transition p-1 rounded hover:bg-rose-50"
                               title="Delete Room"
                             >
@@ -432,26 +886,44 @@ export default function RoomAllocationModal({
                         </div>
                       </div>
 
+                      {isDropTarget && (
+                        <div className="room-alloc-drop-hint">
+                          Drop {draggingTraveller ? `${draggingTraveller.name} ${draggingTraveller.surname}` : 'traveller'} here
+                        </div>
+                      )}
+
                       {/* Rate Details */}
                       <div className="mt-2 text-[11px] text-slate-500 font-medium">
                         Rate Calculation: <span className="text-slate-700 font-semibold">{roomCalc.rateDescription || 'No occupants assigned'}</span>
                       </div>
 
-                      {/* Occupants List */}
+                      {/* Occupants List. Chips are draggable, so a guest can be
+                          moved straight from one room to another. */}
                       <div className="mt-3 flex flex-wrap gap-2">
                         {occs.length === 0 ? (
-                          <div className="text-xs text-slate-400 italic py-1">No occupants assigned yet. Select from unallocated pool.</div>
+                          <div className="text-xs text-slate-400 italic py-1">
+                            {isActive
+                              ? 'This room is selected — use the arrow beside a traveller or drag them here.'
+                              : 'No occupants yet. Click this room, then move travellers in.'}
+                          </div>
                         ) : (
                           occs.map((occ) => (
                             <div
                               key={occ.id}
-                              className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 shadow-sm"
+                              draggable
+                              onDragStart={(event) => handleDragStart(event, occ.id)}
+                              onDragEnd={handleDragEnd}
+                              className="room-alloc-occupant flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 shadow-sm"
+                              title="Drag to another room"
                             >
                               <span>{occ.name} {occ.surname}</span>
                               <span className="text-[10px] font-normal text-slate-500">({isAdultTraveller(occ) ? 'Adult' : 'Child'})</span>
                               <button
                                 type="button"
-                                onClick={() => handleUnassignTraveller(occ.id, rm.roomId)}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleUnassignTraveller(occ.id, rm.roomId);
+                                }}
                                 className="text-slate-400 hover:text-rose-600 transition font-bold leading-none ml-1 text-sm"
                                 title="Remove traveller"
                               >
@@ -501,8 +973,11 @@ export default function RoomAllocationModal({
                   <div>• {doubleBooked.length} traveller(s) already have a bed in another property on this night — remove them here.</div>
                 )}
                 {overCapacityRooms.length > 0 && (
-                  <div>• {overCapacityRooms.length} room(s) exceed maximum contract capacity ({maxOccupancy} pax). Please add another room or redistribute travellers.</div>
+                  <div>• {overCapacityRooms.length} room(s) exceed the contract capacity ({capacityLabel}). Please add another room or redistribute travellers.</div>
                 )}
+                {unpricedRooms.map((room) => (
+                  <div key={room.roomId}>• {room.reason}</div>
+                ))}
               </div>
             </div>
           )}
@@ -542,7 +1017,7 @@ export default function RoomAllocationModal({
         <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestCancel}
             className="px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 transition rounded-xl hover:bg-slate-200/60"
           >
             Cancel

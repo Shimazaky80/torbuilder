@@ -32,7 +32,8 @@ packageBandLabel,
   accommodationRatesForTrip,
   accommodationPerPersonForSeason,
   singleSupplementForSeason,
-  accommodationRoomCapacity
+  accommodationRoomCapacity,
+  packageVehicleCapacity
 } from '../src/lib/packagePricing.js';
 
 const check = (label, actual, expected) => {
@@ -524,6 +525,46 @@ check('an unprotected package may still join the package',
   packageSeasonResolution({ item: futureSeason, rate: futureSeason.item_rates[0], periods: ahead, protectionPercent: 10 }).canAdd, true);
 check('the message tells the operator protection was applied',
   packageSeasonResolution({ item: futureSeason, rate: futureSeason.item_rates[0], periods: ahead, protectionPercent: 10 }).message.includes('Pricing Protection applied'), true);
+
+/* The same item on a package for a company that has set no protection
+   percentage. The old season still prices it, but it is not a protected price
+   and it must not read as one: the card and the line have to say which season
+   the figure came from. */
+const bare = packageSeasonResolution({
+  item: futureSeason, rate: futureSeason.item_rates[0], periods: ahead, protectionPercent: 0
+});
+check('an unprotected package reports a stale season, not ok', bare.status, 'stale');
+check('a stale season still lets the item join the package', bare.canAdd, true);
+check('a stale season is not an honest package', bare.ok, false);
+check('a stale package adds no uplift', bare.protectionPercent, 0);
+check('a stale package prices from the season it names', bare.rate.id, 'prev');
+check('a stale package keeps the old contract figure', bare.rate.price_1_adult, 400);
+check('a stale package names the season', bare.message.includes('Winter 2025'), true);
+check('a stale package gives the season dates', bare.message.includes('2025-06-01 – 2025-08-31'), true);
+check('a stale package says no protection percentage is set',
+  bare.message.includes('no Pricing Protection percentage'), true);
+
+/* The Nov-to-Oct contract shape, on a package: a validity window that sits inside
+   the newer season takes the newer season, and a full-calendar-year validity is
+   not quietly priced by a season that misses its last two months. */
+const capeTurismo = {
+  id: 'cape-turismo', name: 'Cape Turismo transfer', category: 'Transfers', currency: 'ZAR',
+  max_occupancy: 4, pricing_model: 'per_vehicle',
+  item_rates: [
+    { id: 'ct-2025', season_name: 'Nov 2025 - Oct 2026', currency: 'ZAR', rate_basis: 'per_vehicle', unit_cost: 900, valid_from: '2025-11-01', valid_to: '2026-10-31' },
+    { id: 'ct-2026', season_name: 'Nov 2026 - Oct 2027', currency: 'ZAR', rate_basis: 'per_vehicle', unit_cost: 1000, valid_from: '2026-11-01', valid_to: '2027-10-31' }
+  ]
+};
+check('a package window inside the newer season takes the newer season', packageSeasonResolution({
+  item: capeTurismo, rate: capeTurismo.item_rates[0],
+  periods: [{ valid_from: '2027-03-01', valid_to: '2027-03-20' }], protectionPercent: 0
+}).rate.id, 'ct-2026');
+const ctYearPackage = packageSeasonResolution({
+  item: capeTurismo, rate: capeTurismo.item_rates[0],
+  periods: [{ valid_from: '2027-01-01', valid_to: '2027-12-31' }], protectionPercent: 0
+});
+check('a full-year package validity is no exact match', ctYearPackage.status, 'stale');
+check('the closest prior Nov-to-Oct season stands in', ctYearPackage.rate.id, 'ct-2026');
 
 check('a covering season needs no protection', packageSeasonResolution({
   item: seasonal, rate: seasonal.item_rates[0], periods: [{ valid_from: '2026-12-01', valid_to: '2026-12-10' }], protectionPercent: 10
@@ -1397,3 +1438,79 @@ check('an unresolvable accommodation is named so the operator can see why',
   singleSupplementForSeason({ days: supplementDays, library: [seasonalSupplementLodge], from: '2027-01-10', to: '2027-01-15' }).unresolved.join(','), 'Supplement lodge');
 check('a package with no accommodation derives no supplement, so the caller keeps its override',
   singleSupplementForSeason({ days: [{ services: [poolDays[0].services[0]] }], library: [poolTransfer], from: '2026-06-01', to: '2026-06-30' }).total, null);
+/* A CHILD ON A PACKAGE.
+   The per-head lines - meals, entries, extras - carry the child's own contracted
+   figure onto the child card. Everything that sells space (a seat, a berth, a
+   place on a tour) stays at the adult share, exactly as the itinerary charges it.
+   A package with nothing per-head on it must still quote a child at the adult
+   share plus the child bed, so this rule cannot move an existing quote. */
+const meal = {
+  id: 'meal', name: 'Buffet lunch', category: 'Meals', child_age_ranges: [],
+  item_rates: [{
+    id: 'meal-rate', currency: 'ZAR', rate_basis: 'per_person',
+    price_1_adult: 400, unit_price: 400, child_rates_breakdown: { child: 250 }
+  }]
+};
+const parkTicket = {
+  id: 'ticket', name: 'Park entry', category: 'Tickets',
+  child_age_ranges: [
+    { id: 'b1', name: '2-5', ageFrom: 2, ageTo: 5 },
+    { id: 'b2', name: '6-11', ageFrom: 6, ageTo: 11 }
+  ],
+  item_rates: [{
+    id: 'ticket-rate', currency: 'ZAR', rate_basis: 'per_person',
+    price_1_adult: 500, unit_price: 500, child_rates_breakdown: { b1: 100, b2: 200 }
+  }]
+};
+const line = (item, rateId, basis, unitCost) => ({
+  item_id: item.id, rate_id: rateId, item_name: item.name, category: item.category,
+  currency_code: 'ZAR', rate_basis: basis, unit_cost: unitCost, quantity: 1, is_included: true
+});
+const mealDays = [{ services: [line(meal, 'meal-rate', 'per_person', 400), packageDays[0].services[1]] }];
+const mealPrice = calculatePackageTravellerBreakdown({
+  days: mealDays, pattern: { pax: 4 }, library: [meal, accommodation], childRange
+});
+check('an adult card carries the whole meal price', mealPrice.adultSharingTotal, 400 + 540);
+check("a child card carries the child meal price and the child bed", mealPrice.childTotal, 250 + 330);
+check('the child card is a real discount, not a re-labelled adult price',
+  mealPrice.sell.childTotal < mealPrice.sell.adultSharingTotal, true);
+const spaceAndHeadDays = [{ services: [
+  packageDays[0].services[0], line(meal, 'meal-rate', 'per_person', 400), packageDays[0].services[1]
+] }];
+const spaceAndHeadPrice = calculatePackageTravellerBreakdown({
+  days: spaceAndHeadDays, pattern: { pax: 4 }, library: [transfer, meal, accommodation], childRange
+});
+check('a child still pays the full transfer share, because a seat is space',
+  spaceAndHeadPrice.unitChildPerPerson, 350 + 250);
+check('the adult card keeps both full shares', spaceAndHeadPrice.unitPerPerson, 350 + 400);
+const ticketPrice = calculatePackageTravellerBreakdown({
+  days: [{ services: [line(parkTicket, 'ticket-rate', 'per_person', 500)] }],
+  pattern: { pax: 4 }, library: [parkTicket],
+  childRange: { ageFrom: 0, ageTo: PACKAGE_MAX_CHILD_AGE }
+});
+check('a wide child range is quoted off the dearest band it spans, never the infant one',
+  ticketPrice.childTotal, 200);
+check('a package with no per-head line prices a child at the adult unit share',
+  price.unitChildPerPerson, price.unitPerPerson);
+
+/* The package sidebar shows, on every library card, the capacity the band engine will
+   actually read. A card has no saved service line behind it, so that call used to hand the
+   engine a null line - and the engine reads the line's rate to answer, so the whole Packages
+   screen died on "Cannot read properties of null (reading 'rate_id')". */
+const cardCapacity = (item, rate) => {
+  try {
+    return packageVehicleCapacity(item, rate);
+  } catch (error) {
+    return `threw: ${error.message}`;
+  }
+};
+check('a vehicle card reports its capacity without a saved line behind it',
+  cardCapacity(transfer, transfer.item_rates[0]), 4);
+check('a room is not offered as a vehicle band',
+  cardCapacity(accommodation, accommodation.item_rates[0]), 0);
+check('a card for an item with no rate set still answers', cardCapacity(transfer, undefined), 4);
+/* The rate wins over the property, exactly as it does for a saved line: two rooms of one
+   lodge sleep different numbers, and the card has to say what the band engine will use. */
+check('a card reads the capacity of the rate it is showing',
+  cardCapacity({ ...transfer, max_occupancy: 4, item_rates: [{ id: 'big', rate_basis: 'per_vehicle', room_max_occupancy: 7 }] },
+    { id: 'big', rate_basis: 'per_vehicle', room_max_occupancy: 7 }), 7);

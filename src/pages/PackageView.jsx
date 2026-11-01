@@ -3,6 +3,8 @@ import { ArrowLeft, Backpack, Pencil } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
+import { withStarGrade } from '../lib/starGrading';
+import { supplierColumns } from '../lib/supplierStarColumn';
 
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 
@@ -35,8 +37,31 @@ export const PackageView = () => {
         ? await supabase.from('package_day_items').select('*').in('package_day_id', dayIds).order('sort_order')
         : { data: [], error: null };
       if (itemsResult.error) throw itemsResult.error;
+      /* The hotel grade belongs to the supplier, and a package line only stores
+         the item it came from, so the item -> supplier chain resolves it here. */
+      const supplierStarsByItem = new Map();
+      const itemIds = [...new Set((itemsResult.data || []).map((item) => item.item_id).filter(Boolean))];
+      if (itemIds.length) {
+        const { data: libraryRows } = await supabase
+          .from('library_items')
+          .select('id, supplier_id')
+          .in('id', itemIds);
+        const supplierIds = [...new Set((libraryRows || []).map((row) => row.supplier_id).filter(Boolean))];
+        if (supplierIds.length) {
+          const { data: supplierRows } = await supabase
+            .from('suppliers')
+            .select(await supplierColumns('id'))
+            .in('id', supplierIds);
+          const starBySupplier = new Map((supplierRows || []).map((row) => [row.id, row.star_rating]));
+          (libraryRows || []).forEach((row) => {
+            if (starBySupplier.get(row.supplier_id)) {
+              supplierStarsByItem.set(row.id, starBySupplier.get(row.supplier_id));
+            }
+          });
+        }
+      }
       const itemsByDay = new Map();
-      (itemsResult.data || []).forEach((item) => itemsByDay.set(item.package_day_id, [...(itemsByDay.get(item.package_day_id) || []), item]));
+      (itemsResult.data || []).forEach((item) => itemsByDay.set(item.package_day_id, [...(itemsByDay.get(item.package_day_id) || []), { ...item, supplier_star_rating: supplierStarsByItem.get(item.item_id) || null }]));
       setPkg(packageResult.data);
       setPeriods(periodsResult.data || []);
       setPaxOptions(paxResult.data || []);
@@ -90,7 +115,7 @@ export const PackageView = () => {
         <header><h2>Day {index + 1}</h2>{day.notes && <p>{day.notes}</p>}</header>
         {day.services.length ? <div className="package-view-services">
           {day.services.map((service) => <div className="package-view-service" key={service.id}>
-            <div><strong>{service.item_name}</strong><span>{service.category || 'Service'}{service.supplier_name ? ` · ${service.supplier_name}` : ''}{service.is_included === false ? ' · Optional' : ''}</span>{service.notes && <small>{service.notes}</small>}</div>
+            <div><strong>{service.item_name}</strong><span>{service.category || 'Service'}{service.supplier_name ? ` · ${/accommodation/i.test(String(service.category || '')) ? withStarGrade(service.supplier_name, service.supplier_star_rating) : service.supplier_name}` : ''}{/accommodation/i.test(String(service.category || '')) && service.room_type ? ` · ${service.room_type}` : ''}{service.is_included === false ? ' · Optional' : ''}</span>{service.notes && <small>{service.notes}</small>}</div>
             <span>{service.currency_code} {Number(service.unit_price || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
           </div>)}
         </div> : <p className="package-view-empty">No services added to this day.</p>}

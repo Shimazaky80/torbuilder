@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import SearchableSelect from './SearchableSelect';
 import { UserCheck, X } from 'lucide-react';
 import {
   GUIDE_SERVICE_TYPES,
@@ -7,23 +8,54 @@ import {
   guideChargeTotal,
   guideSelection
 } from '../lib/guidePricing';
+import {
+  guideMemberName,
+  guideUpliftPercent,
+  guideMembersByDestination,
+  guideMemberSupplierName,
+  priceGuideLine
+} from '../lib/guideRoster';
 
 /* A Guide is charged per the service it accompanies, so the operator has to say
    which of the five flat per-trip amounts this guide line is priced from before
    the line can be costed. Each type shows its contracted amount so the choice is
-   made on figures, not on memory of what the guide contract lays out. */
+   made on figures, not on memory of what the guide contract lays out.
+
+   Naming who is guiding is optional and asked in the same breath, because it
+   changes one number on this line - the person's uplift - and nothing else. The
+   operator never has to leave the dialog to do the maths: the total shown is the
+   amount the line will actually cost. */
 const money = (value, code) => `${code} ${(Number(value) || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const memberOptionLabel = (member) => {
+  const percent = guideUpliftPercent(member);
+  const where = member?.destination_area || member?.city || '';
+  return [
+    guideMemberName(member) || 'Unnamed guide',
+    percent > 0 ? `+${percent}%` : 'standard rate',
+    where
+  ].filter(Boolean).join(' · ');
+};
 
 export default function GuideServiceTypeModal({
   item,
   rate,
   currency = 'ZAR',
   defaultValue = [],
+  members = [],
+  rosterReady = false,
+  destination = '',
+  defaultMemberId = '',
   onConfirm,
   onCancel
 }) {
   const [selection, setSelection] = useState(() => guideSelection(defaultValue));
-  const total = guideChargeTotal(rate, selection);
+  const [memberId, setMemberId] = useState(defaultMemberId || '');
+  const base = guideChargeTotal(rate, selection);
+  const member = members.find((entry) => String(entry.id) === String(memberId)) || null;
+  const priced = priceGuideLine({ baseCharge: base, member, supplierName: guideMemberSupplierName(member) });
+  const grouped = guideMembersByDestination(members, destination);
+  const ordered = [...grouped.here, ...grouped.elsewhere];
 
   return (
     <div className="modal-overlay service-guide-overlay">
@@ -73,9 +105,44 @@ export default function GuideServiceTypeModal({
             : 'Choose at least one service type. Where more than one is ticked, their flat amounts add up to the line charge.'}
         </p>
 
+        {rosterReady && (
+          <div className="service-guide-section guide-person-section">
+            <h3>Who is guiding?</h3>
+            <SearchableSelect
+              value={memberId}
+              onChange={(event) => setMemberId(event.target.value)}
+              aria-label="Which guide is on this line"
+            >
+              <option value="">No one named — the standard destination rate</option>
+              {ordered.map((entry) => (
+                <option key={entry.id} value={entry.id}>{memberOptionLabel(entry)}</option>
+              ))}
+            </SearchableSelect>
+            {ordered.length === 0 ? (
+              <p className="service-guide-help">
+                Nobody in the guide directory yet. Add them under Guide Team and they will
+                appear here with the percentage they cost above the destination rate.
+              </p>
+            ) : (
+              <p className="service-guide-help">
+                Guides for this destination are listed first; anyone who works elsewhere stays
+                selectable. Naming a guide records who was paid and adds only their uplift to
+                this line — it never changes what the clients are sold for.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="service-guide-total">
-          <span>Guide charge for this line</span>
-          <strong>{money(total, currency)}</strong>
+          <span>
+            Guide charge for this line
+            {priced.snapshot && priced.charged !== priced.baseCharge && (
+              <small className="service-guide-total-detail">
+                {money(priced.baseCharge, currency)} standard + {guideUpliftPercent(member)}% for {guideMemberName(member)}
+              </small>
+            )}
+          </span>
+          <strong>{money(priced.charged, currency)}</strong>
         </div>
 
         <div className="form-actions">
@@ -84,7 +151,7 @@ export default function GuideServiceTypeModal({
             type="button"
             className="primary-btn"
             disabled={selection.length === 0}
-            onClick={() => onConfirm(selection)}
+            onClick={() => onConfirm(selection, memberId || null)}
           >
             <UserCheck size={16} /> Apply guide charge
           </button>

@@ -1362,6 +1362,35 @@ aside.sidebar:not(.collapsed) .logo-full {
   text-overflow: ellipsis;
 }
 
+/* Where the library item actually is, on every picker card in the itinerary and
+   package sidebars. The destination decides whether an item can be used at all,
+   so it reads as clearly as the price — and an item that never recorded one says
+   so rather than silently failing to appear in the destination filter. */
+.library-item-destination {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #0f766e;
+}
+.library-item-destination svg {
+  flex-shrink: 0;
+  color: #14b8a6;
+}
+.library-item-destination span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.library-item-destination.missing {
+  color: #b45309;
+}
+.library-item-destination.missing svg {
+  color: #f59e0b;
+}
+
 /* Main panel */
 .builder-main {
   flex: 1;
@@ -1865,6 +1894,13 @@ aside.sidebar:not(.collapsed) .logo-full {
 .svc-icon-button:hover {
   color: #4c1d95;
   background: #f3e8ff;
+}
+
+/* A guide line that already names somebody shows its button as filled, so the
+   operator can see at a glance which lines carry a person and which do not. */
+.svc-icon-button.is-set {
+  color: #3730a3;
+  background: #eef2ff;
 }
 
 .day-drop-zone {
@@ -2444,7 +2480,31 @@ aside.sidebar:not(.collapsed) .logo-full {
 .package-library-sidebar .category-filters { display: flex; flex-wrap: wrap; gap: .35rem; }
 .package-library-sidebar .category-chip { padding: .3rem .5rem; border: 1px solid #dbe3eb; border-radius: 999px; background: #fff; color: #64748b; font-size: .68rem; cursor: pointer; }
 .package-library-sidebar .category-chip.active { border-color: #0d7478; background: #e6f5f3; color: #0d7478; font-weight: 700; }
-.package-destination-filter select { width: 100%; min-width: 0; padding: .55rem .6rem; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #1e293b; font: inherit; font-size: .78rem; }
+/* Destination / island picker shared by both library sidebars. It stays narrow on
+   purpose: it sits inside a 300px sidebar that scrolls, so the open list has to
+   scroll itself rather than push the filter out of view. */
+.multi-select-filter { position: relative; display: grid; gap: .4rem; }
+.sidebar-field .multi-select-filter { margin-top: .6rem; }
+.multi-select-filter > strong { color: #334155; font-size: .76rem; }
+.multi-select-trigger { display: flex; width: 100%; min-width: 0; align-items: center; justify-content: space-between; gap: .5rem; padding: .55rem .6rem; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #1e293b; font: inherit; font-size: .78rem; text-align: left; cursor: pointer; }
+.multi-select-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-select-trigger.has-selection { border-color: #0d7478; background: #f0fdfa; color: #0f766e; font-weight: 700; }
+.multi-select-chevron { flex: 0 0 auto; color: #94a3b8; transition: transform .15s ease; }
+.multi-select-chevron.open { transform: rotate(180deg); }
+.multi-select-chips { display: flex; flex-wrap: wrap; gap: .25rem; }
+.multi-select-chip { display: inline-flex; align-items: center; gap: .25rem; padding: .18rem .4rem; border: 1px solid #99f6e4; border-radius: 999px; background: #e6f5f3; color: #0f766e; font-size: .66rem; font-weight: 700; cursor: pointer; }
+.multi-select-menu { position: absolute; z-index: 40; top: calc(100% + .25rem); left: 0; right: 0; display: grid; gap: .4rem; padding: .5rem; border: 1px solid #dbe3eb; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px #0f172a20; }
+.multi-select-search { display: flex; align-items: center; gap: .4rem; padding: .35rem .5rem; border: 1px solid #dbe3eb; border-radius: 7px; color: #64748b; }
+.multi-select-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: #1e293b; font: inherit; font-size: .78rem; }
+.multi-select-options { display: grid; max-height: 210px; gap: .1rem; overflow-y: auto; }
+.multi-select-option { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .4rem .5rem; border: 0; border-radius: 6px; background: #fff; color: #334155; font: inherit; font-size: .76rem; text-align: left; cursor: pointer; }
+.multi-select-option:hover { background: #f1f5f9; }
+.multi-select-option.is-selected { background: #e6f5f3; color: #0d7478; font-weight: 700; }
+.multi-select-empty { padding: .4rem .5rem; color: #94a3b8; font-size: .75rem; }
+/* The menu stays open across picks, so it needs its own way shut. */
+.multi-select-foot { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding-top: .35rem; border-top: 1px solid #edf2f7; }
+.multi-select-clear { border: 0; background: transparent; color: #0d7478; font-size: .72rem; font-weight: 700; text-align: left; cursor: pointer; }
+.multi-select-done { margin-left: auto; padding: .3rem .7rem; border: 1px solid #0d7478; border-radius: 7px; background: #0d7478; color: #fff; font-size: .72rem; font-weight: 700; cursor: pointer; }
 .package-library-sidebar .clear-filters-btn { justify-self: start; padding: .2rem 0; border: 0; background: transparent; color: #0d7478; font-size: .75rem; cursor: pointer; }
 .package-service-price { min-width: 160px; }
 .package-currency-breakdown { margin: .85rem 0; padding: .8rem; border: 1px solid #e2e8f0; border-radius: 9px; }
@@ -3190,6 +3250,26 @@ aside.sidebar:not(.collapsed) .logo-full {
 .service-guide-check-row small { margin-top: 3px; color: #6366f1; font-size: .75rem; line-height: 1.45; }
 .service-guide-type-row.disabled { opacity: .55; cursor: default; }
 .service-guide-type-row.disabled:hover { border-color: #e2e8f0; }
+
+/* The guide as a person. One line's charge, one named guide, and the small
+   arithmetic that shows the uplift is the only thing that moved. */
+.service-guide-total-detail { display: block; margin-top: 3px; font-size: .72rem; font-weight: 600; opacity: .75; }
+.guide-person-list { max-height: 24rem; overflow-y: auto; padding-right: .25rem; }
+.guide-person-group-title { margin: 12px 0 2px; color: #94a3b8; font-size: .7rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.guide-person-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid #e2e8f0; border-radius: 11px; background: #fff; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.guide-person-row:hover { border-color: #99d6cf; }
+.guide-person-row.selected { border-color: #0d7478; background: #f0fdfa; }
+.guide-person-row input { accent-color: #0d7478; width: 16px; height: 16px; }
+.guide-person-id { display: flex; flex-direction: column; gap: 2px; }
+.guide-person-id strong { color: #1e293b; font-size: .88rem; }
+.guide-person-id small { color: #64748b; font-size: .72rem; }
+.guide-person-rate { display: flex; flex-direction: column; gap: 2px; align-items: flex-end; text-align: right; }
+.guide-person-rate strong { color: #0f766e; font-size: .86rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.guide-person-rate small { color: #b45309; font-size: .7rem; }
+.guide-person-actions { flex-wrap: wrap; }
+/* A guide line carries the person it was invoiced for, in the same slot as the
+   service types - one chip per fact, so neither hides the other. */
+.basis-tag.guide-person { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
 .service-guide-clients { display: flex; flex-direction: column; gap: 5px; margin: 2px 0; }
 .service-guide-client-tag { display: inline-flex; align-items: center; gap: .4rem; width: fit-content; padding: 5px 10px; border-radius: 999px; font-size: .74rem; font-weight: 650; }
 .service-guide-client-tag.accepts { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
@@ -3212,3 +3292,9 @@ aside.sidebar:not(.collapsed) .logo-full {
 .accom-charge-option-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: #5b21b6; }
 .accom-charge-option-head strong { font-size: .9rem; }
 .accom-charge-option-head span { color: #94a3b8; font-size: .74rem; font-weight: 500; }
+.accom-charge-family { display: flex; flex-direction: column; gap: 6px; }
+.accom-charge-family + .accom-charge-family { margin-top: 10px; }
+.accom-charge-family-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; color: #334155; }
+.accom-charge-family-head strong { font-size: .82rem; }
+.accom-charge-family-head span { color: #94a3b8; font-size: .72rem; }
+.accom-night-band-note { margin-top: .75rem; font-size: .78rem; line-height: 1.5; color: #64748b; }

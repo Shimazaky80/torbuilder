@@ -4,8 +4,11 @@ import { useNavigate } from 'react-router-dom';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useListRowLimit } from '../hooks/useListRowLimit';
-import { Map, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
+/* The icon is aliased: importing it as `Map` shadowed the global Map
+   constructor and broke the load-more merge below. */
+import { Map as MapIcon, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
 import ClientTourForm from '../components/ClientTourForm';
+import { PRECISION_MONTH, travelTimingLabel } from '../lib/travelTiming';
 
 const STATUS_MODS = {
   quotation: 'quotation',
@@ -160,6 +163,10 @@ export const Itineraries = () => {
           itinerary_name: payload.itineraryName,
           travel_start_date: payload.travelStart,
           travel_end_date: payload.travelEnd,
+          travel_date_precision: payload.travelDatePrecision === PRECISION_MONTH ? PRECISION_MONTH : 'exact',
+          duration_days: payload.travelDatePrecision === PRECISION_MONTH
+            ? (Number(payload.durationDays) || null)
+            : null,
           travellers: payload.travellers,
           num_adults: payload.numAdults,
           num_children: payload.numChildren,
@@ -185,6 +192,8 @@ export const Itineraries = () => {
           client: payload.selectedClient,
           travelStart: payload.travelStart,
           travelEnd: payload.travelEnd,
+          travelDatePrecision: payload.travelDatePrecision || 'exact',
+          durationDays: payload.durationDays || null,
           travellers: payload.travellers,
           numAdults: payload.numAdults,
           numChildren: payload.numChildren,
@@ -208,6 +217,8 @@ export const Itineraries = () => {
         client: itinerary.clients || null,
         travelStart: itinerary.travel_start_date,
         travelEnd: itinerary.travel_end_date,
+        travelDatePrecision: itinerary.travel_date_precision || 'exact',
+        durationDays: itinerary.duration_days || null,
         travellers: trav,
         numAdults: trav.length - childrenCount(trav),
         numChildren: childrenCount(trav),
@@ -257,6 +268,8 @@ export const Itineraries = () => {
           itinerary_name: `${itinerary.itinerary_name} (Copy)`,
           travel_start_date: itinerary.travel_start_date,
           travel_end_date: itinerary.travel_end_date,
+          travel_date_precision: itinerary.travel_date_precision || 'exact',
+          duration_days: itinerary.duration_days || null,
           travellers: trav,
           num_adults: trav.length - childrenCount(trav),
           num_children: childrenCount(trav),
@@ -279,6 +292,8 @@ export const Itineraries = () => {
           client: null,
           travelStart: copy.travel_start_date,
           travelEnd: copy.travel_end_date,
+          travelDatePrecision: copy.travel_date_precision || 'exact',
+          durationDays: copy.duration_days || null,
           travellers: trav,
           numAdults: trav.length - childrenCount(trav),
           numChildren: childrenCount(trav),
@@ -312,7 +327,7 @@ export const Itineraries = () => {
     <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
       <header className="page-header" style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
         <div className="header-title">
-          <Map className="header-icon" />
+          <MapIcon className="header-icon" />
           <div>
             <h1>Itineraries</h1>
             <p>Client &amp; Tour — create a new itinerary and open the itinerary builder</p>
@@ -339,7 +354,7 @@ export const Itineraries = () => {
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
           <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Map size={22} color="#0d7478" /> Client &amp; Tour
+            <MapIcon size={22} color="#0d7478" /> Client &amp; Tour
           </h2>
         </div>
 
@@ -356,7 +371,7 @@ export const Itineraries = () => {
       <div className="admin-table-container">
         <div className="table-header-actions">
           <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Map size={20} color="#0d7478" /> Recent Itineraries
+            <MapIcon size={20} color="#0d7478" /> Recent Itineraries
           </h2>
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flex: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
             <div className="search-box" style={{ flex: 1, width: 'auto', maxWidth: '380px' }}>
@@ -430,7 +445,7 @@ export const Itineraries = () => {
             ) : itineraries.length === 0 ? (
               <tr>
                 <td colSpan="8" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
-                  <Map size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
+                  <MapIcon size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
                   <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>
                     {searchQuery.trim() || travelDateStart || travelDateEnd || statusFilter ? 'No itineraries match' : 'No itineraries yet'}
                   </h3>
@@ -444,7 +459,7 @@ export const Itineraries = () => {
             ) : filteredItineraries.length === 0 ? (
               <tr>
                 <td colSpan="8" className="text-center" style={{ padding: '3rem', color: '#64748b' }}>
-                  <Map size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
+                  <MapIcon size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
                   <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>No itineraries match</h3>
                   <p>Try adjusting your search or filter.</p>
                 </td>
@@ -485,7 +500,7 @@ export const Itineraries = () => {
                 </td>
                 <td>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.85rem', color: '#475569' }}>
-                    <Calendar size={13} /> {it.travel_start_date} → {it.travel_end_date}
+                    <Calendar size={13} /> {travelTimingLabel(it)}
                   </span>
                 </td>
                 <td><span style={{ fontSize: '0.85rem', color: '#64748b' }}>{it.itinerary_tour_type || '—'}</span></td>

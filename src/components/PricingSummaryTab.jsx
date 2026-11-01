@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { CalendarDays, ChevronDown, ChevronUp } from 'lucide-react';
 import { accommodationPerPersonForSeason, accommodationRoomCapacity, presentationPricingColumns, singleSupplementForSeason, vehicleColumnPools } from '../lib/packagePricing';
+import { singleSupplementLadderSummary } from '../lib/singleSupplement';
 
 /* Presentation reads the same grid the operator priced on the Pricing & seasons tab — same
    columns, same bands — but with the vehicle row stripped out: a client never needs to know
@@ -58,10 +59,13 @@ export const PricingSummaryTab = ({
           : (accommodationPerPersonForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
         /* The supplement is derived from the accommodation's own contract when the season
            carries no override, so a buyer always reads a figure rather than a zero that
-           looks like nothing is charged for a single room. The override still wins. */
+           looks like nothing is charged for a single room. The override still wins. The
+           contract ladders price the party's singles in order, and a season's manual
+           single-room count replaces the party-size heuristic in every column. */
+        const seasonSupplement = singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null });
         const singleSupplement = (period?.single_supplement != null && period.single_supplement !== 0)
           ? Number(period.single_supplement)
-          : (singleSupplementForSeason({ days, library, from: period?.valid_from || null, to: period?.valid_to || null }).total ?? 0);
+          : (seasonSupplement.total ?? 0);
         const columns = presentationPricingColumns({
           codes: visibleCodes,
           bands,
@@ -69,8 +73,25 @@ export const PricingSummaryTab = ({
           perPersonFixed: pool.perPersonFixed,
           accommodation,
           singleSupplement,
+          singleSupplementTiers: seasonSupplement.tiers,
+          singleRoomsOverride: period?.single_rooms ?? null,
           roomCapacity
         });
+        /* A contract ladder prices the trip's single rooms in order; the flat row can
+           only show one figure, so it names what the ladder does alongside it. */
+        const ladder = singleSupplementLadderSummary(seasonSupplement.tiers, singleSupplement);
+        const ladderNote = !seasonSupplement.tiers.length ? '' : (() => {
+          const parts = [];
+          if (ladder.waived > 0) parts.push(`first ${ladder.waived} single room${ladder.waived === 1 ? '' : 's'} waived`);
+          if (ladder.nextSupplement != null) {
+            parts.push(ladder.waived > 0
+              ? `from single ${ladder.waived + 1}: ${money(ladder.nextSupplement, currency)}`
+              : `single 1 costs ${money(ladder.nextSupplement, currency)}`);
+          } else {
+            parts.push(`beyond that: ${money(ladder.beyond, currency)}`);
+          }
+          return `Contract ladder: ${parts.join(' · ')}`;
+        })();
         const columnsFor = (code) => columns.filter((column) => column.code === code);
         return <div className="ps-grid-scroll" key={`ps-season-${seasonIndex}`}>
         <table className="ps-grid ps-summary-grid">
@@ -109,7 +130,7 @@ export const PricingSummaryTab = ({
               <td className="ps-grid-label">Single supplement</td>
               <td colSpan={visibleCodes.length}>
                 <div className="ps-flat-cell ps-flat-amber">{money(singleSupplement, currency)}
-                  <span className="ps-flat-from">per person · added when you want your own room</span>
+                  <span className="ps-flat-from">per person · added when you want your own room{ladderNote ? ` · ${ladderNote}` : ''}</span>
                 </div>
               </td>
             </tr>
