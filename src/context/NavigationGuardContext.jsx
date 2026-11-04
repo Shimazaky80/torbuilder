@@ -6,19 +6,21 @@ import React, {
   useRef,
   useState
 } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, X } from 'lucide-react';
 
 const NavigationGuardContext = createContext(null);
 
 export const NavigationGuardProvider = ({ children }) => {
   const navigate = useNavigate();
+  const location = useLocation();
 
   // id -> { labelRef, dirtyRef, saveFnRef }
   const guardsRef = useRef({});
   const pendingPathRef = useRef(null);
   const [pendingPath, setPendingPath] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [pageResetToken, setPageResetToken] = useState(0);
 
   const registerGuard = useCallback((id, label) => {
     if (!guardsRef.current[id]) {
@@ -45,21 +47,40 @@ export const NavigationGuardProvider = ({ children }) => {
     Object.values(guardsRef.current).find((g) => g.dirtyRef.current) || null,
   []);
 
+  /* A menu click on the page already open asks for that page as it first
+     opened — filters cleared, editors closed, list fetched again — not a journey
+     to where the operator is already standing. The router has nowhere to go, so
+     the pages under this token are remounted and the scroll returns to the top. */
+  const resetCurrentPage = useCallback(() => {
+    const scroller = document.querySelector('main.main-content');
+    if (scroller) scroller.scrollTop = 0;
+    setPageResetToken((token) => token + 1);
+  }, []);
+
   const performNavigation = useCallback(() => {
     const path = pendingPathRef.current;
     pendingPathRef.current = null;
     setPendingPath(null);
-    if (path) navigate(path);
-  }, [navigate]);
+    if (!path) return;
+    if (location.pathname === path) {
+      resetCurrentPage();
+      return;
+    }
+    navigate(path);
+  }, [navigate, location.pathname, resetCurrentPage]);
 
   const requestNavigate = useCallback((path) => {
     if (!isAnyDirty()) {
+      if (location.pathname === path) {
+        resetCurrentPage();
+        return;
+      }
       navigate(path);
       return;
     }
     pendingPathRef.current = path;
     setPendingPath(path);
-  }, [navigate, isAnyDirty]);
+  }, [navigate, isAnyDirty, location.pathname, resetCurrentPage]);
 
   const handleCancel = useCallback(() => {
     pendingPathRef.current = null;
@@ -111,7 +132,7 @@ export const NavigationGuardProvider = ({ children }) => {
   const dirtyLabel = pendingPath ? (getActiveGuard()?.labelRef?.current || 'your changes') : '';
 
   return (
-    <NavigationGuardContext.Provider value={{ registerGuard, requestNavigate }}>
+    <NavigationGuardContext.Provider value={{ registerGuard, requestNavigate, pageResetToken }}>
       {children}
       {pendingPath && (
         <div className="modal-overlay">
@@ -158,7 +179,6 @@ export const usePageGuard = (id, label, isDirty, saveFn) => {
     handleRef.current.setDirty(isDirty);
     handleRef.current.setSaveFn(saveFn);
     return () => { handleRef.current?.unregister(); handleRef.current = null; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, label, isDirty, saveFn, registerGuard]);
 
   return useNavigationGuard();

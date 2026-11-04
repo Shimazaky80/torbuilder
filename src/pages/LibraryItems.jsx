@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import SearchableSelect from '../components/SearchableSelect';
+import CarSpecGrid from '../components/CarSpecGrid';
 import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
@@ -13,7 +14,7 @@ import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBase
 import { chargesChildRate } from '../lib/servicePricing';
 import { waiverLadder, waiverFromLadder, withWaiverNote } from '../lib/singleSupplement';
 import { nightBandLabel, WEEKEND_DAY_OPTIONS, weekendDaysOf } from '../lib/accommodationOptions';
-import { normaliseStaffTiers, staffRoomLadder, staffTierSummary } from '../lib/staffRoomTiers';
+import { crewLadderTiers, normaliseStaffTiers, staffRoomLadder, staffTierSummary } from '../lib/staffRoomTiers';
 import { STAR_GRADES, starGlyphs, starLabel, starRatingOf } from '../lib/starGrading';
 import { supplierColumns, supplierStarColumn } from '../lib/supplierStarColumn';
 import { normalizeRoomTypes, roomForRate, roomsFromRates } from '../lib/roomTypes';
@@ -69,6 +70,10 @@ import {
   Zap,
   Receipt
 } from 'lucide-react';
+import LanguageText from '../components/LanguageText';
+import { carRentalGroups } from '../lib/carRentalPricing';
+import { SOURCE_LANGUAGE, textI18nPayload, translationsOf } from '../lib/i18n';
+import { useTenantLanguages } from '../lib/i18n/useTenantLanguages';
 
 /* Price and count fields may never hold a negative value. Clamps a typed
    negative number to "0" while leaving empty / non-numeric values (including
@@ -77,6 +82,35 @@ const clampNonNegative = (value) => {
   if (typeof value !== 'string' || value.trim() === '') return value;
   const n = Number(value);
   return Number.isFinite(n) && n < 0 ? '0' : value;
+};
+
+/* A hire tariff is one season's money: a Rental Price Validity window and the
+   rental-length ladder priced inside it. The same car group is contracted at other
+   figures in other weeks, so a group holds one season per window exactly as a room
+   holds one rate row per season.
+
+   Module scope, not the component body: createCarRentalGroup() is hoisted and runs
+   from a useState initializer, and a counter declared below that line would still
+   be in its temporal dead zone when it does. */
+let carSeasonCount = 0;
+const createCarRentalSeason = (copyFrom = null) => {
+  carSeasonCount += 1;
+  return {
+    seasonId: `crs_${carSeasonCount}`,
+    validFrom: '',
+    validTo: '',
+    /* A new season starts as the ladder before it with the money blanked, because a
+       hire contract cuts its weeks the same way all year; only the figures move. A
+       carried-over price would be money nobody had typed. */
+    ranges: copyFrom?.ranges?.length
+      ? copyFrom.ranges.map((range) => ({ minDays: range.minDays, maxDays: range.maxDays, price: '' }))
+      : [
+        { minDays: 1, maxDays: 6, price: '' },
+        { minDays: 7, maxDays: 13, price: '' },
+        { minDays: 14, maxDays: 30, price: '' },
+        { minDays: 31, maxDays: '', price: '' }
+      ]
+  };
 };
 
 /* A money box the operator left blank is written to the season row as null, so a row can tell
@@ -122,14 +156,21 @@ const wholeOrNull = (value) => {
 
 /* A tier with a blank threshold or rate is still being typed; save only
    complete ones so a half-filled row cannot become a free tier from zero client
-   rooms. Shared by the tour leader, guide and driver ladders. */
+   rooms. Shared by the crew and tour leader ladders.
+
+   The ceiling is the stopper and it is optional: a row that leaves "To client
+   rooms" blank runs up to the next threshold, or forever when it is the last
+   row. A ceiling below its own threshold is the row being typed, so it saves as
+   that threshold rather than a band that closed before it opened. */
 const tierLadderPayload = (tiers) => (Array.isArray(tiers) ? tiers : [])
   .map((tier) => {
     const minRooms = moneyOrZero(tier.minClientRooms);
     const rate = moneyOrZero(tier.rate);
     if (minRooms === null || rate === null) return null;
+    const ceiling = wholeOrNull(tier.maxClientRooms);
     return {
       minClientRooms: Math.max(0, Math.round(minRooms)),
+      maxClientRooms: ceiling === null ? null : Math.max(Math.round(minRooms), ceiling),
       rooms: Math.max(1, Math.floor(parseFloat(tier.rooms) || 1)),
       rate
     };
@@ -138,10 +179,12 @@ const tierLadderPayload = (tiers) => (Array.isArray(tiers) ? tiers : [])
   .sort((a, b) => a.minClientRooms - b.minClientRooms);
 
 /* Reads a saved ladder back into the editor, keeping a typed 0 rate (a free
-   room) rather than treating it as a blank box. */
+   room) rather than treating it as a blank box, and leaving a ceiling that was
+   never typed blank so an open band does not become a stop. */
 const tierLadderFromRow = (tiers) => (Array.isArray(tiers)
   ? tiers.map(tier => ({
       minClientRooms: moneyLoadKeepZero(tier?.minClientRooms ?? tier?.min_rooms),
+      maxClientRooms: moneyLoadKeepZero(tier?.maxClientRooms ?? tier?.max_rooms),
       rooms: moneyLoadKeepZero(tier?.rooms) || '1',
       rate: moneyLoadKeepZero(tier?.rate)
     }))
@@ -152,7 +195,7 @@ const tierLadderFromRow = (tiers) => (Array.isArray(tiers)
    the read-only view has nothing to hide. */
 const emptySeasonMoney = () => ({
   roomRate: '', singleRoomRate: '', price1Adult: '', price2Adults: '', price3PlusAdults: '',
-  childRates: {}, singleSupplementWaiver: '', childDiscount: '', guideRate: '', guideTiers: [], driverRate: '', driverTiers: [], tourLeaderRate: '', tourLeaderTiers: [],
+  childRates: {}, singleSupplementWaiver: '', childDiscount: '', guideRate: '', driverRate: '', crewTiers: [], tourLeaderRate: '', tourLeaderTiers: [],
   guideTransferRate: '', guideHalfDayRate: '', guideFullDayRate: '', guideOverlandRate: '', guideDinnerRate: '',
   guideMealPlan: 'Bed & Breakfast', driverMealPlan: 'Bed & Breakfast',
   adultRate: '', childRate: '', fastTrackAdultRate: '', fastTrackChildRates: {}, tiers: [],
@@ -227,16 +270,19 @@ const occupancySizesForRoom = (room) => {
 };
 
 /* Which contract a room is priced on. The room states it; a room saved before
-   the column existed inherits the item's model, exactly as the engines do. A
-   value from before these three bases (a legacy 'per_person' copied onto a
-   derived room) is not a contract choice, so the item's own model still wins. */
+   the column existed inherits the item's model, exactly as the engines do.
+
+   Only these three bases are room contracts, and the column checks for nothing
+   else: an item-level 'per_person' copied down from an older form is not a
+   choice about the room, so it inherits the default sharing contract rather
+   than being saved as a basis the database rejects. */
 const ROOM_CHARGE_MODELS = ['per_person_sharing', 'per_room', OCCUPANCY_BASIS];
 const roomPricingModelOf = (room, item = {}) => {
   const roomModel = String(room?.pricingModel || '').trim();
   if (ROOM_CHARGE_MODELS.includes(roomModel)) return roomModel;
   const itemModel = String(item?.pricingModel || '').trim();
   if (ROOM_CHARGE_MODELS.includes(itemModel)) return itemModel;
-  return roomModel || itemModel || 'per_person_sharing';
+  return 'per_person_sharing';
 };
 
 const isOccupancyRoom = (room, item = {}) => roomPricingModelOf(room, item) === OCCUPANCY_BASIS;
@@ -373,10 +419,12 @@ const vehicleVectorSummary = (rates) => {
    so only a Fees & Tickets item writes these, and only into the columns its own
    rate basis actually uses - the unused ones are left off entirely rather than
    written as 0, so a stale fee can never be read back out of a season row.
-     per_person / per_adult -> the per-person figure
+     per_vehicle            -> the per-vehicle figure, for every fee type
+     per_person / per_adult -> the per-person figure (entrance fee or ticket)
+                               or the adult figure (a levy)
      per_child              -> the per-child figure
-     per_vehicle            -> the per-vehicle figure
-     per_unit               -> the unit price
+     per_unit               -> the unit price, the flat basis per_vehicle
+                               replaced; only an item already saved on it writes
    A fee that bills heads also bills a child on a figure of its own, and the
    guide's place is written beside it by the caller. `feeChildRate` says whether
    the workspace has the column yet: writing the amount read from a box nobody
@@ -385,14 +433,16 @@ const surchargeRateFees = (itemData, season, { feeChildRate = false } = {}) => {
   if (!isSurchargeItem(itemData)) return {};
   const unitBasis = itemData.surchargeUnitBasis || 'per_person';
   const num = moneyOrNull;
-  const isEntrance = (itemData.surchargeType || 'entrance_fee') === 'entrance_fee';
+  /* A ticket is admitted on the same columns as an entrance fee - the type only
+     changes the name on the screen - so the ladder split is levy vs not-levy. */
+  const isLevy = (itemData.surchargeType || 'entrance_fee') === 'conservation_levy';
   if (unitBasis === 'per_unit') {
     return { unit_price: num(season.unitRate) };
   }
   if (unitBasis === 'per_vehicle') {
     return { entrance_fee_per_vehicle: num(season.entranceFeeVehicle) };
   }
-  if (isEntrance) {
+  if (!isLevy) {
     return {
       entrance_fee_per_person: num(season.entranceFeePerson),
       ...(feeChildRate ? { entrance_fee_per_child: num(season.entranceFeeChild) } : {})
@@ -410,10 +460,20 @@ const surchargeRateFees = (itemData, season, { feeChildRate = false } = {}) => {
   };
 };
 
+/* The words a fee's own price boxes are headed with. A ticket and an entrance
+   fee are priced from the same columns, so only the heading tells them apart. */
+const feeTypeHeading = (type) => {
+  const t = type || 'entrance_fee';
+  if (t === 'conservation_levy') return 'Conservation Levy';
+  if (t === 'ticket') return 'Ticket';
+  return 'Entrance Fee';
+};
+
 /* Ladder editor for the rooms a property includes once enough paying client
-   rooms are booked. The tour leader, guide and driver deals share this shape:
-   each tier states the total rooms included from a threshold and the rate for
-   the rooms it adds (0 = free, a partial amount = discounted). */
+   rooms are booked. The crew (driver-guide) and tour leader deals share this
+   shape: each tier states the total rooms included from a threshold, the rate
+   for the rooms it adds (0 = free, a partial amount = discounted) and — when
+   the deal has an end — the client-room count it stops covering. */
 const TierLadderEditor = ({
   legend, roomLabel, currency, tiers = [], tone = 'teal', moneyStep, onAdd, onChange, onRemove
 }) => {
@@ -437,6 +497,18 @@ const TierLadderEditor = ({
               placeholder="e.g. 10"
               value={tier.minClientRooms ?? ''}
               onChange={(e) => onChange(tierIdx, 'minClientRooms', e.target.value)}
+            />
+          </div>
+          <div>
+            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>To client rooms</span>
+            <input
+              type="number"
+              min="0"
+              className="pricing-select"
+              style={{ padding: '0.3rem', width: '110px' }}
+              placeholder="blank = and above"
+              value={tier.maxClientRooms ?? ''}
+              onChange={(e) => onChange(tierIdx, 'maxClientRooms', e.target.value)}
             />
           </div>
           <div>
@@ -483,11 +555,14 @@ const TierLadderEditor = ({
         + Add tier
       </button>
       <div style={{ fontSize: '0.72rem', color: palette.note, marginTop: '0.4rem' }}>
-        Each tier covers the client rooms from its threshold up to the next tier — 1 and 11
-        read as “1–10 client rooms”, then “11+”. Enter the total {roomLabel.toLowerCase()} rooms
-        included from that threshold and the rate for those rooms; repeating the same room
-        count with a new rate changes the price for that band (0 = free). Any further room
-        pays the normal Single rate. Tiers take over from the flat rate above.
+        Each tier covers the client rooms from its From count up to its To count. Leave
+        To blank and the tier runs to the next one, or forever when it is the last row:
+        1 with no To reads as “1 and above”, 10 with a To of 20 reads as “10–20 client
+        rooms” and nothing beyond 20. Enter the total {roomLabel.toLowerCase()} rooms
+        included from that threshold and the rate for those rooms; repeating the same
+        room count with a new rate changes the price for that band (0 = free). A bed
+        outside every band — past a stopped ladder or in a gap between two tiers — pays
+        the normal Single rate. Tiers take over from the flat rate above.
       </div>
     </div>
   );
@@ -566,7 +641,13 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, staffOptions: false, minPaxToRun: false, feeChildRate: false });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, staffOptions: false, minPaxToRun: false, feeChildRate: false, rentalContractFee: false, textI18n: false });
+
+  /* The languages this tenant writes content in. The tabs the editors show are
+     this list narrowed by the column actually existing: a tenant that switched
+     Portuguese on but has not applied 20261251 gets no box it cannot save. */
+  const tenantLanguages = useTenantLanguages();
+  const contentLanguages = dbFeatures.textI18n ? tenantLanguages : [SOURCE_LANGUAGE];
 
   // The price axis a per-vehicle rate row is keyed by, read once from Settings.
   const [vehicleTypes, setVehicleTypes] = useState([]);
@@ -584,6 +665,12 @@ export const LibraryItems = () => {
   const [activeRoomByItem, setActiveRoomByItem] = useState({});
   const [starColumnReady, setStarColumnReady] = useState(false);
   const [supplierStarDraft, setSupplierStarDraft] = useState({});
+
+  /* A car hire is contracted by country — one price list covers the whole of it,
+     so the operator is not asked for a town that changes nothing. The tenant's
+     own country is the starting value; a hire sold abroad is the exception that
+     gets typed differently. */
+  const [operatingCountry, setOperatingCountry] = useState('South Africa');
 
   useEffect(() => {
     let active = true;
@@ -917,6 +1004,10 @@ export const LibraryItems = () => {
     );
   }
 
+  /* A hire tariff is one season's money: a Rental Price Validity window and the
+     rental-length ladder priced inside it. The same car group is contracted at
+     other figures in other weeks, so a group holds one season per window, exactly
+     as a room holds one rate row per season. */
   function createCarRentalGroup() {
     return {
       groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
@@ -925,20 +1016,13 @@ export const LibraryItems = () => {
       rateCode: '',
       kmsUnlimited: true,
       kmsIncluded: '',
-      validFrom: '',
-      validTo: '',
       luggage: '',
       doors: '',
       passengers: '',
       aircon: true,
       gear: 'automatic',
       fuelType: 'fuel',
-      ranges: [
-        { minDays: 1, maxDays: 3, price: '' },
-        { minDays: 4, maxDays: 6, price: '' },
-        { minDays: 7, maxDays: 14, price: '' },
-        { minDays: 15, maxDays: '', price: '' }
-      ]
+      seasons: [createCarRentalSeason()]
     };
   }
 
@@ -1045,12 +1129,17 @@ export const LibraryItems = () => {
       guideMeals: [],
       guideAccommodation: false,
       description: '',
+      textI18n: null,
       imageUrls: [],
       newImageUrlInput: '',
       contractUrl: '',
       contractName: '',
       childAgeRanges: defaultAgeBands,
       carGroups: [createCarRentalGroup()],
+      /* The admin fee the hire company adds to every rental agreement. Typed once
+         per contract - one library item is one contract - because two vehicle
+         groups of the same agreement cannot cost the paperwork differently. */
+      rentalContractFee: '',
       roomTypes: [defaultRoom],
       seasons: [
         {
@@ -1397,7 +1486,8 @@ export const LibraryItems = () => {
           contracts, tieredPricing, transferType, tourType, transportType,
           feeTypeLib, feeTypeRates, driverOption, surchargeFees,
           pricesByVehicle, tourLeaderTiers, singleSupplementTiers, nightBands, weekendRates,
-          roomPricingModel, occupancyRatesColumn, staffOptions, minPaxToRun, entranceFeeChildRate
+          roomPricingModel, occupancyRatesColumn, staffOptions, minPaxToRun, entranceFeeChildRate,
+          rentalContractFee, textI18n
         ] = await Promise.all([
           hasColumns('item_rates', ['guide_rate', 'driver_rate', 'guide_meal_plan', 'driver_meal_plan']),
           hasColumns('library_items', ['guide_min_rooms']),
@@ -1432,7 +1522,14 @@ export const LibraryItems = () => {
              the child entrance fee is a figure on the rate row beside the adult
              one. Both arrive on 20261245. */
           hasColumns('library_items', ['min_pax_to_run']),
-          hasColumns('item_rates', ['entrance_fee_per_child'])
+          hasColumns('item_rates', ['entrance_fee_per_child']),
+          /* A hire contract always carries an admin fee, but the column only
+             arrives with the rental work: an unmigrated workspace keeps its
+             tariffs and simply has nowhere to type the fee. */
+          hasColumns('library_items', ['rental_contract_fee']),
+          /* The translation column 20261251 adds. Until it lands, the item keeps
+             its single English description and no language tabs appear. */
+          hasColumns('library_items', ['text_i18n'])
         ]);
         setDbFeatures({
           guideDriver: guideDriverRates,
@@ -1454,7 +1551,9 @@ export const LibraryItems = () => {
           occupancyPricing: roomPricingModel && occupancyRatesColumn,
           staffOptions,
           minPaxToRun,
-          feeChildRate: entranceFeeChildRate
+          feeChildRate: entranceFeeChildRate,
+          rentalContractFee,
+          textI18n
         });
       } catch {
         // Probes failed (offline / row-level security) — keep the defaults.
@@ -1486,6 +1585,17 @@ export const LibraryItems = () => {
         .eq('company_id', companyId)
         .order('name', { ascending: true });
       setSuppliers(sups || []);
+
+      /* The column has a database default, and a tenant that never opened
+         Settings has no row at all — either way the fallback is the country the
+         rest of the app already assumes. A missing column simply reads as null. */
+      const { data: billingRow } = await supabase
+        .from('company_billing_settings')
+        .select('operating_country')
+        .eq('company_id', companyId)
+        .maybeSingle();
+      const tenantCountry = String(billingRow?.operating_country || '').trim();
+      if (tenantCountry) setOperatingCountry(tenantCountry);
 
       // Load category options from the database (falls back to the built-in
       // list on error, e.g. when library_categories doesn't exist yet).
@@ -1666,6 +1776,13 @@ export const LibraryItems = () => {
   };
 
   // Update Item Field
+  /* One field of a language's own set of translations, merged into the item's
+     text_i18n by the editor. It is a separate handler because a translation is
+     an object of languages, not a value a text input types. */
+  const handleItemTranslationsChange = (tempId, nextTranslations) => {
+    setItemsToSave(prev => prev.map(item => (item.tempId === tempId ? { ...item, textI18n: nextTranslations } : item)));
+  };
+
   const handleItemFieldChange = (tempId, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
@@ -1701,36 +1818,92 @@ export const LibraryItems = () => {
     }));
   };
 
-  const handleAddCarRange = (tempId, groupId) => {
+  /* The seasons a group is sold across, each with its own Rental Price Validity
+     window and its own ladder. Copying the ladder of the season before it keeps the
+     day bands the contract uses; the prices stay blank until they are typed. */
+  const handleAddCarSeason = (tempId, groupId) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const groups = (item.carGroups || []).map(g => {
         if (g.groupId !== groupId) return g;
-        return { ...g, ranges: [...(g.ranges || []), { minDays: '', maxDays: '', price: '' }] };
+        const seasons = g.seasons?.length ? g.seasons : [createCarRentalSeason()];
+        return { ...g, seasons: [...seasons, createCarRentalSeason(seasons[seasons.length - 1])] };
       });
       return { ...item, carGroups: groups };
     }));
   };
 
-  const handleRemoveCarRange = (tempId, groupId, rangeIdx) => {
+  const handleRemoveCarSeason = (tempId, groupId, seasonId) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const groups = (item.carGroups || []).map(g => {
         if (g.groupId !== groupId) return g;
-        const ranges = (g.ranges || []).filter((_, idx) => idx !== rangeIdx);
-        return { ...g, ranges: ranges.length > 0 ? ranges : [{ minDays: '', maxDays: '', price: '' }] };
+        const seasons = (g.seasons || []).filter(s => s.seasonId !== seasonId);
+        return { ...g, seasons: seasons.length > 0 ? seasons : [createCarRentalSeason()] };
       });
       return { ...item, carGroups: groups };
     }));
   };
 
-  const handleCarRangeChange = (tempId, groupId, rangeIdx, field, value) => {
+  const handleCarSeasonFieldChange = (tempId, groupId, seasonId, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const groups = (item.carGroups || []).map(g => {
         if (g.groupId !== groupId) return g;
-        const ranges = (g.ranges || []).map((r, idx) => idx === rangeIdx ? { ...r, [field]: clampNonNegative(value) } : r);
-        return { ...g, ranges };
+        const seasons = (g.seasons || []).map(s =>
+          s.seasonId === seasonId ? { ...s, [field]: clampNonNegative(value) } : s
+        );
+        return { ...g, seasons };
+      });
+      return { ...item, carGroups: groups };
+    }));
+  };
+
+  const handleAddCarRange = (tempId, groupId, seasonId) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g => {
+        if (g.groupId !== groupId) return g;
+        const seasons = (g.seasons || []).map(s => (
+          s.seasonId === seasonId
+            ? { ...s, ranges: [...(s.ranges || []), { minDays: '', maxDays: '', price: '' }] }
+            : s
+        ));
+        return { ...g, seasons };
+      });
+      return { ...item, carGroups: groups };
+    }));
+  };
+
+  const handleRemoveCarRange = (tempId, groupId, seasonId, rangeIdx) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g => {
+        if (g.groupId !== groupId) return g;
+        const seasons = (g.seasons || []).map(s => {
+          if (s.seasonId !== seasonId) return s;
+          const ranges = (s.ranges || []).filter((_, idx) => idx !== rangeIdx);
+          return { ...s, ranges: ranges.length > 0 ? ranges : [{ minDays: '', maxDays: '', price: '' }] };
+        });
+        return { ...g, seasons };
+      });
+      return { ...item, carGroups: groups };
+    }));
+  };
+
+  const handleCarRangeChange = (tempId, groupId, seasonId, rangeIdx, field, value) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const groups = (item.carGroups || []).map(g => {
+        if (g.groupId !== groupId) return g;
+        const seasons = (g.seasons || []).map(s => {
+          if (s.seasonId !== seasonId) return s;
+          const ranges = (s.ranges || []).map((r, idx) => (
+            idx === rangeIdx ? { ...r, [field]: clampNonNegative(value) } : r
+          ));
+          return { ...s, ranges };
+        });
+        return { ...g, seasons };
       });
       return { ...item, carGroups: groups };
     }));
@@ -2011,15 +2184,24 @@ export const LibraryItems = () => {
     }));
   };
 
-  // Transfer: pick a vehicle type (auto-fills max occupancy from its pax capacity)
-  const handleVehicleTypeChange = (tempId, label) => {
+  /* A transfer names its vehicle from the company's own Settings list, and the
+     vehicle's seats ARE its capacity: the band engine, the placement guards and
+     every document read max_occupancy, so picking a 6-seat Combi has to leave a
+     6 behind. The money does not move — a transfer charges the per-person or
+     tiered row it contracts whatever car turns up.
+     A row saved before the list existed, or on a type since retired, keeps its
+     own words and the capacity it already carried. */
+  const handleVehicleTypeChange = (tempId, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
-      const pax = label ? (parseInt(item.maxOccupancy) || 0) : 0;
+      const chosen = vehicleTypes.find((type) => type.name === value);
+      const pax = chosen
+        ? (parseInt(chosen.max_capacity, 10) || 0)
+        : (parseInt(item.maxOccupancy) || 0);
       const driverEligible = isDriverEligibleCategory(item.category) && pax >= 14;
       return {
         ...item,
-        vehicleType: label,
+        vehicleType: value,
         maxOccupancy: pax || (parseInt(item.maxOccupancy) || 0),
         driverRequired: driverEligible ? true : false,
         driverMeals: driverEligible ? getDefaultDriverMeals(item.category, driverHireType(item)) : [],
@@ -2056,9 +2238,16 @@ export const LibraryItems = () => {
          never carries one. */
       const feeType = 'none';
       const driverEligible = isDriverEligibleCategory(category) && getVehiclePax(item.maxOccupancy) >= 14;
+      /* A hire names its country, not its town. Only ever filled when the box
+         is still empty, so switching category cannot overwrite a locality the
+         operator already typed. */
+      const destinationRegion = isCarRentalCategory(category) && !String(item.destinationRegion || '').trim()
+        ? operatingCountry
+        : item.destinationRegion;
       return {
         ...item,
         category,
+        destinationRegion,
         pricingModel,
         feeType,
         driverRequired: driverEligible ? true : false,
@@ -2148,8 +2337,9 @@ export const LibraryItems = () => {
     }));
   };
 
-  /* Tour leader, guide and driver ladders share one editor shape: a list of
-     { minClientRooms, rooms, rate } rows held on the season under its field. */
+  /* The crew and tour leader ladders share one editor shape: a list of
+     { minClientRooms, maxClientRooms, rooms, rate } rows held on the season
+     under its field. */
   const updateSeasonTierList = (tempId, seasonIdx, field, updater) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
@@ -2169,8 +2359,8 @@ export const LibraryItems = () => {
          because its threshold is a new contract term, and the rooms count steps
          up by one so the usual "one more room" ladder is one click away. */
       const next = previous
-        ? { minClientRooms: '', rooms: String(Math.max(1, parseInt(previous.rooms, 10) || 1) + 1), rate: '' }
-        : { minClientRooms: String(defaultMinRooms || 1), rooms: '1', rate: '' };
+        ? { minClientRooms: '', maxClientRooms: '', rooms: String(Math.max(1, parseInt(previous.rooms, 10) || 1) + 1), rate: '' }
+        : { minClientRooms: String(defaultMinRooms || 1), maxClientRooms: '', rooms: '1', rate: '' };
       return [...tiers, next];
     });
   };
@@ -2481,7 +2671,8 @@ export const LibraryItems = () => {
     e.preventDefault();
 
     /* A property's locality is its supplier's city, so an accommodation item is
-       not asked for one it would only duplicate. */
+       not asked for one it would only duplicate. A hire names its country, so
+       the refusal says which box to fill rather than pointing at a town. */
     const supplierLocality = supplierDestination();
     const missingDestination = itemsToSave.find((item) => (
       /accommodation/i.test(String(item.category || ''))
@@ -2489,7 +2680,14 @@ export const LibraryItems = () => {
         : !String(item.destinationRegion || '').trim()
     ));
     if (missingDestination) {
-      showToast('A destination is required: set the supplier city or fill Destination / Locality', 'warning');
+      showToast(
+        /accommodation/i.test(String(missingDestination.category || ''))
+          ? 'A destination is required: set the supplier city or fill Destination / Locality'
+          : (isCarRentalCategory(missingDestination.category)
+            ? 'A hire needs its country — one price list covers it, so the country the car is picked up in goes in Country / Territory'
+            : 'A destination is required: fill Destination / Locality'),
+        'warning'
+      );
       return;
     }
     const missingAccommodationArea = itemsToSave.find(
@@ -2633,13 +2831,55 @@ export const LibraryItems = () => {
               return;
             }
             if (!(g.rateCode || '').trim()) {
-              showToast(`Car Rental Item ${i + 1}: every group requires a Rate Code (e.g. "Classic Max (CM)")`, 'warning');
+              showToast(`Car Rental Item ${i + 1}: every group requires a Contract Type (e.g. "Classic Max (CM)")`, 'warning');
               return;
             }
-            const filledRanges = (g.ranges || []).filter(r => (r.minDays || '') !== '' && (parseFloat(r.price) || 0) > 0);
-            if (filledRanges.length < 4) {
-              showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" requires at least 4 rental-length ranges with a price`, 'warning');
-              return;
+            /* A short-let contract with three bands is a real contract, so the
+               editor no longer insists on four. What it does insist on is a band
+               somebody can price from: without one the drop has nothing to
+               multiply and the hire cannot be quoted. */
+            const seasons = g.seasons?.length ? g.seasons : [createCarRentalSeason()];
+            const windows = new Set();
+            for (let sIdx = 0; sIdx < seasons.length; sIdx += 1) {
+              const s = seasons[sIdx];
+              const from = (s.validFrom || '').trim();
+              const to = (s.validTo || '').trim();
+              const named = `${from}→${to}`;
+              if (windows.has(named)) {
+                showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" has two seasons with the same Rental Price Validity, which would be quoted as one tariff. Give them different weeks.`, 'warning');
+                return;
+              }
+              windows.add(named);
+              if (from && to && to < from) {
+                showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" season ${sIdx + 1} ends before it starts, so no pick-up date could ever price from it.`, 'warning');
+                return;
+              }
+              /* One season may leave its window blank — that is the whole-contract
+                 tariff the editor has always allowed. Two seasons have to say which
+                 weeks each of them speaks for, or the pick-up date cannot answer
+                 which money the car is hired at. */
+              if (seasons.length > 1 && !from && !to) {
+                showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" season ${sIdx + 1} names no Rental Price Validity. A group sold across several seasons has to say which weeks each season covers.`, 'warning');
+                return;
+              }
+              const filledRanges = (s.ranges || []).filter(r => (r.minDays || '') !== '' && (parseFloat(r.price) || 0) > 0);
+              if (filledRanges.length < 1) {
+                showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" season ${sIdx + 1} needs at least one rental-length band with a daily price`, 'warning');
+                return;
+              }
+              /* A band with a length and no money is a car hired for nothing, and one
+                 with money and no length prices no hire at all. Either is a hole in the
+                 contract rather than a box left for later, so the save names the band
+                 that is unfinished instead of writing it. */
+              const halfTyped = (s.ranges || []).find(r => (
+                ((r.minDays || '') !== '' && (r.price || '') === '')
+                || ((r.price || '') !== '' && (r.minDays || '') === '')
+              ));
+              if (halfTyped) {
+                const band = `${halfTyped.minDays || '?'}–${halfTyped.maxDays || '∞'} days`;
+                showToast(`Car Rental Item ${i + 1}: group "${g.vehicleGroup}" season ${sIdx + 1} has a ${band} band that is only half filled — ${halfTyped.price === '' || !halfTyped.price ? 'it has no daily price, which would hire that car for nothing' : 'it has no rental length, so no hire can ever be priced from it'}. Finish it or remove it.`, 'warning');
+                return;
+              }
             }
           }
         }
@@ -2696,7 +2936,11 @@ export const LibraryItems = () => {
           supplier_id: targetSupplierId,
           name: itemData.name,
           destination_region: itemLocality,
-          destination_area: isAccommodationItem
+          /* An accommodation area is the group-split key, so it is mandatory
+             there. A hire's area is only the town its country price does not
+             cover, so it is stored when typed and NULL when left blank — which
+             is exactly "the whole country costs the same". */
+          destination_area: (isAccommodationItem || isCarRental)
             ? String(itemData.destinationArea || '').trim()
             : null,
           category: itemData.category,
@@ -2730,6 +2974,11 @@ export const LibraryItems = () => {
           ...(isTicketCategory(itemData.category)
             ? { ticket_type: itemData.ticketType || 'standard' }
             : {}),
+          /* A hire contract with no admin fee typed is a contract that charges
+             none, so a blank writes NULL rather than a zero that looks priced. */
+          ...(isCarRental && dbFeatures.rentalContractFee
+            ? { rental_contract_fee: moneyOrNull(itemData.rentalContractFee) }
+            : {}),
           ...(itemData.category === 'Meals'
             ? {
                 meal_type: itemData.mealType || 'Breakfast',
@@ -2755,6 +3004,10 @@ export const LibraryItems = () => {
               }
             : {}),
           description: itemData.description,
+          /* Sent only when a second language is switched on and the column
+             exists. An English-only tenant's item saves carry no new key at all,
+             so they behave exactly as they did before this column was added. */
+          ...textI18nPayload(contentLanguages.length > 1, itemData.textI18n),
           currency: itemData.currency,
           pricing_model: pricingModel,
           max_occupancy: maxOcc,
@@ -3163,8 +3416,10 @@ export const LibraryItems = () => {
             const ladderSharing = occupancyPriced ? null : p2Adults;
             const ladderThird = occupancyPriced ? null : p3PlusAdults;
             const tlTiers = tierLadderPayload(s.tourLeaderTiers);
-            const guideTiers = tierLadderPayload(s.guideTiers);
-            const driverTiers = tierLadderPayload(s.driverTiers);
+            /* One crew ladder, saved into both columns: the pool is one contract,
+               so the guide column and the driver column carry the same rows and
+               every reader of either sees the same deal. */
+            const crewTiers = tierLadderPayload(s.crewTiers);
             /* The rate card stores one waiver count and the optional ladder
                column carries it as a zero-supplement tier, so every pricing
                path reads the same rule. Zero waivers clears the ladder. The
@@ -3223,8 +3478,8 @@ export const LibraryItems = () => {
                       driver_rate: moneyOrNull(s.driverRate),
                       ...(dbFeatures.guideDriverTiers
                         ? {
-                            guide_tiers: guideTiers.length ? guideTiers : null,
-                            driver_tiers: driverTiers.length ? driverTiers : null
+                            guide_tiers: crewTiers.length ? crewTiers : null,
+                            driver_tiers: crewTiers.length ? crewTiers : null
                           }
                         : {})
                     }
@@ -3269,11 +3524,15 @@ export const LibraryItems = () => {
           if (ratesErr) throw ratesErr;
         }
 
-        // Insert Car Rental group-based rates (flat per vehicle, bound to group+vehicle+rental length)
+        /* Car hire: one row per (vehicle group × season × rental-length band), so
+           the same group can be sold at other money in other weeks. The group's
+           specs ride on every row because the vehicle is the same car all year; the
+           window and the money come from the season the band belongs to. */
         if (isCarRental && Array.isArray(itemData.carGroups) && itemData.carGroups.length > 0) {
           const carRatesPayload = itemData.carGroups.flatMap(g => {
             const kmsUnlimited = g.kmsUnlimited !== false;
-            return (g.ranges || []).map(r => ({
+            const seasons = g.seasons?.length ? g.seasons : [createCarRentalSeason()];
+            return seasons.flatMap(s => (s.ranges || []).map(r => ({
               item_id: targetItemId,
               vehicle_group: (g.vehicleGroup || '').trim(),
               vehicle_name: (g.vehicleName || '').trim(),
@@ -3289,10 +3548,10 @@ export const LibraryItems = () => {
               min_days: parseInt(r.minDays) || 0,
               max_days: r.maxDays === '' || r.maxDays == null ? null : (parseInt(r.maxDays) || 0),
               price: parseFloat(r.price) || 0,
-              valid_from: g.validFrom || null,
-              valid_to: g.validTo || null,
+              valid_from: s.validFrom || null,
+              valid_to: s.validTo || null,
               currency: itemData.currency
-            }));
+            })));
           });
 
           if (carRatesPayload.length > 0) {
@@ -3621,9 +3880,11 @@ export const LibraryItems = () => {
            default rather than a deal, and honouring it would quietly make guide
            beds free across the existing library. */
         guideRate: isSurchargeItem(item) ? moneyLoadKeepZero(r.guide_rate) : moneyLoad(r.guide_rate),
-        guideTiers: tierLadderFromRow(r.guide_tiers),
+        /* One crew ladder in the editor, whichever column the deal was typed
+           into. It saves to the guide column and mirrors to the driver one; a
+           contract that only ever existed against the driver column still loads. */
+        crewTiers: tierLadderFromRow(r.guide_tiers?.length ? r.guide_tiers : r.driver_tiers),
         driverRate: moneyLoad(r.driver_rate),
-        driverTiers: tierLadderFromRow(r.driver_tiers),
         tourLeaderRate: moneyLoadKeepZero(r.tour_leader_rate),
         tourLeaderTiers: tierLadderFromRow(r.tour_leader_tiers),
         guideMealPlan: r.guide_meal_plan || r.meal_plan || 'Bed & Breakfast',
@@ -3646,10 +3907,16 @@ export const LibraryItems = () => {
       ...emptySeasonMoney()
     }];
 
+    /* Rows come back one per (group × season × band), so fold them the same way the
+       pricing engine does: a card per vehicle group, a season inside it per Rental
+       Price Validity window. A group that was only ever sold on one window loads as
+       one season, exactly as the editor wrote it. */
     const carRatesRows = Array.isArray(item.car_rental_rates) ? item.car_rental_rates : [];
     const carGroupsMap = {};
+    const carSeasonMap = {};
+    let carSeasonLoads = 0;
     carRatesRows.forEach(r => {
-      const key = `${r.vehicle_group || ''}|${r.vehicle_name || ''}|${r.rate_code || ''}|${r.kms_unlimited !== false}|${r.kms_included || ''}|${r.valid_from || ''}|${r.valid_to || ''}`;
+      const key = `${r.vehicle_group || ''}|${r.vehicle_name || ''}|${r.rate_code || ''}|${r.kms_unlimited !== false}|${r.kms_included || ''}`;
       if (!carGroupsMap[key]) {
         carGroupsMap[key] = {
           groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
@@ -3658,21 +3925,38 @@ export const LibraryItems = () => {
           rateCode: r.rate_code || '',
           kmsUnlimited: r.kms_unlimited !== false,
           kmsIncluded: r.kms_included ?? '',
-          validFrom: r.valid_from || '',
-          validTo: r.valid_to || '',
           luggage: r.luggage ?? '',
           doors: r.doors ?? '',
           passengers: r.max_passengers ?? '',
           aircon: r.has_aircon !== false,
           gear: r.gear || 'automatic',
           fuelType: r.fuel_type || 'fuel',
-          ranges: []
+          seasons: []
         };
       }
-      carGroupsMap[key].ranges.push({
+      const group = carGroupsMap[key];
+      const seasonKey = `${key}|${r.valid_from || ''}|${r.valid_to || ''}`;
+      if (!carSeasonMap[seasonKey]) {
+        carSeasonLoads += 1;
+        const season = {
+          seasonId: `crs_load_${carSeasonLoads}`,
+          validFrom: r.valid_from || '',
+          validTo: r.valid_to || '',
+          ranges: []
+        };
+        carSeasonMap[seasonKey] = season;
+        group.seasons.push(season);
+      }
+      carSeasonMap[seasonKey].ranges.push({
         minDays: r.min_days ?? '',
         maxDays: r.max_days ?? '',
         price: r.price ?? ''
+      });
+    });
+    Object.values(carGroupsMap).forEach(group => {
+      group.seasons.sort((a, b) => String(a.validFrom || '9999-12-31').localeCompare(String(b.validFrom || '9999-12-31')));
+      group.seasons.forEach(season => {
+        season.ranges.sort((a, b) => (parseInt(a.minDays) || 0) - (parseInt(b.minDays) || 0));
       });
     });
     const carGroups = Object.keys(carGroupsMap).length > 0
@@ -3695,6 +3979,7 @@ export const LibraryItems = () => {
       minPaxToRun: item.min_pax_to_run ?? '',
       transferType: item.category === 'Transfers' ? (item.transfer_type || '') : '',
       transportType: item.transport_type || '',
+      rentalContractFee: item.rental_contract_fee ?? '',
       flightNumber: item.flight_number || '',
       airlineName: item.airline_name || '',
       departureCity: item.departure_city || '',
@@ -3748,6 +4033,7 @@ export const LibraryItems = () => {
       guideMeals: isGuideCategory(item.category) ? ((item.guide_meals || '').split(',').filter(Boolean)) : [],
       guideAccommodation: isGuideCategory(item.category) && item.guide_accommodation === true,
       description: item.description || '',
+      textI18n: translationsOf(item),
       imageUrls: Array.isArray(item.images) ? item.images : [],
       newImageUrlInput: '',
       contractUrl: item.contract_url || '',
@@ -4363,7 +4649,9 @@ export const LibraryItems = () => {
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.25rem', marginBottom: '1.25rem' }}>
                     <div>
                       <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
-                        {/accommodation/i.test(String(item.category || '')) ? 'Destination' : 'Destination / Locality *'}
+                        {/accommodation/i.test(String(item.category || ''))
+                          ? 'Destination'
+                          : (isCarRentalCategory(item.category) ? 'Country / Territory *' : 'Destination / Locality *')}
                       </label>
                       {/accommodation/i.test(String(item.category || '')) ? (
                         <input
@@ -4378,7 +4666,7 @@ export const LibraryItems = () => {
                         <input
                           type="text"
                           className="pricing-select"
-                          placeholder="e.g. Windhoek / Etosha National Park"
+                          placeholder={isCarRentalCategory(item.category) ? operatingCountry : 'e.g. Windhoek / Etosha National Park'}
                           required
                           value={item.destinationRegion || ''}
                           onChange={(e) => handleItemFieldChange(item.tempId, 'destinationRegion', e.target.value)}
@@ -4389,7 +4677,9 @@ export const LibraryItems = () => {
                           ? (supplierDestination()
                             ? 'Taken from the supplier — a property sits where its supplier does, so the locality is not asked again here.'
                             : 'The supplier has no city yet. Set it in the supplier record; until then the stored locality is kept.')
-                          : 'The specific place this item sits in. Shown in the library list and on rate cards, used by search, and it seeds the identifier code.'}
+                          : (isCarRentalCategory(item.category)
+                            ? 'One hire contract prices the whole country, so this is the country the car is picked up in. Starts on the country set in Settings; change it only when you sell a hire abroad at a different price. Shown on rate cards, used by search, and it seeds the identifier code.'
+                            : 'The specific place this item sits in. Shown in the library list and on rate cards, used by search, and it seeds the identifier code.')}
                       </small>
                     </div>
                     <div>
@@ -4405,6 +4695,27 @@ export const LibraryItems = () => {
                       />
                     </div>
                   </div>
+
+                  {isCarRentalCategory(item.category) && (
+                    <div style={{ marginBottom: '1.25rem' }}>
+                      <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
+                        Locality (only if it prices differently)
+                      </label>
+                      <input
+                        type="text"
+                        className="pricing-select"
+                        placeholder={`e.g. Walvis Bay — leave blank when the whole of ${item.destinationRegion || 'this country'} costs the same`}
+                        value={item.destinationArea || ''}
+                        onChange={(e) => handleItemFieldChange(item.tempId, 'destinationArea', e.target.value)}
+                      />
+                      <small style={{ display: 'block', marginTop: '0.3rem', color: '#64748b' }}>
+                        Normally blank: one hire contract prices the country. Fill it only where one place
+                        costs differently, and it does two things — it names that hire on the rate card, and it
+                        lets the destination filter in the itinerary and package builders find this item by that
+                        town as well as by the country.
+                      </small>
+                    </div>
+                  )}
 
                   {/accommodation/i.test(String(item.category || '')) && (
                     <div style={{ marginBottom: '1.25rem' }}>
@@ -4482,13 +4793,44 @@ export const LibraryItems = () => {
                         <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                           Vehicle Type *
                         </label>
-                        <input
-                          type="text"
-                          className="pricing-select"
-                          placeholder="e.g. Land Cruiser / Safari Minivan"
-                          value={item.vehicleType}
-                          onChange={(e) => handleVehicleTypeChange(item.tempId, e.target.value)}
-                        />
+                        {vehicleTypes.length ? (
+                          <>
+                            <SearchableSelect
+                              className="pricing-select"
+                              value={item.vehicleType}
+                              onChange={(e) => handleVehicleTypeChange(item.tempId, e.target.value)}
+                            >
+                              <option value="">Select a vehicle type</option>
+                              {vehicleTypes.map((type) => (
+                                <option key={type.id || type.code} value={type.name}>
+                                  {type.name} — {type.max_capacity} seats
+                                </option>
+                              ))}
+                              {/* A row saved on words the list no longer holds — a
+                                  free-text vehicle, or a type since retired — shows
+                                  its own answer rather than losing it. */}
+                              {item.vehicleType && !vehicleTypes.some((type) => type.name === item.vehicleType) && (
+                                <option value={item.vehicleType}>{item.vehicleType} (saved value — not in Settings)</option>
+                              )}
+                            </SearchableSelect>
+                            <span style={{ fontSize: '0.7rem', color: '#64748b', display: 'block', marginTop: '0.25rem' }}>
+                              The chosen vehicle's seats become this transfer's capacity, so the party guards and the documents count the same car. Manage the list in Settings.
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <input
+                              type="text"
+                              className="pricing-select"
+                              placeholder="e.g. Land Cruiser / Safari Minivan"
+                              value={item.vehicleType}
+                              onChange={(e) => handleVehicleTypeChange(item.tempId, e.target.value)}
+                            />
+                            <span style={{ fontSize: '0.7rem', color: '#64748b', display: 'block', marginTop: '0.25rem' }}>
+                              No vehicle types are set for this company yet, so this transfer names its own. Add them in Settings to pick from the list instead.
+                            </span>
+                          </>
+                        )}
                       </div>
                     ) : (item.category === 'Accommodation' || isTrainCategory(item.category)) ? (
                       <div>
@@ -5420,7 +5762,7 @@ export const LibraryItems = () => {
                         </h4>
                         <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
                           {item.category === 'Transfers'
-                            ? 'Maximum number of passengers (pax) allowed in this vehicle.'
+                            ? 'The seats of the vehicle type picked above. The price is whatever the transfer contracts; the capacity decides how many of these vehicles a party needs.'
                             : item.category === 'Flights / Charter'
                               ? 'Maximum number of passengers (pax) seats on this flight.'
                               : isTransportCategory(item.category)
@@ -5431,7 +5773,7 @@ export const LibraryItems = () => {
                       <div style={{ background: '#f8fafc', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', alignItems: 'flex-end', gap: '0.6rem', flexWrap: 'wrap' }}>
                         <div style={{ flex: '1', minWidth: '180px' }}>
                           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block' }}>Maximum Occupancy</span>
-                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : 'Max pax allowed — set the capacity for your vehicle type'}</span>
+                          <span style={{ fontSize: '0.7rem', color: '#64748b' }}>{item.category === 'Flights / Charter' ? 'Max passengers (seats) on the flight' : item.category === 'Transfers' ? 'Seats the chosen vehicle type carries — pick the type above and this follows it' : 'Max pax allowed — set the capacity for your vehicle type'}</span>
                           <input
                             type="number"
                             min="1"
@@ -6050,11 +6392,15 @@ export const LibraryItems = () => {
                             value={item.surchargeUnitBasis || 'per_person'}
                             onChange={(e) => handleItemFieldChange(item.tempId, 'surchargeUnitBasis', e.target.value)}
                           >
-                            {unitBasesFor({ surcharge_type: item.surchargeType || 'entrance_fee' }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                            {unitBasesFor({
+                              surcharge_type: item.surchargeType || 'entrance_fee',
+                              surcharge_unit_basis: item.surchargeUnitBasis
+                            }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
                           </SearchableSelect>
-                          {/* An entrance fee has no per-child figure to store, so
-                              leaving "per child" selected after switching type
-                              would save a basis that always prices as zero. */}
+                          {/* A levy is the only type with a child figure of its
+                              own to store, so leaving "per child" selected after
+                              switching type would save a basis that always
+                              prices as zero. */}
                           {!isValidUnitBasis({ surcharge_type: item.surchargeType || 'entrance_fee' }, item.surchargeUnitBasis || 'per_person')
                             && (
                               <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.7rem', color: '#b45309' }}>
@@ -6113,16 +6459,44 @@ export const LibraryItems = () => {
                       border: '1px solid #e2e8f0',
                       marginBottom: '1.5rem'
                     }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
                         <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#334155', margin: 0, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                          <Car size={18} color="#06b6d4" /> Car Rental Rates (Flat Per Vehicle)
+                          <Car size={18} color="#06b6d4" /> Car Rental Contract
                         </h4>
+                        {dbFeatures.rentalContractFee ? (
+                          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.4rem' }}>
+                            <div>
+                              <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.2rem' }}>
+                                Rental Contract Fee ({item.currency})
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                className="pricing-select"
+                                style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '130px', textAlign: 'center', fontWeight: 700, color: '#0f766e' }}
+                                placeholder="e.g. 250"
+                                value={item.rentalContractFee ?? ''}
+                                onChange={(e) => handleItemFieldChange(item.tempId, 'rentalContractFee', e.target.value)}
+                              />
+                            </div>
+                            <span style={{ fontSize: '0.68rem', color: '#64748b', maxWidth: '15rem', lineHeight: 1.35, paddingBottom: '0.3rem' }}>
+                              The admin fee the hire company adds to every agreement. Charged once per car dropped, folded into that vehicle line.
+                            </span>
+                          </div>
+                        ) : (
+                          <div style={{ background: '#fefce8', border: '1px solid #facc15', borderRadius: '6px', padding: '0.4rem 0.6rem', fontSize: '0.72rem', fontWeight: 600, color: '#854d0e' }}>
+                            The contract fee column isn&rsquo;t in this workspace yet, so hires price without it.
+                          </div>
+                        )}
                       </div>
                       <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.85rem', lineHeight: 1.5 }}>
-                        Each group binds a <strong>Vehicle Group</strong>, a <strong>Vehicle</strong> and its <strong>Rate Code</strong> to a set of
-                        rental-length ranges. The price for a range is the flat per-vehicle rate for that vehicle rented for that many days.
-                        The <strong>Booking Validity</strong> is the reservation window during which this contract / tariff code can be booked —
-                        bookings outside it must not use these rates.
+                        Each group binds a <strong>Vehicle Group</strong>, a <strong>Vehicle Model</strong> and its <strong>Contract Type</strong> to
+                        the tariff seasons it is sold across. A band price is <strong>per day</strong>: car hire is charged in whole 24-hour blocks, so
+                        a car collected at 08:00 and back at 08:00 the next morning is one day, and five minutes later is two. The blocks decide which
+                        band applies and the band&rsquo;s daily price is multiplied by them.
+                        <strong> Rental Price Validity</strong> is the window the hire must fall in — it is tested against the pick-up date, it is not a
+                        reservation deadline, and one group can be sold at different money in more than one window. Each season keeps its own ladder.
                       </div>
 
                       {(item.carGroups || []).map((group, groupIdx) => (
@@ -6136,6 +6510,11 @@ export const LibraryItems = () => {
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                             <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#0e7490' }}>
                               Vehicle Group {groupIdx + 1}
+                              {(group.seasons || []).length > 1 && (
+                                <span style={{ fontWeight: 500, color: '#64748b', fontSize: '0.75rem', marginLeft: '0.4rem' }}>
+                                  — {group.seasons.length} rental price seasons
+                                </span>
+                              )}
                             </span>
                             <button
                               type="button"
@@ -6162,20 +6541,20 @@ export const LibraryItems = () => {
                             </div>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                Vehicle <span style={{ color: '#ef4444' }}>*</span>
+                                Vehicle Model <span style={{ color: '#ef4444' }}>*</span>
                               </label>
                               <input
                                 type="text"
                                 className="pricing-select"
                                 style={{ padding: '0.4rem', fontSize: '0.85rem' }}
-                                placeholder="e.g. Toyota Starlet"
+                                placeholder="e.g. Toyota Corolla Quest or similar"
                                 value={group.vehicleName}
                                 onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'vehicleName', e.target.value)}
                               />
                             </div>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                Rate Category / Code <span style={{ color: '#ef4444' }}>*</span>
+                                Contract Type <span style={{ color: '#ef4444' }}>*</span>
                               </label>
                               <input
                                 type="text"
@@ -6216,208 +6595,162 @@ export const LibraryItems = () => {
                                 </div>
                               )}
                             </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                              <div>
-                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                  Booking Valid From
-                                </label>
-                                <input
-                                  type="date"
-                                  className="pricing-select"
-                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%' }}
-                                  value={group.validFrom}
-                                  onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'validFrom', e.target.value)}
-                                />
-                              </div>
-                              <div>
-                                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                  Booking Valid To
-                                </label>
-                                <input
-                                  type="date"
-                                  className="pricing-select"
-                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%' }}
-                                  value={group.validTo}
-                                  onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'validTo', e.target.value)}
-                                />
-                              </div>
+                          </div>
+
+                          {/* The six facts, in the same grid every travel document prints */}
+                          <div style={{ background: '#f0fdff', border: '1px solid #a5f3fc', borderRadius: '10px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
+                            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#155e75', marginBottom: '0.6rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                              <Car size={15} color="#0891b2" /> Vehicle Specification
                             </div>
-                            <div>
-                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                Rate ({item.currency}) — Flat Per Vehicle
-                              </label>
-                              <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem' }}>
-                                Bookable between the validity dates above.
-                              </div>
+                            <CarSpecGrid
+                              spec={group}
+                              onChange={(field, value) => handleCarGroupFieldChange(item.tempId, group.groupId, field, value)}
+                            />
+                            <div style={{ fontSize: '0.68rem', color: '#64748b', marginTop: '0.5rem' }}>
+                              M or A for gearbox, F or E for power, a tick or a cross for air conditioning. This exact grid prints on every document that mentions the car.
                             </div>
                           </div>
 
-                          {/* Vehicle Features */}
-                          <div style={{ background: '#f0fdff', border: '1px solid #a5f3fc', borderRadius: '10px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
-                            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#155e75', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                              <Car size={15} color="#0891b2" /> Vehicle Features
-                            </div>
-                            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'flex-start' }}>
-                              {/* Numeric fields */}
-                              <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                                <div>
-                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.25rem' }}>
-                                    <Briefcase size={14} /> Luggage
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '70px', textAlign: 'center' }}
-                                    placeholder="2"
-                                    value={group.luggage ?? ''}
-                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'luggage', e.target.value)}
-                                  />
-                                </div>
-                                <div>
-                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.25rem' }}>
-                                    <DoorOpen size={14} /> Doors
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '70px', textAlign: 'center' }}
-                                    placeholder="4"
-                                    value={group.doors ?? ''}
-                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'doors', e.target.value)}
-                                  />
-                                </div>
-                                <div>
-                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.25rem' }}>
-                                    <Users size={14} /> Max Passengers
-                                  </label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.85rem', width: '70px', textAlign: 'center' }}
-                                    placeholder="5"
-                                    value={group.passengers ?? ''}
-                                    onChange={(e) => handleCarGroupFieldChange(item.tempId, group.groupId, 'passengers', e.target.value)}
-                                  />
-                                </div>
-                              </div>
+                          {/* The seasons this group is sold across. A hire contract
+                              charges the same car at other money in other weeks, so
+                              one window and the ladder priced inside it belong
+                              together, and the pick-up date of a hire decides which
+                              of them answers. */}
+                          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', marginBottom: '0.3rem' }}>
+                            Rental Price Validity seasons
+                            <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.74rem' }}> — each one a window and the ladder priced inside it</span>
+                          </div>
+                          <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: '0.6rem' }}>
+                            Charged in 24-hour blocks: 08:00 to 08:00 the next morning is 1 day. Five minutes later is 2.
+                            A hire prices off the season that covers its pick-up date.
+                          </div>
 
-                              {/* Toggle-style features */}
-                              <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                                {/* Aircon */}
-                                <div>
-                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.15rem' }}>Aircon</label>
+                          {(group.seasons || []).map((season, seasonIdx) => (
+                            <div key={season.seasonId} style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '10px', padding: '0.75rem 0.85rem', marginBottom: '0.7rem' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.6rem', marginBottom: '0.55rem', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#0e7490' }}>
+                                  Season {seasonIdx + 1}
+                                  <span style={{ fontWeight: 500, color: '#475569', marginLeft: '0.35rem' }}>
+                                    {!season.validFrom && !season.validTo
+                                      ? '— any pick-up date'
+                                      : `— ${season.validFrom || 'from the beginning'} to ${season.validTo || 'open'}`}
+                                  </span>
+                                </span>
+                                {(group.seasons || []).length > 1 && (
                                   <button
                                     type="button"
-                                    onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'aircon', !(group.aircon !== false))}
-                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.7rem', borderRadius: '7px', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: (group.aircon !== false) ? '#ffffff' : '#64748b', background: (group.aircon !== false) ? '#0891b2' : '#e2e8f0' }}
+                                    onClick={() => handleRemoveCarSeason(item.tempId, group.groupId, season.seasonId)}
+                                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.73rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}
                                   >
-                                    <Snowflake size={14} /> {(group.aircon !== false) ? 'Yes' : 'No'}
+                                    <Trash2 size={13} /> Remove Season
                                   </button>
-                                </div>
-                                {/* Gear */}
-                                <div>
-                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.15rem' }}>Gear</label>
-                                  <div style={{ display: 'inline-flex', border: '1px solid #67e8f9', borderRadius: '7px', overflow: 'hidden' }}>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'gear', 'automatic')}
-                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.gear === 'automatic' ? '#ffffff' : '#0e7490', background: group.gear === 'automatic' ? '#0891b2' : 'transparent' }}
-                                    >
-                                      <Cog size={13} /> Auto
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'gear', 'manual')}
-                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.gear === 'manual' ? '#ffffff' : '#0e7490', background: group.gear === 'manual' ? '#0891b2' : 'transparent' }}
-                                    >
-                                      Manual
-                                    </button>
-                                  </div>
-                                </div>
-                                {/* Fuel / Electric */}
-                                <div>
-                                  <label style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0e7490', display: 'block', marginBottom: '0.15rem' }}>Power</label>
-                                  <div style={{ display: 'inline-flex', border: '1px solid #67e8f9', borderRadius: '7px', overflow: 'hidden' }}>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'fuelType', 'fuel')}
-                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.fuelType === 'fuel' ? '#ffffff' : '#0e7490', background: group.fuelType === 'fuel' ? '#0891b2' : 'transparent' }}
-                                    >
-                                      <Fuel size={13} /> Fuel
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCarGroupFieldChange(item.tempId, group.groupId, 'fuelType', 'electric')}
-                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', padding: '0.3rem 0.6rem', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', border: 'none', color: group.fuelType === 'electric' ? '#ffffff' : '#0e7490', background: group.fuelType === 'electric' ? '#0891b2' : 'transparent' }}
-                                    >
-                                      <Zap size={13} /> Electric
-                                    </button>
-                                  </div>
-                                </div>
+                                )}
                               </div>
-                            </div>
-                          </div>
 
-                          {/* Rental Length Ranges */}
-                          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#334155', marginBottom: '0.4rem' }}>
-                            Rental Length Ranges <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.74rem' }}>(at least 4 ranges)</span>
-                          </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                            {(group.ranges || []).map((range, rangeIdx) => (
-                              <div key={rangeIdx} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '0.5rem 0.75rem', flexWrap: 'wrap' }}>
-                                <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, whiteSpace: 'nowrap' }}>Day</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  className="pricing-select"
-                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '80px', textAlign: 'center' }}
-                                  placeholder="min"
-                                  value={range.minDays}
-                                  onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'minDays', e.target.value)}
-                                />
-                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  className="pricing-select"
-                                  style={{ padding: '0.35rem', fontSize: '0.85rem', width: '80px', textAlign: 'center' }}
-                                  placeholder="max / blank = +"
-                                  value={range.maxDays}
-                                  onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'maxDays', e.target.value)}
-                                />
-                                <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, whiteSpace: 'nowrap' }}>days</span>
-                                <div style={{ flex: '1', minWidth: '160px', maxWidth: '220px', marginLeft: 'auto' }}>
+                              {/* Each date keeps its own row: a native date field needs
+                                  real width for its calendar button, and two of them
+                                  squeezed into one narrow auto-fit track overflow onto
+                                  whatever sits next to them. */}
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', marginBottom: '0.5rem' }}>
+                                <div style={{ minWidth: 0 }}>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Rental Price Validity — from
+                                  </label>
                                   <input
-                                    type="number"
-                                    min="0"
+                                    type="date"
                                     className="pricing-select"
-                                    style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%', textAlign: 'center', fontWeight: 700, color: '#0f766e' }}
-                                    placeholder={`Price (${item.currency})`}
-                                    value={range.price}
-                                    onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, rangeIdx, 'price', e.target.value)}
+                                    style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%' }}
+                                    value={season.validFrom}
+                                    onChange={(e) => handleCarSeasonFieldChange(item.tempId, group.groupId, season.seasonId, 'validFrom', e.target.value)}
                                   />
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveCarRange(item.tempId, group.groupId, rangeIdx)}
-                                  style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0.1rem', lineHeight: 1 }}
-                                  title="Remove range"
-                                >
-                                  <X size={15} />
-                                </button>
+                                <div style={{ minWidth: 0 }}>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
+                                    Rental Price Validity — to
+                                  </label>
+                                  <input
+                                    type="date"
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%' }}
+                                    value={season.validTo}
+                                    onChange={(e) => handleCarSeasonFieldChange(item.tempId, group.groupId, season.seasonId, 'validTo', e.target.value)}
+                                  />
+                                </div>
                               </div>
-                            ))}
-                          </div>
+
+                              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
+                                Rental Length Ranges <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.72rem' }}>(per day, in {item.currency})</span>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                {(season.ranges || []).map((range, rangeIdx) => (
+                                  <div key={rangeIdx} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '0.5rem 0.75rem', flexWrap: 'wrap' }}>
+                                    <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, whiteSpace: 'nowrap' }}>Day</span>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      className="pricing-select"
+                                      style={{ padding: '0.35rem', fontSize: '0.85rem', width: '80px', textAlign: 'center' }}
+                                      placeholder="min"
+                                      value={range.minDays}
+                                      onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, season.seasonId, rangeIdx, 'minDays', e.target.value)}
+                                    />
+                                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      className="pricing-select"
+                                      style={{ padding: '0.35rem', fontSize: '0.85rem', width: '80px', textAlign: 'center' }}
+                                      placeholder="max / blank = +"
+                                      value={range.maxDays}
+                                      onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, season.seasonId, rangeIdx, 'maxDays', e.target.value)}
+                                    />
+                                    <span style={{ fontSize: '0.75rem', color: '#0f766e', fontWeight: 600, whiteSpace: 'nowrap' }}>days</span>
+                                    <div style={{ flex: '1', minWidth: '160px', maxWidth: '220px', marginLeft: 'auto' }}>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        className="pricing-select"
+                                        style={{ padding: '0.35rem', fontSize: '0.85rem', width: '100%', textAlign: 'center', fontWeight: 700, color: '#0f766e' }}
+                                        placeholder={`Per day (${item.currency})`}
+                                        value={range.price}
+                                        onChange={(e) => handleCarRangeChange(item.tempId, group.groupId, season.seasonId, rangeIdx, 'price', e.target.value)}
+                                      />
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveCarRange(item.tempId, group.groupId, season.seasonId, rangeIdx)}
+                                      style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0.1rem', lineHeight: 1 }}
+                                      title="Remove range"
+                                    >
+                                      <X size={15} />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', marginTop: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                                onClick={() => handleAddCarRange(item.tempId, group.groupId, season.seasonId)}
+                              >
+                                <Plus size={13} /> Add Range
+                              </button>
+                            </div>
+                          ))}
+
+                          {(group.seasons || []).length === 0 && (
+                            <div style={{ fontSize: '0.76rem', color: '#b45309', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, padding: '0.5rem 0.7rem', marginBottom: '0.6rem' }}>
+                              This group has no tariff yet, so no hire of it can be priced. Add a season below.
+                            </div>
+                          )}
+
                           <button
                             type="button"
                             className="secondary-btn"
-                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', marginTop: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
-                            onClick={() => handleAddCarRange(item.tempId, group.groupId)}
+                            style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                            onClick={() => handleAddCarSeason(item.tempId, group.groupId)}
                           >
-                            <Plus size={13} /> Add Range
+                            <Plus size={13} /> Add Rental Price Validity season
                           </button>
                         </div>
                       ))}
@@ -6527,23 +6860,24 @@ export const LibraryItems = () => {
                     {isSurchargeItem(item) && (
                       <div style={{ background: '#ffffff', border: '1px solid #fed7aa', borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', fontSize: '0.78rem', color: '#7c2d12', lineHeight: '1.45' }}>
                         <div style={{ fontWeight: 700, color: '#c2410c', marginBottom: '0.2rem' }}>
-                          {(item.surchargeType || 'entrance_fee') === 'entrance_fee' ? 'Entrance Fee Rates' : 'Conservation Levy Rates'}
+                          {feeTypeHeading(item.surchargeType) + ' Rates'}
                         </div>
-                        {((item.surchargeType || 'entrance_fee') === 'entrance_fee' ? (
+                        {(item.surchargeType || 'entrance_fee') === 'conservation_levy' ? (
+                          <>
+                            <div>• <strong>Per Adult:</strong> charged for each adult on the booking.</div>
+                            <div>• <strong>Per Child:</strong> charged for each child (up to the child age set below).</div>
+                            <div>• <strong>Per Vehicle:</strong> charged once per vehicle, whatever the levy calls itself.</div>
+                            <div style={{ color: '#9a3412', fontWeight: 600, marginTop: '0.25rem' }}>
+                              Charged {item.surchargeChargeBasis === 'per_night' ? 'nightly for the duration of the stay' : 'once off for the whole booking'}.
+                            </div>
+                          </>
+                        ) : (
                           <>
                             <div>• <strong>Per Person:</strong> charged for each visitor entering.</div>
                             <div>• <strong>Per Vehicle:</strong> charged once per vehicle/departure (e.g. park entry per car).</div>
                             <div style={{ color: '#9a3412', fontWeight: 600, marginTop: '0.25rem' }}>Pick one in &quot;Rate is per&quot; above; the season matrix collects the figure that basis needs.</div>
                           </>
-                        ) : (
-                          <>
-                            <div>• <strong>Per Adult:</strong> charged for each adult on the booking.</div>
-                            <div>• <strong>Per Child:</strong> charged for each child (up to the child age set below).</div>
-                            <div style={{ color: '#9a3412', fontWeight: 600, marginTop: '0.25rem' }}>
-                              Charged {item.surchargeChargeBasis === 'per_night' ? 'nightly for the duration of the stay' : 'once off for the whole booking'}.
-                            </div>
-                          </>
-                        ))}
+                        )}
                       </div>
                     )}
                     {isTourStyle && !isFlightCategory(item.category) ? (
@@ -7927,7 +8261,10 @@ export const LibraryItems = () => {
                                           value={fee.unitBasis || 'per_person'}
                                           onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'unitBasis', e.target.value)}
                                         >
-                                          {unitBasesFor({ surcharge_type: feeType }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                          {unitBasesFor({
+                                            surcharge_type: feeType,
+                                            surcharge_unit_basis: fee.unitBasis
+                                          }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
                                         </SearchableSelect>
                                       </div>
                                       <div>
@@ -8014,7 +8351,7 @@ export const LibraryItems = () => {
                           {isSurchargeItem(item) && (() => {
                             const basis = item.surchargeChargeBasis || 'once_off';
                             const unit = item.surchargeUnitBasis || 'per_person';
-                            const isEntrance = (item.surchargeType || 'entrance_fee') === 'entrance_fee';
+                            const isLevy = (item.surchargeType || 'entrance_fee') === 'conservation_levy';
                             const when = basis === 'per_night' ? 'per night' : 'once off';
                             const moneyField = (
                               field, label, hint, placeholder
@@ -8045,11 +8382,11 @@ export const LibraryItems = () => {
                             const splitsAge = unit === 'per_person';
                             const visitorLabel = unit === 'per_adult' ? 'Adult Rate' : 'Per Person Rate';
                             let fields;
-                            if (unit === 'per_unit') {
-                              fields = [moneyField('unitRate', `Per Unit Rate`, `Charged once for the unit, ${when}`, 'e.g. 1500')];
-                            } else if (isEntrance && unit === 'per_vehicle') {
+                            if (unit === 'per_vehicle') {
                               fields = [moneyField('entranceFeeVehicle', `Per Vehicle Rate`, `Charged once per vehicle, ${when}`, 'e.g. 1200')];
-                            } else if (isEntrance) {
+                            } else if (unit === 'per_unit') {
+                              fields = [moneyField('unitRate', `Per Unit Rate`, `Charged once for the unit, ${when}`, 'e.g. 1500')];
+                            } else if (!isLevy) {
                               fields = [
                                 moneyField('entranceFeePerson', visitorLabel, `Charged per visitor, ${when}`, 'e.g. 850'),
                                 ...(dbFeatures.feeChildRate && splitsAge
@@ -8077,7 +8414,7 @@ export const LibraryItems = () => {
                             return (
                               <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
                                 <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#9a3412', display: 'block', marginBottom: '0.5rem' }}>
-                                  {(isEntrance ? 'Entrance Fee' : 'Conservation Levy') + ' Rates (' + item.currency + ') — ' + when}
+                                  {(feeTypeHeading(item.surchargeType) + ' Rates (' + item.currency + ') — ' + when)}
                                 </label>
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '0.75rem', maxWidth: '720px' }}>
                                   {fields}
@@ -8092,18 +8429,18 @@ export const LibraryItems = () => {
                             );
                           })()}
 
-                          {/* Guide & Driver Room Rates (Accommodation, offered hotels only) */}
+                          {/* Driver-Guide room pool (Accommodation, offered hotels only) */}
                           {item.category === 'Accommodation' && item.guideDriverOffered && dbFeatures.guideDriver && (
                             <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
                               <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#92400e', display: 'block', marginBottom: '0.35rem' }}>
-                                🚌 Guide & Driver Room Rates (per night — {item.currency})
+                                🚌 Driver-Guide Room Rates (per night — {item.currency})
                               </span>
                               <span style={{ fontSize: '0.7rem', color: '#92400e', display: 'block', marginBottom: '0.6rem' }}>
-                                Both rates apply from {Math.max(1, parseInt(item.guideMinRooms, 10) || 1)} client room{Math.max(1, parseInt(item.guideMinRooms, 10) || 1) === 1 ? '' : 's'} booked — set that in the Min Client Rooms box above. A room rule below replaces it with the hotel’s own ladder.
+                                One pool of crew rooms, released from {Math.max(1, parseInt(item.guideMinRooms, 10) || 1)} client room{Math.max(1, parseInt(item.guideMinRooms, 10) || 1) === 1 ? '' : 's'} booked — set that in the Min Client Rooms box above. Whichever of the guide and the driver beds first takes the room, and the next crew bed pays the normal Single rate. A crew rule below replaces the flat rate with the hotel’s own ladder.
                               </span>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
                                 <div>
-                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Guide Room Rate</span>
+                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Guide Room Rate (prices the pool)</span>
                                   <input
                                     type="number"
                                     min="0"
@@ -8129,7 +8466,7 @@ export const LibraryItems = () => {
                                   </SearchableSelect>
                                 </div>
                                 <div>
-                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Driver Room Rate</span>
+                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Driver Room Rate (stands in only where the Guide box is blank)</span>
                                   <input
                                     type="number"
                                     min="0"
@@ -8156,30 +8493,17 @@ export const LibraryItems = () => {
                                 </div>
                               </div>
                               {dbFeatures.guideDriverTiers && (
-                                <>
-                                  <TierLadderEditor
-                                    legend="Guide room rule (optional)"
-                                    roomLabel="Guide"
-                                    currency={item.currency}
-                                    tiers={season.guideTiers || []}
-                                    tone="amber"
-                                    moneyStep={moneyStep}
-                                    onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'guideTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1))}
-                                    onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'guideTiers', tierIdx, field, value)}
-                                    onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'guideTiers', tierIdx)}
-                                  />
-                                  <TierLadderEditor
-                                    legend="Driver room rule (optional)"
-                                    roomLabel="Driver"
-                                    currency={item.currency}
-                                    tiers={season.driverTiers || []}
-                                    tone="amber"
-                                    moneyStep={moneyStep}
-                                    onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'driverTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1))}
-                                    onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'driverTiers', tierIdx, field, value)}
-                                    onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'driverTiers', tierIdx)}
-                                  />
-                                </>
+                                <TierLadderEditor
+                                  legend="Driver-Guide room rule (optional) — one shared allowance"
+                                  roomLabel="Crew"
+                                  currency={item.currency}
+                                  tiers={season.crewTiers || []}
+                                  tone="amber"
+                                  moneyStep={moneyStep}
+                                  onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'crewTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1))}
+                                  onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'crewTiers', tierIdx, field, value)}
+                                  onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'crewTiers', tierIdx)}
+                                />
                               )}
                             </div>
                           )}
@@ -8245,12 +8569,14 @@ export const LibraryItems = () => {
                     <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.35rem' }}>
                       Description
                     </label>
-                    <textarea
-                      className="pricing-select"
-                      style={{ minHeight: '80px', fontFamily: 'inherit', padding: '0.75rem' }}
-                      placeholder="Detailed description of the library item..."
+                    <LanguageText
+                      field="description"
+                      languages={contentLanguages}
+                      translations={item.textI18n}
                       value={item.description}
-                      onChange={(e) => handleItemFieldChange(item.tempId, 'description', e.target.value)}
+                      onChange={(v) => handleItemFieldChange(item.tempId, 'description', v)}
+                      onTranslationsChange={(next) => handleItemTranslationsChange(item.tempId, next)}
+                      placeholder="Detailed description of the library item..."
                     />
                   </div>
 
@@ -8782,32 +9108,20 @@ export const LibraryItems = () => {
                           const driverRateConfigured = rate.driver_rate !== null && rate.driver_rate !== undefined && rate.driver_rate !== '';
                           const guideRate = guideRateConfigured ? (parseFloat(rate.guide_rate) || 0) : singleRate;
                           const driverRate = driverRateConfigured ? (parseFloat(rate.driver_rate) || 0) : singleRate;
-                          const guideTiers = normaliseStaffTiers(rate.guide_tiers);
-                          const driverTiers = normaliseStaffTiers(rate.driver_tiers);
-                          const guideEff = guideDriverOffered ? guideRate : singleRate;
-                          const driverEff = guideDriverOffered ? driverRate : singleRate;
+                          /* One crew pool prints one rule: the ladder a property
+                             saved into either column, headed by the guide figure. */
+                          const crewTiers = crewLadderTiers(rate.guide_tiers, rate.driver_tiers);
+                          const crewRate = guideRateConfigured ? guideRate : driverRate;
                           const guideRateText = (value) => `${item.currency} ${Number(value).toLocaleString()}`;
-                          const guideTierSummary = staffTierSummary(
-                            staffRoomLadder({ offered: true, tiers: guideTiers, minRooms: guideMinRooms, rate: guideRate }),
+                          const crewTierSummary = staffTierSummary(
+                            staffRoomLadder({ offered: true, tiers: crewTiers, minRooms: guideMinRooms, rate: crewRate }),
                             guideRateText,
-                            'guide room'
-                          );
-                          const driverTierSummary = staffTierSummary(
-                            staffRoomLadder({ offered: true, tiers: driverTiers, minRooms: guideMinRooms, rate: driverRate }),
-                            guideRateText,
-                            'driver room'
+                            'crew room'
                           );
                           /* Tour leader: a 0 is a free room, so the preview keeps a
                              configured 0 instead of falling back to the single rate. */
                           const tourLeaderOffered = item.tour_leader_room_offered === true;
-                          const tlLadder = (Array.isArray(rate.tour_leader_tiers) ? rate.tour_leader_tiers : [])
-                            .filter(t => t && t.rate !== null && t.rate !== undefined && t.rate !== '' && Number.isFinite(Number(t.rate)))
-                            .map(t => ({
-                              minRooms: Number(t?.minClientRooms ?? t?.min_rooms) || 0,
-                              rooms: Number(t?.rooms) || 1,
-                              rate: Number(t.rate)
-                            }))
-                            .sort((a, b) => a.minRooms - b.minRooms);
+                          const tlLadder = normaliseStaffTiers(rate.tour_leader_tiers);
                           const tlRateConfigured = rate.tour_leader_rate !== null && rate.tour_leader_rate !== undefined && rate.tour_leader_rate !== '';
                           const tlBaseRate = tlRateConfigured ? (parseFloat(rate.tour_leader_rate) || 0) : singleRate;
                           /* The preview states each band's client-room range,
@@ -8992,13 +9306,9 @@ export const LibraryItems = () => {
                                 <div style={{ color: '#b45309', fontSize: '0.7rem', marginTop: '0.15rem', background: '#fffbeb', border: '1px solid #fde68a', padding: '0.2rem 0.4rem', borderRadius: '4px', display: 'flex', flexWrap: 'wrap', gap: '0 0.5rem' }}>
                                   {guideDriverOffered ? (
                                     <span>
-                                      Guide: {guideTiers.length > 0
-                                        ? guideTierSummary
-                                        : `${item.currency} ${guideEff.toLocaleString()} (${guideMealPlan}${guideMinRooms > 1 ? ` · min ${guideMinRooms} client rooms` : ''})`}
-                                      {' | '}
-                                      Driver: {driverTiers.length > 0
-                                        ? driverTierSummary
-                                        : `${item.currency} ${driverEff.toLocaleString()} (${driverMealPlan}${guideMinRooms > 1 ? ` · min ${guideMinRooms} client rooms` : ''})`}
+                                      Driver-Guide (one pool): {crewTiers.length > 0
+                                        ? crewTierSummary
+                                        : `${item.currency} ${crewRate.toLocaleString()} (guide ${guideMealPlan} \u00b7 driver ${driverMealPlan}${guideMinRooms > 1 ? ` \u00b7 min ${guideMinRooms} client rooms` : ''})`}
                                     </span>
                                   ) : (
                                     <span>
@@ -9045,56 +9355,53 @@ export const LibraryItems = () => {
                       ) : isCarRentalCategory(item.category) ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                           {(item.car_rental_rates && item.car_rental_rates.length > 0) ? (
-                            (() => {
-                              const groupKeys = {};
-                              const carRateGroups = [];
-                              (item.car_rental_rates || []).forEach(r => {
-                                const key = `${r.vehicle_group || ''}|${r.vehicle_name || ''}|${r.rate_code || ''}`;
-                                if (!groupKeys[key]) {
-                                  groupKeys[key] = { vehicleGroup: r.vehicle_group || '', vehicleName: r.vehicle_name || '', rateCode: r.rate_code || '', ranges: [], validFrom: r.valid_from || '', validTo: r.valid_to || '', kmsUnlimited: r.kms_unlimited !== false, kmsIncluded: r.kms_included, luggage: r.luggage ?? '', doors: r.doors ?? '', passengers: r.max_passengers ?? '', aircon: r.has_aircon !== false, gear: r.gear === 'manual' ? 'Manual' : 'Auto', fuelType: r.fuel_type === 'electric' ? 'Electric' : 'Fuel' };
-                                  carRateGroups.push(groupKeys[key]);
-                                }
-                                groupKeys[key].ranges.push(r);
-                              });
-                              return carRateGroups.map((g, gi) => (
-                                <div key={gi} style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '6px', padding: '0.4rem 0.55rem', marginTop: '0.1rem' }}>
-                                  <div style={{ fontWeight: 700, color: '#0e7490', marginBottom: '0.15rem' }}>
-                                    {g.vehicleGroup && `${g.vehicleGroup} · `}{g.vehicleName || 'Vehicle'}
-                                    {g.rateCode && <span style={{ color: '#155e75', fontWeight: 600 }}> — {g.rateCode}</span>}
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.2rem', fontSize: '0.7rem', color: '#0e7490' }}>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <Briefcase size={11} /> {g.luggage ? `${g.luggage} bags` : '—'}
-                                    </span>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <DoorOpen size={11} /> {g.doors ? `${g.doors}` : '—'}
-                                    </span>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <Users size={11} /> {g.passengers ? `Max ${g.passengers} pax` : '—'}
-                                    </span>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <Snowflake size={11} /> {g.aircon ? 'AC' : 'No AC'}
-                                    </span>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      <Cog size={11} /> {g.gear}
-                                    </span>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
-                                      {g.fuelType === 'Electric' ? <Zap size={11} /> : <Fuel size={11} />} {g.fuelType}
-                                    </span>
-                                  </div>
-                                  {g.ranges.sort((a, b) => ((a.min_days ?? 99) - (b.min_days ?? 99))).map((r, ri) => (
-                                    <div key={ri} style={{ color: '#334155', fontSize: '0.74rem', lineHeight: 1.5 }}>
-                                      {`${r.min_days}${(r.max_days && r.max_days !== r.min_days) ? `–${r.max_days}` : '+'} days: `}
-                                      {item.currency} {(parseFloat(r.price) || 0).toLocaleString()} / vehicle
-                                    </div>
-                                  ))}
-                                  <div style={{ color: '#64748b', fontSize: '0.7rem', marginTop: '0.2rem' }}>
-                                    {g.kmsUnlimited ? 'Unlimited km' : `${g.kmsIncluded || 0} km incl.`}
-                                    {(g.validFrom || g.validTo) && ` · Bookable ${g.validFrom || '…'} → ${g.validTo || '…'}`}
-                                  </div>
+                            /* The same fold the hire dialog prices from, so the summary
+                               on the saved card cannot say one thing about the seasons
+                               and the drop say another. */
+                            carRentalGroups({ car_rental_rates: item.car_rental_rates, currency: item.currency }).map((g) => (
+                              <div key={g.key} style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '6px', padding: '0.4rem 0.55rem', marginTop: '0.1rem' }}>
+                                <div style={{ fontWeight: 700, color: '#0e7490', marginBottom: '0.15rem' }}>
+                                  {g.vehicleGroup && `${g.vehicleGroup} · `}{g.vehicleName || 'Vehicle'}
+                                  {g.rateCode && <span style={{ color: '#155e75', fontWeight: 600 }}> — {g.rateCode}</span>}
                                 </div>
-                              ));
-                            })()
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.2rem', fontSize: '0.7rem', color: '#0e7490' }}>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                    <Briefcase size={11} /> {g.luggage ? `${g.luggage} bags` : '—'}
+                                  </span>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                    <DoorOpen size={11} /> {g.doors ? `${g.doors}` : '—'}
+                                  </span>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                    <Users size={11} /> {g.passengers ? `Max ${g.passengers} pax` : '—'}
+                                  </span>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                    <Snowflake size={11} /> {g.aircon ? 'AC' : 'No AC'}
+                                  </span>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                    <Cog size={11} /> {g.gear === 'manual' ? 'Manual' : 'Auto'}
+                                  </span>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>
+                                    {g.fuelType === 'electric' ? <Zap size={11} /> : <Fuel size={11} />} {g.fuelType === 'electric' ? 'Electric' : 'Fuel'}
+                                  </span>
+                                </div>
+                                {g.seasons.map((season) => (
+                                  <div key={season.key} style={{ marginBottom: '0.2rem' }}>
+                                    <div style={{ color: '#0e7490', fontSize: '0.7rem', fontWeight: 700 }}>
+                                      Rental Price Validity {season.windowLabel}
+                                    </div>
+                                    {season.bands.map((band) => (
+                                      <div key={`${season.key}-${band.id}`} style={{ color: '#334155', fontSize: '0.74rem', lineHeight: 1.5 }}>
+                                        {`${band.minDays}${(band.maxDays && band.maxDays !== band.minDays) ? `–${band.maxDays}` : '+'} days: `}
+                                        {item.currency} {(parseFloat(band.price) || 0).toLocaleString()} / vehicle
+                                      </div>
+                                    ))}
+                                  </div>
+                                ))}
+                                <div style={{ color: '#64748b', fontSize: '0.7rem', marginTop: '0.2rem' }}>
+                                  {g.kmsUnlimited ? 'Unlimited km' : `${g.kmsIncluded || 0} km incl.`}
+                                </div>
+                              </div>
+                            ))
                           ) : (
                             <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No car rental rates configured</span>
                           )}

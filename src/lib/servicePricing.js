@@ -1,7 +1,8 @@
-import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus } from './priceValidity';
+import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus, protectionForSeason } from './priceValidity';
 import { isOccupancyTiered, occupancyCeiling, occupancyRateForPax } from './occupancyPricing';
 import { isSurchargeItem, isSurchargeChargeable, surchargeBuyTotal, surchargePricing, surchargeRateAmount } from './surchargeFees';
-import { isGuideService, isGuideOnly, guideChargeTotal, lineGuideUpliftPercent } from './guidePricing';
+import { isGuideService, isGuideOnly, guideChargeTotal, lineGuideUpliftPercent, crewShareOn, refreshCrewShare, crewSharePerPerson } from './guidePricing';
+import { rentalLineBuyTotal } from './carRentalPricing';
 import { allocatedTravellerCount, childRateForAge, hasStaffAccommodation, isAdultTraveller, payingClientCount, tourGuideCount, travellersPlusTlCount } from './roomAllocationHelper';
 
 /* 'per_unit' is an Extras charged once for the service itself - a meet-and-greet,
@@ -185,15 +186,19 @@ const round2 = (value) => Math.round((Number(value) || 0) * 100) / 100;
    new travel window must not quietly swap in today's Settings value. A season
    that covers the trip - or has no dates to compare against - takes no uplift. */
 const lineProtectionPercent = (service, season) => {
-  if (!season || ['ok', 'undated', 'provisional'].includes(season.status)) return 0;
   const stored = Math.max(0, Number(service?.priceProtectionPercent) || 0);
-  return stored || Math.max(0, Number(season.protectionPercent) || 0);
+  return protectionForSeason(season, stored || Math.max(0, Number(season.protectionPercent) || 0));
 };
 
 const isGuideLineService = (service) => isGuideService(service)
   || isGuideOnly(service)
   || !!service?.guideForKey
   || (Array.isArray(service?.guideServiceTypes) && service.guideServiceTypes.length > 0);
+
+/* A hire line carries its own contract copy — the vehicle group, the rental-length
+   band, the whole 24-hour blocks and the flat total those come to. No library rate
+   row prices it per head, so no repricer may re-derive it from one. */
+const isRentalLineService = (service) => !!service?.rental;
 
 /* How many shares a line's per-person figure is multiplied by.
    Most lines just use the current party size. Two cases differ: a guide line's
@@ -264,6 +269,26 @@ export const repriceServicesForPax = ({
   const updatedDays = (Array.isArray(days) ? days : []).map((day) => ({
     ...day,
     services: (Array.isArray(day.services) ? day.services : []).map((service) => {
+      /* The car costs what the contract says it costs whoever is sitting in it, so
+         a party that grows or shrinks re-splits the same hire total instead of
+         repricing the hire — or being reported as a line the builder could not
+         price, which is what reading the empty rate matrix would otherwise say.
+         A day's line of a spread hire re-splits its own block, not the whole
+         contract, or every day of the trip would start charging the hire again. */
+      if (isRentalLineService(service) && count > 0) {
+        const stored = (Number(service.buyPP) || 0) * (Number(service.pax) || count);
+        const flatTotal = rentalLineBuyTotal(service.rental) || round2(stored);
+        const buyPP = round2(flatTotal / count);
+        const rentalMarkup = Number(service.markup) || 0;
+        repriced += 1;
+        return {
+          ...service,
+          buyPP,
+          sellPP: round2(buyPP * (1 + rentalMarkup / 100)),
+          pax: count
+        };
+      }
+
       /* A guide line and its guide-&-driver detail lines are a flat per-trip
          figure split across the party, not a per-person library rate. Re-split
          the same flat total over the new party size so a pax change neither
@@ -305,7 +330,12 @@ export const repriceServicesForPax = ({
         };
       }
 
-      if (!service.itemId || Number(service.pax) === count) {
+      /* A crew figure folded onto a line is shared by the travellers and their
+         tour leaders, so a roster that gained or lost a leader re-shares it even
+         when the client count itself did not move. */
+      const crew = crewShareOn(service);
+      if (!service.itemId
+        || (Number(service.pax) === count && !(crew && crew.divisor !== guideDivisor))) {
         return service;
       }
 
@@ -362,14 +392,23 @@ export const repriceServicesForPax = ({
         };
       }
 
-      const buyPP = round2(contractPaxRate(pricedItem, currencyCode, count, { childCount, travellers }));
       const basis = rate.rate_basis || item.pricing_model || 'per_person';
+      const buyPP = round2(contractPaxRate(pricedItem, currencyCode, count, { childCount, travellers }));
+      /* The crew figure the line folded in rides the same new season row as the
+         clients' fare and re-shares over the same party, so a bigger group neither
+         multiplies the guide's seat nor drops it. */
+      const nextCrew = refreshCrewShare(crew, rate, {
+        perCharter: String(basis).toLowerCase() === 'per_vehicle',
+        guideCount: tourGuideCount(travellers)
+      });
+      const withCrew = round2(buyPP + (nextCrew ? crewSharePerPerson(nextCrew.total, guideDivisor) : 0));
       repriced += 1;
       return {
         ...service,
         basis,
-        buyPP,
-        sellPP: round2(buyPP * (1 + markup / 100)),
+        buyPP: withCrew,
+        sellPP: round2(withCrew * (1 + markup / 100)),
+        ...(nextCrew ? { crewShare: { ...nextCrew, divisor: guideDivisor } } : {}),
         pax: count,
         item_rates: [rate],
         priceProtectionPercent: pct,
@@ -437,6 +476,12 @@ export const revalidateServicesForWindow = ({
     ...day,
     services: (Array.isArray(day.services) ? day.services : []).map((service) => {
       if (!service.itemId) return service;
+      /* The hire's window is its own: the car is collected and returned at the
+         moments the operator agreed with the hire desk, and its price came from
+         the tariff covering that pick-up — not from a season matched to the trip.
+         Moving the itinerary's dates must not silently re-count the blocks a quote
+         already settled; the operator re-opens the hire and says so instead. */
+      if (isRentalLineService(service)) return service;
       /* Guide & driver detail lines are flat per-trip figures pinned when the
          operator chose them, not season per-person rates. */
       if (service.guideOnly || service.guideForKey) return service;
@@ -546,12 +591,23 @@ export const revalidateServicesForWindow = ({
       const pricedItem = { ...item, item_rates: [rate] };
       const linePax = servicePax(service, count, shareContext) || count || 1;
       const buyPP = round2(contractPaxRate(pricedItem, currencyCode, linePax, { childCount, travellers }));
+      /* A crew figure folded onto the line rides the same season row as the
+         clients' ticket, so a new season re-prices the seat too. */
+      const crew = crewShareOn(service);
+      const nextCrew = crew
+        ? refreshCrewShare(crew, rate, {
+          perCharter: String(rate.rate_basis || item.pricing_model || '').toLowerCase() === 'per_vehicle',
+          guideCount: tourGuideCount(travellers)
+        })
+        : null;
+      const withCrew = round2(buyPP + (nextCrew ? crewSharePerPerson(nextCrew.total, guideDivisor) : 0));
       return {
         ...service,
         ...nextStamp,
         basis: rate.rate_basis || item.pricing_model || service.basis || 'per_person',
-        buyPP,
-        sellPP: round2(buyPP * (1 + markup / 100)),
+        buyPP: withCrew,
+        sellPP: round2(withCrew * (1 + markup / 100)),
+        ...(nextCrew ? { crewShare: { ...nextCrew, divisor: guideDivisor } } : {}),
         pax: linePax,
         item_rates: [rate]
       };

@@ -1,5 +1,5 @@
 /* Which season prices a line, and what the builder is allowed to do about it.
-   177 checks, 20 numbered blocks, all run through the SHIPPED modules
+   206 checks, 21 numbered blocks, all run through the SHIPPED modules
    (src/lib/priceValidity.js, accommodationOptions.js, servicePricing.js,
    roomAllocationHelper.js, packagePricing.js and the two charge dialogs).
 
@@ -25,15 +25,21 @@
            percentage, the one-off percentage the add dialog collects living on
            the line, the tightest-then-latest season tie-break, and `unit_cost`
            counting as a real price
-     16-18 the reusable coverage note, pinned rows, and choices the dialog lists
+     16-18 the reusable coverage note, pinned rows, and choices the dialog lists,
+           plus the rule the Knysna quote broke: a season that MATCHES the travel
+           dates is the contract figure and is never uplifted - by Settings, by a
+           carried-over percentage, or on a re-price
      19-19f child fares: band selection by age, space-selling categories that
            ignore them, and the invoice breakdown for a mixed party
      20    extras charged per unit
+     21    an item the library cannot price: the refusal says which seasons are
+           missing instead of blaming the currency, and the card asks the same
+           question so an unpriced item never presents as a droppable R0
 
    The source uses Vite-style extensionless imports, so this is bundled before
    it runs:  npm run test:pricing
 */
-import { resolveSeasonForTravel, rateForTravel, applyProtectionToRate, rateTravelCoverage, seasonLineStatus, rateHasPrice, ESTIMATE_SEASON_STATUSES, CONSENT_SEASON_STATUSES, PROTECTABLE_SEASON_STATUSES } from '../src/lib/priceValidity.js';
+import { resolveSeasonForTravel, rateForTravel, applyProtectionToRate, rateTravelCoverage, seasonLineStatus, rateHasPrice, itemHasPricedRate, ESTIMATE_SEASON_STATUSES, CONSENT_SEASON_STATUSES, PROTECTABLE_SEASON_STATUSES, protectionForSeason } from '../src/lib/priceValidity.js';
 import {
   accommodationOptionGroups,
   accommodationSeasonChoices,
@@ -634,6 +640,70 @@ check('a pinned season that ended is reported as expired', pinnedExpired.status,
 const pinnedPartial = seasonForRate(expiresMidTrip, { startDate: '2026-11-20', endDate: '2026-12-05' });
 check('a pinned season that expires mid-trip is partial', pinnedPartial.status, 'partial');
 
+/* 17b. THE RULE THE KNYSNA QUOTE BROKE: a season that MATCHES the travel dates
+        is the contract figure, so nothing uplifts it. The accommodation charge
+        dialog showed the operator "matches the travel dates" and "No Pricing
+        Protection is applied", then the builder stamped the company's Settings
+        percentage onto the pinned row anyway and inflated the room. Protection is
+        a stand-in for a season the library does not have, which is the same set
+        the confirmation dialog offers a percentage for. */
+const SETTINGS_PCT = 12;
+const pinnedCovering = seasonForRate(summer, { startDate: travel.start, endDate: travel.end });
+check('a pinned covering season is an exact match', pinnedCovering.status, 'ok');
+check('a matching season takes no protection from Settings', protectionForSeason(pinnedCovering, SETTINGS_PCT), 0);
+check('so the matching row is charged as contracted',
+  applyProtectionToRate(pinnedCovering.rate, protectionForSeason(pinnedCovering, SETTINGS_PCT)).price_2_adults, 2290);
+check('and the line is stamped matched, never protected', seasonLineStatus(pinnedCovering, SETTINGS_PCT), 'matched');
+/* The same invariant across every other resolution. */
+check('a resolved covering season takes no protection', protectionForSeason(season, SETTINGS_PCT), 0);
+const monthPartialSeason = resolveSeasonForTravel({
+  rates: [expiresMidTrip], currencyCode: 'ZAR',
+  startDate: '2026-11-20', endDate: '2026-12-05',
+  protectionPercent: SETTINGS_PCT, allowPartial: true
+});
+check('a month-timed season that covers part of the window is provisional', monthPartialSeason.status, 'provisional');
+check('a provisional season takes no protection', protectionForSeason(monthPartialSeason, SETTINGS_PCT), 0);
+const undatedSeason = resolveSeasonForTravel({
+  rates: [{ ...summer, valid_from: null, valid_to: null }], currencyCode: 'ZAR',
+  startDate: travel.start, endDate: travel.end, protectionPercent: SETTINGS_PCT
+});
+check('an undated season cannot be checked, so it is not uplifted either', protectionForSeason(undatedSeason, SETTINGS_PCT), 0);
+check('a future season is never uplifted', protectionForSeason(futureAllowed, SETTINGS_PCT), 0);
+check('a pinned future season is never uplifted', protectionForSeason(pinnedFuture, SETTINGS_PCT), 0);
+check('a pinned partial season is never uplifted', protectionForSeason(pinnedPartial, SETTINGS_PCT), 0);
+/* Where protection belongs, it still applies - the fix must not disarm it. */
+check('a prior-year season standing in keeps its protection', protectionForSeason(protectedSeason, protectedSeason.protectionPercent), 10);
+check('a stale season agreed in the dialog keeps its percentage', protectionForSeason(unprotected, SETTINGS_PCT), 12);
+const pinnedExpired2 = seasonForRate(winter, { startDate: travel.start, endDate: travel.end });
+check('a pinned expired season can be protected', protectionForSeason(pinnedExpired2, SETTINGS_PCT), SETTINGS_PCT);
+
+/* 17c. A line already carrying a stray percentage - the bad data the bug wrote -
+        loses it the moment the operator re-prices it, because the season it was
+        pinned to covers the trip. A party-size change is what runs the reprice. */
+const knysnaLikeRate = {
+  id: 'r-kl-2', currency: 'ZAR', season_name: 'Season 2 of 3',
+  valid_from: '2027-01-01', valid_to: '2027-04-30',
+  rate_basis: 'per_person_sharing', price_1_adult: 2218, price_2_adults: 1205
+};
+const knysnaItem = {
+  id: 'knysna-log-inn', name: 'Knysna Log-Inn Hotel', category: 'Accommodation',
+  currency: 'ZAR', item_rates: [knysnaLikeRate]
+};
+const knysnaLine = {
+  itemId: knysnaItem.id, name: 'Knysna Log-Inn Hotel', category: 'Meals',
+  currencyCode: 'ZAR', basis: 'per_person', buyPP: 1349.6, sellPP: 1349.6, markup: 0, pax: 3,
+  priceProtectionPercent: SETTINGS_PCT
+};
+const healed = repriceServicesForPax({
+  days: [{ services: [knysnaLine] }],
+  libraryItems: [knysnaItem],
+  paxCount: 2,
+  travelWindow: { start: '2027-03-01', end: '2027-03-03' }
+}).days[0].services[0];
+check('a matching line drops the protection it was wrongly stamped with', healed.priceProtectionPercent, 0);
+check('a matching line is charged the contracted figure', healed.buyPP, 1205);
+check('a matching line reads as a match', healed.rateSeasonStatus, 'matched');
+
 /* 18. The charge dialog used to filter out every season that did not cover the
        trip, leaving the future-only case with an empty list while Apply stayed
        enabled on a hidden rate. Every window must be listed and chooseable, with
@@ -874,6 +944,43 @@ const headRows = computePerPersonRows({
 });
 check('a per-person extra still splits its child onto its own row',
   Math.round(headRows.perPersonSharing.sell * 2 + headRows.perChild.sell), 3060);
+
+/* 21. AN ITEM THE LIBRARY CANNOT PRICE.
+       The Knysna duplicates were three same-named library items and two of them
+       held no item_rates rows at all. The refusal blamed the itinerary currency -
+       which the resolver never reaches, because rowsForCurrency falls back to every
+       row when none matches - and the sidebar kept offering the empty item as a
+       droppable R0 card, so the operator only learned the truth after the drop. */
+const noRows = resolveSeasonForTravel({
+  rates: [], currencyCode: 'ZAR', startDate: '2027-03-01', endDate: '2027-03-03'
+});
+check('an item with no rate rows cannot be added', noRows.canAdd, false);
+check('that refusal names the missing seasons',
+  noRows.reason.startsWith('This library item has no season prices loaded'), true);
+check('that refusal does not blame the currency', noRows.reason.includes('currency'), false);
+
+const blankRow = { id: 'r-blank', currency: 'ZAR', season_name: '2027', price_1_adult: null, price_2_adults: null };
+const blankUndated = resolveSeasonForTravel({
+  rates: [blankRow], currencyCode: 'ZAR', startDate: '2027-03-01', endDate: '2027-03-03'
+});
+check('a season row with no amounts cannot be added', blankUndated.canAdd, false);
+check('that refusal says the amounts are empty',
+  blankUndated.reason.includes('no amounts filled in'), true);
+const blankNoDates = resolveSeasonForTravel({
+  rates: [{ ...blankRow, valid_from: '2027-01-01', valid_to: '2027-04-30' }],
+  currencyCode: 'ZAR'
+});
+check('an unpriced row with no travel dates yet cannot be added', blankNoDates.canAdd, false);
+check('and says the same thing', blankNoDates.reason.includes('no amounts filled in'), true);
+
+/* The picker cards ask the same question without the travel dates in it, so an
+   item is locked on the card rather than refused after the drop. */
+check('an item with no rows at all has nothing to price', itemHasPricedRate({ id: 'dup', item_rates: [] }), false);
+check('an item with no rate matrix at all has nothing to price', itemHasPricedRate({ id: 'dup' }), false);
+check('rows whose money columns are empty have nothing to price', itemHasPricedRate({ item_rates: [blankRow] }), false);
+check('a priced season makes the item priceable', itemHasPricedRate({ item_rates: [unitExtraRate] }), true);
+check('a price in any currency is still a price',
+  itemHasPricedRate({ item_rates: [{ id: 'r-usd', currency: 'USD', unit_price: 10 }] }), true);
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll checks passed.');
 process.exit(failures ? 1 : 0);

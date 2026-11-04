@@ -21,6 +21,11 @@
  *
  *  - Link. A fee that belongs to one accommodation carries that item's id so
  *    the two arrive together and stay together on the same day.
+ *
+ *  - Type. Entrance fees and tickets are bought at the same gate and priced
+ *    from the same columns - a ticket is a name, not a new ladder. Only a
+ *    conservation levy keeps its own adult/child columns, and only a levy
+ *    prices a booking that bills children alone.
  */
 
 export const SURCHARGE_CATEGORY = 'Fees & Tickets';
@@ -31,7 +36,8 @@ export const LEGACY_SURCHARGE_CATEGORY = 'Surcharge Fees';
 
 export const SURCHARGE_TYPES = [
   { id: 'entrance_fee', label: 'Park / Entrance Fees' },
-  { id: 'conservation_levy', label: 'Conservation Levy' }
+  { id: 'conservation_levy', label: 'Conservation Levy' },
+  { id: 'ticket', label: 'Ticket' }
 ];
 
 export const CHARGE_BASIS = [
@@ -43,22 +49,38 @@ export const CHARGE_BASIS = [
    rate row, so they are not offered per child: silently charging the adult
    figure or the per-person figure here would bill the wrong number.
    (An entrance fee still prices a CHILD - see surchargeChildAmount - it just
-   does not offer a basis that bills ONLY children.) */
+   does not offer a basis that bills ONLY children.)
+
+   "Per Vehicle" is the flat basis a park gate actually uses - it bills the
+   car, not the heads - so it is offered on every fee type and stores its
+   figure in the one vehicle column the rate table has.
+   "Per Unit" is what that basis was called before it was named: kept so an
+   item already saved on it still prices, but never offered again. */
 export const UNIT_BASES = [
   { id: 'per_person', label: 'Per Person' },
   { id: 'per_adult', label: 'Per Adult' },
   { id: 'per_child', label: 'Per Child', conservationOnly: true },
-  { id: 'per_unit', label: 'Per Unit' },
-  { id: 'per_vehicle', label: 'Per Vehicle' }
+  { id: 'per_vehicle', label: 'Per Vehicle' },
+  { id: 'per_unit', label: 'Per Unit', legacyOnly: true }
 ];
 
 export const unitBasesFor = (item) => {
   const type = surchargeTypeOf(item);
-  return UNIT_BASES.filter((u) => !(u.conservationOnly && type !== 'conservation_levy'));
+  const stored = surchargeUnitBasisOf(item);
+  return UNIT_BASES.filter((u) => {
+    if (u.conservationOnly && type !== 'conservation_levy') return false;
+    if (u.legacyOnly && stored !== u.id) return false;
+    return true;
+  });
 };
 
+/* Whether this fee type can price the basis at all - which is not the same
+   question as whether the editor still offers it. A legacy "per unit" item
+   prices on every type, so it stays valid even though the dropdown lists it
+   only while it is the stored answer; "per child" belongs to a levy alone,
+   because no other type stores a child-only figure. */
 export const isValidUnitBasis = (item, basis) =>
-  unitBasesFor(item).some((u) => u.id === basis);
+  basis !== 'per_child' || surchargeTypeOf(item) === 'conservation_levy';
 
 export const isSurchargeItem = (item) => {
   const category = String(item?.category || '').trim();
@@ -68,9 +90,16 @@ export const isSurchargeItem = (item) => {
 export const surchargeTypeOf = (item) => {
   const raw = String(item?.surcharge_type || item?.fee_type || '').toLowerCase();
   if (raw.includes('conservation')) return 'conservation_levy';
+  if (raw.includes('ticket')) return 'ticket';
   if (raw.includes('entrance')) return 'entrance_fee';
   return 'entrance_fee';
 };
+
+/* A ticket is bought at the same gate as an entrance fee and is priced from the
+   same columns - the type only changes what the editor, the rate card and the
+   documents say. A conservation levy is the odd one out: it quotes its own
+   adult/child ladder. */
+export const feeUsesLevyColumns = (item) => surchargeTypeOf(item) === 'conservation_levy';
 
 export const surchargeBasisOf = (item) =>
   String(item?.surcharge_charge_basis || '') === 'per_night' ? 'per_night' : 'once_off';
@@ -104,17 +133,17 @@ export const feeChargesPerHead = (item) => feeBasisChargesHeads(surchargeUnitBas
    tell "no fee here" apart from a deliberate 0. */
 export const surchargeRateAmount = (rate, item) => {
   if (!rate) return null;
-  const type = surchargeTypeOf(item);
   const unitBasis = surchargeUnitBasisOf(item);
+  /* A vehicle is a vehicle whoever quotes it, so every fee type reads the per-
+     vehicle figure from the one vehicle column before its type is consulted. */
+  if (unitBasis === 'per_vehicle') return rateNumber(rate.entrance_fee_per_vehicle);
   if (unitBasis === 'per_unit') return rateNumber(rate.unit_price);
-  if (type === 'conservation_levy') {
+  if (feeUsesLevyColumns(item)) {
     return unitBasis === 'per_child'
       ? rateNumber(rate.conservation_levy_per_child)
       : rateNumber(rate.conservation_levy_per_adult);
   }
-  return unitBasis === 'per_vehicle'
-    ? rateNumber(rate.entrance_fee_per_vehicle)
-    : rateNumber(rate.entrance_fee_per_person);
+  return rateNumber(rate.entrance_fee_per_person);
 };
 
 /* What one CHILD pays this fee, when the property prices children separately.
@@ -123,7 +152,7 @@ export const surchargeRateAmount = (rate, item) => {
    slots. Only a per_child levy has a child figure with no adult one beside it. */
 export const surchargeChildAmount = (rate, item) => {
   if (!rate || !feeChargesPerHead(item)) return null;
-  if (surchargeTypeOf(item) === 'conservation_levy') {
+  if (feeUsesLevyColumns(item)) {
     return rateNumber(rate.conservation_levy_per_child);
   }
   return rateNumber(rate.entrance_fee_per_child);
@@ -147,13 +176,13 @@ export const surchargeRateColumns = ({
   const parsed = parseFloat(amount);
   const value = Number.isFinite(parsed) ? parsed : null;
   const columns = {};
-  if (unitBasis === 'per_unit') {
+  if (unitBasis === 'per_vehicle') {
+    columns.entrance_fee_per_vehicle = value;
+  } else if (unitBasis === 'per_unit') {
     columns.unit_price = value;
   } else if (type === 'conservation_levy') {
     if (unitBasis === 'per_child') columns.conservation_levy_per_child = value;
     else columns.conservation_levy_per_adult = value;
-  } else if (unitBasis === 'per_vehicle') {
-    columns.entrance_fee_per_vehicle = value;
   } else {
     columns.entrance_fee_per_person = value;
   }
@@ -384,13 +413,22 @@ export const surchargeBuyTotal = ({ rate, item, paxCount = 1, childCount = 0, gu
     const n = parseFloat(v);
     return Number.isFinite(n) ? n : 0;
   };
-  /* Each surcharge type stores its figure in a different pair of columns, so
-     the basis has to be read against the type rather than against one set of
+  /* Each surcharge type stores its head figures in a different pair of columns,
+     so the basis has to be read against the type rather than against one set of
      columns - otherwise a levy set per adult silently priced as zero (or as the
-     wrong number) depending on which columns happened to be filled in. */
-  const unitFigure = type === 'conservation_levy'
-    ? { adult: num(rate?.conservation_levy_per_adult), child: num(rate?.conservation_levy_per_child) }
-    : { adult: num(rate?.entrance_fee_per_person), child: num(rate?.entrance_fee_per_child), vehicle: num(rate?.entrance_fee_per_vehicle) };
+     wrong number) depending on which columns happened to be filled in. The
+     vehicle figure is the exception: one column, shared by every type. */
+  const unitFigure = feeUsesLevyColumns(item)
+    ? {
+        adult: num(rate?.conservation_levy_per_adult),
+        child: num(rate?.conservation_levy_per_child),
+        vehicle: num(rate?.entrance_fee_per_vehicle)
+      }
+    : {
+        adult: num(rate?.entrance_fee_per_person),
+        child: num(rate?.entrance_fee_per_child),
+        vehicle: num(rate?.entrance_fee_per_vehicle)
+      };
 
   /* The amount ONE adult head costs on this basis, which is also what a guide
      falls back to when the property gave no crew figure. It stays 0 on a basis
@@ -411,7 +449,9 @@ export const surchargeBuyTotal = ({ rate, item, paxCount = 1, childCount = 0, gu
       perRepeat = num(rate?.unit_price) || num(rate?.price_1_adult);
       break;
     case 'per_vehicle':
-      perRepeat = unitFigure.vehicle || unitFigure.adult;
+      /* One vehicle, one figure, whoever quoted it. Falling back to the head
+         amount here would charge a car the price of a person. */
+      perRepeat = unitFigure.vehicle;
       break;
     case 'per_person':
     default:

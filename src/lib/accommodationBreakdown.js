@@ -1,5 +1,6 @@
 import { round2, vatOfInclusive } from './invoiceDoc';
 import { calculateRoomCharges } from './roomAllocationHelper';
+import { roomTypeOfAllocation } from './roomTypes';
 
 /* "2A, 1C" occupant summary for the Qty column of expanded accommodation lines.
    Adults always appear; the children part is only added when the room / trip
@@ -42,18 +43,20 @@ export const accommodationBreakdown = ({
   markup = 0,
   taxRate = 15,
   fallbackAdults = 0,
-  fallbackChildren = 0
+  fallbackChildren = 0,
+  soldRoomType = ''
 } = {}) => {
   const total = round2(Number(lineTotal) || 0);
   const rms = Array.isArray(rooms) ? rooms : [];
 
-  const row = (adults, children, rowTotal, pax) => {
+  const row = (adults, children, rowTotal, pax, roomType = '') => {
     const t = round2(Number(rowTotal) || 0);
     const t2 = taxOf(t, taxRate);
     return {
       qty: paxQtyText(adults, children),
       qtyTitle: `${adults} Adult${adults === 1 ? '' : 's'}${children > 0 ? `, ${children} Child${children === 1 ? '' : 'ren'}` : ''}`,
       qtyText: true,
+      roomType: String(roomType || '').trim(),
       unit: round2(pax > 0 ? t / pax : t),
       subExcl: t2.subExcl,
       tax: t2.tax,
@@ -79,23 +82,28 @@ export const accommodationBreakdown = ({
       const pending = occRooms.map((rm) => ({
         adults: rm.adultCount,
         children: rm.childCount,
+        /* Each room prints the type it was allocated, so a night mixing a Family
+           Suite with Standard Rooms names both instead of the one the line sold. */
+        roomType: roomTypeOfAllocation(rm, { roomType: soldRoomType }),
         share: charge.totalBuy > 0 ? total * rm.buyCost / charge.totalBuy : 0
       }));
       pending.forEach((p) => { p.lineTotal = round2(p.share); });
       const sum = pending.reduce((a, p) => a + p.lineTotal, 0);
       pending[pending.length - 1].lineTotal = round2(pending[pending.length - 1].lineTotal + round2(total - sum));
       return {
-        rows: pending.map((p) => row(p.adults, p.children, p.lineTotal, p.adults + p.children)),
+        rows: pending.map((p) => row(p.adults, p.children, p.lineTotal, p.adults + p.children, p.roomType)),
         total
       };
     }
-    return { rows: [row(fallbackAdults, fallbackChildren, total, fallbackAdults + fallbackChildren)], total };
+    return { rows: [row(fallbackAdults, fallbackChildren, total, fallbackAdults + fallbackChildren, soldRoomType)], total };
   }
 
   if (occRooms.length) {
     const adults = occRooms.reduce((a, rm) => a + rm.adultCount, 0);
     const children = occRooms.reduce((a, rm) => a + rm.childCount, 0);
-    return { rows: [row(adults, children, total, adults + children)], total };
+    const types = [...new Set(occRooms
+      .map((rm) => roomTypeOfAllocation(rm, { roomType: soldRoomType })))].filter(Boolean);
+    return { rows: [row(adults, children, total, adults + children, types.join(', ') || soldRoomType)], total };
   }
-  return { rows: [row(fallbackAdults, fallbackChildren, total, fallbackAdults + fallbackChildren)], total };
+  return { rows: [row(fallbackAdults, fallbackChildren, total, fallbackAdults + fallbackChildren, soldRoomType)], total };
 };

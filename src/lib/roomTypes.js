@@ -167,4 +167,32 @@ export const soldRoomCapacity = ({ rooms, rate, roomTypeId, roomType, fallback }
 /* The room name a document should print for a sold line. */
 export const serviceRoomName = (service) => String(service?.roomType || service?.room_type || '').trim();
 
+/* The room type the travellers actually occupy.
+   A night can mix types - a Family Suite beside two Standard Rooms - and the
+   room allocation is the authority on who sleeps where, so an allocation row
+   that names a type wins for that room. A row with no type of its own is a bed
+   in the room this line was sold at, so it reads as the line's sold type rather
+   than dropping off the list, and the document still says which rooms the night
+   uses. A role marker ('staff', 'client') is not a room name and never prints. */
+const ALLOCATION_ROLE_MARKERS = new Set(['staff', 'client', 'guest', 'crew']);
+
+const allocationRoomType = (room, soldRoomType) => {
+  const named = String(room?.roomType || room?.room_type || '').trim();
+  if (named && !ALLOCATION_ROLE_MARKERS.has(named.toLowerCase())) return named;
+  if (named) return '';
+  return ALLOCATION_ROLE_MARKERS.has(String(soldRoomType || '').trim().toLowerCase())
+    ? '' : String(soldRoomType || '').trim();
+};
+
+export const roomTypeOfAllocation = (room, service) => (
+  allocationRoomType(room, serviceRoomName(service))
+);
+
+export const allocatedRoomTypeLabel = (service) => {
+  const rooms = Array.isArray(service?.roomAllocations) ? service.roomAllocations : [];
+  const sold = serviceRoomName(service);
+  const named = [...new Set(rooms.map((rm) => allocationRoomType(rm, sold)).filter(Boolean))];
+  return named.join(', ') || sold;
+};
+
 export const serviceRoomId = (service) => service?.roomTypeId || service?.room_type_id || null;

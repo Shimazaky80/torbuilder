@@ -1311,6 +1311,18 @@ aside.sidebar:not(.collapsed) .logo-full {
   box-shadow: none;
 }
 
+/* A library item the library cannot price is not dropped, so it never reaches
+   the refusal the operator would only see after placing it. */
+.draggable-item.unavailable,
+.draggable-item.unavailable:hover {
+  cursor: not-allowed;
+  opacity: 0.62;
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  transform: none;
+  box-shadow: none;
+}
+
 .draggable-item-top {
   display: flex;
   align-items: center;
@@ -1351,6 +1363,12 @@ aside.sidebar:not(.collapsed) .logo-full {
   font-weight: 700;
   color: #1a202c;
   white-space: nowrap;
+}
+
+/* Said out loud on a picker card instead of a figure that reads as free. */
+.item-price-tag.missing {
+  color: #94a3b8;
+  font-weight: 600;
 }
 
 .draggable-item-supplier {
@@ -1560,6 +1578,55 @@ aside.sidebar:not(.collapsed) .logo-full {
   font-size: 0.68rem;
   font-weight: 700;
   color: #64748b;
+}
+
+/* Bulk day delete: the tick on a day card, and the bar that lets the ticked days
+   go together. */
+.day-strip-cell {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.day-strip-mark {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 2;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--primary-color);
+  cursor: pointer;
+}
+
+.day-strip-cell.marked .day-strip-card {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.day-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.1rem 0 0.6rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.day-bulk-count {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #475569;
+  margin-right: auto;
+}
+
+.action-btn.danger.armed,
+.secondary-btn.danger.armed {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #fff;
 }
 
 .day-add-chip {
@@ -1974,6 +2041,30 @@ aside.sidebar:not(.collapsed) .logo-full {
   box-shadow: 0 12px 28px -8px rgba(0, 0, 0, 0.18);
   min-width: 180px;
   padding: 0.35rem;
+}
+
+/* The language a client document exports in, shown above the format choices for
+   an operator who writes content in more than one language. */
+.menu-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem 0.55rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.menu-field label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.menu-field select {
+  width: 100%;
+  font-size: 0.82rem;
 }
 
 .menu-item {
@@ -2557,7 +2648,7 @@ aside.sidebar:not(.collapsed) .logo-full {
   font-size: .72rem;
 }
 
-.package-canvas-day > textarea {
+.package-canvas-day textarea {
   width: 100%;
   margin: .7rem 0;
   padding: .6rem;
@@ -2566,6 +2657,18 @@ aside.sidebar:not(.collapsed) .logo-full {
   font: inherit;
   font-size: .8rem;
   resize: vertical;
+}
+
+/* The language strip is the day notes editor once a tenant translates: the block
+   carries the day's spacing and the boxes inside it do not, or every language
+   tab would push another gap into the day card. */
+.package-canvas-day .language-text {
+  width: 100%;
+  margin: .7rem 0;
+}
+
+.package-canvas-day .language-text textarea {
+  margin: 0;
 }
 
 .package-canvas-service {
@@ -2579,6 +2682,11 @@ aside.sidebar:not(.collapsed) .logo-full {
 .package-grip { flex: 0 0 auto; color: #94a3b8; cursor: grab; }
 .package-service-main { display: flex; flex: 1 1 180px; min-width: 130px; flex-direction: column; gap: .25rem; }
 .package-service-main strong { color: #334155; font-size: .82rem; }
+/* The hire answers on its own line card: the car, the blocks, the two ends and
+   the six specs the documents print. */
+.package-rental-copy { display: flex; flex-direction: column; gap: .15rem; padding: .35rem .45rem; border: 1px dashed #67e8f9; border-radius: 8px; background: #f0fdff; }
+.package-rental-copy small { color: #0e7490; font-size: .7rem; }
+.package-rental-copy small:first-child { font-weight: 800; }
 .package-service-price { display: flex; min-width: 125px; flex-direction: column; gap: .2rem; color: #0f766e; font-size: .78rem; }
 .package-included-toggle,.package-quantity { display: flex; align-items: center; gap: .3rem; color: #475569; font-size: .73rem; white-space: nowrap; }
 .package-quantity input { width: 58px; padding: .4rem; border: 1px solid #cbd5e1; border-radius: 7px; }
@@ -2956,7 +3064,6 @@ aside.sidebar:not(.collapsed) .logo-full {
   gap: .5rem;
   margin-top: .4rem;
 }
-.package-library-card .package-library-meta .item-price-tag.missing { color: #94a3b8; font-weight: 600; }
 .package-library-card .package-library-supplier {
   display: flex;
   align-items: center;
@@ -2996,6 +3103,13 @@ aside.sidebar:not(.collapsed) .logo-full {
 }
 .package-protected-flag {
   color: #92400e;
+  font-size: 11px;
+}
+
+/* A crew place folded into a package line is part of its cost, not a head, so it
+   is stated in the same quiet tone as the protection flag. */
+.package-crew-flag {
+  color: #4c1d95;
   font-size: 11px;
 }
 
@@ -3221,6 +3335,11 @@ aside.sidebar:not(.collapsed) .logo-full {
 /* Guide service detour — the service-type picker and the guide & driver detail
    (lunch / dinner / overnight) modals shared by the itinerary and package builders. */
 .service-guide-modal { max-width: 520px; }
+/* The rent-a-car drop lists a whole contract - both ends of the hire, every vehicle
+   group on it, the spec grid and the price - so it grows taller than the screen.
+   It takes the tall-modal shape: the header and the action row stay fixed and the
+   middle scrolls, which keeps "Add the hire" reachable at any window height. */
+.modal-content.tall.car-rental-modal .form-actions { flex: 0 0 auto; margin: 0; padding: .85rem 1.5rem 1.2rem; border-top: 1px solid #e2e8f0; }
 .service-guide-details-modal { max-width: 560px; }
 .service-guide-type-list { display: flex; flex-direction: column; gap: 9px; }
 .service-guide-type-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid #e2e8f0; border-radius: 11px; background: #fff; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
@@ -3269,7 +3388,14 @@ aside.sidebar:not(.collapsed) .logo-full {
 .guide-person-actions { flex-wrap: wrap; }
 /* A guide line carries the person it was invoiced for, in the same slot as the
    service types - one chip per fact, so neither hides the other. */
-.basis-tag.guide-person { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+.basis-tag.guide-person { display: inline-flex; align-items: center; gap: .3rem; background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+/* An unnamed guide line is charged at the destination's standard rate, so the
+   gap is shown as a flag you can act on - not a warning, not a blocker. */
+.basis-tag.guide-person.is-unset { background: #fff; border: 1px dashed #cbd5e1; color: #64748b; font: inherit; font-size: .68rem; font-weight: 700; }
+button.basis-tag.guide-person.is-unset { cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+button.basis-tag.guide-person.is-unset:hover:not(:disabled) { border-color: #c7d2fe; background: #eef2ff; color: #3730a3; }
+button.basis-tag.guide-person.is-unset:disabled { cursor: default; opacity: .75; }
+.guide-person-ops { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .service-guide-clients { display: flex; flex-direction: column; gap: 5px; margin: 2px 0; }
 .service-guide-client-tag { display: inline-flex; align-items: center; gap: .4rem; width: fit-content; padding: 5px 10px; border-radius: 999px; font-size: .74rem; font-weight: 650; }
 .service-guide-client-tag.accepts { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
@@ -3297,4 +3423,13 @@ aside.sidebar:not(.collapsed) .logo-full {
 .accom-charge-family-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; color: #334155; }
 .accom-charge-family-head strong { font-size: .82rem; }
 .accom-charge-family-head span { color: #94a3b8; font-size: .72rem; }
-.accom-night-band-note { margin-top: .75rem; font-size: .78rem; line-height: 1.5; color: #64748b; }
+.accom-night-band-note { margin-top: .75rem; font-size: .78rem; line-height: 1.5; color: #64748b; }.language-text { display: flex; flex-direction: column; gap: .5rem; }
+.language-text-label { font-size: .85rem; font-weight: 600; color: #475569; }
+.language-text-tabs { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
+.language-text-source { margin-right: .25rem; color: #94a3b8; font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.language-text-tab { display: inline-flex; align-items: center; gap: .35rem; padding: 4px 9px; border: 1px solid #e2e8f0; border-radius: 999px; background: #f8fafc; color: #475569; font-size: .72rem; font-weight: 700; cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+.language-text-tab:hover { border-color: #99d6cf; color: #0f766e; }
+.language-text-tab.active { border-color: #0d7478; background: #f0fdfa; color: #0f766e; }
+.language-text-dot { width: 6px; height: 6px; border-radius: 50%; background: #cbd5e1; }
+.language-text-dot.on { background: #10b981; }
+.language-text-panel { border-left: 3px solid #0d7478; padding-left: .6rem; }

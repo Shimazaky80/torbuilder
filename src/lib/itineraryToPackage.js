@@ -1,6 +1,8 @@
 import { packageKey, packageRateForDates, packageSeasonResolution } from './packagePricing';
+import { rentalLineBuyTotal, rentalPackageRate } from './carRentalPricing';
 import { applyProtectionToRate } from './priceValidity';
 import { servicePax } from './servicePricing';
+import { crewShareOn, crewSharePerPerson } from './guidePricing';
 import { isAdultTraveller, normaliseTravellerRole } from './roomAllocationHelper';
 
 /* A package line stores the contract cost of ONE unit, while an itinerary line
@@ -42,7 +44,12 @@ const selectRate = (service, item, periods, currency) => {
   const preferred = service?.protectedSeasonName
     ? candidates.find((rate) => rate.season_name === service.protectedSeasonName)
     : null;
-  const protection = Number(service?.priceProtectionPercent) || 0;
+  const storedProtection = Number(service?.priceProtectionPercent) || 0;
+  /* Protection only ever stands in for a season the library does not have. When
+     one of these rows covers the package dates the figure IS the contract price,
+     so a percentage the line carries - from an earlier Settings default applied
+     to a matching season - must not ride across and inflate it again. */
+  const protection = covering ? 0 : storedProtection;
 
   if (!covering && protection > 0) {
     /* A line reloaded from the database keeps its protection percent but not the
@@ -95,9 +102,15 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
   const guideDetail = isGuideDetail(service);
   const guide = guideTypes.length > 0;
   const surcharge = isSurchargeLine(service);
+  const rental = service?.rental || null;
   const divisor = Math.max(1, Number(servicePax(service, fallbackPax, shareContext)) || 0);
   const quantity = Math.max(1, Number(service?.quantity) || 1);
-  const buyPP = Number(service?.buyPP) || 0;
+  /* A crew figure folded onto this line is the guide's own seat or place, which a
+     package re-shares over whoever turns up in the band. It leaves unit_cost - the
+     price of one client's place - and crosses over as its own snapshot. */
+  const crew = crewShareOn(service);
+  const crewPP = crew ? crewSharePerPerson(crew.total, crew.divisor) : 0;
+  const buyPP = round2((Number(service?.buyPP) || 0) - crewPP);
 
   let basis = String(service?.basis || 'per_person').toLowerCase();
   let unitCost;
@@ -114,6 +127,15 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
     basis = 'per_person';
     unitCost = round2(buyPP);
     outputQuantity = 1;
+  } else if (rental) {
+    /* A hire crosses over as the whole-vehicle figure it was quoted at — the
+       24-hour blocks at the band's daily rate, plus the contract fee — because
+       the package prices one vehicle per unit, not one head. A day's line of a
+       hire spread across the trip crosses over as its own block on its own day,
+       which is the same money the itinerary was quoting. */
+    basis = 'per_trip';
+    unitCost = rentalLineBuyTotal(rental) || round2(buyPP * divisor);
+    outputQuantity = 1;
   } else if (FLAT_BASES.has(basis)) {
     unitCost = round2((buyPP * divisor) / quantity);
   } else {
@@ -121,9 +143,23 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
   }
 
   const rate = selectRate(service, item, periods, service?.currencyCode || currency);
-  const snapshot = surcharge || guideDetail
-    ? seasonStub(rate, basis, service, currency, periods)
-    : (rate || seasonStub(rate, basis, service, currency, periods));
+  /* The stamp on the package line must describe the money that actually crossed:
+     selectRate has already decided whether the row is uplifted, and a season that
+     covers the package dates is taken whole. With no row to read, the percentage
+     the itinerary line carries is the only record there is. */
+  const protectionStamp = rate
+    ? (Number(rate.price_protection_percent) || 0)
+    : (Number(service?.priceProtectionPercent) || 0);
+  /* A hire has no season to stub in: its own tariff window, tested against the
+     pick-up date when the hire was recorded, travels with it, and the package's
+     coverage guard reads that as settled. */
+  const rentalStubRate = rental
+    ? rentalPackageRate(rental, service?.currencyCode || currency, unitCost)
+    : null;
+  const snapshot = rentalStubRate
+    || (surcharge || guideDetail
+      ? seasonStub(rate, basis, service, currency, periods)
+      : (rate || seasonStub(rate, basis, service, currency, periods)));
   const isStay = /accommodation/i.test(String(service?.category || item?.category || ''));
   return {
     item_key: packageKey(),
@@ -141,7 +177,9 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
     quantity: outputQuantity,
     is_included: service?.isOptional !== true,
     notes: notesFor(service),
-    vehicle_capacity: isStay
+    vehicle_capacity: rental
+      ? (Number(rental.passengers) || 0)
+      : isStay
       ? (Number(service?.maxOccupancy) || Number(rate?.room_max_occupancy) || Number(item?.max_occupancy) || 0)
       : (Number(service?.maxOccupancy) || Number(item?.max_occupancy) || 0),
     room_type_id: isStay ? (service?.roomTypeId || rate?.room_type_id || null) : null,
@@ -149,7 +187,9 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
     tier_key: null,
     replaces_item_key: null,
     rate_snapshot: snapshot,
-    price_protection_percent: Number(service?.priceProtectionPercent) || 0,
+    rental: rental || null,
+    crew_share: crew ? { ...crew, divisor: crew.divisor } : null,
+    price_protection_percent: protectionStamp,
     protected_season_name: service?.protectedSeasonName || '',
     guide_service_types: guideTypes.length ? guideTypes : null,
     guide_only: service?.guideOnly === true,
@@ -222,6 +262,10 @@ export const buildItineraryPackage = ({
   const mappedDays = sourceDays.map((day, dayIndex) => ({
     day_number: dayIndex + 1,
     notes: day?.notes || null,
+    /* The day's notes are operator prose, so the languages they were written in
+       cross the itinerary boundary with them - the package day prints in the
+       reader's language, not in whichever document it was drafted from. */
+    text_i18n: day?.textI18n || null,
     items: (day?.services || []).map((service) => lineFor(
       service,
       libraryById.get(String(service?.itemId)),

@@ -41,6 +41,7 @@ import {
 import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing';
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import { rateForTravel } from '../lib/priceValidity';
+import { withRoomTypeRates } from '../lib/roomTypePricing';
 import {
   Receipt,
   Plus,
@@ -678,7 +679,15 @@ export const Finance = () => {
           protectionPercent: priceProtectionPercent,
           allowPartial: selectedItinerary?.travel_date_precision === 'month'
         });
-        return rate ? { ...rate, _ageRanges: itineraryAgeRanges.get(String(itemId)) || [] } : null;
+        if (!rate) return null;
+        /* A night can mix this property's room types and each has its own
+           contract. The invoice has no room records loaded, but every rate row
+           carries its own room's name and capacity, so the siblings are read off
+           the matrix and ride on the row the breakdown prices from. */
+        return withRoomTypeRates({ ...rate, _ageRanges: itineraryAgeRanges.get(String(itemId)) || [] }, {
+          rates: arr,
+          nightDate: ''
+        });
       };
       const perPersonBreakdown = breakdownSnapshot(computePerPersonRows({ services, travellers, rateBy }));
 

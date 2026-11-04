@@ -188,6 +188,13 @@ export const rateHasPrice = (rate) => {
   return false;
 };
 
+/* Whether the library item carries a price anywhere at all - any currency, any
+   season, any column. The picker cards use it to say "no prices loaded" instead
+   of showing R0 and refusing the item only once the operator has dropped it. */
+export const itemHasPricedRate = (item) => (
+  (Array.isArray(item?.item_rates) ? item.item_rates : []).some(rateHasPrice)
+);
+
 /* Narrowest covering window wins: a specific week beats a whole-year band. */
 const spanOf = (w) => (w.fromDay === -Infinity || w.toDay === Infinity ? Infinity : w.toDay - w.fromDay);
 
@@ -247,11 +254,14 @@ export const resolveSeasonForTravel = ({
   };
 
   if (!rows.length) {
+    /* Nothing to check at all. This is never a currency problem - rowsForCurrency
+       falls back to every row when none matches the itinerary's - so the reason
+       says what the library is actually missing. */
     return {
       ...base,
       status: 'no_price',
       canAdd: false,
-      reason: 'This library item has no price loaded for this currency.'
+      reason: 'This library item has no season prices loaded, so there is nothing to charge for this trip. Price it in Library Items first.'
     };
   }
 
@@ -262,7 +272,7 @@ export const resolveSeasonForTravel = ({
        row and let the dates be checked again once they are set. */
     const fallback = rows.find((r) => rateHasPrice(r.rate));
     if (!fallback) {
-      return { ...base, status: 'no_price', canAdd: false, reason: 'This library item has no price loaded.' };
+      return { ...base, status: 'no_price', canAdd: false, reason: 'This library item has rate rows with no amounts filled in, so there is nothing to charge for this trip. Enter its prices in Library Items first.' };
     }
     return {
       ...base,
@@ -282,7 +292,7 @@ export const resolveSeasonForTravel = ({
   if (!dated.length) {
     const fallback = rows.find((r) => rateHasPrice(r.rate));
     if (!fallback) {
-      return { ...base, status: 'no_price', canAdd: false, reason: 'This library item has no price loaded.' };
+      return { ...base, status: 'no_price', canAdd: false, reason: 'This library item has rate rows with no amounts filled in, so there is nothing to charge for this trip. Enter its prices in Library Items first.' };
     }
     return {
       ...base,
@@ -490,8 +500,23 @@ export const ESTIMATE_SEASON_STATUSES = new Set(['future', 'expired', 'partial',
 export const CONSENT_SEASON_STATUSES = new Set(['protected', 'stale', 'future', 'expired', 'partial']);
 export const PROTECTABLE_SEASON_STATUSES = new Set(['protected', 'stale', 'expired']);
 
+/* The rule every entry point prices by: Pricing Protection is a stand-in for a
+   season the library does not have. A price that matches the travel dates IS the
+   contract figure, so nothing may uplift it - not the company's Settings
+   percentage, not a percentage carried over from another line.
+
+   Protection is therefore only ever applied to the same statuses the confirmation
+   dialog offers it for (PROTECTABLE_SEASON_STATUSES). An exact match takes none,
+   and so does a season that is live for part of the trip or has not been published
+   yet - inflating either would misprice the very days it covers. */
+export const protectionForSeason = (season, requestedPercent = 0) => (
+  PROTECTABLE_SEASON_STATUSES.has(String(season?.status || ''))
+    ? Math.max(0, Number(requestedPercent) || 0)
+    : 0
+);
+
 export const seasonLineStatus = (season, protectionPercent = 0) => {
-  const pct = Math.max(0, Number(protectionPercent) || 0);
+  const pct = protectionForSeason(season, protectionPercent);
   if (pct > 0) return 'protected';
   if (season?.status === 'undated') return 'undated';
   if (season?.status === 'provisional') return 'provisional';

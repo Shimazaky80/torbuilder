@@ -15,6 +15,7 @@ import {
   calculateRoomCharges,
   normaliseTravellerRole
 } from '../lib/roomAllocationHelper';
+import { roomTypesOf, roomTypeOfAllocation } from '../lib/roomTypes';
 import { taxWordOf } from '../lib/invoiceDoc';
 import './RoomAllocationModal.css';
 
@@ -40,6 +41,46 @@ const occupantCounts = (room) => {
   const occupants = Array.isArray(room?.allocatedTravellers) ? room.allocatedTravellers : [];
   const adults = occupants.filter(isAdultTraveller).length;
   return { total: occupants.length, adults, children: occupants.length - adults };
+};
+
+/* A crew room is marked by its role, not by one of the property's guest room
+   types, and its role marker is what drives the staff pricing rules. The type
+   picker must never read 'staff' as a room name or overwrite it. */
+const isCrewRoom = (room) => String(room?.roomType || room?.room_type || '').trim().toLowerCase() === 'staff'
+  || room?.isStaffRoom === true
+  || !!String(room?.staffRole || room?.staff_role || '').trim();
+
+/* The beds one room offers. Each room type states its own capacity, so a night
+   that mixes a Family Suite with Standard Rooms cannot judge both against the
+   capacity of whichever room the line was sold at. */
+const roomCapsOf = (room, choices, fallback) => {
+  const named = String(room?.roomType || room?.room_type || '').trim();
+  const choice = named && !isCrewRoom(room)
+    ? choices.find((rt) => rt.name.toLowerCase() === named.toLowerCase())
+    : null;
+  if (!choice) return fallback;
+  const maxOccupancy = Math.max(1, parseInt(choice.maxOccupancy, 10) || fallback.maxOccupancy);
+  const statedAdults = parseInt(choice.maxAdults, 10);
+  const statedChildren = parseInt(choice.maxChildren, 10);
+  return {
+    maxOccupancy,
+    maxAdults: Number.isFinite(statedAdults) && statedAdults > 0
+      ? Math.min(statedAdults, maxOccupancy)
+      : fallback.maxAdults,
+    maxChildren: Number.isFinite(statedChildren) && statedChildren >= 0
+      ? statedChildren
+      : fallback.maxChildren
+  };
+};
+
+const capsLabel = ({ maxOccupancy, maxAdults, maxChildren }) => {
+  const parts = [];
+  if (maxAdults !== null && maxAdults < maxOccupancy) {
+    parts.push(`${maxAdults} adult${maxAdults === 1 ? '' : 's'}`);
+  }
+  if (maxChildren === 0) parts.push('adults only');
+  else if (maxChildren !== null) parts.push(`${maxChildren} child${maxChildren === 1 ? '' : 'ren'}`);
+  return parts.length ? `${parts.join(' + ')} · ${maxOccupancy} pax` : `${maxOccupancy} pax`;
 };
 
 const roomIsOverCapacity = (room, maxOccupancy, maxAdults, maxChildren) => {
@@ -105,7 +146,14 @@ export default function RoomAllocationModal({
   const capacityLabel = capacityParts.length
     ? `${capacityParts.join(' + ')} · ${maxOccupancy} pax`
     : `${maxOccupancy} pax`;
-  
+  const lineCaps = useMemo(() => ({ maxOccupancy, maxAdults, maxChildren }), [maxOccupancy, maxAdults, maxChildren]);
+  /* The property's own room types. A night can mix them - one Family Suite and
+     two Standard Rooms - and the allocation is what knows which guest sleeps
+     where, so each room carries its own type. With only one type there is
+     nothing to choose and the line's sold type already says it all. */
+  const roomTypeChoices = useMemo(() => roomTypesOf(item).filter((rt) => rt.name), [item]);
+  const typesToChoose = roomTypeChoices.length > 1;
+  const soldRoomType = String(item?.roomType || item?.room_type || '').trim();
   const travellersList = useMemo(() => {
     if (Array.isArray(itineraryTravellers) && itineraryTravellers.length > 0) {
       return itineraryTravellers.map((t, idx) => ({
@@ -192,8 +240,11 @@ export default function RoomAllocationModal({
 
   // Check over capacity rooms
   const overCapacityRooms = useMemo(() => {
-    return rooms.filter((rm) => roomIsOverCapacity(rm, maxOccupancy, maxAdults, maxChildren));
-  }, [rooms, maxOccupancy, maxAdults, maxChildren]);
+    return rooms.filter((rm) => {
+      const caps = roomCapsOf(rm, roomTypeChoices, lineCaps);
+      return roomIsOverCapacity(rm, caps.maxOccupancy, caps.maxAdults, caps.maxChildren);
+    });
+  }, [rooms, roomTypeChoices, lineCaps]);
 
   /* A group split starts here: the operator deliberately houses only part of
      the party in this property and adds the next property for the remainder.
@@ -241,11 +292,15 @@ export default function RoomAllocationModal({
   const activeRoom = useMemo(() => {
     const selected = rooms.find((rm) => rm.roomId === selectedRoomId);
     if (selected) return selected;
-    return rooms.find((rm) => (rm.allocatedTravellers || []).length < maxOccupancy) || rooms[0] || null;
-  }, [rooms, selectedRoomId, maxOccupancy]);
+    return rooms.find((rm) => {
+      const caps = roomCapsOf(rm, roomTypeChoices, lineCaps);
+      return (rm.allocatedTravellers || []).length < caps.maxOccupancy;
+    }) || rooms[0] || null;
+  }, [rooms, selectedRoomId, roomTypeChoices, lineCaps]);
   const activeRoomId = activeRoom?.roomId ?? null;
+  const activeRoomCaps = roomCapsOf(activeRoom, roomTypeChoices, lineCaps);
   const activeRoomOccupants = activeRoom ? (activeRoom.allocatedTravellers || []).length : 0;
-  const activeRoomFull = !!activeRoom && activeRoomOccupants >= maxOccupancy;
+  const activeRoomFull = !!activeRoom && activeRoomOccupants >= activeRoomCaps.maxOccupancy;
 
   const orderedTravellers = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -322,7 +377,8 @@ export default function RoomAllocationModal({
     if (!target) return 'Add or select a room first';
     const occs = target.allocatedTravellers || [];
     if (occs.some((t) => t.id === traveller.id)) return `Already in Room ${target.roomId}`;
-    return roomCapacityBlock(target.roomId, target, traveller, maxOccupancy, maxAdults, maxChildren);
+    const caps = roomCapsOf(target, roomTypeChoices, lineCaps);
+    return roomCapacityBlock(target.roomId, target, traveller, caps.maxOccupancy, caps.maxAdults, caps.maxChildren);
   };
 
   const moveTraveller = (traveller, targetRoomId) => {
@@ -354,6 +410,7 @@ export default function RoomAllocationModal({
       return;
     }
     const targetRoomId = activeRoom.roomId;
+    const targetCaps = activeRoomCaps;
     const movers = selectedMovableTravellers.filter(
       (t) => roomByTravellerId.get(t.id) !== targetRoomId
     );
@@ -367,7 +424,7 @@ export default function RoomAllocationModal({
     const rejected = [];
     movers.forEach((traveller) => {
       const roomAfter = { ...activeRoom, allocatedTravellers: [...(activeRoom.allocatedTravellers || []), ...accepted] };
-      const blocked = roomCapacityBlock(targetRoomId, roomAfter, traveller, maxOccupancy, maxAdults, maxChildren);
+      const blocked = roomCapacityBlock(targetRoomId, roomAfter, traveller, targetCaps.maxOccupancy, targetCaps.maxAdults, targetCaps.maxChildren);
       if (blocked) rejected.push(traveller);
       else accepted.push(traveller);
     });
@@ -385,7 +442,7 @@ export default function RoomAllocationModal({
     clearSelection();
     setMoveNotice(
       rejected.length
-        ? `${rejected.length} traveller(s) not moved into Room ${targetRoomId} — it takes ${capacityLabel}.`
+        ? `${rejected.length} traveller(s) not moved into Room ${targetRoomId} — it takes ${capsLabel(targetCaps)}.`
         : ''
     );
   };
@@ -397,6 +454,7 @@ export default function RoomAllocationModal({
       setMoveNotice('Add or select a room first.');
       return;
     }
+    const fillCaps = roomCapsOf(activeRoom, roomTypeChoices, lineCaps);
     const candidates = travellersList.filter(
       (t) => !roomByTravellerId.has(t.id) && !isBeddedElsewhere.has(t.id)
     );
@@ -404,7 +462,7 @@ export default function RoomAllocationModal({
     let firstBlocked = '';
     candidates.forEach((traveller) => {
       const roomAfter = { ...activeRoom, allocatedTravellers: [...(activeRoom.allocatedTravellers || []), ...chosen] };
-      const blocked = roomCapacityBlock(activeRoom.roomId, roomAfter, traveller, maxOccupancy, maxAdults, maxChildren);
+      const blocked = roomCapacityBlock(activeRoom.roomId, roomAfter, traveller, fillCaps.maxOccupancy, fillCaps.maxAdults, fillCaps.maxChildren);
       if (blocked) firstBlocked = firstBlocked || blocked;
       else chosen.push(traveller);
     });
@@ -420,7 +478,7 @@ export default function RoomAllocationModal({
       ))
     );
     clearSelection();
-    setMoveNotice(firstBlocked ? `Room ${activeRoom.roomId} takes ${capacityLabel}.` : '');
+    setMoveNotice(firstBlocked ? `Room ${activeRoom.roomId} takes ${capsLabel(fillCaps)}.` : '');
   };
 
   // Handlers
@@ -428,11 +486,33 @@ export default function RoomAllocationModal({
     const nextId = rooms.length + 1;
     setRooms((prev) => [
       ...prev,
-      { roomId: prev.length + 1, allocatedTravellers: [] }
+      {
+        roomId: prev.length + 1,
+        allocatedTravellers: [],
+        /* A new room starts as the type this line was sold at; the picker on the
+           card is what turns it into the Family Suite beside the Standard Rooms. */
+        ...(typesToChoose && soldRoomType ? { roomType: soldRoomType } : {})
+      }
     ]);
     /* Adding a room is almost always followed by filling it. */
     setSelectedRoomId(nextId);
     setMoveNotice('');
+  };
+
+  const handleRoomTypeChange = (roomId, name) => {
+    const choice = roomTypeChoices.find((rt) => rt.name === name) || null;
+    setRooms((prev) => prev.map((rm) => (
+      rm.roomId === roomId
+        ? { ...rm, roomType: name || '', roomTypeId: choice?.id || null }
+        : rm
+    )));
+    /* A smaller room type can leave the occupants over its beds, so say so
+       instead of letting the alert look like a move that never happened. */
+    const after = rooms.find((rm) => rm.roomId === roomId);
+    const caps = roomCapsOf({ ...after, roomType: name || '' }, roomTypeChoices, lineCaps);
+    setMoveNotice(roomIsOverCapacity(after, caps.maxOccupancy, caps.maxAdults, caps.maxChildren)
+      ? `Room ${roomId} as ${name || 'the sold room'} takes ${capsLabel(caps)}, which the travellers in it do not fit.`
+      : '');
   };
 
   const handleRemoveRoom = (roomId) => {
@@ -644,7 +724,7 @@ export default function RoomAllocationModal({
                 <span className="room-alloc-target-text">
                   <ArrowRight size={13} />
                   {activeRoom
-                    ? `Selected room: Room ${activeRoom.roomId} · ${activeRoomOccupants}/${maxOccupancy}${activeRoomFull ? ' · full' : ''}`
+                    ? `Selected room: Room ${activeRoom.roomId}${roomTypeOfAllocation(activeRoom, item) ? ` · ${roomTypeOfAllocation(activeRoom, item)}` : ''} · ${activeRoomOccupants}/${activeRoomCaps.maxOccupancy}${activeRoomFull ? ' · full' : ''}`
                     : 'Add a room, then select it to move travellers in.'}
                 </span>
                 {activeRoom && (
@@ -803,7 +883,11 @@ export default function RoomAllocationModal({
                   <UserCheck size={15} className="text-[#0d7478]" />
                   Room Allocations
                 </h3>
-                <span className="text-xs text-slate-500 font-medium">Max {capacityLabel} per Room</span>
+                <span className="text-xs text-slate-500 font-medium">
+                  {typesToChoose
+                    ? 'Each room is typed below — a night can mix this property’s room types'
+                    : `Max ${capacityLabel} per Room`}
+                </span>
               </div>
 
               <div className="space-y-3.5 max-h-[360px] overflow-y-auto pr-1">
@@ -815,11 +899,13 @@ export default function RoomAllocationModal({
                 {rooms.map((rm) => {
                   const occs = rm.allocatedTravellers || [];
                   const counts = occupantCounts(rm);
-                  const isOver = roomIsOverCapacity(rm, maxOccupancy, maxAdults, maxChildren);
-                  const isFull = counts.total >= maxOccupancy
-                    || (maxAdults !== null && counts.adults >= maxAdults);
+                  const roomCaps = roomCapsOf(rm, roomTypeChoices, lineCaps);
+                  const isOver = roomIsOverCapacity(rm, roomCaps.maxOccupancy, roomCaps.maxAdults, roomCaps.maxChildren);
+                  const isFull = counts.total >= roomCaps.maxOccupancy
+                    || (roomCaps.maxAdults !== null && counts.adults >= roomCaps.maxAdults);
                   const isActive = rm.roomId === activeRoomId;
                   const isDropTarget = dragOverRoomId === rm.roomId;
+                  const effectiveType = roomTypeOfAllocation(rm, item);
                   const roomCalc = financialSummary.rooms.find((r) => r.roomId === rm.roomId) || {};
 
                   return (
@@ -833,13 +919,36 @@ export default function RoomAllocationModal({
                     >
                       {/* Room Card Header */}
                       <div className="flex items-center justify-between pb-2.5 border-b border-slate-200">
-                        <div className="flex items-center gap-2.5">
+                        <div className="flex items-center gap-2.5 flex-wrap">
                           <span className="font-bold text-sm text-slate-900">Room {rm.roomId}</span>
-                          {rm.roomType === 'staff' && (
+                          {isCrewRoom(rm) ? (
                             <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-purple-100 text-purple-800 border border-purple-200">
                               Staff Room
                             </span>
-                          )}
+                          ) : typesToChoose ? (
+                            <label
+                              className="room-alloc-type"
+                              onClick={(event) => event.stopPropagation()}
+                              onDoubleClick={(event) => event.stopPropagation()}
+                            >
+                              <span className="room-alloc-type-label">Room type</span>
+                              <select
+                                className="room-alloc-type-select"
+                                aria-label={`Room type for Room ${rm.roomId}`}
+                                value={effectiveType}
+                                onChange={(event) => handleRoomTypeChange(rm.roomId, event.target.value)}
+                              >
+                                {!effectiveType && <option value="">Not chosen</option>}
+                                {roomTypeChoices.map((rt) => (
+                                  <option key={rt.key || rt.name} value={rt.name}>{rt.name}</option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : (effectiveType ? (
+                            <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-slate-100 text-slate-700 border border-slate-300">
+                              {effectiveType}
+                            </span>
+                          ) : null)}
                           <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-bold ${
                             isOver
                               ? 'bg-rose-100 text-rose-800 border border-rose-300'
@@ -848,8 +957,8 @@ export default function RoomAllocationModal({
                               : 'bg-slate-100 text-slate-700 border border-slate-300'
                           }`}>
                             {isOver
-                              ? `⚠️ ${counts.total}/${maxOccupancy}${maxAdults !== null ? ` · ${counts.adults}/${maxAdults} adults` : ''} OVER CAPACITY`
-                              : `${counts.total}/${maxOccupancy} Occupants${maxAdults !== null ? ` · ${counts.adults}/${maxAdults} adults` : ''}`}
+                              ? `⚠️ ${counts.total}/${roomCaps.maxOccupancy}${roomCaps.maxAdults !== null ? ` · ${counts.adults}/${roomCaps.maxAdults} adults` : ''} OVER CAPACITY`
+                              : `${counts.total}/${roomCaps.maxOccupancy} Occupants${roomCaps.maxAdults !== null ? ` · ${counts.adults}/${roomCaps.maxAdults} adults` : ''}`}
                           </span>
                         </div>
 
@@ -973,7 +1082,7 @@ export default function RoomAllocationModal({
                   <div>• {doubleBooked.length} traveller(s) already have a bed in another property on this night — remove them here.</div>
                 )}
                 {overCapacityRooms.length > 0 && (
-                  <div>• {overCapacityRooms.length} room(s) exceed the contract capacity ({capacityLabel}). Please add another room or redistribute travellers.</div>
+                  <div>• {overCapacityRooms.length} room(s) exceed the beds their own room type allows ({overCapacityRooms.map((room) => `Room ${room.roomId}${roomTypeOfAllocation(room, item) ? ` ${roomTypeOfAllocation(room, item)}` : ''} takes ${capsLabel(roomCapsOf(room, roomTypeChoices, lineCaps))}`).join('; ')}). Add another room or redistribute travellers.</div>
                 )}
                 {unpricedRooms.map((room) => (
                   <div key={room.roomId}>• {room.reason}</div>

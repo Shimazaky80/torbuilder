@@ -23,8 +23,44 @@ import { PartnerLogin } from './pages/PartnerLogin';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './context/ToastContext';
-import { NavigationGuardProvider } from './context/NavigationGuardContext';
+import { NavigationGuardProvider, useNavigationGuard } from './context/NavigationGuardContext';
 import './App.css';
+
+/* The pages under the sidebar. Keyed on the menu-reset token: clicking the
+   entry of the page already open moves that token, and the remount is what
+   clears a filter, closes an editor and fetches the list again — the router
+   alone would stay exactly where the operator is standing. */
+const AppPages = () => {
+  const { pageResetToken } = useNavigationGuard();
+
+  return (
+    <ErrorBoundary key={pageResetToken}>
+      <Routes>
+        <Route path="dashboard" element={<Dashboard />} />
+        <Route path="" element={<Navigate to="dashboard" replace />} />
+        <Route path="super-admin" element={<SuperAdmin />} />
+        <Route path="clients" element={<Clients />} />
+        <Route path="suppliers" element={<Suppliers />} />
+        <Route path="guide-team" element={<GuideTeam />} />
+        <Route path="services" element={<Navigate to="/library-items" replace />} />
+        <Route path="library-items" element={<LibraryItems />} />
+        <Route path="packages" element={<Packages />} />
+        <Route path="packages/view/:packageId" element={<PackageView />} />
+        <Route path="packages/builder/:packageId" element={<PackageBuilder />} />
+        <Route path="itineraries" element={<Itineraries />} />
+        <Route path="itineraries/builder" element={<ItineraryBuilder />} />
+        <Route path="finance" element={<Finance />} />
+        {/* The module was renamed Invoices -> Finance; keep old links working. */}
+        <Route path="invoices" element={<Navigate to="/finance" replace />} />
+        <Route path="tariffs" element={<Tariffs />} />
+        <Route path="analytics" element={<Analytics />} />
+        <Route path="users" element={<div>Users (Coming Soon)</div>} />
+        <Route path="settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="dashboard" replace />} />
+      </Routes>
+    </ErrorBoundary>
+  );
+};
 
 function App() {
   return (
@@ -45,31 +81,7 @@ function App() {
                   <div className="app-container">
                     <Sidebar />
                     <main className="main-content">
-                      <ErrorBoundary>
-                        <Routes>
-                        <Route path="dashboard" element={<Dashboard />} />
-                        <Route path="" element={<Navigate to="dashboard" replace />} />
-                        <Route path="super-admin" element={<SuperAdmin />} />
-                        <Route path="clients" element={<Clients />} />
-                        <Route path="suppliers" element={<Suppliers />} />
-                        <Route path="guide-team" element={<GuideTeam />} />
-                        <Route path="services" element={<Navigate to="/library-items" replace />} />
-                        <Route path="library-items" element={<LibraryItems />} />
-                        <Route path="packages" element={<Packages />} />
-                        <Route path="packages/view/:packageId" element={<PackageView />} />
-                        <Route path="packages/builder/:packageId" element={<PackageBuilder />} />
-                        <Route path="itineraries" element={<Itineraries />} />
-                        <Route path="itineraries/builder" element={<ItineraryBuilder />} />
-                        <Route path="finance" element={<Finance />} />
-                        {/* The module was renamed Invoices -> Finance; keep old links working. */}
-                        <Route path="invoices" element={<Navigate to="/finance" replace />} />
-                        <Route path="tariffs" element={<Tariffs />} />
-                        <Route path="analytics" element={<Analytics />} />
-                        <Route path="users" element={<div>Users (Coming Soon)</div>} />
-                        <Route path="settings" element={<Settings />} />
-                        <Route path="*" element={<Navigate to="dashboard" replace />} />
-                        </Routes>
-                      </ErrorBoundary>
+                      <AppPages />
                     </main>
                   </div>
                 </NavigationGuardProvider>

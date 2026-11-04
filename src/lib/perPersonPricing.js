@@ -12,6 +12,7 @@ import {
   occupancyFloor,
   occupancyRateForPax
 } from './occupancyPricing';
+import { rateForAllocatedRoom } from './roomTypePricing';
 
 const parseF = (v) => parseFloat(v) || 0;
 
@@ -52,6 +53,31 @@ const rateNumbers = (rate) => {
   const singleBuy = parseF(rate?.price_1_adult) || parseF(rate?.single_room_rate) || parseF(rate?.unit_price) || 0;
   const sharingBuy = parseF(rate?.price_2_adults) || parseF(rate?.double_twin_rate) || singleBuy || 0;
   return { singleBuy, sharingBuy };
+};
+
+/* Everything one accommodation rate row says about the price of a bed: the two
+   columns, whether the room is charged per room or by an occupancy ladder, and
+   its own single-supplement ladder. The per-person card needs all of it per room,
+   because a night can mix this property's room types and each is contracted
+   separately — see roomTypePricing.js. */
+const roomProfileOf = (rate) => {
+  const { singleBuy, sharingBuy } = rateNumbers(rate);
+  return {
+    rate,
+    singleBuy,
+    sharingBuy,
+    /* A third adult in a room pays the room's extra-adult figure, which falls
+       back to the sharing rate when the contract states none. */
+    extraAdultBuy: parseF(rate?.price_3_plus_adults) > 0 ? parseF(rate?.price_3_plus_adults) : sharingBuy,
+    flat: String(rate?.rate_basis || '') === 'per_room'
+      || (parseF(rate?.unit_price) > 0 && !parseF(rate?.price_2_adults)),
+    /* A villa on an occupancy ladder has no single supplement and no child
+       discount: the room's own occupant count picks the band and every head in it
+       pays that figure. */
+    occupancyPriced: isOccupancyTiered(rate),
+    singleLadder: normaliseSingleSupplementLadder(rate),
+    singleSuppBase: baseSingleSupplement(rate, sharingBuy, singleBuy)
+  };
 };
 
 /* The adult / child split of one non-accommodation line.
@@ -111,6 +137,12 @@ const nonAccommodationChildSplit = ({ sv, pp, list, rateBy, T }) => {
        the sharing base plus the per-child child-rate difference, for the room
        and for any per-head service that contracts a child price.
 
+   Every room is priced from the contract of the room TYPE its allocation names -
+   a Family Suite beside two Standard Rooms costs three different figures - and
+   the resolution is shared with the room engine (roomTypePricing.js), so the two
+   cannot quote different nights. A third adult pays that room's extra-adult
+   figure and a flat room is charged once, as the engine charges them.
+
    `services` are normalized entries:
      { category, currencyCode, sellPP, taxRate, itemId, roomAllocations, markup }
    `rateBy(itemId)` resolves the rate ROW the line is priced from, for
@@ -166,7 +198,8 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
 
     const rate = sv.itemId ? rateBy(sv.itemId, sv.item_rates, sv.dayDate) : null;
     const ageRanges = Array.isArray(rate?._ageRanges) ? rate._ageRanges : [];
-    const { singleBuy, sharingBuy } = rateNumbers(rate);
+    const lineProfile = roomProfileOf(rate);
+    const { sharingBuy } = lineProfile;
     const rooms = Array.isArray(sv.roomAllocations) && sv.roomAllocations.length ? sv.roomAllocations : null;
     /* Children in their own room price at adult rates or one single room rate
        (property contract), so the breakdown must not show child discounts the
@@ -191,26 +224,27 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
     } else {
       scale = sharingBuy > 0 ? pp / sharingBuy : 1;
     }
-    const sharingSell = sharingBuy > 0 ? sharingBuy * scale : pp;
-    const singleSell = sharingBuy > 0 ? singleBuy * scale : pp;
-    const childSellFor = (t) => {
-      const c = childRateForAge(rate, parseF(t?.age), ageRanges, sharingBuy);
-      return c.known && sharingBuy > 0 ? c.rate * scale : null;
-    };
+    const sellOf = (buy) => (buy > 0 ? buy * scale : pp);
 
     if (!rooms) {
-      add(sharingSell * T, taxRate, 'sharing');
+      add(sellOf(sharingBuy) * T, taxRate, 'sharing');
       return;
     }
 
-    const singleLadder = normaliseSingleSupplementLadder(rate);
-    const singleSuppBase = baseSingleSupplement(rate, sharingBuy, singleBuy);
-    const flatRoomRate = String(rate?.rate_basis || '') === 'per_room'
-      || (parseF(rate?.unit_price) > 0 && !parseF(rate?.price_2_adults));
-    /* A villa on an occupancy ladder has no single supplement and no child
-       discount: the room's own occupant count picks the band and every head in it
-       pays that figure. */
-    const occupancyPriced = isOccupancyTiered(rate);
+    /* Each room is priced from the contract of the room TYPE its allocation
+       names, not from the single row the line was sold at: a night with a Family
+       Suite beside two Standard Rooms charges three different contracts. The
+       resolution goes through the same helper the room engine uses, so the two
+       engines cannot disagree about which row a bed is priced from, and a row
+       with no type stamp behaves exactly as it did before. */
+    const typedProfiles = new Map();
+    const profileForRoom = (rm) => {
+      const resolved = rateForAllocatedRoom(rate, rm);
+      if (resolved.reason) return { profile: lineProfile, reason: resolved.reason };
+      if (!resolved.rate || resolved.rate === rate) return { profile: lineProfile, reason: '' };
+      if (!typedProfiles.has(resolved.rate)) typedProfiles.set(resolved.rate, roomProfileOf(resolved.rate));
+      return { profile: typedProfiles.get(resolved.rate), reason: resolved.reason };
+    };
     let singleOrdinal = 0;
 
     const isStaffRoom = (rm, occs) => {
@@ -224,6 +258,18 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
       const occs = Array.isArray(rm.allocatedTravellers) ? rm.allocatedTravellers : [];
       const occ = occs.length;
       if (!occ) return;
+      const { profile: p, reason: typeRefusal } = profileForRoom(rm);
+      /* A room this season does not price was charged nothing by the room engine
+         either, so it contributes nothing here and the rows keep re-adding to
+         the day line. */
+      if (typeRefusal) return;
+      const bands = Array.isArray(p.rate?._ageRanges) && p.rate._ageRanges.length ? p.rate._ageRanges : ageRanges;
+      const sharingSell = sellOf(p.sharingBuy);
+      const singleSell = sellOf(p.singleBuy);
+      const childSellFor = (t) => {
+        const c = childRateForAge(p.rate, parseF(t?.age), bands, p.sharingBuy);
+        return c.known && p.sharingBuy > 0 ? c.rate * scale : null;
+      };
       const childOccs = occs.filter((t) => !isAdultTraveller(t));
       const staffRoom = isStaffRoom(rm, occs);
       /* A children-only client room under a children-own-room policy prices at
@@ -231,8 +277,8 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
       const childOnlyAsAdult = !staffRoom && childOccs.length === occ && ownRoomPolicy === 'adult_rates';
       const childOnlySingleRoom = !staffRoom && childOccs.length === occ && ownRoomPolicy === 'single_room_rate';
 
-      if (occupancyPriced && !staffRoom) {
-        const bandRate = occupancyRateForPax(rate, occ);
+      if (p.occupancyPriced && !staffRoom) {
+        const bandRate = occupancyRateForPax(p.rate, occ);
         add(bandRate === null ? pp * occ : bandRate * occ * scale, taxRate, 'sharing');
         return;
       }
@@ -245,32 +291,53 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
         /* Only paying-client singles consume a ladder slot; a solo child does
            too, matching the room engine. Flat rooms are priced per room and are
            excluded from the ladder. */
-        if (!flatRoomRate) singleOrdinal += 1;
+        if (!p.flat) singleOrdinal += 1;
         if (!childOccs.length || childOnlyAsAdult) {
           add(sharingSell, taxRate, 'sharing');
-          const supplement = !flatRoomRate && singleLadder.length
-            ? singleSupplementForOrdinal(singleLadder, singleSuppBase, singleOrdinal)
+          /* A ladder is quoted in library (buy) figures and has to be scaled;
+             the plain gap between the single and sharing rates is already a
+             selling figure, so scaling it again would mark the supplement up
+             twice and stop the summary re-adding to the day line. */
+          const supplement = !p.flat && p.singleLadder.length
+            ? singleSupplementForOrdinal(p.singleLadder, p.singleSuppBase, singleOrdinal) * scale
             : singleSell - sharingSell;
-          add(supplement * scale, taxRate, 'single');
+          add(supplement, taxRate, 'single');
         } else if (childOnlySingleRoom) {
           /* One single room rate for the whole room: no supplement ladder. */
           add(sharingSell, taxRate, 'sharing');
-          add((singleSell - sharingSell) * scale, taxRate, 'single');
+          add(singleSell - sharingSell, taxRate, 'single');
         } else {
           add(sharingSell, taxRate, 'sharing');
           const childSell = childSellFor(childOccs[0]);
           if (childSell !== null) {
             add(childSell - sharingSell, taxRate, 'childD');
-          } else if (!flatRoomRate && singleLadder.length) {
-            const supplement = singleSupplementForOrdinal(singleLadder, singleSuppBase, singleOrdinal);
+          } else if (!p.flat && p.singleLadder.length) {
+            const supplement = singleSupplementForOrdinal(p.singleLadder, p.singleSuppBase, singleOrdinal);
             add(supplement * scale, taxRate, 'single');
           }
         }
         return;
       }
 
-      add(occ * sharingSell, taxRate, 'sharing');
-      if (childOnlyAsAdult || childOnlySingleRoom) return;
+      if (p.flat) {
+        /* One charge for the whole room, however many sleep in it. */
+        add(sharingSell, taxRate, 'sharing');
+        return;
+      }
+      if (childOnlySingleRoom) {
+        /* The property charges one single room rate for the children-only room. */
+        add(singleSell, taxRate, 'sharing');
+        return;
+      }
+      /* Every head in the room pays the sharing figure first, exactly as the room
+         engine charges it, and the contract's deviations come off that base: an
+         adult beyond the second pays the room's extra-adult figure instead, and a
+         child with a contracted child rate pays that. A child with no child rate
+         already sits in the base at the sharing figure. */
+      const adultHeads = childOnlyAsAdult ? occ : occ - childOccs.length;
+      const extraAdults = Math.max(0, adultHeads - 2);
+      add(occ * sharingSell + extraAdults * (sellOf(p.extraAdultBuy) - sharingSell), taxRate, 'sharing');
+      if (childOnlyAsAdult) return;
       childOccs.forEach((t) => {
         const childSell = childSellFor(t);
         if (childSell !== null) add(childSell - sharingSell, taxRate, 'childD');
@@ -296,6 +363,10 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
     } : null,
     hasSingle: singleIncl > 0,
     hasChildren: childrenCount > 0,
+    /* The document needs the head count to express the party-only rows (the
+       supplement is the whole party's money) per person, so it travels with the
+       rows instead of every caller re-counting the party. */
+    childrenCount,
     totalCount: T
   };
 };
@@ -308,4 +379,62 @@ export const breakdownSnapshot = (r) => {
   if (r.hasSingle) rows.push({ label: 'Single supplement', sell: r.singleSupplement.sell, subExcl: r.singleSupplement.subExcl, tax: r.singleSupplement.tax });
   if (r.perChild) rows.push({ label: 'Per child', sell: r.perChild.sell, subExcl: r.perChild.subExcl, tax: r.perChild.tax });
   return { rows, totalCount: r.totalCount, hasChildren: r.hasChildren, hasSingle: r.hasSingle };
+};
+
+/* The same money expressed for ONE traveller, which is what a per-person
+   document prints.
+
+   Two of the engine's rows are not per-head to start with: the single
+   supplement is the whole party's supplement bill, and each child is billed
+   once for that child, not once per head. Both are converted here - the
+   supplement spread over every head in the party, each child's price above the
+   sharing base multiplied by the children and then spread the same way - so
+   that the rows add down the page to that traveller's total instead of mixing
+   one person's rate with the party's bill.
+
+   Labels are returned as dictionary keys plus their numbers; the document
+   supplies the words and the currency format. */
+export const perPersonHeadBreakdown = (r) => {
+  if (!r) return null;
+  const heads = Math.max(1, Number(r.totalCount) || 1);
+  const rows = [{
+    key: 'doc.perPersonSharing',
+    incl: r.perPersonSharing.sell,
+    tax: r.perPersonSharing.tax
+  }];
+  if (r.hasSingle) {
+    rows.push({
+      key: 'doc.singleSupplementPerPerson',
+      incl: (Number(r.singleSupplement.sell) || 0) / heads,
+      tax: (Number(r.singleSupplement.tax) || 0) / heads
+    });
+  }
+  if (r.hasChildren && r.perChild) {
+    const kids = Math.max(1, Number(r.childrenCount) || 1);
+    rows.push({
+      key: 'doc.childRateAdjustment',
+      count: kids,
+      each: round2(r.perChild.sell - r.perPersonSharing.sell),
+      eachTax: round2(r.perChild.tax - r.perPersonSharing.tax),
+      incl: ((r.perChild.sell - r.perPersonSharing.sell) * kids) / heads,
+      tax: ((r.perChild.tax - r.perPersonSharing.tax) * kids) / heads
+    });
+  }
+  /* Rounding happens before the total is taken, so the column a reader adds down
+     the page is the column that answers with the total per person. The cent a
+     split leaves behind belongs to the last row of the party's own table, not to
+     this one. */
+  const money = (row) => ({
+    ...row,
+    incl: round2(row.incl),
+    tax: round2(row.tax)
+  });
+  const settled = rows.map(money);
+  const total = money({
+    key: 'doc.totalPerPerson',
+    incl: settled.reduce((sum, row) => sum + row.incl, 0),
+    tax: settled.reduce((sum, row) => sum + row.tax, 0),
+    total: true
+  });
+  return { heads, rows: settled, total, rowsWithTotal: settled.concat([total]) };
 };

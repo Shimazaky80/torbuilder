@@ -4,7 +4,7 @@ import { rateCoversNights } from './accommodationOptions';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
 import { chargesChildRate, contractPaxRate } from './servicePricing';
 import { buildShareContext } from './staffPricing';
-import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal } from './guidePricing';
+import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal, crewShareOn } from './guidePricing';
 import {
   combineSingleSupplements,
   normaliseSingleSupplementLadder,
@@ -120,10 +120,15 @@ const rateCoversWindow = (rate, window) => {
 const rateCoverageCount = (rate, windows) =>
   windows.reduce((total, window) => total + (rateCoversWindow(rate, window) ? 1 : 0), 0);
 
-const uniqueRates = (item, rate) => {
-  const rows = [rate, ...(Array.isArray(item?.item_rates) ? item.item_rates : [])].filter(Boolean);
+const uniqueRates = (item, rate) => {  const rows = [rate, ...(Array.isArray(item?.item_rates) ? item.item_rates : [])].filter(Boolean);
   return [...new Map(rows.map((row) => [row.id ?? `${row.currency || ''}:${seasonLabel(row)}:${seasonWindowText(row)}`, row])).values()];
 };
+
+/* A hire line answers its own date question: the tariff window was tested against
+   the pick-up date when the hire was recorded, and the flat figure it came to is
+   stored on the line. Neither coverage nor protection has anything to say about a
+   contract row that was never a season, so both guards read it as settled. */
+const isRentalRate = (rate) => rate?.rental_price_validity === true;
 
 /**
  * Does the season behind this contract rate actually cover the dates the package
@@ -141,6 +146,7 @@ const uniqueRates = (item, rate) => {
 export const packageSeasonCoverage = (item, rate, periods = []) => {
   const windows = packageValidityWindows(periods);
   const name = item?.name || 'This item';
+  if (isRentalRate(rate)) return { status: 'ok', ok: true, message: '' };
   if (!windows.length) return { status: 'open', ok: true, message: '' };
 
   const ranges = windows.map((window) => `${window.from} – ${window.to}`).join(', ');
@@ -198,6 +204,9 @@ export const packageItemSeasonError = (item, rate, periods = []) => packageSeaso
 export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode = '', protectionPercent = 0 } = {}) => {
   const windows = packageValidityWindows(periods);
   if (!windows.length) return { status: 'open', ok: true, canAdd: true, protectionPercent: 0, rate: rate || null, seasonName: '', message: '' };
+  if (isRentalRate(rate)) {
+    return { status: 'ok', ok: true, canAdd: true, protectionPercent: 0, rate, seasonName: rate.season_name || '', message: '' };
+  }
 
   const name = item?.name || 'This item';
   const rates = uniqueRates(item, rate);
@@ -746,7 +755,7 @@ export const vehicleBlockReason = (service, item, pax, vehicleTypes = []) => {
    Pass a child age range to price ONE CHILD's share instead of an adult's. Only the
    categories that buy per head (meals, entries, extras) contract a child figure; a
    vehicle, a trip or a room is space, so a child takes the adult share there too. */
-const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], shareContext = null, childRange = null) => {
+const unitContractContribution = (service, item, pax, vehicleTypes = [], shareContext = null, childRange = null) => {
   const rate = rateFor(service, item);
   const currency = service.currency_code || rate.currency || item?.currency || 'ZAR';
   const pricedItem = {
@@ -799,6 +808,18 @@ const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], sha
     if (child.known) return child.rate * quantity;
   }
   return perTraveller * quantity;
+};
+
+/* One service's share per traveller, including the crew figure folded onto it.
+   A guide's seat or place is bought once for the whole line, so a bigger band
+   splits the same sum over more heads rather than buying a seat per head. */
+const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], shareContext = null, childRange = null) => {
+  const base = unitContractContribution(service, item, pax, vehicleTypes, shareContext, childRange);
+  if (base === null) return null;
+  const crew = crewShareOn(service);
+  if (!crew) return base;
+  const heads = Math.max(1, numberOf(pax));
+  return base + crew.total / heads;
 };
 
 /**
@@ -1249,11 +1270,17 @@ export const vehicleColumnPools = ({ days = [], library = [], vehicleTypes = [] 
   const pools = Object.fromEntries(codes.map((code) => [code, 0]));
   let perPersonFixed = 0;
   let flatTotal = 0;
+  /* A crew figure folded onto a line is a fixed sum the party shares, so it joins
+     the flat pool on every vehicle column rather than the per-person fixed slice -
+     the per-person slice is added to a column's price unscaled. */
+  let crewFlat = 0;
   includedServices(days)
     .filter((service) => currencyOf(service) === currency)
     .forEach((service) => {
       const item = libraryEntryFor(service, library);
       if (isAccommodation(item, service)) return;
+      const crew = crewShareOn(service);
+      if (crew) crewFlat += crew.total;
       const rate = rateFor(service, item);
       const basis = String(rate.rate_basis || service.rate_basis || item?.pricing_model || '').toLowerCase();
       const quantity = Math.max(1, numberOf(service.quantity) || 1);
@@ -1273,6 +1300,10 @@ export const vehicleColumnPools = ({ days = [], library = [], vehicleTypes = [] 
       codes.forEach((code) => { pools[code] += single; });
       flatTotal += single;
     });
+  if (crewFlat > 0) {
+    codes.forEach((code) => { pools[code] += crewFlat; });
+    flatTotal += crewFlat;
+  }
   return { pools, perPersonFixed, flatTotal, currency };
 };
 

@@ -1,11 +1,15 @@
 import {
   SURCHARGE_CATEGORY,
+  SURCHARGE_TYPES,
   isSurchargeItem,
   surchargeTypeOf,
+  surchargeTypeLabel,
   surchargeBasisOf,
   surchargeUnitBasisOf,
   surchargeRateColumns,
   surchargeRateAmount,
+  unitBasesFor,
+  isValidUnitBasis,
   feeEditorRowFromRecord,
   feeSeasonKey,
   feeAmountsBySeason,
@@ -323,5 +327,93 @@ check('a per-vehicle fee ignores a guide figure',
   surchargeBuyTotal({ rate: { entrance_fee_per_vehicle: 1200, guide_rate: 200 }, item: { ...entranceItem, surcharge_unit_basis: 'per_vehicle' }, paxCount: 4, guideCount: 2 }).total, 1200);
 check('a per-unit fee ignores a guide figure',
   surchargeBuyTotal({ rate: { unit_price: 1500, guide_rate: 200 }, item: unitFee, paxCount: 4, guideCount: 1 }).total, 1500);
+
+/* (L) A ticket. It is admitted at the same gate as an entrance fee, so it is
+   priced from the same columns — the type names the line, it does not move the
+   money. */
+const ticketItem = { category: SURCHARGE_CATEGORY, surcharge_type: 'ticket' };
+check('a ticket reads as a ticket', surchargeTypeOf({ surcharge_type: 'ticket' }), 'ticket');
+check('a ticket is offered in the editor',
+  SURCHARGE_TYPES.map((t) => t.id), ['entrance_fee', 'conservation_levy', 'ticket']);
+check('a ticket is named on the line', surchargeTypeLabel('ticket'), 'Ticket');
+check('a ticket writes the entrance columns',
+  surchargeRateColumns({ type: 'ticket', unitBasis: 'per_person', amount: '850', childAmount: '430' }),
+  { entrance_fee_per_person: 850, entrance_fee_per_child: 430 });
+check('a ticket reads the entrance columns back',
+  surchargeRateAmount({ entrance_fee_per_person: 850, entrance_fee_per_child: 430 },
+    { ...ticketItem, surcharge_unit_basis: 'per_person' }), 850);
+check('a ticket charges heads the way an entrance fee does',
+  surchargeBuyTotal({
+    rate: { entrance_fee_per_person: 850, entrance_fee_per_child: 430 },
+    item: { ...ticketItem, surcharge_unit_basis: 'per_person' },
+    paxCount: 4,
+    childCount: 2
+  }).total, 2560);
+check('a ticket splits by age only when a child figure was stored',
+  surchargeBuyTotal({
+    rate: { entrance_fee_per_person: 850 },
+    item: { ...ticketItem, surcharge_unit_basis: 'per_person' },
+    paxCount: 4,
+    childCount: 2
+  }).total, 3400);
+check('a ticket prices a child only beside an adult figure',
+  isValidUnitBasis(ticketItem, 'per_child'), false);
+
+/* (M) Per Vehicle is the flat basis on every fee type, a levy included, and it
+   is the only figure that basis charges — a car never pays the head price. */
+const levyPerVehicle = { ...levyItem, surcharge_unit_basis: 'per_vehicle' };
+check('a levy set per vehicle writes the vehicle column',
+  surchargeRateColumns({ type: 'conservation_levy', unitBasis: 'per_vehicle', amount: '300' }),
+  { entrance_fee_per_vehicle: 300 });
+check('a levy set per vehicle reads the vehicle column back',
+  surchargeRateAmount({ entrance_fee_per_vehicle: 300, conservation_levy_per_adult: 120 }, levyPerVehicle), 300);
+check('a levy set per vehicle charges one vehicle, not a party',
+  surchargeBuyTotal({
+    rate: { entrance_fee_per_vehicle: 300, conservation_levy_per_adult: 120, guide_rate: 40 },
+    item: levyPerVehicle,
+    paxCount: 6,
+    childCount: 2,
+    guideCount: 1
+  }).total, 300);
+check('a ticket set per vehicle charges one vehicle',
+  surchargeBuyTotal({
+    rate: { entrance_fee_per_vehicle: 1200, entrance_fee_per_person: 850 },
+    item: { ...ticketItem, surcharge_unit_basis: 'per_vehicle' },
+    paxCount: 4
+  }).total, 1200);
+check('a vehicle figure left blank prices nothing, not the head price',
+  surchargeBuyTotal({
+    rate: { entrance_fee_per_person: 850 },
+    item: { ...entranceItem, surcharge_unit_basis: 'per_vehicle' },
+    paxCount: 4
+  }).total, 0);
+check('a per-vehicle levy reads its figure from the editor path too',
+  feeEditorRowFromRecord({
+    id: 'fee-5',
+    name: 'Gate vehicle pass',
+    category: SURCHARGE_CATEGORY,
+    surcharge_type: 'conservation_levy',
+    surcharge_unit_basis: 'per_vehicle',
+    item_rates: [{ id: 'r1', season_name: 'High season', entrance_fee_per_vehicle: 300 }]
+  }).amount, '300');
+
+/* (N) Which bases each type is offered. "Per Unit" was the same flat idea under
+   an ambiguous name, so it is no longer a choice — but an item already saved on
+   it must still list it, or its own figure would vanish from the editor. */
+check('an entrance fee is offered person, adult and vehicle',
+  unitBasesFor(entranceItem).map((u) => u.id), ['per_person', 'per_adult', 'per_vehicle']);
+check('a levy adds the basis that bills children alone',
+  unitBasesFor(levyItem).map((u) => u.id), ['per_person', 'per_adult', 'per_child', 'per_vehicle']);
+check('a ticket is offered what an entrance fee is',
+  unitBasesFor(ticketItem).map((u) => u.id), ['per_person', 'per_adult', 'per_vehicle']);
+check('a legacy per-unit item still lists its own basis',
+  unitBasesFor({ ...entranceItem, surcharge_unit_basis: 'per_unit' }).map((u) => u.id),
+  ['per_person', 'per_adult', 'per_vehicle', 'per_unit']);
+check('a basis only a levy stores is refused elsewhere',
+  [isValidUnitBasis(levyItem, 'per_child'), isValidUnitBasis(entranceItem, 'per_child')],
+  [true, false]);
+check('a legacy per-unit basis stays priced on every type',
+  [isValidUnitBasis(entranceItem, 'per_unit'), isValidUnitBasis(levyItem, 'per_unit')],
+  [true, true]);
 
 if (!process.exitCode) console.log('\nAll Fees & Tickets checks passed');

@@ -41,6 +41,10 @@ export const LIBRARY_ITEM_LIGHT_FIELDS = [
      these, and a library load that has to drop the whole select would leave the
      builder with no meals to offer the guide at all. */
   'guide_meal_offered', 'driver_meal_offered', 'guide_flight_offered',
+  /* The hire contract fee. It belongs to the item rather than to a vehicle
+     group, so the drop dialog needs it to build the line total; a workspace that
+     has not applied that migration yet still loads its library. */
+  'rental_contract_fee',
   LIBRARY_ITEM_BASE_FIELDS
 ].join(',');
 
@@ -57,7 +61,10 @@ const LIBRARY_ITEM_PACKAGE_COLUMNS = [
 
 export const LIBRARY_ITEM_PACKAGE_FIELDS = [
   ...LIBRARY_ITEM_PACKAGE_COLUMNS,
-  'guide_meal_offered', 'driver_meal_offered', 'guide_flight_offered'
+  'guide_meal_offered', 'driver_meal_offered', 'guide_flight_offered',
+  /* The hire contract fee, so a rent-a-car dropped into a package can be priced
+     with the fee folded into its line. */
+  'rental_contract_fee'
 ].join(',');
 
 export const LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK = LIBRARY_ITEM_PACKAGE_COLUMNS.join(',');

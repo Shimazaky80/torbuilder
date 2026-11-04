@@ -166,6 +166,21 @@ function tariffDocument(tariff, rows, profile) {
         basisLabel = 'Per Vehicle';
         const price = positiveRate(rate.price);
         if (price) rateLines.push(`${escapeHtml(rate.vehicle_name || 'Vehicle')} (${rate.min_days || 1}+ days): ${money(price, rate.currency || currency)}`);
+      } else if (/^(fees & tickets|surcharge fees)$/i.test(row.category || '')) {
+        /* A fee keeps its figure in whichever column its own basis writes, so the
+           tariff prints the columns the row actually carries instead of guessing a
+           ladder it does not have. */
+        basisLabel = 'Fee';
+        rateLines = [
+          ['Fee per person', rate.entrance_fee_per_person],
+          ['Fee per child', rate.entrance_fee_per_child],
+          ['Fee per vehicle', rate.entrance_fee_per_vehicle],
+          ['Levy per adult', rate.conservation_levy_per_adult],
+          ['Levy per child', rate.conservation_levy_per_child],
+          ["Guide's place", rate.guide_rate],
+          ['Flat rate', rate.unit_price]
+        ].filter(([, value]) => positiveRate(value))
+          .map(([label, value]) => `${label}: ${money(positiveRate(value), rate.currency || currency)}`);
       } else {
         const price = positiveRate(rate.unit_price, rate.price_1_adult, rate.adult_rate, rate.rate);
         if (price) rateLines.push(`${basisLabel}: ${money(price, rate.currency || currency)}`);

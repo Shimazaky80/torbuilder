@@ -5,7 +5,7 @@ import { calculateRoomCharges } from '../src/lib/roomAllocationHelper.js';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PricingSeasonsTab } from '../src/components/PricingSeasonsTab.jsx';
-import { computePerPersonRows } from '../src/lib/perPersonPricing.js';
+import { computePerPersonRows, perPersonHeadBreakdown } from '../src/lib/perPersonPricing.js';
 import { presentationPricingColumns, singleSupplementForSeason, accommodationRatesForTrip } from '../src/lib/packagePricing.js';
 import { applyProtectionToRate } from '../src/lib/priceValidity.js';
 import { libraryItemDetail } from '../src/lib/libraryItemDetail.js';
@@ -182,6 +182,97 @@ const ppChild = perPerson(
 );
 check('per-person child price keeps the child rate difference', ppChild.perChild.sell, 300);
 check('the child still consumes a waiver slot in per-person rows', ppChild.singleSupplement.sell, 112.5);
+
+/* ---------------- Marked-up contracts re-add to the day line ----------------
+   A ladder is quoted in library (buy) money, so the breakdown scales it; the
+   plain gap between the single and sharing rates is ALREADY a selling figure,
+   so scaling that again marks the supplement up twice and the summary stops
+   matching the total the room engine charged. Every case below prices one night
+   through the room engine and through the per-person rows and requires the three
+   rows to add back to the same money. */
+const round2t = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const markedUp = (item, rooms, travellers, pp, markup = 15) => computePerPersonRows({
+  services: [{
+    category: 'Accommodation', currencyCode: 'ZAR', sellPP: pp, taxRate: 0,
+    itemId: 'lodge', roomAllocations: rooms, markup
+  }],
+  travellers,
+  rateBy: () => ({ ...item.item_rates[0], _ageRanges: item.child_age_ranges || [] }),
+  defaultTaxRate: 0
+});
+const dayLine = (item, rooms, markup = 15) => {
+  const charges = calculateRoomCharges(item, rooms, 'ZAR', markup);
+  const pax = rooms.reduce((n, rm) => n + rm.allocatedTravellers.length, 0);
+  return { sell: round2t(charges.totalSell), pp: round2t(charges.totalSell / pax), pax };
+};
+const rowsTotal = (r, childCount) => round2t(
+  r.perPersonSharing.sell * r.totalCount
+  + (r.hasSingle ? r.singleSupplement.sell : 0)
+  + (r.perChild && childCount ? (r.perChild.sell - r.perPersonSharing.sell) * childCount : 0)
+);
+
+const plainRate = { currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 1200, price_2_adults: 900 };
+const sharedPlusSolo = {
+  category: 'Accommodation',
+  item_rates: [plainRate]
+};
+const soloRooms = [
+  { allocatedTravellers: [{ id: 'a', age: 30 }, { id: 'b', age: 30 }] },
+  { allocatedTravellers: [{ id: 'c', age: 30 }] }
+];
+const soloParty = [{ id: 'a', age: 30 }, { id: 'b', age: 30 }, { id: 'c', age: 30 }];
+const soloLine = dayLine(sharedPlusSolo, soloRooms);
+const soloRows = markedUp(sharedPlusSolo, soloRooms, soloParty, soloLine.pp);
+check('a marked-up sharing row is the selling sharing rate', soloRows.perPersonSharing.sell, 1035);
+check('a marked-up supplement is the single rate over the sharing rate, once', soloRows.singleSupplement.sell, 345);
+check('a marked-up no-ladder contract re-adds to the day line', rowsTotal(soloRows, 0), soloLine.sell);
+
+const kidBand = [{ id: 'kid', name: 'Child', ageFrom: 0, ageTo: 12 }];
+const kidLodge = {
+  category: 'Accommodation',
+  child_age_ranges: kidBand,
+  item_rates: [{ ...plainRate, child_rates_breakdown: { kid: 500 } }]
+};
+const kidRooms = [
+  { allocatedTravellers: [{ id: 'a', age: 30 }, { id: 'b', age: 30 }, { id: 'k', age: 6 }] },
+  { allocatedTravellers: [{ id: 'c', age: 30 }] }
+];
+const kidParty = [...soloParty, { id: 'k', age: 6 }];
+const kidLine = dayLine(kidLodge, kidRooms);
+const kidRows = markedUp(kidLodge, kidRooms, kidParty, kidLine.pp);
+check('a marked-up child row is the selling child rate', kidRows.perChild.sell, 575);
+check('a marked-up contract with a child re-adds to the day line', rowsTotal(kidRows, 1), kidLine.sell);
+
+/* The exported per-person table turns the party's supplement bill and each
+   child's own price into one traveller's money. The column must add down to the
+   total per person, and that total times the heads must be the money the day
+   line charged — otherwise the document a client reads disagrees with the
+   invoice. */
+const kidHeads = perPersonHeadBreakdown(kidRows);
+check('the per-person table counts every traveller in the party', kidHeads.heads, 4);
+check('the per-person table has a row for sharing, the supplement and the child', kidHeads.rows.length, 3);
+check('the supplement row is the party bill spread over the heads', kidHeads.rows[1].incl, round2t(345 / 4));
+check('the child row prices one child above the sharing base', kidHeads.rows[2].each, 575 - 1035);
+check('the child row is that difference for every child, spread over the heads', kidHeads.rows[2].incl, round2t((575 - 1035) / 4));
+check('the per-person column adds down to the total per person',
+  kidHeads.total.incl, round2t(kidHeads.rows.reduce((sum, r) => sum + r.incl, 0)));
+check('the total per person times the heads is the money the day line charged',
+  round2t(kidHeads.total.incl * kidHeads.heads), kidLine.sell);
+check('a party with neither a single nor a child prints one row and no total split',
+  perPersonHeadBreakdown({ ...kidRows, hasSingle: false, hasChildren: false, perChild: null }).rows.length, 1);
+
+const tieredLodge = {
+  category: 'Accommodation',
+  item_rates: [{
+    ...plainRate, single_supplement: 200,
+    single_supplement_tiers: [{ singles: 1, supplement: 150 }]
+  }]
+};
+const tieredRooms = [{ allocatedTravellers: [{ id: 'a', age: 30 }] }];
+const tieredLine = dayLine(tieredLodge, tieredRooms);
+const tieredRows = markedUp(tieredLodge, tieredRooms, [{ id: 'a', age: 30 }], tieredLine.pp);
+check('a marked-up ladder supplement scales the library figure once', tieredRows.singleSupplement.sell, 172.5);
+check('a marked-up ladder contract re-adds to the day line', rowsTotal(tieredRows, 0), tieredLine.sell);
 
 /* ---------------- Package presentation ---------------- */
 const columns = presentationPricingColumns({

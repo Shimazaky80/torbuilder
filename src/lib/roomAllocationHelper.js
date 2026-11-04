@@ -5,8 +5,17 @@ import {
   singleSupplementForOrdinal
 } from './singleSupplement';
 import { roomTypesOf, soldRoomCapacity } from './roomTypes';
+import { rateForAllocatedRoom } from './roomTypePricing';
 import { isOccupancyTiered, occupancyRateForPax } from './occupancyPricing';
-import { staffRoomLadder, staffRoomRates, staffRateValue, hasStaffRate } from './staffRoomTiers';
+import {
+  crewLadderTiers,
+  hasStaffRate,
+  normaliseStaffTiers,
+  staffLadderStoppedReason,
+  staffRateValue,
+  staffRoomLadder,
+  staffRoomRates
+} from './staffRoomTiers';
 
 export const isAdultTraveller = (t) => {
   if (!t) return true;
@@ -290,6 +299,39 @@ export const childRateForAge = (rate, age, ageRanges = [], sharingBuy = 0) => {
   return { rate: null, known: false };
 };
 
+/* Everything one room's rate row says about price. Derived per row rather than
+   once per line, because a night can mix room types: the Family Suite and the
+   Standard Rooms beside it each bring their own single, sharing, extra-adult,
+   flat, occupancy and supplement-ladder figures. */
+const roomRateProfile = (rate) => {
+  const singlePrice = parseFloat(rate?.price_1_adult) || parseFloat(rate?.single_room_rate) || parseFloat(rate?.unit_price) || 0;
+  const sharingPrice = parseFloat(rate?.price_2_adults) || parseFloat(rate?.double_twin_rate) || singlePrice || 0;
+  const extraAdultPrice = parseFloat(rate?.price_3_plus_adults) > 0 ? parseFloat(rate?.price_3_plus_adults) : sharingPrice;
+  /* Flat room rate: unit_price is the room, price_1_adult / single_room_rate is
+     the single-room figure. Both are totals for the room, never per person. */
+  const isFlatRoom = String(rate?.rate_basis || '') === 'per_room';
+  const flatRoomPrice = parseFloat(rate?.unit_price) || parseFloat(rate?.double_twin_rate) || parseFloat(rate?.price_2_adults) || 0;
+  const flatSinglePrice = parseFloat(rate?.single_room_rate) || parseFloat(rate?.effective_single_rate) || parseFloat(rate?.price_1_adult) || flatRoomPrice;
+  /* A villa or apartment sold on an occupancy ladder: the room's own occupant
+     count picks the band and every head in it pays that figure. The adult columns,
+     the child bands and the single supplement are all inert on such a room, which
+     is why this branch sits ahead of every one of them. */
+  const occupancyPriced = isOccupancyTiered(rate);
+  const singleLadder = normaliseSingleSupplementLadder(rate);
+  return {
+    rate,
+    singlePrice,
+    sharingPrice,
+    extraAdultPrice,
+    isFlatRoom,
+    flatRoomPrice,
+    flatSinglePrice,
+    occupancyPriced,
+    singleLadder,
+    singleSuppBase: baseSingleSupplement(rate, sharingPrice, singlePrice)
+  };
+};
+
 /* Priced contractually from the Library item:
    - 1 guest alone in a room -> single room rate (an adult); a lone child uses
      the child rate when one is configured, else the single rate.
@@ -317,25 +359,32 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   const taxRate = defaultTaxRate;
   const ageRanges = item?.child_age_ranges || [];
 
-  const singlePrice = parseFloat(rate?.price_1_adult) || parseFloat(rate?.single_room_rate) || parseFloat(rate?.unit_price) || 0;
-  const sharingPrice = parseFloat(rate?.price_2_adults) || parseFloat(rate?.double_twin_rate) || singlePrice || 0;
-  const extraAdultPrice = parseFloat(rate?.price_3_plus_adults) > 0 ? parseFloat(rate?.price_3_plus_adults) : sharingPrice;
+  /* The line's own row prices every room that names no type of its own, and
+     every staff bed. A room the allocation types as another of the property's
+     rooms brings its own row, and so its own columns. */
+  const lineProfile = roomRateProfile(rate);
+  /* Tour leader and crew beds keep the LINE's own single figure: the property's
+     crew deal is negotiated on the room it sold, not on every room type. Guest
+     rooms price from their own type's row below. */
+  const { singlePrice } = lineProfile;
   /* Children in their own room: some properties charge the standard adult
      rates, others charge one single room rate for the whole children-only
      room. Absent or unknown values keep the legacy child band rates. */
   const ownRoomPolicy = String(item?.children_own_room_policy || item?.childrenOwnRoomPolicy || 'child_rates');
   const childrenAsAdults = ownRoomPolicy === 'adult_rates';
   const childrenSingleRoom = ownRoomPolicy === 'single_room_rate';
-  /* Flat room rate: unit_price is the room, price_1_adult / single_room_rate is
-     the single-room figure. Both are totals for the room, never per person. */
-  const isFlatRoom = String(rate?.rate_basis || '') === 'per_room';
-  const flatRoomPrice = parseFloat(rate?.unit_price) || parseFloat(rate?.double_twin_rate) || parseFloat(rate?.price_2_adults) || 0;
-  const flatSinglePrice = parseFloat(rate?.single_room_rate) || parseFloat(rate?.effective_single_rate) || parseFloat(rate?.price_1_adult) || flatRoomPrice;
-  /* A villa or apartment sold on an occupancy ladder: the room's own occupant
-     count picks the band and every head in it pays that figure. The adult columns,
-     the child bands and the single supplement are all inert on such a room, which
-     is why this branch sits ahead of every one of them. */
-  const occupancyPriced = isOccupancyTiered(rate);
+  /* Each typed room is profiled once per pricing run, and a room whose type has
+     no row in this line's season is refused rather than borrowed. */
+  const typedProfiles = new Map();
+  const profileForRoom = (rm) => {
+    const resolved = rateForAllocatedRoom(rate, rm);
+    /* A type with no row in this season prices nothing: the reason travels up
+       to the dialog, which refuses the allocation instead of charging R0. */
+    if (resolved.reason) return { profile: lineProfile, reason: resolved.reason, roomType: resolved.roomType };
+    if (!resolved.rate || resolved.rate === rate) return { profile: lineProfile, reason: '', roomType: resolved.roomType };
+    if (!typedProfiles.has(resolved.rate)) typedProfiles.set(resolved.rate, roomRateProfile(resolved.rate));
+    return { profile: typedProfiles.get(resolved.rate), reason: resolved.reason, roomType: resolved.roomType };
+  };
 
   // Tour Leader deal, priced off client rooms only. A season may carry a ladder
   // of thresholds (e.g. 10 client rooms -> 1 free TL room, 20 -> 2 free). Each
@@ -351,60 +400,47 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   const tlRateRaw = rate?.tour_leader_rate;
   const tlRateConfigured = tlRateRaw !== null && tlRateRaw !== undefined && tlRateRaw !== '';
   const tlRate = tlRateConfigured ? (parseFloat(tlRateRaw) || 0) : singlePrice;
-  const tlLadder = tlOffered
-    ? (Array.isArray(rate?.tour_leader_tiers) ? rate.tour_leader_tiers : [])
-        .filter((tier) => tier && tier.rate !== null && tier.rate !== undefined && tier.rate !== '' && Number.isFinite(Number(tier.rate)))
-        .map((tier) => ({
-          minRooms: Math.max(0, Math.round(Number(tier.minClientRooms ?? tier.min_rooms) || 0)),
-          rooms: Math.max(1, Math.floor(Number(tier.rooms) || 1)),
-          rate: Number(tier.rate)
-        }))
-        .sort((a, b) => a.minRooms - b.minRooms)
-    : [];
-  const tlTiers = tlOffered ? (tlLadder.length ? tlLadder : [{ minRooms: tlMinRooms, rooms: 1, rate: tlRate }]) : [];
+  const tlLadder = tlOffered ? normaliseStaffTiers(rate?.tour_leader_tiers) : [];
+  const tlTiers = tlOffered ? (tlLadder.length ? tlLadder : [{ minRooms: tlMinRooms, maxRooms: null, rooms: 1, rate: tlRate }]) : [];
   /* Rate for each included TL room, in room order. Rooms a threshold adds keep
      that threshold's rate; a tier that adds no room is a rate band over the
      rooms already included (1–10 client rooms @ 800, 11+ @ 650). */
   const tlIncludedRates = staffRoomRates(tlTiers, clientRooms);
   const tlFirstThreshold = tlTiers[0]?.minRooms ?? tlMinRooms;
   let tlRoomsCharged = 0;
-  /* Guide and driver room deals use the same ladder as the TL deal: a property
-     includes one or more guide / driver rooms once enough paying client rooms
-     are booked. Each party has its own rule; rooms beyond the allowance (or a
-     property that does not offer the deal) pay the normal single rate.
+  /* The crew rooms are one pool, not one per party: a property states "1
+     Driver-Guide room from 4 client rooms", meaning whichever of the guide and
+     the driver beds first takes that room, and the next crew bed pays the normal
+     single rate. So the ladder is one deal regardless of which column it was
+     typed into, and its flat figure is the guide rate, falling back to the
+     driver's where only that was entered.
 
      A configured flat rate or a stored ladder counts as offering the deal even
      when the older "guide & driver room offered" switch was never ticked, so
      existing contracts keep pricing as they did. */
   const guideDriverOffered = item?.guide_driver_room_offered === true || item?.guideDriverRoomOffered === true;
-  /* One threshold gates both parties: a property states "from N client rooms
-     the guide / driver room is released", not a separate rule per party. */
+  /* One threshold gates the whole pool: a property states "from N client rooms
+     the crew room is released", not a separate rule per party. */
   const staffMinRooms = Math.max(1, Number(item?.guide_min_rooms ?? item?.guideMinRooms) || 1);
-  const guideTiersRaw = rate?.guide_tiers ?? rate?.guideTiers;
-  const driverTiersRaw = rate?.driver_tiers ?? rate?.driverTiers;
-  const guideLadder = staffRoomLadder({
-    offered: guideDriverOffered || hasStaffRate(rate?.guide_rate ?? rate?.guideRate) || !!guideTiersRaw?.length,
-    tiers: guideTiersRaw,
+  const crewTiersRaw = crewLadderTiers(
+    rate?.guide_tiers ?? rate?.guideTiers,
+    rate?.driver_tiers ?? rate?.driverTiers
+  );
+  const crewFlatRaw = [rate?.guide_rate, rate?.guideRate, rate?.driver_rate, rate?.driverRate].find(hasStaffRate);
+  const crewLadder = staffRoomLadder({
+    offered: guideDriverOffered || hasStaffRate(crewFlatRaw) || crewTiersRaw.length > 0,
+    tiers: crewTiersRaw,
     minRooms: staffMinRooms,
-    rate: staffRateValue(rate?.guide_rate ?? rate?.guideRate, singlePrice)
+    rate: staffRateValue(crewFlatRaw, singlePrice)
   });
-  const guideIncludedRates = staffRoomRates(guideLadder, clientRooms);
-  const driverLadder = staffRoomLadder({
-    offered: guideDriverOffered || hasStaffRate(rate?.driver_rate ?? rate?.driverRate) || !!driverTiersRaw?.length,
-    tiers: driverTiersRaw,
-    minRooms: staffMinRooms,
-    rate: staffRateValue(rate?.driver_rate ?? rate?.driverRate, singlePrice)
-  });
-  const driverIncludedRates = staffRoomRates(driverLadder, clientRooms);
-  let guideRoomsCharged = 0;
-  let driverRoomsCharged = 0;
+  const crewIncludedRates = staffRoomRates(crewLadder, clientRooms);
+  let crewRoomsCharged = 0;
 
   /* Single-supplement ladder for this night. Ordinals count the paying-client
      single rooms in allocation order, so the first waived room is the one
      listed first. Flat rooms do not consume a slot (they are charged per room,
-     not per guest) and neither do staff / TL rooms. */
-  const singleLadder = normaliseSingleSupplementLadder(rate);
-  const singleSuppBase = baseSingleSupplement(rate, sharingPrice, singlePrice);
+     not per guest) and neither do staff / TL rooms. The ladder itself is each
+     room's own contract, so the line's figure is only the fallback. */
   let singleOrdinal = 0;
 
   let totalBuy = 0;
@@ -425,6 +461,10 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
 
     let roomBuy = 0;
     let rateDescription = '';
+    /* Which contract this room is priced from: its own room type's row when the
+       allocation types it as one of the property's other rooms, the line's row
+       for an untyped bed, a staff bed or the room the line was sold at. */
+    const { profile: p, reason: typeRefusal, roomType: typedAs } = profileForRoom(rm);
 
     if (occupants.length === 0) {
       roomBuy = 0;
@@ -439,41 +479,59 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
           ? `Tour Leader Room Rate: ${round2(includedRate).toFixed(2)} (TL room ${tlRoomsCharged} of ${included} included: ${clientRooms} client rooms booked)`
           : `Tour Leader Room Rate: ${round2(includedRate).toFixed(2)} (Threshold of ${tlFirstThreshold} client rooms met)`;
       } else {
+        const stopped = staffLadderStoppedReason(tlLadder, clientRooms, 'tour leader');
         roomBuy = singlePrice;
         rateDescription = tlIncludedRates.length
           ? `Tour Leader Single Rate: ${singlePrice.toFixed(2)} (TL allowance of ${tlIncludedRates.length} room(s) used: ${clientRooms} client rooms booked)`
-          : `Tour Leader Single Rate: ${singlePrice.toFixed(2)}${tlOffered ? ` (Threshold of ${tlFirstThreshold} client rooms not met: ${clientRooms} booked)` : ''}`;
+          : stopped
+            ? `Tour Leader Single Rate: ${singlePrice.toFixed(2)} (${stopped})`
+            : `Tour Leader Single Rate: ${singlePrice.toFixed(2)}${tlOffered ? ` (Threshold of ${tlFirstThreshold} client rooms not met: ${clientRooms} booked)` : ''}`;
       }
     } else if (isTourDriver || isTourGuide || isStaffRoom) {
       const staffNames = occupants.map((t) => t.name).filter(Boolean).join(', ') || 'Staff';
       const isDriverRoom = isTourDriver;
       const label = isDriverRoom ? 'Driver' : isTourGuide ? 'Guide' : 'Staff';
-      const ladder = isDriverRoom ? driverLadder : guideLadder;
-      const includedRates = isDriverRoom ? driverIncludedRates : guideIncludedRates;
-      const chargedAlready = isDriverRoom ? driverRoomsCharged : guideRoomsCharged;
-      const includedRate = includedRates[chargedAlready];
-      const firstThreshold = ladder[0]?.minRooms;
+      /* One ordinal for the whole pool, in the order the crew bed in: the first
+         takes the property's contracted crew room and the next pays single. */
+      const includedRate = crewIncludedRates[crewRoomsCharged];
 
       if (includedRate !== undefined) {
-        if (isDriverRoom) driverRoomsCharged += 1;
-        else if (isTourGuide) guideRoomsCharged += 1;
+        crewRoomsCharged += 1;
         roomBuy = includedRate;
-        rateDescription = includedRates.length > 1
-          ? `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (${label.toLowerCase()} room ${chargedAlready + 1} of ${includedRates.length} included: ${clientRooms} client rooms booked)`
-          : `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (Threshold of ${firstThreshold} client rooms met)`;
+        rateDescription = crewIncludedRates.length > 1
+          ? `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (crew room ${crewRoomsCharged} of ${crewIncludedRates.length} included: ${clientRooms} client rooms booked)`
+          : `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (Threshold of ${crewLadder[0]?.minRooms} client rooms met)`;
       } else {
+        const stopped = staffLadderStoppedReason(crewLadder, clientRooms);
+        const why = crewIncludedRates.length
+          ? `crew allowance of ${crewIncludedRates.length} room(s) used: ${clientRooms} client rooms booked`
+          : stopped
+            ? stopped
+            : crewLadder.length
+              ? `Threshold of ${crewLadder[0]?.minRooms} client rooms not met: ${clientRooms} booked`
+              : '';
         roomBuy = singlePrice;
-        rateDescription = includedRates.length
-          ? `${label} Single Rate (${staffNames}): ${singlePrice.toFixed(2)} (allowance of ${includedRates.length} ${label.toLowerCase()} room(s) used: ${clientRooms} client rooms booked)`
-          : ladder.length
-            ? `${label} Single Rate (${staffNames}): ${singlePrice.toFixed(2)} (Threshold of ${firstThreshold} client rooms not met: ${clientRooms} booked)`
-            : `${label} Single Rate (${staffNames}): ${singlePrice.toFixed(2)}`;
+        rateDescription = why
+          ? `${label} Single Rate (${staffNames}): ${singlePrice.toFixed(2)} (${why})`
+          : `${label} Single Rate (${staffNames}): ${singlePrice.toFixed(2)}`;
       }
-    } else if (occupancyPriced) {
+    } else if (typeRefusal) {
+      /* The room is typed as one this season does not price, so it is not a
+         cheaper room - it is a room this night cannot be housed in. It is
+         charged nothing and named beside the total. */
+      roomBuy = 0;
+      rateDescription = typeRefusal;
+      unpricedRooms.push({
+        roomId: rm.roomId || idx + 1,
+        occupants: occupants.length,
+        roomType: typedAs,
+        reason: `${rm.roomName || `Room ${idx + 1}`}${typedAs ? ` (${typedAs})` : ''} — ${typeRefusal}`
+      });
+    } else if (p.occupancyPriced) {
       /* The band is chosen by how many sleep in THIS room, not by how many adults
          answer to it: a villa holding one adult and two children is a 3 pax villa
          and all three pay the 3 pax figure. */
-      const perHead = occupancyRateForPax(rate, occupants.length);
+      const perHead = occupancyRateForPax(p.rate, occupants.length);
       if (perHead === null) {
         roomBuy = 0;
         rateDescription = `${occupants.length} Guests (not sold at ${occupants.length} pax)`;
@@ -488,56 +546,56 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
           ? `1 Guest (Occupancy Band: ${perHead.toFixed(2)} each)`
           : `${occupants.length} Guests (Occupancy Band: ${perHead.toFixed(2)} each = ${roomBuy.toFixed(2)})`;
       }
-    } else if (isFlatRoom) {
+    } else if (p.isFlatRoom) {
       /* One charge for the room: the single-room figure when a lone traveller
          has it to themselves, otherwise the flat room rate. */
       const alone = occupants.length === 1;
-      roomBuy = alone ? flatSinglePrice : flatRoomPrice;
+      roomBuy = alone ? p.flatSinglePrice : p.flatRoomPrice;
       rateDescription = alone
         ? `1 Guest (Flat Single Room Rate: ${round2(roomBuy).toFixed(2)})`
         : `${occupants.length} Guests (Flat Room Rate: ${round2(roomBuy).toFixed(2)})`;
     } else if (occupants.length === 1) {
       singleOrdinal += 1;
-      const ladderTop = singleLadder.length ? singleLadder[singleLadder.length - 1].singles : 0;
-      const onLadder = singleLadder.length > 0 && singleOrdinal <= ladderTop;
+      const ladderTop = p.singleLadder.length ? p.singleLadder[p.singleLadder.length - 1].singles : 0;
+      const onLadder = p.singleLadder.length > 0 && singleOrdinal <= ladderTop;
       const supplement = onLadder
-        ? singleSupplementForOrdinal(singleLadder, singleSuppBase, singleOrdinal)
-        : singleSuppBase;
-      const soloLadderPrice = sharingPrice + supplement;
+        ? singleSupplementForOrdinal(p.singleLadder, p.singleSuppBase, singleOrdinal)
+        : p.singleSuppBase;
+      const soloLadderPrice = p.sharingPrice + supplement;
       if (adults === 1 || childrenAsAdults) {
-        if (!singleLadder.length) {
-          roomBuy = singlePrice;
-          rateDescription = `1 Guest (Single Rate: ${singlePrice.toFixed(2)})`;
+        if (!p.singleLadder.length) {
+          roomBuy = p.singlePrice;
+          rateDescription = `1 Guest (Single Rate: ${p.singlePrice.toFixed(2)})`;
         } else if (onLadder && supplement === 0) {
-          roomBuy = sharingPrice;
-          rateDescription = `1 Guest (Single ${singleOrdinal} of ${ladderTop} waived: sharing rate ${round2(sharingPrice).toFixed(2)})`;
+          roomBuy = p.sharingPrice;
+          rateDescription = `1 Guest (Single ${singleOrdinal} of ${ladderTop} waived: sharing rate ${round2(p.sharingPrice).toFixed(2)})`;
         } else if (onLadder) {
           roomBuy = round2(soloLadderPrice);
-          rateDescription = `1 Guest (Single ${singleOrdinal} of ${ladderTop}: sharing ${round2(sharingPrice).toFixed(2)} + supplement ${round2(supplement).toFixed(2)})`;
+          rateDescription = `1 Guest (Single ${singleOrdinal} of ${ladderTop}: sharing ${round2(p.sharingPrice).toFixed(2)} + supplement ${round2(supplement).toFixed(2)})`;
         } else {
           roomBuy = round2(soloLadderPrice);
-          rateDescription = `1 Guest (Single ${singleOrdinal} beyond the ladder: sharing ${round2(sharingPrice).toFixed(2)} + supplement ${round2(supplement).toFixed(2)})`;
+          rateDescription = `1 Guest (Single ${singleOrdinal} beyond the ladder: sharing ${round2(p.sharingPrice).toFixed(2)} + supplement ${round2(supplement).toFixed(2)})`;
         }
       } else if (childrenSingleRoom) {
         /* The property charges one single room rate; the supplement ladder
            (a waiver on solo adults) does not discount it. The room still
            occupies a single slot for rooms priced after it. */
-        roomBuy = singlePrice;
+        roomBuy = p.singlePrice;
         rateDescription = `1 Child (Single Room Rate: ${round2(roomBuy).toFixed(2)})`;
       } else {
-        const soloChild = childRateForAge(rate, parseFloat(occupants[0].age), ageRanges, sharingPrice);
+        const soloChild = childRateForAge(p.rate, parseFloat(occupants[0].age), ageRanges, p.sharingPrice);
         if (soloChild.known) {
           roomBuy = soloChild.rate;
           rateDescription = `1 Child (Child Rate: ${soloChild.rate.toFixed(2)})`;
-        } else if (!singleLadder.length) {
-          roomBuy = singlePrice;
-          rateDescription = `1 Child (Single Rate: ${singlePrice.toFixed(2)})`;
+        } else if (!p.singleLadder.length) {
+          roomBuy = p.singlePrice;
+          rateDescription = `1 Child (Single Rate: ${p.singlePrice.toFixed(2)})`;
         } else if (onLadder && supplement === 0) {
-          roomBuy = sharingPrice;
-          rateDescription = `1 Child (Single ${singleOrdinal} of ${ladderTop} waived: sharing rate ${round2(sharingPrice).toFixed(2)})`;
+          roomBuy = p.sharingPrice;
+          rateDescription = `1 Child (Single ${singleOrdinal} of ${ladderTop} waived: sharing rate ${round2(p.sharingPrice).toFixed(2)})`;
         } else {
           roomBuy = round2(soloLadderPrice);
-          rateDescription = `1 Child (Single ${singleOrdinal}${onLadder ? ` of ${ladderTop}` : ' beyond the ladder'}: sharing ${round2(sharingPrice).toFixed(2)} + supplement ${round2(supplement).toFixed(2)})`;
+          rateDescription = `1 Child (Single ${singleOrdinal}${onLadder ? ` of ${ladderTop}` : ' beyond the ladder'}: sharing ${round2(p.sharingPrice).toFixed(2)} + supplement ${round2(supplement).toFixed(2)})`;
         }
       }
     } else if (adults === 0 && childrenAsAdults) {
@@ -545,25 +603,25 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
          two at the sharing rate, extras at the 3+ rate. */
       const baseChildren = Math.min(children, 2);
       const extraChildren = Math.max(0, children - 2);
-      roomBuy = baseChildren * sharingPrice + extraChildren * extraAdultPrice;
+      roomBuy = baseChildren * p.sharingPrice + extraChildren * p.extraAdultPrice;
       rateDescription = extraChildren > 0
-        ? `${baseChildren} Child(ren) (Adult Sharing Rate: ${sharingPrice.toFixed(2)}) + ${extraChildren} Extra Child(ren) (Adult Rate: ${extraAdultPrice.toFixed(2)})`
-        : `${baseChildren} Child(ren) (Adult Sharing Rate: ${sharingPrice.toFixed(2)} each)`;
+        ? `${baseChildren} Child(ren) (Adult Sharing Rate: ${p.sharingPrice.toFixed(2)}) + ${extraChildren} Extra Child(ren) (Adult Rate: ${p.extraAdultPrice.toFixed(2)})`
+        : `${baseChildren} Child(ren) (Adult Sharing Rate: ${p.sharingPrice.toFixed(2)} each)`;
     } else if (adults === 0 && childrenSingleRoom) {
       /* The property charges one single room rate for the whole children-only
          room, no matter how many children it holds. */
-      roomBuy = singlePrice;
+      roomBuy = p.singlePrice;
       rateDescription = `${children} Child(ren) (Single Room Rate: ${round2(roomBuy).toFixed(2)})`;
     } else {
       const baseAdults = Math.min(adults, 2);
       const extraAdults = Math.max(0, adults - 2);
-      const adultCost = baseAdults * sharingPrice + extraAdults * extraAdultPrice;
+      const adultCost = baseAdults * p.sharingPrice + extraAdults * p.extraAdultPrice;
 
       let childCost = 0;
       const childRates = [];
       occupants.filter((t) => !isAdultTraveller(t)).forEach((t) => {
-        const child = childRateForAge(rate, parseFloat(t.age), ageRanges, sharingPrice);
-        const rateForChild = child.known ? child.rate : sharingPrice;
+        const child = childRateForAge(p.rate, parseFloat(t.age), ageRanges, p.sharingPrice);
+        const rateForChild = child.known ? child.rate : p.sharingPrice;
         childCost += rateForChild;
         childRates.push(rateForChild);
       });
@@ -572,9 +630,9 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
       const parts = [];
       if (adults > 0) {
         if (extraAdults > 0) {
-          parts.push(`${baseAdults} Adult(s) x ${sharingPrice.toFixed(2)} + ${extraAdults} Extra Adult(s) x ${extraAdultPrice.toFixed(2)}`);
+          parts.push(`${baseAdults} Adult(s) x ${p.sharingPrice.toFixed(2)} + ${extraAdults} Extra Adult(s) x ${p.extraAdultPrice.toFixed(2)}`);
         } else {
-          parts.push(`${adults} Adult(s) x ${sharingPrice.toFixed(2)}`);
+          parts.push(`${adults} Adult(s) x ${p.sharingPrice.toFixed(2)}`);
         }
       }
       if (children > 0) {

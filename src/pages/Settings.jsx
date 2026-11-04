@@ -26,8 +26,13 @@ import {
   Eye,
   Compass,
   Truck,
-  AlertTriangle
+  AlertTriangle,
+  Globe
 } from 'lucide-react';
+import LanguageText from '../components/LanguageText';
+import { LANGUAGES, SOURCE_LANGUAGE, enabledLanguageCodes, textI18nPayload, translationsOf } from '../lib/i18n';
+import { documentLanguagesColumn, textI18nColumn } from '../lib/i18n/textI18nColumn';
+import { refreshTenantLanguages } from '../lib/i18n/useTenantLanguages';
 
 /* The stable key written into a rate row's price map. Derived once when a vehicle type
    is created and never recomputed, so renaming "Quantum (10)" cannot silently re-key
@@ -265,6 +270,8 @@ export const Settings = () => {
     itinerary_include_default_inclusions: true,
     itinerary_exclusions: '',
     itinerary_exclusions_position: 'under_day_by_day',
+    text_i18n: null,
+    document_languages: ['en'],
     contact_email: '',
     contact_tel: '',
     contact_cell: '',
@@ -339,6 +346,8 @@ export const Settings = () => {
         itinerary_include_default_inclusions: data.itinerary_include_default_inclusions !== false,
         itinerary_exclusions: data.itinerary_exclusions || '',
         itinerary_exclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(data.itinerary_exclusions_position) ? data.itinerary_exclusions_position : 'under_day_by_day',
+        text_i18n: translationsOf(data),
+        document_languages: enabledLanguageCodes(data.document_languages),
         contact_email: data.contact_email || '',
         contact_tel: data.contact_tel || '',
         contact_cell: data.contact_cell || '',
@@ -742,10 +751,22 @@ export const Settings = () => {
     }
     setSaving(true);
     try {
+      /* Both columns 20261251 adds are probed before they are written. PostgREST
+         rejects a whole upsert that names a missing column, so an un-migrated
+         tenant would fail every settings save on an "unknown column" error
+         instead of this one - and a refused save is told to the operator rather
+         than reported as saved, because their words were not stored. */
+      if (payload.document_languages !== undefined && !(await documentLanguagesColumn())) {
+        throw new Error('Apply migration 20261251_multilingual_content_descriptions.sql before saving document languages.');
+      }
+      if (payload.text_i18n !== undefined && !(await textI18nColumn('company_billing_settings'))) {
+        throw new Error('Apply migration 20261251_multilingual_content_descriptions.sql before saving translated text.');
+      }
       const { error } = await supabase
         .from('company_billing_settings')
         .upsert({ company_id: cid, ...payload }, { onConflict: 'company_id' });
       if (error) throw error;
+      if (payload.document_languages !== undefined) await refreshTenantLanguages();
       return true;
     } catch (err) {
       showToast(err.message || 'Failed to save billing settings', 'error');
@@ -878,6 +899,10 @@ const handleSavePriceProtection = async () => {
   };
 
   const handleSaveItinerarySettings = async () => {
+    /* The translation column is only sent once the tenant has switched a second
+       language on. An English-only tenant has nothing to store, so its saves
+       stay exactly what they were before this column existed. */
+    const multiLanguage = (billing.document_languages || [SOURCE_LANGUAGE]).length > 1;
     const ok = await saveBillingFields({
       itinerary_pricing_position: ['above', 'below'].includes(billing.itinerary_pricing_position) ? billing.itinerary_pricing_position : 'above',
       itinerary_terms: billing.itinerary_terms || '',
@@ -886,9 +911,26 @@ const handleSavePriceProtection = async () => {
       itinerary_inclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(billing.itinerary_inclusions_position) ? billing.itinerary_inclusions_position : 'under_day_by_day',
       itinerary_include_default_inclusions: billing.itinerary_include_default_inclusions === true,
       itinerary_exclusions: billing.itinerary_exclusions || '',
-      itinerary_exclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(billing.itinerary_exclusions_position) ? billing.itinerary_exclusions_position : 'under_day_by_day'
+      itinerary_exclusions_position: ['under_day_by_day', 'before_pricing', 'after_pricing'].includes(billing.itinerary_exclusions_position) ? billing.itinerary_exclusions_position : 'under_day_by_day',
+      ...textI18nPayload(multiLanguage, billing.text_i18n)
     });
     if (ok) showToast('Itinerary presentation saved', 'success');
+  };
+
+  const toggleDocumentLanguage = (code) => {
+    const current = enabledLanguageCodes(billing.document_languages);
+    const next = current.includes(code)
+      ? current.filter((entry) => entry !== code)
+      : [...current, code];
+    setBilling({ ...billing, document_languages: enabledLanguageCodes(next) });
+  };
+
+  const handleSaveDocumentLanguages = async () => {
+    const ok = await saveBillingFields({ document_languages: enabledLanguageCodes(billing.document_languages) });
+    if (ok) {
+      setBilling({ ...billing, document_languages: enabledLanguageCodes(billing.document_languages) });
+      showToast('Document languages saved', 'success');
+    }
   };
 
   const openAddBank = () => {
@@ -1478,16 +1520,11 @@ const handleSavePriceProtection = async () => {
               When on, each service line also shows its supplier beneath the description. When off, only the service description appears — accommodation always shows its supplier so clients can see who quotes the room.
             </p>
           </div>
-          <div className="sidebar-field">
-            <label>Price breakdown</label>
-            <SearchableSelect className="sidebar-select" style={fieldStyle} value={billing.pricing_breakdown_mode} onChange={(e) => setBilling({ ...billing, pricing_breakdown_mode: e.target.value })}>
-              <option value="daily">Service per day (detailed)</option>
-              <option value="per_person">Total per person (summary)</option>
-            </SearchableSelect>
-            <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
-              Daily shows every service across the days. Per person shows the price per person sharing, adds a single supplement when a traveller occupies a single room, and a per-child figure when children travel.
-            </p>
-          </div>
+          {/* The price breakdown is no longer a company-wide setting. Whether a
+              document is priced day by day or per person is a question about the
+              document, so the Export dialog answers it each time. The stored
+              billing.pricing_breakdown_mode field still drives tax invoices, which
+              are not exported from here. */}
           <div className="sidebar-field">
             <label>Pricing Protection (%)</label>
             <input
@@ -1599,6 +1636,45 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
+      {/* Document languages */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Globe size={18} color="#0d7478" /> Document Languages
+          </h2>
+          <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            English is what content is typed in. Switch on a language here to get a translation box beside every description, and a language choice when a document is exported.
+          </p>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+          {LANGUAGES.filter((entry) => !entry.source).map((entry) => {
+            const on = enabledLanguageCodes(billing.document_languages).includes(entry.code);
+            return (
+              <div key={entry.code} style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                <input
+                  type="checkbox"
+                  id={`document-language-${entry.code}`}
+                  checked={on}
+                  onChange={() => toggleDocumentLanguage(entry.code)}
+                  style={{ width: '16px', height: '16px', accentColor: '#0d7478', cursor: 'pointer' }}
+                />
+                <label htmlFor={`document-language-${entry.code}`} style={{ fontSize: '0.85rem', color: '#334155', cursor: 'pointer' }}>
+                  {entry.label}
+                </label>
+              </div>
+            );
+          })}
+        </div>
+        <p style={{ margin: '0.7rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
+          A line with no version in the exported language prints in English, so a part-translated document still goes out complete. Money and dates follow the language of the document.
+        </p>
+        <div style={{ marginTop: '1rem' }}>
+          <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving} onClick={handleSaveDocumentLanguages}>
+            <Check size={16} /> {saving ? 'Saving...' : 'Save Document Languages'}
+          </button>
+        </div>
+      </div>
+
       {/* Itinerary presentation */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
@@ -1624,11 +1700,15 @@ const handleSavePriceProtection = async () => {
 
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
           <label>Terms &amp; Conditions</label>
-          <textarea
-            className="sidebar-select"
-            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
+          <LanguageText
+            field="itinerary_terms"
+            languages={billing.document_languages}
+            translations={billing.text_i18n}
             value={billing.itinerary_terms}
-            onChange={(e) => setBilling({ ...billing, itinerary_terms: e.target.value })}
+            onChange={(v) => setBilling({ ...billing, itinerary_terms: v })}
+            onTranslationsChange={(next) => setBilling({ ...billing, text_i18n: next })}
+            inputClassName="sidebar-select"
+            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
             placeholder="Booking terms, cancellation policy, payment terms..."
           />
           <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
@@ -1660,11 +1740,15 @@ const handleSavePriceProtection = async () => {
               Include the default inclusions text below on the itinerary
             </label>
           </div>
-          <textarea
-            className="sidebar-select"
-            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
+          <LanguageText
+            field="itinerary_inclusions"
+            languages={billing.document_languages}
+            translations={billing.text_i18n}
             value={billing.itinerary_inclusions}
-            onChange={(e) => setBilling({ ...billing, itinerary_inclusions: e.target.value })}
+            onChange={(v) => setBilling({ ...billing, itinerary_inclusions: v })}
+            onTranslationsChange={(next) => setBilling({ ...billing, text_i18n: next })}
+            inputClassName="sidebar-select"
+            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
             placeholder="General inclusions applied to every itinerary..."
           />
           <p style={{ margin: '0.25rem 0 0', color: '#94a3b8', fontSize: '0.74rem', lineHeight: 1.4 }}>
@@ -1682,11 +1766,15 @@ const handleSavePriceProtection = async () => {
 
         <div className="sidebar-field" style={{ marginTop: '1rem' }}>
           <label>Exclusions</label>
-          <textarea
-            className="sidebar-select"
-            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
+          <LanguageText
+            field="itinerary_exclusions"
+            languages={billing.document_languages}
+            translations={billing.text_i18n}
             value={billing.itinerary_exclusions}
-            onChange={(e) => setBilling({ ...billing, itinerary_exclusions: e.target.value })}
+            onChange={(v) => setBilling({ ...billing, itinerary_exclusions: v })}
+            onTranslationsChange={(next) => setBilling({ ...billing, text_i18n: next })}
+            inputClassName="sidebar-select"
+            style={{ ...fieldStyle, minHeight: '96px', resize: 'vertical' }}
             placeholder="What is not included..."
           />
         </div>

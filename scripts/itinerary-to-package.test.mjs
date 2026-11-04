@@ -152,8 +152,11 @@ check('unresolved item keeps its cost', handWritten.unit_cost, 12.5);
 check('unresolved item carries a season stub', handWritten.rate_snapshot.valid_from, '2026-11-01');
 check('optional line stays optional', handWritten.is_included, false);
 
-/* A protected line snapshots the uplifted season, exactly as the itinerary
-   priced it, so the package does not silently drop Pricing Protection. */
+/* A line carrying a percentage while the library holds a season that covers the
+   package dates loses it on the way across. Pricing Protection only ever stands
+   in for a season that is missing; a season that matches the dates IS the
+   contract figure, so the package takes it whole rather than inflating it a
+   second time. The reloaded case below is the one where protection is right. */
 const protectedLine = {
   itemId: 'hotel', name: 'Lodge', category: 'Accommodation',
   currencyCode: 'ZAR', basis: 'per_person_sharing', buyPP: 800,
@@ -167,8 +170,8 @@ const protectedPackage = buildItineraryPackage({
   travelWindow,
   currencyCode: 'ZAR'
 });
-check('protected snapshot scaled', protectedPackage.days[0].items[0].rate_snapshot.price_1_adult, 880);
-check('protection percent kept', protectedPackage.days[0].items[0].price_protection_percent, 10);
+check('a covering season crosses at the contract figure', protectedPackage.days[0].items[0].rate_snapshot.price_1_adult, 800);
+check('a covering season crosses with no protection stamp', protectedPackage.days[0].items[0].price_protection_percent, 0);
 
 /* A reloaded line keeps the protection percent but not the season's name. The
    closest prior season must be found from the library and uplifted, so the

@@ -60,7 +60,7 @@ export const rateCoversNights = (rate, nights) => {
 /* The rows that describe the same thing as `rate` apart from the night band:
    same currency, same season window and same charge type. Bands are only
    compared inside a family, because a half-board row never prices a B&B stay. */
-const sameRateFamily = (a, b) => {
+export const sameRateFamily = (a, b) => {
   const wa = rateWindow(a);
   const wb = rateWindow(b);
   return String(a?.currency || '').toUpperCase() === String(b?.currency || '').toUpperCase()

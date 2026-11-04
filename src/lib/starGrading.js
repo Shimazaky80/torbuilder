@@ -26,9 +26,11 @@ export const starLabel = (value) => {
 };
 
 /* "Hotel X (4-star)" — the property name as every travel document prints it,
-   unchanged when the hotel is ungraded. */
-export const withStarGrade = (name, value) => {
-  const label = starLabel(value);
+   unchanged when the hotel is ungraded. A document written in another language
+   passes its own grade wording, because "(4-star)" is this app's words, not the
+   hotel's name. */
+export const withStarGrade = (name, value, gradeLabel = starLabel(value)) => {
+  const label = String(gradeLabel ?? '').trim();
   const text = String(name ?? '').trim();
   return label ? `${text} (${label})` : text;
 };

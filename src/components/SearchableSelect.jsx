@@ -23,6 +23,7 @@ export default function SearchableSelect({
   name,
   title,
   id,
+  allowFreeText = false,
   'aria-label': ariaLabel,
   ...inputProps
 }) {
@@ -38,14 +39,33 @@ export default function SearchableSelect({
       value: String(child.props.value ?? textOf(child.props.children)),
       label: child.props.children,
       text: textOf(child.props.children),
+      search: String(child.props['data-search'] ?? ''),
       disabled: Boolean(child.props.disabled),
       key: child.key ?? String(child.props.value ?? textOf(child.props.children))
     })), [children]);
   const selected = options.find((option) => option.value === selectedValue);
   const filtered = useMemo(() => {
     const q = query.trim().toLocaleLowerCase();
-    return options.filter((option) => !q || option.text.toLocaleLowerCase().includes(q) || option.value.toLocaleLowerCase().includes(q));
-  }, [options, query]);
+    const matches = options.filter((option) => !q
+      || option.text.toLocaleLowerCase().includes(q)
+      || option.value.toLocaleLowerCase().includes(q)
+      || option.search.toLocaleLowerCase().includes(q));
+    /* A place list can never hold every desk a hire actually starts at, so an
+       opted-in field offers the typed text back as a choice instead of refusing
+       it. Clicking or pressing Enter then commits exactly what was typed. */
+    const typed = query.trim();
+    if (allowFreeText && typed && !matches.some((option) => option.value === typed)) {
+      return [...matches, {
+        value: typed,
+        label: <>Use &ldquo;{typed}&rdquo; &mdash; not on the list</>,
+        text: typed,
+        search: '',
+        disabled: false,
+        key: '__free_text__'
+      }];
+    }
+    return matches;
+  }, [options, query, allowFreeText]);
 
   useEffect(() => {
     const onDocumentMouseDown = (event) => {

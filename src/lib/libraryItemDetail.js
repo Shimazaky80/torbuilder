@@ -20,6 +20,7 @@ import {
   UNIT_BASES,
   isSurchargeChargeable,
   isSurchargeItem,
+  feeUsesLevyColumns,
   surchargeBasisOf,
   surchargeTypeOf,
   surchargeUnitBasisOf
@@ -27,8 +28,9 @@ import {
 import { normaliseSingleSupplementLadder, stripWaiverNote, waiverFromLadder } from './singleSupplement';
 import { collapseOccupancyLadder, isOccupancyBasis, isOccupancyTiered } from './occupancyPricing';
 import { nightBandLabel, weekendDaysLabel, weekendPriceOf } from './accommodationOptions';
-import { normaliseStaffTiers, staffTierBands } from './staffRoomTiers';
+import { crewLadderTiers, normaliseStaffTiers, staffTierBands } from './staffRoomTiers';
 import { starGlyphs } from './starGrading';
+import { carRentalGroups } from './carRentalPricing';
 
 /* The destination an item is picked by: the region (for a property, the city its
    supplier is in) narrowed by its area. `location` is the older single field and
@@ -451,30 +453,31 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
 
   if (kind === 'surcharge') {
     const unit = surchargeUnitBasisOf(item);
-    if (surchargeTypeOf(item) === 'conservation_levy') {
+    /* The flat bases buy a thing, not a head, so they print that one figure and
+       no ladder beside it. A vehicle is a vehicle whoever quotes it: the same
+       column serves an entrance fee, a ticket and a levy. */
+    if (unit === 'per_vehicle') {
+      if (priced(rate.entrance_fee_per_vehicle)) push('Per vehicle', money(rate.entrance_fee_per_vehicle));
+    } else if (unit === 'per_unit') {
+      if (priced(rate.unit_price)) push('Per unit', money(rate.unit_price));
+    } else if (feeUsesLevyColumns(item)) {
       const adult = firstPriced([rate.conservation_levy_per_adult, rate.conservation_levy_adult]);
       const child = firstPriced([rate.conservation_levy_per_child, rate.conservation_levy_child]);
       if (priced(adult)) {
-        const adultOnly = priced(child) || unit === 'per_child' || unit === 'per_adult';
-        push(!adultOnly && unit === 'per_person' ? 'Per person' : unit === 'per_unit' ? 'Per unit' : 'Per adult', money(adult));
+        const adultOnly = priced(child) || unit === 'per_adult';
+        push(!adultOnly && unit === 'per_person' ? 'Per person' : 'Per adult', money(adult));
       }
       if (priced(child)) push('Per child', money(child));
+      if (priced(rate.guide_rate)) push("Guide's place", money(rate.guide_rate));
     } else {
       if (priced(rate.entrance_fee_per_person)) {
-        push(unit === 'per_unit' ? 'Per unit' : unit === 'per_adult' ? 'Per adult' : 'Per person', money(rate.entrance_fee_per_person));
+        push(unit === 'per_adult' ? 'Per adult' : 'Per person', money(rate.entrance_fee_per_person));
       }
       /* An entrance fee with a child figure is one the park splits by age; with
          none, a child walks in on the visitor price and there is nothing to
          print. */
-      if (priced(rate.entrance_fee_per_child) && unit !== 'per_unit' && unit !== 'per_vehicle') {
-        push('Per child', money(rate.entrance_fee_per_child));
-      }
-      if (priced(rate.entrance_fee_per_vehicle)) push('Per vehicle', money(rate.entrance_fee_per_vehicle));
-    }
-    /* The crew place at the gate, on either fee type, whenever the contract
-       gives one a price of its own. */
-    if (priced(rate.guide_rate) && unit !== 'per_unit' && unit !== 'per_vehicle') {
-      push("Guide's place", money(rate.guide_rate));
+      if (priced(rate.entrance_fee_per_child)) push('Per child', money(rate.entrance_fee_per_child));
+      if (priced(rate.guide_rate)) push("Guide's place", money(rate.guide_rate));
     }
   }
 
@@ -516,10 +519,15 @@ const ladderRows = ({ label, ladder, roomLabel, meals, money }) => staffTierBand
   };
 });
 
-const staffTierRows = (label, tiers, meals, money) => ladderRows({
-  label,
+/* A property contracts ONE pool of crew rooms — its rate card reads
+   "Driver-Guide room", meaning whichever of the guide and the driver beds first
+   takes it — so the card states the rule once instead of a deal per party. The
+   meal plans stay per person, so they are named together and only split out when
+   the property feeds the two differently. */
+const crewRows = ({ tiers, meals, money }) => ladderRows({
+  label: 'Driver-Guide',
   ladder: tiers,
-  roomLabel: `${label.toLowerCase()} room`,
+  roomLabel: 'crew room',
   meals,
   money
 });
@@ -562,38 +570,32 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
        missing rate reads as "charge the single rate". */
     const tlConfigured = has(rate.tour_leader_rate);
     const tlTiers = normaliseStaffTiers(rate.tour_leader_tiers);
-    /* Guide and driver have their own ladders, mirroring the TL deal. */
-    const guideTiers = normaliseStaffTiers(rate.guide_tiers);
-    const driverTiers = normaliseStaffTiers(rate.driver_tiers);
-    if (priced(rate.guide_rate) || priced(rate.driver_rate) || item.guide_driver_room_offered || guideTiers.length || driverTiers.length || tlConfigured || item.tour_leader_room_offered) {
+    /* One pool, one rule: the crew ladder a property typed into either column. */
+    const crewTiers = crewLadderTiers(rate.guide_tiers, rate.driver_tiers);
+    if (priced(rate.guide_rate) || priced(rate.driver_rate) || item.guide_driver_room_offered || crewTiers.length || tlConfigured || item.tour_leader_room_offered) {
       const rows = [];
-      if (guideTiers.length) {
-        rows.push(...staffTierRows('Guide', guideTiers, guideMeals, money));
-      } else if (priced(rate.guide_rate) || item.guide_driver_room_offered) {
-        /* The guide bed follows the same contract shape as the TL deal: the
-           property's guide rate only applies once its minimum client rooms are
+      const crewMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
+      /* The pool is one deal, so the guide figure heads it and the driver figure
+         stands in only where the guide box was left blank. A blank pair means the
+         property beds crew at its own single rate. */
+      const crewConfigured = priced(rate.guide_rate) || priced(rate.driver_rate);
+      const crewHeadline = firstPriced([rate.guide_rate, rate.driver_rate]);
+      const crewSingle = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
+      const crewMealNote = !guideMeals ? '' : (guideMeals === driverMeals ? guideMeals : `${guideMeals} guide \u00b7 ${driverMeals} driver`);
+      if (crewTiers.length) {
+        rows.push(...crewRows({ tiers: crewTiers, meals: crewMealNote, money }));
+      } else if (crewConfigured || item.guide_driver_room_offered) {
+        /* The crew bed follows the same contract shape as the TL deal: the
+           property's crew rate only applies once its minimum client rooms are
            booked, and a blank rate falls back to the single rate. Print both the
            threshold and the figure actually charged instead of a dash. */
-        const guideMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
-        const guideConfigured = priced(rate.guide_rate);
-        const guideSingle = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
-        const guideHeadline = guideConfigured ? rate.guide_rate : guideSingle;
-        const guideLabel = guideConfigured
-          ? (guideMinRooms > 1 ? `Guide (from ${guideMinRooms} client rooms)` : 'Guide')
-          : (guideMinRooms > 1 ? `Guide (single rate until ${guideMinRooms} client rooms)` : 'Guide (single rate)');
-        rows.push({ label: guideLabel, value: `${guideHeadline !== null ? money(guideHeadline) : '\u2014'}${guideMeals ? ` \u00b7 ${guideMeals}` : ''}` });
-      }
-      if (driverTiers.length) {
-        rows.push(...staffTierRows('Driver', driverTiers, driverMeals, money));
-      } else if (priced(rate.driver_rate) || item.guide_driver_room_offered) {
-        const driverMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
-        const driverConfigured = priced(rate.driver_rate);
-        const driverSingle = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
-        const driverHeadline = driverConfigured ? rate.driver_rate : driverSingle;
-        const driverLabel = driverConfigured
-          ? (driverMinRooms > 1 ? `Driver (from ${driverMinRooms} client rooms)` : 'Driver')
-          : (driverMinRooms > 1 ? `Driver (single rate until ${driverMinRooms} client rooms)` : 'Driver (single rate)');
-        rows.push({ label: driverLabel, value: `${driverHeadline !== null ? money(driverHeadline) : '\u2014'}${driverMeals ? ` \u00b7 ${driverMeals}` : ''}` });
+        const charged = crewConfigured ? crewHeadline : crewSingle;
+        rows.push({
+          label: `Driver-Guide${crewConfigured
+            ? (crewMinRooms > 1 ? ` (from ${crewMinRooms} client rooms)` : '')
+            : ` (single rate${crewMinRooms > 1 ? ` until ${crewMinRooms} client rooms` : ''})`}`,
+          value: `${charged !== null ? money(charged) : '\u2014'}${crewMealNote ? ` \u00b7 ${crewMealNote}` : ''}`
+        });
       }
       if (tlConfigured || item.tour_leader_room_offered || tlTiers.length) {
         const boardSuffix = board ? ` \u00b7 ${board}` : '';
@@ -663,19 +665,27 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
   };
 };
 
-const carRentalCard = (group, index, money) => ({
-  key: group.key || `car-${index}`,
-  title: [group.vehicle_group, group.vehicle_name].filter(Boolean).join(' \u00b7 ') || 'Vehicle',
-  chips: [
-    group.rate_code,
-    group.kms_unlimited !== false ? 'Unlimited km' : `${group.kms_included || 0} km included`,
-    group.valid_from || group.valid_to ? `${group.valid_from || 'open'}\u2013${group.valid_to || 'open'}` : null
-  ].filter(Boolean),
-  rows: group.ranges.map((range) => ({
-    label: `${range.min_days ?? '?'}\u2013${range.max_days ?? '\u221e'} days`,
-    value: `${money(range.price)} / vehicle`
-  }))
-});
+/* A vehicle group is one card, and the card prints the tariff seasons the group
+   is actually sold across. With one window the bands carry just their day range,
+   as they always did; with several, every band names the window it belongs to,
+   because two ladders for the same car are only two ladders if you can tell which
+   weeks each one speaks for. */
+const carRentalCard = (group, index, money) => {
+  const many = group.seasons.length > 1;
+  return {
+    key: group.key || `car-${index}`,
+    title: [group.vehicleGroup, group.vehicleName].filter(Boolean).join(' \u00b7 ') || 'Vehicle',
+    chips: [
+      group.rateCode,
+      group.kmsUnlimited !== false ? 'Unlimited km' : `${group.kmsIncluded || 0} km included`,
+      many ? `${group.seasons.length} rental price seasons` : group.seasons[0]?.windowLabel
+    ].filter(Boolean),
+    rows: group.seasons.flatMap((season) => season.bands.map((band) => ({
+      label: `${many ? `${season.windowLabel} \u00b7 ` : ''}${band.minDays}\u2013${band.maxDays === null ? '\u221e' : band.maxDays} days`,
+      value: `${money(band.price)} / vehicle`
+    })))
+  };
+};
 
 export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
   const kind = libraryItemKind(item.category);
@@ -683,23 +693,13 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
   const money = makeMoney(currency);
   const bands = Array.isArray(item.child_age_ranges) ? item.child_age_ranges : [];
   const rates = Array.isArray(item.item_rates) ? item.item_rates : [];
-  const carRates = Array.isArray(item.car_rental_rates) ? item.car_rental_rates : [];
   const vehicleName = (code) =>
     vehicleTypes.find((type) => String(type.id ?? type.code) === String(code))?.name || code;
 
-  const carGroups = (() => {
-    const seen = {};
-    const groups = [];
-    carRates.forEach((rate) => {
-      const key = `${rate.vehicle_group || ''}|${rate.vehicle_name || ''}|${rate.rate_code || ''}`;
-      if (!seen[key]) {
-        seen[key] = { key, ...rate, ranges: [] };
-        groups.push(seen[key]);
-      }
-      seen[key].ranges.push(rate);
-    });
-    return groups;
-  })();
+  /* Folded by the same engine that prices a hire, so the card and the drop dialog
+     describe the same contract: groups, the seasons each group is sold across, and
+     the ladder inside each season. */
+  const carGroups = carRentalGroups(item);
 
   const seasons = rates.map((rate, index) => seasonCard({ item, rate, index, kind, money, bands, vehicleName }));
 

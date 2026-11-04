@@ -22,6 +22,8 @@ import {
   withRoomCapacity
 } from '../src/lib/roomAllocationHelper.js';
 import { roomTypesOf, soldRoomCapacity } from '../src/lib/roomTypes.js';
+import { rateForAllocatedRoom, withRoomTypeRates } from '../src/lib/roomTypePricing.js';
+import { computePerPersonRows, perPersonHeadBreakdown } from '../src/lib/perPersonPricing.js';
 
 let failures = 0;
 const check = (label, actual, expected) => {
@@ -641,6 +643,82 @@ const adultsOnlyModalHtml = renderModal({
 });
 check('a room typed zero children says so', adultsOnlyModalHtml.includes('Contract Capacity: adults only · 2 pax / Room'), true);
 
+/* A night can mix the property's room types, so every room card carries its own
+   type picker and sizes itself on that type's beds. One room type leaves nothing
+   to choose, and the line's sold type already says what the rooms are. */
+const suiteRoom = {
+  id: 'room-suite',
+  name: 'Family Suite',
+  max_occupancy: 4,
+  max_adults: 3,
+  max_children: 2
+};
+const mixedProperty = {
+  ...accommodation('davinci-mixed', { item_rates: [] }),
+  name: 'DaVinci Hotel',
+  roomType: 'Standard Room',
+  maxOccupancy: 3,
+  maxAdults: 2,
+  maxChildren: 1,
+  room_types: [bayRoom, suiteRoom]
+};
+const pickerHtml = renderModal({
+  item: {
+    ...mixedProperty,
+    roomAllocations: [
+      { roomId: 1, allocatedTravellers: [travellers[0]] },
+      { roomId: 2, roomType: 'Family Suite', roomTypeId: 'room-suite', allocatedTravellers: [travellers[1]] }
+    ]
+  }
+});
+check('each room card offers the property room types', pickerHtml.includes('room-alloc-type-select'), true);
+check('the picker lists both room types', pickerHtml.includes('<option value="Family Suite">Family Suite</option>')
+  && pickerHtml.includes('<option value="Standard Room">Standard Room</option>'), true);
+const selectedTypeFor = (roomId) => {
+  const card = pickerHtml.match(new RegExp(`aria-label="Room type for Room ${roomId}".*?</select>`, 's'));
+  const chosen = card && card[0].match(/<option value="([^"]*)" selected/g);
+  return chosen ? chosen[0].replace(/^.*value="|".*$/g, '') : '';
+};
+check('a room with no type of its own is shown as the room the line sold',
+  selectedTypeFor(1), 'Standard Room');
+check('a room carries the type the allocation named',
+  selectedTypeFor(2), 'Family Suite');
+check('the picker replaces the flat room-type caption when there is a choice',
+  pickerHtml.includes('room-alloc-type-label'), true);
+check('a mixed night is not sized on one flat capacity',
+  pickerHtml.includes('Max Standard Room / Family Suite per Room'), false);
+check('the dialog stops claiming one capacity for every room',
+  pickerHtml.includes('Each room is typed below'), true);
+
+const singleTypeHtml = renderModal({
+  item: {
+    ...accommodation('davinci-one', { item_rates: [] }),
+    name: 'DaVinci Hotel',
+    roomType: 'Standard Room',
+    room_types: [bayRoom],
+    roomAllocations: [{ roomId: 1, allocatedTravellers: [travellers[0]] }]
+  }
+});
+check('a one-room-type property gets no picker', singleTypeHtml.includes('room-alloc-type-select'), false);
+check('a one-room-type property still names the room on the card',
+  singleTypeHtml.includes('Standard Room'), true);
+
+/* A crew room is marked by its role, and that marker drives its pricing - the
+   picker must never offer to rename it or overwrite it. */
+const crewHtml = renderModal({
+  item: {
+    ...mixedProperty,
+    roomAllocations: [
+      { roomId: 1, allocatedTravellers: [travellers[0]] },
+      { roomId: 2, roomType: 'staff', staffRole: 'tour_guide', allocatedTravellers: [{ id: 'g1', name: 'Guide', surname: '', age: 40, role: 'tour_guide' }] }
+    ]
+  }
+});
+check('a crew room keeps its badge instead of a type picker',
+  crewHtml.includes('Staff Room') && !/room-alloc-type-select[^>]*value="staff"/.test(crewHtml), true);
+check('a crew room is never offered the guest room types as its own value',
+  crewHtml.includes('Selected room: Room 2 · staff'), false);
+
 const libraryModalItem = buildRoomModalItem({
   base: {
     id: 'davinci',
@@ -699,6 +777,119 @@ check('one child alone under single-room policy charges the single rate', roomBu
 
 const mixedAdult = calculateRoomCharges(ownRoomItem('adult_rates'), kidsRoom([travellers[0], kidA]), 'ZAR', 0);
 check('a child sharing with an adult keeps the child band rate', roomBuyOf(mixedAdult), 1050);
+
+/* ── One night, several room types ──────────────────────────────────────
+   A property sells Standard Rooms and Family Suites at once and negotiates each
+   separately. The accommodation LINE is sold at one row, so until the room
+   engine could type a bed, a Suite sleeping beside a Standard Room cost the
+   operator a second line. The two engines — the room charge calculator and the
+   per-person card — must price each room from its own contract and agree. */
+const season = { currency: 'ZAR', season_name: 'Summer', valid_from: '2026-11-01', valid_to: '2027-04-30' };
+const stdRow = { ...season, id: 'r-std', room_type_id: 'rt-std', room_type: 'Standard Room', room_max_occupancy: 2, price_1_adult: 1200, price_2_adults: 800 };
+const suiteRow = { ...season, id: 'r-suite', room_type_id: 'rt-suite', room_type: 'Family Suite', room_max_occupancy: 4, price_1_adult: 2600, price_2_adults: 1500, price_3_plus_adults: 400 };
+const villaWinter = { currency: 'ZAR', season_name: 'Winter', valid_from: '2026-06-01', valid_to: '2026-10-30', id: 'r-villa', room_type_id: 'rt-villa', room_type: 'Garden Villa', room_max_occupancy: 2, price_1_adult: 3000, price_2_adults: 2000 };
+const typedLodge = {
+  category: 'Accommodation',
+  child_age_ranges: [],
+  room_types: [
+    { id: 'rt-std', name: 'Standard Room', max_occupancy: 2, max_adults: 2, sort_order: 1 },
+    { id: 'rt-suite', name: 'Family Suite', max_occupancy: 4, max_adults: 4, sort_order: 2 }
+  ],
+  item_rates: [stdRow, suiteRow]
+};
+const soldStd = withRoomTypeRates(stdRow, { item: typedLodge, rates: typedLodge.item_rates });
+const fiveAdults = ['a1', 'a2', 'a3', 'a4', 'a5'].map((id) => ({ id, age: 30 }));
+const typedCharges = (rate, rooms, markup = 0) => calculateRoomCharges(
+  { category: 'Accommodation', child_age_ranges: [], item_rates: [rate] }, rooms, 'ZAR', markup
+);
+const mixedNight = [
+  { roomId: 1, roomType: 'Standard Room', roomTypeId: 'rt-std', allocatedTravellers: fiveAdults.slice(0, 2) },
+  { roomId: 2, roomType: 'Family Suite', roomTypeId: 'rt-suite', allocatedTravellers: fiveAdults.slice(2) }
+];
+const mixedCharges = typedCharges(soldStd, mixedNight);
+check('a typed standard room keeps the line row', mixedCharges.rooms[0].buyCost, 1600);
+check('a typed suite is priced from its own contract', mixedCharges.rooms[1].buyCost, 3400);
+check('a mixed night totals both contracts', mixedCharges.totalBuy, 5000);
+check('a suite third adult pays the suite extra-adult rate', mixedCharges.rooms[1].rateDescription.includes('400.00'), true);
+check('a room prices from the row of its own type', rateForAllocatedRoom(soldStd, mixedNight[1]).rate.id, 'r-suite');
+check('a room with no type of its own keeps the line row', rateForAllocatedRoom(soldStd, { roomId: 3, allocatedTravellers: fiveAdults.slice(0, 2) }).rate.id, 'r-std');
+const untypedNight = mixedNight.map((rm) => ({ roomId: rm.roomId, allocatedTravellers: rm.allocatedTravellers }));
+check('an untyped night still prices every bed on the line row', typedCharges(soldStd, untypedNight).totalBuy, 4000);
+
+const suiteSolo = [
+  { roomId: 1, roomType: 'Standard Room', roomTypeId: 'rt-std', allocatedTravellers: fiveAdults.slice(0, 2) },
+  { roomId: 2, roomType: 'Family Suite', roomTypeId: 'rt-suite', allocatedTravellers: [fiveAdults[2]] }
+];
+const soloCharges = typedCharges(soldStd, suiteSolo);
+check('a solo guest in the suite pays the suite single, not the standard single', soloCharges.rooms[1].buyCost, 2600);
+
+/* A room type this season does not price is not a cheaper room: it is a room
+   this night cannot be housed in, and the dialog refuses the allocation. */
+const villaLodge = {
+  category: 'Accommodation',
+  child_age_ranges: [],
+  room_types: [...typedLodge.room_types, { id: 'rt-villa', name: 'Garden Villa', max_occupancy: 2, max_adults: 2, sort_order: 3 }],
+  item_rates: [stdRow, suiteRow, villaWinter]
+};
+const soldWithVilla = withRoomTypeRates(stdRow, { item: villaLodge, rates: villaLodge.item_rates });
+const villaRoom = [{ roomId: 1, roomType: 'Garden Villa', roomTypeId: 'rt-villa', allocatedTravellers: fiveAdults.slice(0, 2) }];
+const refused = typedCharges(soldWithVilla, villaRoom);
+check('a room type with no price in this season charges nothing', refused.totalBuy, 0);
+check('the unpriceable room is reported, not swallowed', refused.unpricedRooms.length, 1);
+check('the refusal names the season the line is priced from', String(refused.unpricedRooms[0].reason).includes('Summer season'), true);
+check('the stamp carries the refusal reason for the room', rateForAllocatedRoom(soldWithVilla, villaRoom[0]).rate, null);
+
+/* The per-person card must re-add to the same money the room engine charged. */
+const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const near = (label, actual, expected) => {
+  const ok = Math.abs(Number(actual) - Number(expected)) < 0.05;
+  if (!ok) failures += 1;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}: got ${actual}, expected ${expected} (+/- 0.05)`);
+};
+const rowsAgainstEngine = (rate, rooms, markup = 15) => {
+  const charges = typedCharges(rate, rooms, markup);
+  const heads = rooms.flatMap((rm) => rm.allocatedTravellers);
+  const rows = computePerPersonRows({
+    services: [{
+      category: 'Accommodation', currencyCode: 'ZAR', sellPP: money(charges.totalSell / heads.length),
+      taxRate: 0, itemId: 'lodge', roomAllocations: rooms, markup
+    }],
+    travellers: heads,
+    rateBy: () => rate,
+    defaultTaxRate: 0
+  });
+  return {
+    charges,
+    rows,
+    total: money(rows.perPersonSharing.sell * rows.totalCount
+      + (rows.hasSingle ? rows.singleSupplement.sell : 0))
+  };
+};
+const mixedRows = rowsAgainstEngine(soldStd, mixedNight);
+check('a mixed night averages both room contracts into the per-person row', mixedRows.rows.perPersonSharing.sell, 1150);
+near('a mixed night re-adds to what the room engine charged', mixedRows.total, mixedRows.charges.totalSell);
+const soloRows = rowsAgainstEngine(soldStd, suiteSolo);
+near('a solo suite supplement is the suite single over the suite sharing rate',
+  soloRows.rows.singleSupplement.sell, 2990 - 1725);
+near('a night with a solo suite re-adds to what the room engine charged', soloRows.total, soloRows.charges.totalSell);
+const refusedRows = rowsAgainstEngine(soldWithVilla, villaRoom);
+near('an unpriceable room contributes nothing to the per-person rows either', refusedRows.total, refusedRows.charges.totalSell);
+
+/* The per-person document table: the party's supplement bill becomes each
+   traveller's share of it, and the printed column still re-adds to the money the
+   room engine charged for the two different contracts. */
+const mixedHead = perPersonHeadBreakdown(mixedRows.rows);
+check('a party with no solo traveller prints one row', mixedHead.rows.length, 1);
+near('the per-person table is the engine money divided by the heads',
+  money(mixedHead.total.incl * mixedHead.heads), mixedRows.charges.totalSell);
+const soloHead = perPersonHeadBreakdown(soloRows.rows);
+check('a solo traveller adds the supplement row', soloHead.rows.length, 2);
+near('the supplement row is the party bill spread over the heads',
+  soloHead.rows[1].incl, money(soloRows.rows.singleSupplement.sell / soloHead.heads));
+near('the typed party total per person re-adds to what the room engine charged',
+  money(soloHead.total.incl * soloHead.heads), soloRows.charges.totalSell);
+near('a refused room leaves the per-person table at nothing',
+  money(perPersonHeadBreakdown(refusedRows.rows).total.incl * refusedRows.rows.totalCount), refusedRows.charges.totalSell);
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll checks passed.');
 process.exit(failures ? 1 : 0);

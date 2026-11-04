@@ -10,8 +10,11 @@ import {
   roomsFromRates,
   roomCapacityOf,
   roomOccupancyForRate,
-  serviceRoomName
+  serviceRoomName,
+  allocatedRoomTypeLabel,
+  roomTypeOfAllocation
 } from '../src/lib/roomTypes.js';
+import { accommodationBreakdown } from '../src/lib/accommodationBreakdown.js';
 import {
   accommodationHasChoices,
   accommodationRoomChoices,
@@ -199,6 +202,75 @@ check('a transfer never claims a room', nonStayLine.room_type, '');
 check('a transfer keeps its own capacity', nonStayLine.vehicle_capacity, 4);
 
 check('a service name is read for documents', serviceRoomName({ roomType: 'Safari Cabin' }), 'Safari Cabin');
+
+/* The room type a document prints. An allocation row only names its room when
+   it is a crew room, so the guests' type comes from the line; a crew room never
+   names a traveller's bed. */
+check('the allocation falls back to the room the line sold',
+  allocatedRoomTypeLabel({ roomType: 'Safari Cabin', roomAllocations: [{ roomId: 1, allocatedTravellers: [{ id: 'a' }] }] }),
+  'Safari Cabin');
+check('a crew room does not name the traveller room',
+  allocatedRoomTypeLabel({ roomType: 'Safari Cabin', roomAllocations: [
+    { roomId: 1, allocatedTravellers: [{ id: 'a' }] },
+    { roomId: 2, roomType: 'staff', staffRole: 'tour_guide', allocatedTravellers: [{ id: 'g' }] }
+  ] }),
+  'Safari Cabin');
+check('a room type named on the allocation is the one printed',
+  allocatedRoomTypeLabel({ roomType: 'Safari Cabin', roomAllocations: [{ roomId: 1, roomType: 'Family Suite', allocatedTravellers: [{ id: 'a' }] }] }),
+  'Family Suite');
+check('two allocated room types print once each',
+  allocatedRoomTypeLabel({ roomAllocations: [
+    { roomId: 1, roomType: 'Family Suite', allocatedTravellers: [{ id: 'a' }] },
+    { roomId: 2, roomType: 'Safari Cabin', allocatedTravellers: [{ id: 'b' }] },
+    { roomId: 3, roomType: 'Family Suite', allocatedTravellers: [{ id: 'c' }] }
+  ] }),
+  'Family Suite, Safari Cabin');
+check('a line with no room stated prints no room', allocatedRoomTypeLabel({ roomAllocations: [] }), '');
+check('a role marker on an allocation is not a room name',
+  allocatedRoomTypeLabel({ roomType: 'Safari Cabin', roomAllocations: [{ roomId: 1, roomType: 'client', allocatedTravellers: [{ id: 'a' }] }] }),
+  'Safari Cabin');
+check('a line with no allocation at all still prints its sold room', allocatedRoomTypeLabel({ roomType: 'Safari Cabin' }), 'Safari Cabin');
+
+/* A night that mixes types: the room typed in the allocation prints its own
+   name, and a room the operator never re-typed is a bed in the room the line
+   sold, so both names appear instead of the suite swallowing the cabins. */
+const mixedNight = {
+  roomType: 'Standard Room',
+  roomAllocations: [
+    { roomId: 1, roomType: 'Family Suite', roomTypeId: 'room-suite', allocatedTravellers: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] },
+    { roomId: 2, allocatedTravellers: [{ id: 'd' }, { id: 'e' }] },
+    { roomId: 3, roomType: 'Standard Room', roomTypeId: 'room-standard', allocatedTravellers: [{ id: 'f' }] }
+  ]
+};
+check('a mixed night prints every room type it uses',
+  allocatedRoomTypeLabel(mixedNight), 'Family Suite, Standard Room');
+check('an allocation row with no type of its own reads as the room the line sold',
+  roomTypeOfAllocation(mixedNight.roomAllocations[1], mixedNight), 'Standard Room');
+check('an allocation row names its own room type',
+  roomTypeOfAllocation(mixedNight.roomAllocations[0], mixedNight), 'Family Suite');
+check('a crew room never names a guest room type',
+  roomTypeOfAllocation({ roomType: 'staff', staffRole: 'driver' }, mixedNight), '');
+
+const mixedRooms = mixedNight.roomAllocations.map((rm) => ({
+  ...rm,
+  allocatedTravellers: (rm.allocatedTravellers || []).map((t) => ({ ...t, age: 30 }))
+}));
+const roomRows = accommodationBreakdown({
+  mode: 'rooms',
+  lineTotal: 6000,
+  rooms: mixedRooms,
+  rate: {
+    currency: 'ZAR', rate_basis: 'per_person_sharing',
+    price_1_adult: 2000, price_2_adults: 2000
+  },
+  ageRanges: [],
+  markup: 0,
+  taxRate: 0,
+  soldRoomType: 'Standard Room'
+}).rows;
+check('the per-room breakdown puts each room on its own line', roomRows.length, 3);
+checkJson('the per-room breakdown prints each room own type',
+  roomRows.map((r) => r.roomType), ['Family Suite', 'Standard Room', 'Standard Room']);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

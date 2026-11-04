@@ -262,25 +262,28 @@ check('the rate card names the waiver rather than a derived supplement', rowsOf(
   ['Single supplement', 'waived for the first 2 single rooms'],
   ['Child discount', '50%']
 ]);
-check('accommodation guide and driver rows', rowsOf(accommodationDetail.seasons[0], 'guide-driver'), [
-  ['Guide', `${money(400)} \u00b7 Bed & Breakfast`],
-  ['Driver', `${money(350)} \u00b7 Bed & Breakfast`]
+/* One pool, one rule: the contract reads "Driver-Guide room", meaning whichever
+   of the guide and the driver beds first takes it. */
+check('the crew deal prints as one pooled row', rowsOf(accommodationDetail.seasons[0], 'guide-driver'), [
+  ['Driver-Guide', `${money(400)} \u00b7 Bed & Breakfast`]
 ]);
 
-/* A guide rate can be gated on the same client-room threshold as the TL deal. */
-const guideThresholdRow = rowsOf(libraryItemDetail({
+/* A crew rate can be gated on the same client-room threshold as the TL deal. */
+const crewThresholdRow = rowsOf(libraryItemDetail({
   item: { ...accommodation, guide_min_rooms: 8 }
-}).seasons[0], 'guide-driver').find((row) => row[0].startsWith('Guide'));
-check('a guide rate prints the client rooms it needs', guideThresholdRow, [
-  'Guide (from 8 client rooms)',
+}).seasons[0], 'guide-driver')[0];
+check('the crew rate prints the client rooms it needs', crewThresholdRow, [
+  'Driver-Guide (from 8 client rooms)',
   `${money(400)} \u00b7 Bed & Breakfast`
 ]);
 
-const driverThresholdRow = rowsOf(libraryItemDetail({
-  item: { ...accommodation, guide_min_rooms: 8 }
-}).seasons[0], 'guide-driver').find((row) => row[0].startsWith('Driver'));
-check('the driver rate shares the guide client-rooms threshold', driverThresholdRow, [
-  'Driver (from 8 client rooms)',
+/* The guide figure heads the pool; the driver figure stands in only where the
+   guide box was left blank. */
+const crewStandsInRow = rowsOf(libraryItemDetail({
+  item: { ...accommodation, guide_min_rooms: 8, item_rates: [{ ...accommodation.item_rates[0], guide_rate: null }] }
+}).seasons[0], 'guide-driver')[0];
+check('the driver rate stands in only where the guide box is blank', crewStandsInRow, [
+  'Driver-Guide (from 8 client rooms)',
   `${money(350)} \u00b7 Bed & Breakfast`
 ]);
 
@@ -288,17 +291,17 @@ check('the waiver marker never prints in the rate notes', libraryItemDetail({
   item: { ...accommodation, item_rates: [{ ...accommodation.item_rates[0], notes: 'Sea view [[waiver:2]]' }] }
 }).seasons[0].notes, 'Sea view');
 
-/* Without a contracted guide rate the property charges the single rate, and the
-   card says so instead of printing a dash. */
-const guideFallbackRow = rowsOf(libraryItemDetail({
+/* With neither crew box typed the property beds crew at its own single rate, and
+   the card says so instead of printing a dash. */
+const crewFallbackRow = rowsOf(libraryItemDetail({
   item: {
     ...accommodation,
     guide_min_rooms: 8,
-    item_rates: [{ ...accommodation.item_rates[0], guide_rate: null }]
+    item_rates: [{ ...accommodation.item_rates[0], guide_rate: null, driver_rate: null }]
   }
-}).seasons[0], 'guide-driver').find((row) => row[0].startsWith('Guide'));
-check('a guide bed with no typed rate shows the Single rate it falls back to', guideFallbackRow, [
-  'Guide (single rate until 8 client rooms)',
+}).seasons[0], 'guide-driver')[0];
+check('a crew bed with no typed rate shows the Single rate it falls back to', crewFallbackRow, [
+  'Driver-Guide (single rate until 8 client rooms)',
   `${money(810)} \u00b7 Bed & Breakfast`
 ]);
 
@@ -345,22 +348,63 @@ check('a tour leader ladder prints one row per client-room band', tieredTlRows, 
   ['Tour Leader (20+ client rooms)', `2 TL rooms (1 more) @ ${money(500)} \u00b7 Bed & Breakfast`]
 ]);
 
-/* Guide and driver carry their own ladders, mirroring the TL deal. */
+/* The crew ladder is one shared allowance, printed as one rule per band. */
 const tieredStaff = {
   ...accommodation,
   item_rates: [{
     ...accommodation.item_rates[0],
+    guide_rate: null,
+    driver_rate: null,
     guide_tiers: [
       { minClientRooms: 5, rooms: 1, rate: 0 },
       { minClientRooms: 8, rooms: 2, rate: 300 }
-    ],
-    driver_tiers: [{ minClientRooms: 6, rooms: 1, rate: 250 }]
+    ]
   }]
 };
-check('guide and driver ladders print one row per client-room band', rowsOf(libraryItemDetail({ item: tieredStaff }).seasons[0], 'guide-driver'), [
-  ['Guide (5–7 client rooms)', `1 guide room @ ${money(0)} \u00b7 Bed & Breakfast`],
-  ['Guide (8+ client rooms)', `2 guide rooms (1 more) @ ${money(300)} \u00b7 Bed & Breakfast`],
-  ['Driver (6+ client rooms)', `1 driver room @ ${money(250)} \u00b7 Bed & Breakfast`]
+check('the crew ladder prints one row per client-room band', rowsOf(libraryItemDetail({ item: tieredStaff }).seasons[0], 'guide-driver'), [
+  ['Driver-Guide (5–7 client rooms)', `1 crew room @ ${money(0)} \u00b7 Bed & Breakfast`],
+  ['Driver-Guide (8+ client rooms)', `2 crew rooms (1 more) @ ${money(300)} \u00b7 Bed & Breakfast`]
+]);
+
+/* A tier can stop: a To count bounds the band, and the last open row runs on.
+   This is the real contract shape — 4–9 half rate, 10–20 one free crew room,
+   21+ two free crew rooms. */
+const stoppedStaff = {
+  ...accommodation,
+  item_rates: [{
+    ...accommodation.item_rates[0],
+    guide_rate: null,
+    driver_rate: null,
+    guide_tiers: [
+      { minClientRooms: 4, maxClientRooms: 9, rooms: 1, rate: 405 },
+      { minClientRooms: 10, maxClientRooms: 20, rooms: 1, rate: 0 },
+      { minClientRooms: 21, rooms: 2, rate: 0 }
+    ]
+  }]
+};
+check('a stopped tier keeps its ceiling and the last tier stays open', rowsOf(libraryItemDetail({ item: stoppedStaff }).seasons[0], 'guide-driver'), [
+  ['Driver-Guide (4–9 client rooms)', `1 crew room @ ${money(405)} \u00b7 Bed & Breakfast`],
+  ['Driver-Guide (10–20 client rooms)', `1 crew room @ ${money(0)} \u00b7 Bed & Breakfast`],
+  ['Driver-Guide (21+ client rooms)', `2 crew rooms (1 more) @ ${money(0)} \u00b7 Bed & Breakfast`]
+]);
+
+/* A ladder where every tier carries a ceiling stops: the card says the deal ends
+   rather than implying a bed outside the bands is still contracted. */
+const fullyStoppedStaff = {
+  ...accommodation,
+  item_rates: [{
+    ...accommodation.item_rates[0],
+    guide_rate: null,
+    driver_rate: null,
+    guide_tiers: [
+      { minClientRooms: 4, maxClientRooms: 9, rooms: 1, rate: 405 },
+      { minClientRooms: 10, maxClientRooms: 20, rooms: 1, rate: 0 }
+    ]
+  }]
+};
+check('a fully stopped ladder prints both ceilings', rowsOf(libraryItemDetail({ item: fullyStoppedStaff }).seasons[0], 'guide-driver'), [
+  ['Driver-Guide (4–9 client rooms)', `1 crew room @ ${money(405)} \u00b7 Bed & Breakfast`],
+  ['Driver-Guide (10–20 client rooms)', `1 crew room @ ${money(0)} \u00b7 Bed & Breakfast`]
 ]);
 
 /* The same room count with a new rate is a price band, not a duplicate row:
@@ -370,11 +414,10 @@ const bandedStaff = {
   tour_leader_room_offered: true,
   item_rates: [{
     ...accommodation.item_rates[0],
+    guide_rate: null,
+    driver_rate: null,
+    tour_leader_rate: null,
     guide_tiers: [
-      { minClientRooms: 1, rooms: 1, rate: 800 },
-      { minClientRooms: 11, rooms: 1, rate: 650 }
-    ],
-    driver_tiers: [
       { minClientRooms: 1, rooms: 1, rate: 800 },
       { minClientRooms: 11, rooms: 1, rate: 650 }
     ],
@@ -385,10 +428,8 @@ const bandedStaff = {
   }]
 };
 check('a ladder that repeats the room count prints both rate bands', rowsOf(libraryItemDetail({ item: bandedStaff }).seasons[0], 'guide-driver'), [
-  ['Guide (1–10 client rooms)', `1 guide room @ ${money(800)} \u00b7 Bed & Breakfast`],
-  ['Guide (11+ client rooms)', `1 guide room @ ${money(650)} \u00b7 Bed & Breakfast`],
-  ['Driver (1–10 client rooms)', `1 driver room @ ${money(800)} \u00b7 Bed & Breakfast`],
-  ['Driver (11+ client rooms)', `1 driver room @ ${money(650)} \u00b7 Bed & Breakfast`],
+  ['Driver-Guide (1–10 client rooms)', `1 crew room @ ${money(800)} \u00b7 Bed & Breakfast`],
+  ['Driver-Guide (11+ client rooms)', `1 crew room @ ${money(650)} \u00b7 Bed & Breakfast`],
   ['Tour Leader (1–10 client rooms)', `1 TL room @ ${money(800)} \u00b7 Bed & Breakfast`],
   ['Tour Leader (11+ client rooms)', `1 TL room @ ${money(650)} \u00b7 Bed & Breakfast`]
 ]);
@@ -605,6 +646,25 @@ check('car rental rows are per vehicle', carDetail.carRental[0].rows.map((row) =
   [`3\u20137 days`, `${money(1500)} / vehicle`]
 ]);
 check('car rental is not empty', carDetail.empty, false);
+
+/* The same car sold at other money in other weeks: one card, every tariff named. */
+const twoSeasonCar = {
+  ...carRental,
+  car_rental_rates: [
+    ...carRental.car_rental_rates,
+    { vehicle_group: 'C', vehicle_name: 'Toyota Starlet', rate_code: 'STD', kms_unlimited: true, valid_from: '2026-12-01', valid_to: '2027-02-28', min_days: 1, max_days: 2, price: 1100 },
+    { vehicle_group: 'C', vehicle_name: 'Toyota Starlet', rate_code: 'STD', kms_unlimited: true, valid_from: '2026-12-01', valid_to: '2027-02-28', min_days: 3, max_days: 7, price: 1900 }
+  ]
+};
+const twoSeasonDetail = libraryItemDetail({ item: twoSeasonCar }).carRental;
+check('two tariffs on one car stay one card', twoSeasonDetail.length, 1);
+check('and the card says how many tariffs it holds', twoSeasonDetail[0].chips, ['STD', 'Unlimited km', '2 rental price seasons']);
+check('every band names the window it belongs to', twoSeasonDetail[0].rows.map((row) => [row.label, row.value]), [
+  [`2026-01-01 \u2192 2026-06-30 \u00b7 1\u20132 days`, `${money(800)} / vehicle`],
+  [`2026-01-01 \u2192 2026-06-30 \u00b7 3\u20137 days`, `${money(1500)} / vehicle`],
+  [`2026-12-01 \u2192 2027-02-28 \u00b7 1\u20132 days`, `${money(1100)} / vehicle`],
+  [`2026-12-01 \u2192 2027-02-28 \u00b7 3\u20137 days`, `${money(1900)} / vehicle`]
+]);
 
 /* Model plumbing */
 check('legacy category name maps to guide', libraryItemKind('Guide / Driver'), 'guide');
