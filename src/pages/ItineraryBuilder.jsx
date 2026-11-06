@@ -47,6 +47,7 @@ import {
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
+import { useSession } from '../hooks/useSession';
 import ClientTourForm from '../components/ClientTourForm';
 import { usePageGuard } from '../context/NavigationGuardContext';
 import RoomAllocationModal from '../components/RoomAllocationModal';
@@ -77,15 +78,18 @@ import {
   priceGuideLine
 } from '../lib/guideRoster';
 import { accommodationHasChoices, ratesForOption, rateById, rateForNights, rateForNight, nightBandLabel, seasonForRate, weekendDaysLabel, weekendNightOf } from '../lib/accommodationOptions';
+import { extrasHasChargeChoices, isExtrasItem, lineChargeLabel } from '../lib/extrasChargeTypes';
 import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount, clientRoomsBooked, withRoomCapacity, tourGuideCount } from '../lib/roomAllocationHelper';
 import { roomTypesOf, soldRoomCapacity, allocatedRoomTypeLabel, serviceRoomName } from '../lib/roomTypes';
 import { withRoomTypeRates } from '../lib/roomTypePricing';
 import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus, ESTIMATE_SEASON_STATUSES, CONSENT_SEASON_STATUSES, PROTECTABLE_SEASON_STATUSES, protectionForSeason, itemHasPricedRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
 import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
-import { computePerPersonRows, breakdownSnapshot, perPersonHeadBreakdown } from '../lib/perPersonPricing';
+import { computePerPersonRows, breakdownSnapshot, perPersonPrintRows } from '../lib/perPersonPricing';
 import {
   carRentalBuyTotal,
+  carRentalGroups,
   carRentalHireTotal,
+  cheapestDailyRate,
   isCarRentalItem,
   isRentalFeeLine,
   rentalDayDetails,
@@ -133,6 +137,7 @@ import { voucherDetailLines } from '../lib/voucherDetails';
 import { netBilled, canBill, billableRemaining, billableAtPercentage, parseGuardRejection, guardMessage, netReceivedTotal, settledTotal, refundableTotal, invoiceBalance, bookingReceivableRemaining, bookingOverpayment } from '../lib/settlement';
 import { InvoiceFinanceRow, JournalEntryCard, CostOfSalesPanel } from '../components/finance/FinanceJournalViews';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { scopeCompanyId } from '../lib/tenantScope';
 import {
   buildLinesFromDays,
   accountingPayload,
@@ -1811,10 +1816,16 @@ export const ItineraryBuilder = () => {
   const isInProgress = stage === 'in_progress';
   const isCompleted = stage === 'completed';
   const isCancelled = stage === 'cancelled';
+  /* RBAC. A Guide or a Finance account is allowed to open a trip and read it,
+     but only a job with write access to itineraries may change one. The route
+     admits the reader, so the lock has to live here, where every mutation
+     already funnels through setDays / setMeta. */
+  const { can: holdModule, canSeeCosts } = useSession();
+  const mayEditItinerary = holdModule('itineraries', 'write');
   /* Provisional, Confirmed, In Progress, Completed, and Cancelled itineraries
      are locked against commercial edits. Only the status badge stays live, so
      an eligible booking can be returned to Quotation to re-open editing. */
-  const isReadOnly = isProvisional || isConfirmed || isInProgress || isCompleted || isCancelled;
+  const isReadOnly = isProvisional || isConfirmed || isInProgress || isCompleted || isCancelled || !mayEditItinerary;
   const editLockedRef = useRef(isReadOnly);
   const hydrateRef = useRef(false);
 
@@ -1822,8 +1833,9 @@ export const ItineraryBuilder = () => {
     editLockedRef.current = isReadOnly;
   }, [isReadOnly]);
 
-  const EDIT_LOCK_MESSAGE =
-    'This itinerary is locked for editing. Change its status back to Quotation to make changes.';
+  const EDIT_LOCK_MESSAGE = mayEditItinerary
+    ? 'This itinerary is locked for editing. Change its status back to Quotation to make changes.'
+    : 'Your role can read itineraries but not change them. An Admin can give your job write access.';
 
   /* Every itinerary mutation funnels through these two wrappers, so a stale
      modal or keyboard path cannot slip past the disabled controls. Hydration
@@ -1841,7 +1853,7 @@ export const ItineraryBuilder = () => {
     }
     markEdited();
     setDaysRaw(update);
-  }, [showToast, markEdited]);
+  }, [showToast, markEdited, EDIT_LOCK_MESSAGE]);
 
   const setMeta = useCallback((update) => {
     if (!hydrateRef.current) markEdited();
@@ -2084,7 +2096,7 @@ export const ItineraryBuilder = () => {
       .select('company_id')
       .eq('id', user.id)
       .single();
-    return profile?.company_id || null;
+    return scopeCompanyId(profile?.company_id) || null;
   }, []);
 
   const loadCompanyMeta = useCallback(async (cid) => {
@@ -2726,7 +2738,11 @@ repeatGroupId: ii.repeat_group_id || null,
   }, [symbolByCode]);
 
   const pickerItemsToShow = useMemo(() =>
-    pickerItems.filter((it) => visibleInCurrency(it, currencyCode)),
+    /* A hire prices from its own rental-length tariff, whose rows carry their own
+       currency; it has no item_rates row at all, so the currency test below would
+       judge it on the wrong table and hide a priced contract. The package sidebar
+       exempts hires in exactly the same way. */
+    pickerItems.filter((it) => isCarRentalItem(it) || visibleInCurrency(it, currencyCode)),
   [pickerItems, currencyCode]);
 
   const pricingGroups = useMemo(() => {
@@ -3115,7 +3131,12 @@ repeatGroupId: ii.repeat_group_id || null,
       maxOccupancy: numOrBlank(libMaxOcc),
       maxAdults: soldCapacity ? soldCapacity.maxAdults : null,
       maxChildren: soldCapacity ? soldCapacity.maxChildren : null,
-      mealPlan: options.optionLabel || item.mealPlan || item.meal_plan || (item.item_rates || []).find((r) => r.meal_plan)?.meal_plan || (accomCat ? 'Bed & Breakfast' : ''),
+      /* A drop that pinned its charge row labels the line from that row, blank
+         included. Falling through to the matrix here would stamp a sibling charge
+         — or a property's default board — onto a line priced from another row. */
+      mealPlan: options.rateId
+        ? String(pricedRate?.meal_plan || '').trim()
+        : (options.optionLabel || item.mealPlan || item.meal_plan || (item.item_rates || []).find((r) => r.meal_plan)?.meal_plan || (accomCat ? 'Bed & Breakfast' : '')),
       checkInTime: item.checkInTime || item.check_in_time || '',
       checkOutTime: item.checkOutTime || item.check_out_time || '',
       startTime: item.startTime || item.start_time || '',
@@ -3527,6 +3548,14 @@ repeatGroupId: ii.repeat_group_id || null,
        service it accompanies. */
     if (isAccommodationItem(item) && accommodationHasChoices(item)) {
       setAccomChargeModal({ dayIndex, item, via });
+      return;
+    }
+    /* An extra contracted at several charges — a fuel contract that sells 5 litres,
+       a full tank and a different fuel again — cannot be costed until the operator
+       says which of them this line is bought as. One charge, or none named at all,
+       drops straight in. */
+    if (isExtrasItem(item) && extrasHasChargeChoices(item)) {
+      setAccomChargeModal({ dayIndex, item, via, variant: 'extras' });
       return;
     }
     if (via === 'drop' || via === 'double-click') {
@@ -4830,19 +4859,28 @@ return !!sv.time; /* activities / meals / other */
     if (completedRef.current) return;
     const src = days[idx];
     if (!src) return;
+    /* The same rule as copying a service: a hire's days come from its contract,
+       so a duplicated day repeats the rooms and the meals but never a second
+       charge for a block the trip already bills. */
+    const hireLines = (src.services || []).filter((s) => s.rental);
     const clone = {
       ...src,
       key: nextId(),
       dayNumber: 0,
       date: '',
-      services: (src.services || []).map((s) => ({ ...s, key: nextId() }))
+      services: (src.services || [])
+        .filter((s) => !s.rental)
+        .map((s) => ({ ...s, key: nextId() }))
     };
     const next = normalizeDays([...days.slice(0, idx + 1), clone, ...days.slice(idx + 1)]);
     setDays(next);
     applyDateExtension(next);
     setSelectedDayIndex(idx + 1);
     setKebabFor(null);
-  }, [days, normalizeDays, applyDateExtension, nextId, setDays ]);
+    if (hireLines.length) {
+      showToast(`Day duplicated without the hire: its ${hireLines.length} line${hireLines.length === 1 ? '' : 's'} bill${hireLines.length === 1 ? 's' : ''} a 24-hour block of a contract that already lays its own days. Change the hire to give it more days.`, 'warning');
+    }
+  }, [days, normalizeDays, applyDateExtension, nextId, setDays, showToast ]);
 
   const clearDay = useCallback((idx) => {
     if (completedRef.current) return;
@@ -5133,7 +5171,11 @@ return !!sv.time; /* activities / meals / other */
     const showSupplierBase = billing?.show_supplier_in_description !== false;
     const showSupplierOf = (sv) => showSupplierBase || /accommodation/i.test(sv.category || '');
     const showMealPlanBase = billing?.show_meal_plan_on_accommodation !== false;
-    const showMealPlanOf = (sv) => showMealPlanBase && /accommodation/i.test(sv.category || '') && !!(sv.mealPlan || '').trim();
+    /* The charge a line is bought as prints under its description: the board basis
+       on a room, the named charge on an extra. */
+    const showMealPlanOf = (sv) => showMealPlanBase
+      && (/accommodation/i.test(sv.category || '') || /extras?/i.test(sv.category || ''))
+      && !!(sv.mealPlan || '').trim();
     /* Chosen in the Export dialog for this one document: the costing team reads
        the day lines, the client reads per-person figures, and some operators
        send a quote that never states the party total at all. */
@@ -5546,11 +5588,14 @@ return !!sv.time; /* activities / meals / other */
       /* The day list and the prices are the services being sold, so the document
          says they are finished and then turns the page: what follows — terms,
          inclusions, exclusions — starts on a page of its own and the sections run
-         on together instead of each hunting for room on a half-full page. */
+         on together instead of each hunting for room on a half-full page. The break
+         is inline because Word carries no stylesheet, and the class is for the PDF
+         window, which shows the document as one continuous scroll until it prints —
+         an invisible promise looks like a broken one, so the screen marks the turn. */
       const underBlocks = itineraryBlocks.filter((b) => (b.position || 'under_day_by_day') === 'under_day_by_day');
       const under = underBlocks.length
         ? `<div style="margin-top:26px;font-weight:700;color:#111;">${TL('doc.endOfServices')}</div>`
-          + `<div style="page-break-before:always;break-before:page;">`
+          + `<div class="doc-page-break" style="page-break-before:always;break-before:page;">`
           + underBlocks.map((b) => itineraryBlockHtml(b, { keep: b.key !== 'inclusions' })).join('')
           + `</div>`
         : '';
@@ -5567,23 +5612,20 @@ return !!sv.time; /* activities / meals / other */
       groups.forEach((g) => m.set(g.code, computePerPerson(days, g.code, meta.travellers || [], libraryItems, { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent, allowPartial: monthTimed })));
       return m;
     })();
-    /* Every figure a per-person view prints is ONE traveller's money, and the
-       conversion from the party's money to that lives in the pricing library,
-       where it is tested. */
+    /* An adult's price and a child's price are different money, so the per-person
+       table prints each figure beside the number of travellers who pay it, and
+       closes with what the party is charged. "Per person figures only" prints the
+       head's own money instead. Which money a row shows is the pricing library's
+       decision, where it is tested; the document only supplies the words. */
     const ppSetOf = (g) => {
-      const set = perPersonHeadBreakdown(ppData.get(g.code));
-      const row = (r) => ({
-        label: r.count ? L(r.key, { count: r.count, each: M(r.each, g.symbol) }) : L(r.key),
-        unit: round2(r.incl),
-        tax: round2(r.tax),
-        subExcl: round2(r.incl - r.tax),
-        total: !!r.total
-      });
-      return { dateRange: ppDateRange(g), rows: set.rows.map(row), total: row(set.total) };
+      const print = perPersonPrintRows(ppData.get(g.code), { totals: showTripTotals });
+      const row = (r) => ({ ...r, label: L(r.key) });
+      return { dateRange: ppDateRange(g), rows: print.rows.map(row), total: row(print.total) };
     };
-    /* The first per-person choice stops at the figures - no total row at all, so
-       nothing in the document is anybody's money but one traveller's. The second
-       adds the computed total per person, and the party totals with it. */
+    /* The first per-person choice stops at the figures - no totals at all, so the
+       document states only what each class of traveller pays. The second adds the
+       money the rows multiply out to, and the party's subtotal, tax and total due
+       with it. */
     const ppPrintable = (g) => {
       const set = ppSetOf(g);
       return { ...set, rows: set.rows.concat(showTripTotals ? [set.total] : []) };
@@ -5593,19 +5635,19 @@ return !!sv.time; /* activities / meals / other */
       return set.rows.map((r, i) => [
         i === 0 ? L('doc.allDays') : '',
         i === 0 ? set.dateRange : '',
-        r.label, 1, r.unit, r.subExcl, r.tax, r.unit
+        r.label, r.qty, r.unit, r.subExcl, r.tax, r.incl
       ]);
     };
     const ppRowsHtml = (g, pdf) => {
       const set = ppPrintable(g);
-      const num = (v) => M(v, g.symbol);
+      const num = (v) => (v === '' ? '' : M(v, g.symbol));
       const n = pdf ? ' class="num"' : ' style="text-align:right;"';
       return set.rows.map((r, i) => `<tr${r.total && pdf ? ' class="grand"' : ''}>`
         + `<td>${esc(i === 0 ? L('doc.allDays') : '')}</td>`
         + `<td>${esc(i === 0 ? set.dateRange : '')}</td>`
         + `<td>${r.total && !pdf ? `<b>${esc(r.label)}</b>` : esc(r.label)}</td>`
-        + `<td${n}>1</td><td${n}>${num(r.unit)}</td><td${n}>${num(r.subExcl)}</td>`
-        + `<td${n}>${num(r.tax)}</td><td${n}><b>${num(r.unit)}</b></td></tr>`).join('');
+        + `<td${n}>${esc(r.qty)}</td><td${n}>${num(r.unit)}</td><td${n}>${num(r.subExcl)}</td>`
+        + `<td${n}>${num(r.tax)}</td><td${n}><b>${num(r.incl)}</b></td></tr>`).join('');
     };
 
     if (format === 'excel') {
@@ -5743,7 +5785,11 @@ return !!sv.time; /* activities / meals / other */
         h1{margin:0 0 6px} .muted{color:#666;font-size:13px;margin:2px 0}
         table{border-collapse:collapse;width:100%;margin-top:16px}
         th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}
-        th{background:#eee} .grand{font-weight:700} td.num{text-align:right}</style></head><body>
+        th{background:#eee} .grand{font-weight:700} td.num{text-align:right}
+        @media screen{
+          .doc-page-break{position:relative;margin-top:30px;padding-top:26px;border-top:1px dashed #9aa4a8}
+          .doc-page-break::before{content:"page break";position:absolute;top:-9px;left:50%;transform:translateX(-50%);background:#fff;padding:0 12px;color:#9aa4a8;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+        }</style></head><body>
         ${logoImgTag}
         ${hdrLegal}
         ${hdrAddress}
@@ -5763,7 +5809,7 @@ return !!sv.time; /* activities / meals / other */
   }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent, monthTimed, exportLang]);
 
   const handleSave = useCallback(async ({ silent = false } = {}) => {
-    if (isReadOnly && !isProvisional) {
+    if (isReadOnly && !(isProvisional && mayEditItinerary)) {
       showToast(EDIT_LOCK_MESSAGE, 'warning');
       return false;
     }
@@ -6041,7 +6087,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, EDIT_LOCK_MESSAGE, setDaysRaw, rentalColumnReady, crewShareColumnReady, canStoreTranslations]);
+  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, mayEditItinerary, EDIT_LOCK_MESSAGE, setDaysRaw, rentalColumnReady, crewShareColumnReady, canStoreTranslations]);
 
   const applyStatusChange = useCallback(async (nextStatus) => {
     setUpdatingStatus(true);
@@ -6050,7 +6096,7 @@ return !!sv.time; /* activities / meals / other */
          before changing stage. Locked stages must never use the wholesale
          itinerary save (which deletes and recreates all saved days). */
       let savedBeforeStatusChange = false;
-      if (!isReadOnly || isProvisional) {
+      if (!isReadOnly || (isProvisional && mayEditItinerary)) {
         const savedSuccessfully = await handleSave({ silent: true });
         if (!savedSuccessfully) return;
         savedBeforeStatusChange = true;
@@ -6085,11 +6131,16 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setUpdatingStatus(false);
     }
-  }, [meta, days, showToast, isReadOnly, isProvisional, handleSave, companyId, setMeta, unnamedGuideCount]);
+  }, [meta, days, showToast, isReadOnly, isProvisional, mayEditItinerary, handleSave, companyId, setMeta, unnamedGuideCount]);
 
   const handleStatusChange = useCallback((nextStatus) => {
     setStatusMenuOpen(false);
     if (updatingStatus || nextStatus === normaliseStatus(meta.status)) return;
+    /* Moving a booking forward is a write, whatever the job can read. */
+    if (!mayEditItinerary) {
+      showToast('Your role can read itineraries but not change their status.', 'warning');
+      return;
+    }
     if (nextStatus === 'confirmed' && !canConfirmBooking()) {
       const count = (days || []).reduce((n, d) => n + (d.services || []).length, 0);
       showToast(
@@ -6108,7 +6159,7 @@ return !!sv.time; /* activities / meals / other */
       return;
     }
     applyStatusChange(nextStatus);
-  }, [updatingStatus, meta.status, canConfirmBooking, days, showToast, estimateCount, provisionalCount, applyStatusChange]);
+  }, [updatingStatus, meta.status, canConfirmBooking, days, showToast, estimateCount, provisionalCount, applyStatusChange, mayEditItinerary]);
 
   /* -- Unsaved-changes guard ------------------------------------------------
      The app ships a NavigationGuardProvider (mounted in App.jsx) that shows a
@@ -7166,10 +7217,14 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     showToast('Service updated', 'success');
   }, [editSvc, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays ]);
 
-  /* Copy the service currently being edited to all days or specific days.
-     Creates deep clones so each occurrence remains independently editable.
-     Room allocations copy along where present; a repeated accommodation keeps
-     its meal plan, rates and per-day pricing. */
+  /* Copy the service currently being edited to all days or specific days — the
+     ordinary way a tour operator repeats a service. Deep clones, so each
+     occurrence stays independently editable; room allocations, meal plan, rates
+     and per-day pricing travel with the line. A service that owns other lines on
+     the day repeats with them, because selling a night without the levy the
+     supplier charges for it, or a guide day without the crew's meals, would
+     price the arrangement short. Only a hire, whose days come from a contract
+     rather than the day it sits on, is not copied. */
   const copyServiceToDays = useCallback((targets) => {
     if (completedRef.current) return;
     if (!editSvc) return;
@@ -7183,6 +7238,36 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
       showToast('Select at least one target day', 'warning');
       return;
     }
+    /* A hire is not a service that happens to sit on a day: its days are laid by
+       the contract when it is dropped, one line per 24-hour block, with the
+       paperwork fee beside the block the car is collected. Copying one of those
+       lines onto another day repeats a block the client is already paying for and
+       re-tells the same car, so the copy is refused rather than quietly priced. */
+    if (source.rental) {
+      showToast(isRentalFeeLine(source.rental)
+        ? 'The rental contract fee belongs to the hire, not to a day — it is billed once, beside the block the car is collected. Change the hire itself to move it.'
+        : 'This line is one 24-hour block of a hire, and the contract already lays every block on its own day. Copying it to another day would bill the client the same block twice — change the hire, or add its days, instead.',
+        'warning');
+      return;
+    }
+    /* Lines that belong to another line on this day travel with it or not at all.
+       A crew meal is answered by the guide line's own details dialog and a
+       property's levy is re-answered by the property, so a lone copy of either
+       strands a charge whose owner does not know it exists. */
+    const crewOwner = source.guideForKey
+      ? (sourceDay.services || []).find((s) => s.itemId === source.guideForKey)
+      : null;
+    const levyOwner = !source.guideForKey && source.linkedItemId
+      ? (sourceDay.services || []).find((s) => s.itemId === source.linkedItemId && /accommodation/i.test(s.category || ''))
+      : null;
+    if (crewOwner || levyOwner) {
+      const owner = crewOwner || levyOwner;
+      showToast(
+        `"${owner.name}" owns this line on the day it sits — copy that ${crewOwner ? 'guide line, or use its Guide & driver details' : 'property'} instead, so the charge arrives with what it belongs to.`,
+        'warning'
+      );
+      return;
+    }
     const valid = [...new Set(targets.map(Number))]
       .filter((i) => i >= 0 && i < days.length && i !== editSvc.dayIdx)
       .sort((a, b) => a - b);
@@ -7191,7 +7276,30 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
       setEditSvc(null);
       return;
     }
+    /* Repeating a service repeats what hangs off it on that day: the per-night
+       levies the supplier charges for the property, and the crew's lunch, dinner
+       and overnight belonging to a guide line. A drop places them the same way,
+       so copying only the row would sell a night without its levy or a guide day
+       with no crew meals. A once-off fee stays behind — it is billed once for
+       the booking, not once per night. */
+    /* A line keeps its basis as `surchargeChargeBasis`, while the helper reads the
+       library column, so a line written before the field existed is answered from
+       the fee it was copied from rather than assumed once-off. */
+    const feeBasisOf = (line) => (
+      line.surchargeChargeBasis
+      || surchargeBasisOf(libraryItems.find((item) => item.id === line.itemId) || {})
+    );
+    const attached = (sourceDay.services || []).filter((s) => (
+      s.key !== source.key
+      && !s.rental
+      && (s.guideForKey
+        ? s.guideForKey === source.itemId
+        : !!s.linkedItemId
+          && s.linkedItemId === source.itemId
+          && feeBasisOf(s) === 'per_night')
+    ));
     let copied = 0;
+    let ownedCopied = 0;
     setDays((prev) => prev.map((d, i) => {
       if (!valid.includes(i)) return d;
       const family = source.repeatGroupId
@@ -7199,22 +7307,26 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
         : [source];
       const targetIds = new Set((d.services || []).map((s) => s.itemId));
       if (family.some((s) => s.itemId && targetIds.has(s.itemId))) return d;
-      const clone = {
-        ...source,
+      const cloneOf = (line) => ({
+        ...line,
         key: nextId(),
-        roomAllocations: Array.isArray(source.roomAllocations) ? JSON.parse(JSON.stringify(source.roomAllocations)) : [],
-        item_rates: Array.isArray(source.item_rates) ? source.item_rates : [],
+        roomAllocations: Array.isArray(line.roomAllocations) ? JSON.parse(JSON.stringify(line.roomAllocations)) : [],
+        item_rates: Array.isArray(line.item_rates) ? line.item_rates : [],
         repeatGroupId: source.repeatGroupId || null
-      };
+      });
+      const additions = [source, ...attached].filter((line) => line === source || !targetIds.has(line.itemId));
       copied += 1;
-      return { ...d, services: [...(d.services || []), clone] };
+      ownedCopied += additions.length - 1;
+      return { ...d, services: [...(d.services || []), ...additions.map(cloneOf)] };
     }));
     setSaved(false);
     setEditSvc(null);
     setCopyDays([]);
     setCopyAllDays(false);
-    showToast(`Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`, 'success');
-  }, [days, editSvc, nextId, showToast, setDays ]);
+    showToast(ownedCopied
+      ? `Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}, with the ${ownedCopied} line${ownedCopied === 1 ? '' : 's'} that belong to it`
+      : `Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`, 'success');
+  }, [days, editSvc, libraryItems, nextId, showToast, setDays ]);
 
   /* ── Supplier payment confirmation (Operations, in progress) ────────────────
      One checkbox per service, because suppliers are paid per booking. Ticking
@@ -7485,9 +7597,14 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
                       </>
                     )}
                   </div>
-                  <div style={{ marginTop: '0.5rem' }}>
-                    <CarSpecGrid spec={sv.rental} />
-                  </div>
+                  {/* One car, one grid: it is the collection block that shows it, so a
+                      hire out for three days does not describe the same vehicle three
+                      times, and the paperwork line beside it is a charge, not a car. */}
+                  {rentalPrintsSpecGrid(sv.rental) && (
+                    <div style={{ marginTop: '0.5rem' }}>
+                      <CarSpecGrid spec={sv.rental} />
+                    </div>
+                  )}
                   {canEdit && (
                     <button
                       type="button"
@@ -7988,10 +8105,16 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                 /* A card the library cannot price is not a cheap version of the item
                    the operator wants — it is a dead end they only discover after the
                    drop, when createService refuses it. So it says what is missing and
-                   refuses to be dragged. A hire is exempt: it prices from its own
-                   rental-length tariff, not from item_rates, so an empty rate matrix
-                   says nothing about it. */
-                const unpriced = !isCarRentalItem(item) && !itemHasPricedRate(item);
+                   refuses to be dragged. A hire is priced from its own table, not from
+                   item_rates, so an empty rate matrix says nothing about it — but a
+                   contract with no vehicle groups priced is just as dead as a room
+                   with no rate, and is locked for the same reason. */
+                const hireGroups = isCarRentalItem(item) ? carRentalGroups(item) : [];
+                const hireCapacity = hireGroups.reduce((widest, group) => Math.max(widest, group.passengers || 0), 0);
+                const hireFrom = isCarRentalItem(item) ? cheapestDailyRate(hireGroups) : null;
+                const unpriced = isCarRentalItem(item)
+                  ? hireFrom === null
+                  : !itemHasPricedRate(item);
                 /* Use the resolved rate row for display; fall back to the first
                    available rate when no season resolves (will show as 0 or
                    the raw price, consistent with what would happen on drop). */
@@ -8031,6 +8154,10 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                    the figure belongs to before dropping it. */
                 const seasonState = sidebarSeason.status;
                 const seasonChip = (() => {
+                  /* A hire holds no season row in the rate matrix — its tariff windows
+                     are named in the drop dialog — so the matrix's verdict says nothing
+                     about this card and must not be printed on it. */
+                  if (isCarRentalItem(item)) return '';
                   switch (seasonState) {
                     case 'protected':
                       return `⚠ ${sidebarSeason.seasonName || 'Prior season'} ${sidebarSeason.validFrom} +${sidebarSeason.protectionPercent}%`;
@@ -8071,7 +8198,9 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                     title={isReadOnly
                       ? 'Locked itinerary is read-only'
                       : unpriced
-                        ? 'No prices loaded on this library item — price it in Library Items before it can be added'
+                        ? (isCarRentalItem(item)
+                          ? 'This hire contract has no vehicle group priced — add its groups and rental-length bands in Library Items before it can be added'
+                          : 'No prices loaded on this library item — price it in Library Items before it can be added')
                         : 'Drag or double-click to choose placement'}
                   >
                     <div className="draggable-item-top">
@@ -8087,9 +8216,16 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                           Max: {Number(item?.capacity ?? item?.max_occupancy ?? item?.maxOccupancy)}
                         </span>
                       )}
+                      {hireCapacity > 0 && (
+                        <span className="item-capacity-tag" title={`The largest vehicle on this contract seats ${hireCapacity} travellers`}>
+                          Max: {hireCapacity}
+                        </span>
+                      )}
                       {unpriced
-                        ? <span className="item-price-tag missing">No prices loaded</span>
-                        : <span className="item-price-tag">{fmtMoney(price, currencySymbol)}<span style={{ color: '#94a3b8', fontWeight: 500 }}>{` ${priceUnit}`}</span></span>}
+                        ? <span className="item-price-tag missing">{isCarRentalItem(item) ? 'No hire tariff priced' : 'No prices loaded'}</span>
+                        : isCarRentalItem(item)
+                          ? <span className="item-price-tag">from {fmtMoney(hireFrom, svcSymbol(hireGroups[0].currency))}<span style={{ color: '#94a3b8', fontWeight: 500 }}>{` per 24h${hireGroups.length > 1 ? ` · ${hireGroups.length} groups` : ''}`}</span></span>
+                          : <span className="item-price-tag">{fmtMoney(price, currencySymbol)}<span style={{ color: '#94a3b8', fontWeight: 500 }}>{` ${priceUnit}`}</span></span>}
                     </div>
                     {/* A guide, vehicle or property in the wrong town is not a cheaper
                         alternative, so the card states where it is — and says so plainly
@@ -8258,8 +8394,10 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
               <button
                 type="button"
                 className="icon-btn teal"
-                disabled={saving || (isReadOnly && !isProvisional)}
-                title={isReadOnly && !isProvisional ? 'This itinerary is locked; change its status to Quotation before editing' : undefined}
+                disabled={saving || (isReadOnly && !(isProvisional && mayEditItinerary))}
+                title={isReadOnly && !(isProvisional && mayEditItinerary)
+                  ? (mayEditItinerary ? 'This itinerary is locked; change its status to Quotation before editing' : 'Your role can read itineraries but not change them')
+                  : undefined}
                 onClick={handleSave}
               >
                 <Save size={16} /> {saving ? 'Saving...' : isProvisional ? 'Save confirmations' : 'Save'}
@@ -8267,7 +8405,14 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
             </div>
           </div>
 
-          {isReadOnly && (
+          {!mayEditItinerary ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#334155', borderRadius: '12px', padding: '0.85rem 1.1rem', fontSize: '0.88rem', fontWeight: 600, marginBottom: '1rem' }}>
+              <Lock size={16} />
+              <div>
+                Your role can <strong>read</strong> itineraries. Prices, days and details are live but not editable — an Admin can give your job write access on the Users page.
+              </div>
+            </div>
+          ) : isReadOnly && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: isCancelled ? '#fee2e2' : isCompleted ? '#f3e8ff' : '#fff7ed', border: `1px solid ${isCancelled ? '#fecaca' : isCompleted ? '#e9d5ff' : '#fed7aa'}`, color: isCancelled ? '#b91c1c' : isCompleted ? '#6b21a8' : '#9a3412', borderRadius: '12px', padding: '0.85rem 1.1rem', fontSize: '0.88rem', fontWeight: 600, marginBottom: '1rem' }}>
               <Lock size={16} />
               <div>
@@ -8502,6 +8647,7 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                               {sv.supplierName ? ` · ${sv.supplierName}` : ''}
                               {/accommodation/i.test(sv.category || '') && starLabel(sv.supplierStar) ? ` · ${starLabel(sv.supplierStar)}` : ''}
                               {/accommodation/i.test(sv.category || '') && String(sv.roomType || '').trim() ? ` · ${sv.roomType}` : ''}
+                              {/extras?/i.test(sv.category || '') && lineChargeLabel(sv) ? ` · ${lineChargeLabel(sv)}` : ''}
                               {servicePax > 0 ? ` · ${servicePax} pax` : ''}
                               {sv.currencyCode ? ` · ${sv.currencyCode}` : ''}
                               <span className={`basis-tag ${isFlatBasis(sv.basis) ? 'flat' : ''}`}>
@@ -9754,7 +9900,12 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
           )}
 
           {/* --- Cost of sales (per itinerary, per currency) ------------------- */}
-          {tab === 'finance' && (
+          {tab === 'finance' && !canSeeCosts && (
+            <p style={{ fontSize: '0.85rem', color: '#64748b', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '0.85rem 1.1rem' }}>
+              <strong>Cost of sales is hidden for your role.</strong> What the itinerary earns against what the suppliers charge is shown to jobs that hold the cost price — an Admin can turn that on for you from the Users page.
+            </p>
+          )}
+          {tab === 'finance' && canSeeCosts && (
             <FinanceSection
               sectionId="cost-of-sales"
               title="Cost of sales"
@@ -10693,6 +10844,7 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
           {accomChargeModal && (
             <AccommodationChargeModal
               item={accomChargeModal.item}
+              variant={accomChargeModal.variant || 'accommodation'}
               currency={accomChargeModal.item.currency_code || currencyCode}
               travelStart={travelWindow.start}
               travelEnd={travelWindow.end}

@@ -1,7 +1,7 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
-  ArrowLeft, Backpack, Baby, CalendarDays, Car, Check, ChevronDown, Download, FileText, MapPin,
+  ArrowLeft, Backpack, Baby, CalendarDays, Car, Check, ChevronDown, Download, FileText, Link2, MapPin,
   GripVertical, Plus, RefreshCw, Save, Search, Trash2, UtensilsCrossed, X
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -33,6 +33,7 @@ packageTransportSummary,
 packageRateForDates,
   packageSeasonResolution,
   packageTierDays,
+  packageValidityWindows,
   applyPackageMarkup,
   presentationPricingColumns,
   singleSupplementForSeason,
@@ -61,6 +62,7 @@ import {
   carRentalGroupChoices,
   carRentalGroups,
   carRentalHireTotal,
+  cheapestDailyRate,
   isCarRentalItem,
   isRentalFeeLine,
   rentalCollectionDayIndex,
@@ -78,7 +80,20 @@ import {
 } from '../lib/carRentalPricing';
 import { carSpecGridHtml } from '../lib/carSpecIcons';
 import { fetchCarRentalRates } from '../lib/carRentalRates';
-import { crewShareColumn, rentalDetailsColumn } from '../lib/rentalSnapshotColumn';
+import { bundleColumn, crewShareColumn, rentalDetailsColumn } from '../lib/rentalSnapshotColumn';
+/* The composed offer, and the hire inside it that has no dates of its own. See
+   packageBundlePricing.js for why a package answers "how long is one transfer"
+   rather than "when does the car leave". */
+import {
+  bundleGroups,
+  defaultBundleLabel,
+  isReferenceHire,
+  referenceHireDetails,
+  repriceHireComponents,
+  resolveHireOfferForDetails,
+  stampBundle,
+  unstampBundle
+} from '../lib/packageBundlePricing';
 import LanguageText from '../components/LanguageText';
 import {
   SOURCE_LANGUAGE,
@@ -92,13 +107,17 @@ import {
 import { textI18nColumn } from '../lib/i18n/textI18nColumn';
 import { useTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { accommodationHasChoices, nightBandLabel, rateOptionLabel } from '../lib/accommodationOptions';
+import { extrasHasChargeChoices, chargeNameOf, isExtrasItem, lineChargeLabel } from '../lib/extrasChargeTypes';
 import { starRatingOf, withStarGrade } from '../lib/starGrading';
 import { supplierColumns } from '../lib/supplierStarColumn';
 import { fetchRoomTypesForItems } from '../lib/roomTypeTable';
 import { LIBRARY_ITEM_PACKAGE_FIELDS, LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK } from '../lib/libraryItemFields';
+import { VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { itemDestinationLabel } from '../lib/libraryItemDetail';
 import { destinationClause, destinationsOf, fetchDestinationCatalog, matchesDestinations } from '../lib/destinationFilter';
 import MultiSelectFilter from '../components/MultiSelectFilter';
+import { useSession } from '../hooks/useSession';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 /* The guide & driver meal flags and the flight's guide ticket are the newest
    library columns. PostgREST rejects a named select whole when one column in it
@@ -241,6 +260,11 @@ const [tab, setTab] = useState('itinerary');
 const [bandScope, setBandScope] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  /* RBAC: a job that may read packages may open one and work in it, but only a
+     write-level job can put it back on the shelf. The route admits the reader,
+     so the save itself is where the answer is given. */
+  const { can: holdModule } = useSession();
+  const mayEditPackage = holdModule('packages', 'write');
   /* Newer season columns are written on the same insert as the season itself, where an
      unknown column rejects the whole payload. They stay off until the database proves it
      has them, so an unmigrated package still saves. */
@@ -302,6 +326,10 @@ const [bandScope, setBandScope] = useState('');
      migration is applied PostgREST is asked for no such column, so every other
      column still saves; the fold itself only lives for the session. */
   const [crewColumnReady, setCrewColumnReady] = useState(false);
+  /* Which lines belong to one composed offer travels in two columns of its own, so
+     the offer survives the save. Until they are applied the lines still group and
+     print grouped while the builder is open — the key simply is not stored yet. */
+  const [bundleColumnReady, setBundleColumnReady] = useState(false);
 
   /* Which languages this operator writes content in. The prose editors show the
      tenant's own list, narrowed by the text_i18n column actually existing on
@@ -321,6 +349,14 @@ const [bandScope, setBandScope] = useState('');
   const snapshot = useMemo(() => JSON.stringify({ form, days, periods, paxOptions }), [form, days, periods, paxOptions]);
   const dirty = Boolean(pkg && lastSaved && snapshot !== lastSaved);
 
+  /* The dates this package is sold for, as the ranges a tariff is tested against.
+     A hire recorded as a component of an offer answers these ranges instead of a
+     pick-up stamp, so it is what the drop dialog and every re-resolution read. */
+  const hireWindows = useMemo(() => packageValidityWindows(periods), [periods]);
+  /* The same ranges in the words a line reads in: a component hire has to say which
+     dates its tariff was answered for, not merely that it was. */
+  const hireRangesWords = hireWindows.map((window) => `${window.from} – ${window.to}`).join(', ');
+
   const load = useCallback(async () => {
     if (!packageId) return;
     try {
@@ -329,8 +365,8 @@ const [bandScope, setBandScope] = useState('');
       if (!user) throw new Error('Sign in to edit packages.');
       const { data: profile, error: profileError } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
       if (profileError) throw profileError;
-      if (!profile?.company_id) throw new Error('Your account is not linked to a company.');
-      setCompanyId(profile.company_id);
+      if (!scopeCompanyId(profile?.company_id)) throw new Error('Your account is not linked to a company.');
+      setCompanyId(scopeCompanyId(profile.company_id));
 
       /* Whether this database can store the per-season single-room override. A
          probe against the optional column fails when it is absent; the save
@@ -355,6 +391,7 @@ const [bandScope, setBandScope] = useState('');
          own snapshot rather than in a column of its own. */
       setRentalColumnReady(await rentalDetailsColumn('package_day_items'));
       setCrewColumnReady(await crewShareColumn('package_day_items'));
+      setBundleColumnReady(await bundleColumn('package_day_items'));
       /* A package with no terms of its own borrows the company's, so the company
          row is read with its translations too - but only once the column exists,
          because naming a column the workspace has not migrated yet would fail the
@@ -362,12 +399,12 @@ const [bandScope, setBandScope] = useState('');
       const billingHasText = await textI18nColumn('company_billing_settings');
 
       const [pkgRes, dayRes, periodRes, paxRes, billingRes, vehicleTypesRes] = await Promise.all([
-        supabase.from('packages').select('*').eq('id', packageId).eq('company_id', profile.company_id).single(),
+        supabase.from('packages').select('*').eq('id', packageId).eq('company_id', scopeCompanyId(profile.company_id)).single(),
         supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number'),
         supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
         supabase.from('package_pax_options').select('*').eq('package_id', packageId).order('pax'),
-        supabase.from('company_billing_settings').select(`itinerary_terms, price_protection_percent${billingHasText ? ', text_i18n' : ''}`).eq('company_id', profile.company_id).maybeSingle(),
-        supabase.from('company_vehicle_types').select('*').eq('company_id', profile.company_id).order('max_capacity')
+        supabase.from('company_billing_settings').select(`itinerary_terms, price_protection_percent${billingHasText ? ', text_i18n' : ''}`).eq('company_id', scopeCompanyId(profile.company_id)).maybeSingle(),
+        supabase.from('company_vehicle_types').select('*').or(vocabularyReadFilter(scopeCompanyId(profile.company_id))).order(...VEHICLE_TYPES.orderBy)
       ]);
       for (const result of [pkgRes, dayRes, periodRes, paxRes, billingRes, vehicleTypesRes]) {
         if (result.error) throw result.error;
@@ -395,8 +432,8 @@ const [bandScope, setBandScope] = useState('');
       let loadedClients = [];
       let assignedClientIds = [];
       const [clientsRes, assignmentsRes] = await Promise.all([
-        supabase.from('clients').select('id, name, markup_percentage, client_type').eq('company_id', profile.company_id).order('name'),
-        supabase.from('package_client_assignments').select('client_id').eq('company_id', profile.company_id).eq('package_id', packageId)
+        supabase.from('clients').select('id, name, markup_percentage, client_type').eq('company_id', scopeCompanyId(profile.company_id)).order('name'),
+        supabase.from('package_client_assignments').select('client_id').eq('company_id', scopeCompanyId(profile.company_id)).eq('package_id', packageId)
       ]);
       if (clientsRes.error || assignmentsRes.error) {
         const error = clientsRes.error || assignmentsRes.error;
@@ -420,17 +457,19 @@ const [bandScope, setBandScope] = useState('');
       };
       setPkg(pkgRes.data);
       setForm(packageForm);
-      setProtectionPercent(Math.max(0, Number(billingRes.data?.price_protection_percent) || 0));
+      const loadedProtectionPercent = Math.max(0, Number(billingRes.data?.price_protection_percent) || 0);
+      const loadedPeriods = (periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }));
+      setProtectionPercent(loadedProtectionPercent);
       setDays(loadedDays);
-      setPeriods((periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms })));
+      setPeriods(loadedPeriods);
       setPaxOptions(paxRes.data || []);
-      setVehicleTypes((vehicleTypesRes.data || []).filter(Boolean));
+      setVehicleTypes(mergeVocabulary((vehicleTypesRes.data || []).filter(Boolean), VEHICLE_TYPES.keyColumn));
       setClients(loadedClients);
       setSelectedDay(0);
       setLastSaved(JSON.stringify({
         form: packageForm,
         days: loadedDays,
-        periods: (periodRes.data || []).map(({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms }) => ({ valid_from, valid_to, name, accommodation_per_person, single_supplement, single_rooms })),
+        periods: loadedPeriods,
         paxOptions: paxRes.data || []
       }));
 
@@ -451,14 +490,30 @@ const [bandScope, setBandScope] = useState('');
         const supplierStars = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.star_rating]));
         const roomsByItem = await fetchRoomTypesForItems(usedIds);
         const carRatesByItem = await fetchCarRentalRates(usedIds);
-        setLibrary((itemsRes.data || []).map((item) => ({
+        const loadedLibrary = (itemsRes.data || []).map((item) => ({
           ...item,
           supplier_name: supplierNames.get(item.supplier_id) || '',
           supplier_star_rating: supplierStars.get(item.supplier_id) || null,
           room_types: roomsByItem.get(item.id) || [],
           car_rental_rates: carRatesByItem[item.id] || [],
           item_rates: (ratesRes.data || []).filter((rate) => rate.item_id === item.id)
-        })));
+        }));
+        setLibrary(loadedLibrary);
+        /* A hire recorded as a component of an offer keeps no tariff of its own: it
+           is priced off whichever contract runs for the dates the package is sold
+           for. Opening the package is when it asks the contract again, so an offer
+           built against last season's hire figure reads today's the moment it is
+           opened — and says so, because the operator then has unsaved work. */
+        const answeredHires = repriceHireComponents(loadedDays, {
+          items: loadedLibrary,
+          windows: packageValidityWindows(loadedPeriods),
+          protectionPercent: loadedProtectionPercent,
+          currency: pkgRes.data?.currency_code || ''
+        });
+        if (answeredHires.changed) {
+          setDays(answeredHires.days);
+          showToast('A hire in this package is priced from the tariff that runs for its validity dates rather than the one it was saved on, so its figure has been re-answered. Save to keep it.', 'info');
+        }
       } else {
         setLibrary([]);
       }
@@ -655,8 +710,36 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
     bandCapacityAlertsRef.current = key;
   }, [days, library, mergedBands, showToast]);
 
+  /* A hire recorded as a component of an offer states a length, not a trip, so it has
+     no tariff of its own to keep: it is priced off whichever contract runs for the
+     dates this package is sold for. Re-answering it is the whole point of asking for a
+     reference length — the composed offer moves with the season the way the guide
+     beside it does. It changes the figure on lines that already exist and never adds,
+     moves or removes one, and it never touches a hire recorded with real pick-up and
+     return stamps: the day the car left the yard answered that tariff, and the client
+     was quoted the figure it gave.
+
+     Run from the paths that move the dates the offer is sold for, and from the load —
+     not from an effect watching them, so a package nobody edited is never marked
+     changed by a tariff that has not moved either. */
+  const repriceHires = (nextPeriods = periods, currentDays = days) => {
+    const answered = repriceHireComponents(currentDays, {
+      items: library,
+      windows: packageValidityWindows(nextPeriods),
+      protectionPercent,
+      currency: packageCurrency
+    });
+    if (answered.changed) setDays(answered.days);
+    return answered;
+  };
+
+
 const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextPax = mergedBands, nextForm = form) => {
    if (!companyId || !pkg) return false;
+   if (!mayEditPackage) {
+     showToast('Your role can read packages but not save them. An Admin can give your job write access on the Users page.', 'warning');
+     return false;
+   }
    const validPeriods = nextPeriods.filter((period) => period.valid_from && period.valid_to);
     if (nextPeriods.some((period) => Boolean(period.valid_from) !== Boolean(period.valid_to))) {
       showToast('Complete both dates for each validity period, or remove the incomplete row.', 'warning');
@@ -670,10 +753,15 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
        same Pricing Protection the itinerary builder applies takes over, and only a
        genuine dead end (no usable season on the item at all) stops the save. The
        message is collected so the operator is told exactly what was protected. A hire
-       is not in that question at all: it has no season, and its tariff window was
-       tested against the pick-up date when the line was recorded. */
+       is in that question only when it has no dates of its own: a hire recorded with
+       a pick-up and return had its tariff answered by the day the car left the yard,
+       and the quote is that contract. A hire recorded as a package component states a
+       length, not a date, so the guard asks it the package's own question — does a
+       tariff run for the dates this offer is sold for — and refuses the save when the
+       contract does not answer. Its paperwork fee is not a hire length, so it is not
+       asked either. */
     const seasonProblem = nextDays.flatMap((day) => day.services || [])
-      .filter((service) => !service.rental)
+      .filter((service) => !service.rental || (isReferenceHire(service.rental) && !isRentalFeeLine(service.rental)))
       .map((service) => {
         const item = library.find((entry) => entry.id === service.item_id) || null;
         const rate = item?.item_rates?.find((entry) => entry.id === service.rate_id) || service.rate_snapshot;
@@ -781,7 +869,16 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           ...(rentalColumnReady && service.rental ? { rental_details: service.rental } : {}),
           /* The crew place this line buys and the party shares, so a reloaded
              package re-shares the same sum over its bands. */
-          ...(crewColumnReady && service.crew_share ? { crew_share: service.crew_share } : {})
+          ...(crewColumnReady && service.crew_share ? { crew_share: service.crew_share } : {}),
+          /* Which composed offer this line is one part of, and the name that offer
+             is sold under. Both live on the line rather than on a parent row
+             because persist() rebuilds every line on each save: a parent would have
+             to be re-keyed too, and then nothing would still know which parts
+             belonged to the offer the operator named. */
+          ...(bundleColumnReady ? {
+            bundle_key: service.bundle_key || null,
+            bundle_label: service.bundle_key ? (service.bundle_label || defaultBundleLabel(service)) : null
+          } : {})
         }));
         if (rows.length) {
           const { error: itemError } = await supabase.from('package_day_items').insert(rows);
@@ -869,7 +966,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, rentalColumnReady, crewColumnReady, canStoreTranslations, showToast]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -957,6 +1054,30 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       return;
     }
     const feeDetails = rentalFeeDetails(details);
+    /* A hire recorded as a component of an offer names a length, not a trip. It has
+       no collection date to lay its 24-hour blocks along, so it stands whole on the
+       day it was dropped, and the tariff under it is re-answered whenever the
+       package's dates or the contract move. Only the paperwork keeps a line of its
+       own, exactly as a dated hire does. */
+    if (isReferenceHire(details)) {
+      const componentLines = [
+        rentalService(item, details, currency, scope),
+        ...(feeDetails ? [rentalService(item, feeDetails, currency, scope, rentalFeeLineLabel(feeDetails))] : [])
+      ];
+      showToast(
+        `${item.name} — ${rentalSummaryLabel(details)} at ${currency} ${Number(details.dailyRate || 0).toFixed(2)} per rental day${feeDetails ? `, with the ${currency} ${Number(details.contractFee).toFixed(2)} rental contract fee on a line of its own` : ''}. This hire has no dates of its own: it is priced off the tariff that runs for the package validity dates and re-answers itself when those move.`,
+        'success'
+      );
+      setDays((previous) => {
+        if (!previous.length) {
+          return [{ day_number: 1, notes: '', text_i18n: null, services: [...componentLines] }];
+        }
+        return previous.map((day, index) => (
+          index === dayIndex ? { ...day, services: [...day.services, ...componentLines] } : day
+        ));
+      });
+      return;
+    }
     /* One line per 24-hour cycle, on the day it bills — the same rule the
        itinerary lays a hire with, so a package and an itinerary built from one
        contract read the same way day by day. A package day carries no date, so
@@ -1000,10 +1121,34 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       ));
     });
   };
-  /* The hire copy a line is re-priced from after "update from library": the same
-     group, the same 24-hour blocks and the pick-up date that chose the tariff, read
-     off the line rather than guessed at. */
+  /* The hire copy a line is re-priced from after "update from library". A dated hire
+     keeps the rule it always had: the same group, the same 24-hour blocks and the
+     pick-up date that chose the tariff, read off the line rather than guessed at. A
+     component hire has no stamp to read, so it asks the package's own question again —
+     which tariff runs for the dates this offer is sold for — and its paperwork fee
+     takes the fee the desk charges today. */
   const rentalRefresh = (item, rental) => {
+    if (isReferenceHire(rental)) {
+      if (isRentalFeeLine(rental)) {
+        const liveFee = Number(item?.rental_contract_fee);
+        const fee = Number.isFinite(liveFee) && liveFee > 0 ? liveFee : (Number(rental.contractFee) || 0);
+        return { details: { ...rental, contractFee: fee, total: fee } };
+      }
+      const offer = resolveHireOfferForDetails({ item, details: rental, windows: hireWindows, protectionPercent });
+      if (!offer.canPrice) return { error: offer.message };
+      const details = referenceHireDetails({
+        item,
+        offer,
+        source: {
+          pickupLocation: rental.pickupLocation,
+          returnLocation: rental.returnLocation,
+          sameReturn: rental.sameReturn !== false
+        }
+      });
+      return details
+        ? { details }
+        : { error: `${item?.name || 'This contract'} no longer sells a hire tariff that answers this package's dates.` };
+    }
     const days = rentalDayCount(rental.pickupAt, rental.returnAt) || Number(rental.rentalDays) || 0;
     const wanted = [rental.vehicleGroup, rental.vehicleModel, rental.contractType].join('|');
     const choice = carRentalGroupChoices(item, { days, pickupAt: rental.pickupAt, pax: 0 })
@@ -1069,6 +1214,12 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
        asks which one this booking uses before it is priced. */
     if (/accommodation/i.test(String(item.category || '')) && accommodationHasChoices(item) && !scope.accommodationChargeChosen) {
       setAccomChargeModal({ item, rateId, dayIndex, scope, rate });
+      return;
+    }
+    /* An extra contracted at several charges is asked the same question, from the same
+       dialog: which of them this line is bought as. */
+    if (isExtrasItem(item) && extrasHasChargeChoices(item) && !scope.accommodationChargeChosen) {
+      setAccomChargeModal({ item, rateId, dayIndex, scope, rate, variant: 'extras' });
       return;
     }
     /* Whether this item is fit to be in a package at all. Whether it is big enough is not
@@ -1242,6 +1393,58 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       const current = days[pending.dayIndex]?.services?.[pending.serviceIndex];
       if (!current?.rental) return;
       const currency = details.currency || current.currency_code || packageCurrency;
+      /* A component hire is one line stating one length: it has no cycles to re-lay
+         across the days and no siblings on days nobody opened, so the answer
+         replaces this line alone — plus the paperwork line beside it, because a
+         contract fee is the same agreement's charge and follows the same re-answer. */
+      if (isReferenceHire(current.rental) || isReferenceHire(details)) {
+        const componentFee = rentalFeeDetails(details);
+        const sameGroup = (service) => isReferenceHire(service.rental)
+          && service.rental.groupKey === (details.groupKey || current.rental.groupKey);
+        const priced = (service, copy, name = '') => ({
+          ...service,
+          item_name: name || service.item_name,
+          currency_code: currency,
+          unit_cost: rentalLineBuyTotal(copy),
+          unit_price: rentalLineBuyTotal(copy),
+          vehicle_capacity: copy.passengers || 0,
+          rental: copy,
+          rate_snapshot: rentalPackageRate(copy, currency, rentalLineBuyTotal(copy)),
+          price_protection_percent: Number(copy.upliftPercent) || 0,
+          protected_season_name: copy.upliftPercent ? (copy.hireTariff || '') : ''
+        });
+        const here = (days[pending.dayIndex]?.services || []).filter(sameGroup);
+        const cars = here.filter((service) => !isRentalFeeLine(service.rental));
+        const feeLines = here.filter((service) => isRentalFeeLine(service.rental));
+        const patches = new Map();
+        here.forEach((service) => patches.set(
+          service.item_key,
+          priced(
+            service,
+            isRentalFeeLine(service.rental) ? componentFee : details,
+            isRentalFeeLine(service.rental) ? rentalFeeLineLabel(componentFee || details) : ''
+          )
+        ));
+        const gone = componentFee ? [] : feeLines.map((service) => service.item_key);
+        const addFee = Boolean(componentFee) && !feeLines.length && Boolean(cars.length);
+        setDays((previous) => previous.map((day, index) => {
+          if (index !== pending.dayIndex) return day;
+          const services = (day.services || [])
+            .filter((service) => !gone.includes(service.item_key))
+            .map((service) => patches.get(service.item_key) || service);
+          if (addFee) {
+            services.push(rentalService(pending.item, componentFee, currency, {}, rentalFeeLineLabel(componentFee)));
+          }
+          return { ...day, services };
+        }));
+        showToast(
+          `${rentalSummaryLabel(details)} — this day's hire re-priced to ${currency} ${rentalLineBuyTotal(details).toFixed(2)}`
+          + (componentFee ? `, its contract fee to ${currency} ${Number(componentFee.contractFee).toFixed(2)}` : ' (no contract fee on this contract)')
+          + (gone.length ? `. The ${gone.length} fee line${gone.length === 1 ? '' : 's'} this day no longer needs came off.` : ''),
+          'success'
+        );
+        return;
+      }
       const feeDetails = rentalFeeDetails(details);
       const priced = (service, rentalCopy, name = '') => ({
         ...service,
@@ -1492,10 +1695,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           showToast(`${service.item_name} is no longer in the library, so there is nothing to refresh from.`, 'warning');
           return service;
         }
-        /* A hire refreshes from its own tariff: the same group, the same 24-hour
-           blocks and the same pick-up date, read against the contract as it stands
-           today. There is no item_rates row for a car, so the rate path below would
-           have nothing to find. */
+        /* A hire refreshes from its own tariff. A dated hire reads the same group,
+           the same 24-hour blocks and the same pick-up date against the contract as
+           it stands today; a component hire re-answers the package's validity dates.
+           Either way there is no item_rates row for a car, so the rate path below
+           would have nothing to find. */
         if (service.rental || isCarRentalItem(item)) {
           if (!service.rental) {
             showToast(`${service.item_name} carries no hire copy, so there is nothing to refresh. Record the hire on the line instead.`, 'warning');
@@ -1516,7 +1720,14 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
             unit_price: hireTotal,
             vehicle_capacity: refreshed.details.passengers || service.vehicle_capacity,
             rental: refreshed.details,
-            rate_snapshot: rentalPackageRate(refreshed.details, currency)
+            rate_snapshot: rentalPackageRate(refreshed.details, currency),
+            /* A component standing in for a tariff that closed keeps the same stamp
+               every other protected line carries, so the refreshed figure stays
+               explainable on the day and in the document. */
+            ...(isReferenceHire(refreshed.details) ? {
+              price_protection_percent: Number(refreshed.details.upliftPercent) || 0,
+              protected_season_name: refreshed.details.hireTariff || ''
+            } : {})
           };
         }
         const liveRate = (item.item_rates || []).find((entry) => entry.id === service.rate_id) || rateForDates(item);
@@ -1588,6 +1799,91 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
   const rawIndexOf = (dayIndex, service) => (days[dayIndex]?.services || []).findIndex((entry) => (
     service?.item_key && entry.item_key ? entry.item_key === service.item_key : entry === service
   ));
+
+  /* ---------------------------------------------------------------------------
+     THE COMPOSED OFFER ON THE DAY
+     -------------------------------------------------------------------------
+     Several library items sold as one thing — a Cape Town transfer being the car,
+     the hire desk's paperwork and the guide's time. Nothing about how a part is
+     priced changes: the parts are grouped on the day, named once, totalled once
+     and printed as one block. Every part carries the same key and the same name,
+     so the offer travels with the rows and a band's copy of it stays that band's. */
+  const visibleDayServices = scopedServicesFor(days[selectedDay] || { services: [] });
+  const dayOffers = bundleGroups(visibleDayServices, {
+    /* A part the day does not sell does not add to the price of the offer. */
+    lineTotal: (service) => (service?.is_included === false ? 0 : Number(service?.unit_cost) || 0)
+  });
+  const offerOfLine = new Map();
+  dayOffers.forEach((group) => {
+    if (!group.key) return;
+    group.lines.forEach((line, lineIndex) => offerOfLine.set(line.item_key, { group, isFirst: lineIndex === 0 }));
+  });
+  const offersOnDay = dayOffers.filter((group) => group.key);
+  /* The day in offer order: an offer's parts are pulled together wherever they sit,
+     because a client reading the day asks what the transfer cost, not where each of
+     its three parts happened to land. */
+  const visibleDayLines = dayOffers.flatMap((group) => group.lines);
+
+  /* Joining an offer: the key is minted on the line because a new offer starts here,
+     and every part already in the target takes the name the operator typed once. */
+  const joinBundle = (dayIndex, service, offerKey = '') => {
+    const raw = rawIndexOf(dayIndex, service);
+    if (raw < 0) return;
+    const services = days[dayIndex]?.services || [];
+    const target = offerKey ? services.find((entry) => entry.bundle_key === offerKey) : null;
+    const key = target ? offerKey : uuid();
+    const label = (target?.bundle_label) || defaultBundleLabel(service);
+    setDays((previous) => previous.map((day, index) => (index !== dayIndex ? day : {
+      ...day,
+      services: (day.services || []).map((entry, entryIndex) => (
+        entryIndex === raw || entry.bundle_key === key ? stampBundle(entry, key, label) : entry
+      ))
+    })));
+    showToast(
+      target
+        ? `${service.item_name} joined the "${label}" offer. Its ${services.filter((entry) => entry.bundle_key === key).length + 1} parts now print and total as one.`
+        : `"${label}" is now an offer of its own. Add the other parts from their own lines, and rename the offer over its heading.`,
+      'success'
+    );
+  };
+
+  /* Leaving an offer. An offer reduced to a single part says nothing a plain line
+     does not, so it comes apart rather than surviving as a group of one. */
+  const leaveBundle = (dayIndex, service) => {
+    const key = service.bundle_key;
+    if (!key) return;
+    setDays((previous) => previous.map((day, index) => {
+      if (index !== dayIndex) return day;
+      const staying = (day.services || []).filter((entry) => entry.bundle_key === key && entry.item_key !== service.item_key);
+      const dissolving = staying.length < 2;
+      return {
+        ...day,
+        services: (day.services || []).map((entry) => {
+          if (entry.item_key === service.item_key) return unstampBundle(entry);
+          if (dissolving && entry.bundle_key === key) return unstampBundle(entry);
+          return entry;
+        })
+      };
+    }));
+  };
+
+  const ungroupBundle = (dayIndex, key) => setDays((previous) => previous.map((day, index) => (
+    index !== dayIndex ? day : {
+      ...day,
+      services: (day.services || []).map((entry) => (entry.bundle_key === key ? unstampBundle(entry) : entry))
+    }
+  )));
+
+  /* Renaming is typed into the heading and travels to every part, because the name
+     is what the document prints over the block — not a label on one line. */
+  const renameBundle = (dayIndex, key, label) => setDays((previous) => previous.map((day, index) => (
+    index !== dayIndex ? day : {
+      ...day,
+      services: (day.services || []).map((entry) => (
+        entry.bundle_key === key ? { ...entry, bundle_label: label } : entry
+      ))
+    }
+  )));
 
   /* Writing to a band: a service the band does not have is recorded as an exclusion of the
      shared item rather than by deleting the shared item, so the other bands keep it. */
@@ -1831,20 +2127,37 @@ const childRange = packageChildAgeRange(form.childAgeRange);
        what they actually get, and the ladder is only spelled out when asked for. */
     const dayMarkup = days.map((day, index) => {
       const included = day.services.filter((service) => service.is_included !== false);
-      const vehicles = included.filter((service) => packageIsTransport(service, library));
-      const others = included.filter((service) => !packageIsTransport(service, library));
-      const vehicleLines = vehicles.length ? (options.showVehicleOptions
-        ? vehicles.map((service) => { const supplier = packageServiceSupplier(service, library); return `<li>${escapeHtml(service.item_name)}${supplier ? ` — ${escapeHtml(supplier)}` : ''}</li>`; }).join('')
-        : `<li>${escapeHtml(packageTransportSummary(vehicles, library))}</li>`) : '';
-      const otherLines = others
-        .map((service) => {
-          const supplier = packageServiceSupplier(service, library);
-          const room = /accommodation/i.test(String(service.category || '')) && service.room_type
-            ? ` (${escapeHtml(service.room_type)})`
-            : '';
-          return `<li>${escapeHtml(service.item_name)}${room}${supplier ? ` — ${escapeHtml(supplier)}` : ''}</li>`;
-        }).join('');
-      const services = `${vehicleLines}${otherLines}`;
+      const named = (service) => {
+        const supplier = packageServiceSupplier(service, library);
+        const room = /accommodation/i.test(String(service.category || '')) && service.room_type
+          ? ` (${escapeHtml(service.room_type)})`
+          : '';
+        /* The charge an extra is sold as, in the same bracket the room type uses. */
+        const charge = /extras?/i.test(String(service.category || '')) && lineChargeLabel(service)
+          ? ` (${escapeHtml(lineChargeLabel(service))})`
+          : '';
+        return `${escapeHtml(service.item_name)}${room}${charge}${supplier ? ` — ${escapeHtml(supplier)}` : ''}`;
+      };
+      /* A day's lines, printed. Several parts sold as one composed offer print as one
+         named block with its parts indented under it, because the client is buying
+         "Cape Town airport transfer", not three unrelated lines that happened to fall
+         on the same day. A vehicle still collapses to the one the party is sized for
+         wherever it sits - inside an offer as well as loose on the day - and no money
+         is printed either way, because this document prices the traveller, not the
+         part. */
+      const printLines = (lines) => {
+        const vehicles = lines.filter((service) => packageIsTransport(service, library));
+        const others = lines.filter((service) => !packageIsTransport(service, library));
+        const vehicleLines = vehicles.length ? (options.showVehicleOptions
+          ? vehicles.map((service) => `<li>${named(service)}</li>`).join('')
+          : `<li>${escapeHtml(packageTransportSummary(vehicles, library))}</li>`) : '';
+        return `${vehicleLines}${others.map((service) => `<li>${named(service)}</li>`).join('')}`;
+      };
+      const services = bundleGroups(included)
+        .map((group) => (group.key
+          ? `<li class="doc-bundle"><strong>${escapeHtml(group.label || defaultBundleLabel(group.lines[0]))}</strong><ul>${printLines(group.lines)}</ul></li>`
+          : printLines(group.lines)))
+        .join('');
       /* A hire's vehicle keeps its spec grid in the client document, printed once
          on the day the car is collected — the same rule the itinerary's day-by-day
          follows, so the two documents describe one car the same way. The icons and
@@ -1955,7 +2268,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
        prices, amber for the child, and grey when no child range is set. */
     const priceCardCss = `.price-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 4px}.price-card{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:8px;background:#f0fdfa}.price-card span,.price-card small{color:#64748b;font-size:11px;line-height:1.35}.price-card strong{color:#0f766e;font-size:17px}.price-card.lead{box-shadow:0 0 0 2px #0d7478 inset}.price-card-party{background:#f0fdf4;border:1px solid #bbf7d0}.price-card-party span,.price-card-party small{color:#166534}.price-card-party strong{color:#15803d}.price-card-child{background:#fff7ed;border:1px solid #fed7aa}.price-card-child span,.price-card-child small{color:#9a5b13}.price-card-child strong{color:#b45309}.price-card-child.pending{background:#f8fafc;border:1px dashed #cbd5e1}.price-card-child.pending span,.price-card-child.pending small,.price-card-child.pending strong{color:#94a3b8}.pattern-pax{margin:0 0 2px;font-weight:bold;color:#1a202c}.pattern-note{margin:8px 0 0;padding:8px 10px;border-left:3px solid #94a3b8;background:#f8fafc;color:#475569;font-size:12px;line-height:1.45}.price-matrix-card{margin:12px 0;padding:12px 14px;border:1px solid #e2e8f0;border-radius:9px;background:#f8fafc}.price-matrix-card h2{margin:0 0 9px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#0d7478}.price-matrix-scroll{overflow-x:auto}.price-matrix{width:100%;border-collapse:collapse}.price-matrix th,.price-matrix td{padding:9px 12px;text-align:center;border:1px solid #e2e8f0;font-size:14px;white-space:nowrap}.price-matrix th{background:#f0fdfa;color:#0f766e;font-weight:700}.price-matrix td{color:#1e293b;font-weight:700}.price-matrix td.pending{color:#94a3b8;font-weight:400}@media print{.price-cards,.price-matrix-card{break-inside:avoid}}`;
     const summaryCss = `.pricing-summary-section{break-inside:avoid}.price-summary{width:100%;border-collapse:collapse;margin:10px 0;table-layout:fixed;break-inside:avoid}.price-summary .lab{width:168px;background:#f8fafc;text-align:left;font-size:12.5px;font-weight:600;color:#334155}.price-summary th,.price-summary td{border:1px solid #e2e8f0;padding:10px 12px;vertical-align:top}.price-summary .sum-cell{text-align:center}.price-summary .sum-trav{background:#f0fdfa}.price-summary .sum-pax{display:block;font-size:15px;font-weight:700;color:#0f766e;font-variant-numeric:tabular-nums}.price-summary .sum-price{display:block;font-size:15px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums}.price-summary .sum-date{background:#fffbeb;text-align:left;font-size:15px;font-weight:700;color:#78350f;font-variant-numeric:tabular-nums}.price-summary .sum-flat{text-align:left;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}.price-summary .sum-flat-amber{background:#fefce8;color:#854d0e}.price-summary .sum-flat-child{background:#fdf2f8;color:#9d174d}.price-summary .sum-flat-from{display:block;margin-top:3px;font-size:11px;font-weight:500;color:#94a3b8}`;
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}.car-specs{margin:8px 0 0}${priceCardCss}${summaryCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(descriptionText)}</p>${clientNames ? `<h3>${TL('doc.forPartner', { names: clientNames })}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${summaryMarkup}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}.car-specs{margin:8px 0 0}.doc-bundle{margin:8px 0}.doc-bundle>strong{color:#0d7478}.doc-bundle>ul{margin:4px 0 0;padding-left:18px;list-style:circle}.doc-bundle li{margin:3px 0}${priceCardCss}${summaryCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(descriptionText)}</p>${clientNames ? `<h3>${TL('doc.forPartner', { names: clientNames })}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${summaryMarkup}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
   };
 
   const exportDocument = () => {
@@ -1982,9 +2295,18 @@ const childRange = packageChildAgeRange(form.childAgeRange);
 
   const updateForm = (field, value) => setForm((previous) => ({ ...previous, [field]: value }));
   const addPeriod = () => setPeriods((previous) => [...previous, { valid_from: '', valid_to: '', name: '', accommodation_per_person: null, single_supplement: 0, single_rooms: null }]);
-  const changePeriod = (index, field, value) => setPeriods((previous) => previous.map((period, rowIndex) =>
-    rowIndex === index ? { ...period, [field]: value } : period));
-  const removePeriod = (index) => setPeriods((previous) => previous.filter((_, rowIndex) => rowIndex !== index));
+  const changePeriod = (index, field, value) => {
+    const next = periods.map((period, rowIndex) => (rowIndex === index ? { ...period, [field]: value } : period));
+    setPeriods(next);
+    /* Only a date moves the range a component hire is answered from; a name or an
+       accommodation figure edits the row, not the contract question. */
+    if (field === 'valid_from' || field === 'valid_to') repriceHires(next);
+  };
+  const removePeriod = (index) => {
+    const next = periods.filter((_, rowIndex) => rowIndex !== index);
+    setPeriods(next);
+    repriceHires(next);
+  };
   if (!packageId) return <div className="super-admin-page"><button className="secondary-btn" onClick={() => navigate('/packages')}><ArrowLeft size={16} /> Packages</button><p>Open a package from the Packages list.</p></div>;
 
   const tabs = [
@@ -2003,9 +2325,14 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       <div className="package-builder-actions">
         <button className="secondary-btn" onClick={() => requestNavigate('/packages')}><ArrowLeft size={16} /> Packages</button>
         <button className="secondary-btn" onClick={() => { setExportOptions((previous) => (previous.audience === 'partner' && !selectedClients.length ? { ...previous, audience: 'markup' } : previous)); setExportDialog(true); }} disabled={!pkg}><Download size={16} /> Export</button>
-        <button className="primary-btn" disabled={saving || loading || !pkg} onClick={() => persist()}><Save size={16} /> {saving ? 'Saving…' : 'Save package'}</button>
+        <button className="primary-btn" disabled={saving || loading || !pkg || !mayEditPackage} title={!mayEditPackage ? 'Your role can read packages but not save them' : undefined} onClick={() => persist()}><Save size={16} /> {saving ? 'Saving…' : 'Save package'}</button>
       </div>
     </header>
+    {!mayEditPackage && (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#334155', borderRadius: '12px', padding: '0.85rem 1.1rem', fontSize: '0.88rem', fontWeight: 600, marginBottom: '1rem' }}>
+        Your role can <strong>read</strong> this package. Anything you change here stays on your screen and cannot be saved — an Admin can give your job write access on the Users page.
+      </div>
+    )}
     {loading ? <div className="admin-table-container">Loading package…</div> : !pkg ? <div className="admin-table-container">Package not found.</div> : <>
       <nav className="package-builder-tabs" aria-label="Package editor sections">
         {tabs.map(([id, label]) => <button key={id} type="button" className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}
@@ -2044,13 +2371,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
               /* The cheapest day on the whole contract, across every season and every
                  band: the card cannot know which tariff the operator's pick-up date
                  will answer from, so it says "from" over all of them. */
-              const hireFrom = hireGroups.reduce((cheapest, group) => (
-                group.seasons.reduce((bySeason, season) => (
-                  season.bands.reduce((low, band) => (
-                    band.price > 0 && (low === null || band.price < low) ? band.price : low
-                  ), bySeason)
-                ), cheapest)
-              ), null);
+              const hireFrom = isHire ? cheapestDailyRate(hireGroups) : null;
               const hireCapacity = hireGroups.reduce((widest, group) => Math.max(widest, group.passengers || 0), 0);
               const eligibleRates = (item.item_rates || []).filter((entry) => currencyMatches(entry, packageCurrency));
               const rate = rateForDates(item);
@@ -2070,7 +2391,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                  number that decides which band this vehicle opens up. */
               const vehicleCapacity = isHire ? hireCapacity : packageVehicleCapacity(item, shownRate);
               const destination = itemDestinationLabel(item);
-              const canDrop = isHire ? hireGroups.length > 0 : Boolean(shownRate);
+              const canDrop = isHire ? hireFrom !== null : Boolean(shownRate);
               const addToDay = () => addService(item, shownRate?.id, selectedDay, bandScope ? { tier_key: bandScope } : {});
               return <article key={item.id} className={`package-library-card ${!canDrop ? 'unavailable' : ''}`} draggable={canDrop} onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'library', itemId: item.id, rateId: shownRate?.id }))} onDoubleClick={canDrop ? addToDay : undefined}>
                 <div className="package-library-top">
@@ -2220,8 +2541,9 @@ const childRange = packageChildAgeRange(form.childAgeRange);
               inputClassName=""
               style={{ minHeight: 'auto', padding: '.6rem', fontSize: '.8rem' }}
             />
-            {scopedServicesFor(days[selectedDay]).map((service) => {
+            {visibleDayLines.map((service) => {
               const rawIndex = rawIndexOf(selectedDay, service);
+              const offer = offerOfLine.get(service.item_key) || null;
               const item = itemForService(service);
               const crew = crewShareOn(service);
               const coverage = seasonFor(item, rateForService(service), { service });
@@ -2245,16 +2567,48 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                 && String(pillRate?.rate_basis || service.rate_basis || item?.pricing_model || '').toLowerCase() === 'per_vehicle'
                 && pillRate?.prices_by_vehicle && Object.keys(pillRate.prices_by_vehicle).length;
               const serviceCurrency = service.currency_code || packageCurrency;
-              return <article key={service.item_key || `${service.id || service.item_id}-${rawIndex}`} className={`package-canvas-service ${bandOnly ? 'band-only' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: selectedDay, fromIndex: rawIndex }))}>
+              /* The offer's own heading, printed above the first of its parts: the name
+                 the operator typed, how many parts answer for it, and the one figure the
+                 client is shown for the whole of it. */
+              return <Fragment key={service.item_key || `${service.id || service.item_id}-${rawIndex}`}>
+                {offer && offer.isFirst && (
+                  <div className="package-bundle-head">
+                    <Link2 size={14} aria-hidden="true" />
+                    <input
+                      className="package-bundle-name"
+                      value={offer.group.label || defaultBundleLabel(offer.group.lines[0])}
+                      onChange={(event) => renameBundle(selectedDay, offer.group.key, event.target.value)}
+                      aria-label={`Name of the composed offer on day ${selectedDay + 1}`}
+                      placeholder="Composed offer"
+                    />
+                    <span className="package-bundle-parts">{offer.group.lines.length} part{offer.group.lines.length === 1 ? '' : 's'}</span>
+                    <strong className="package-bundle-total">{offer.group.currency || packageCurrency} {Number(offer.group.total).toFixed(2)}</strong>
+                    <button type="button" className="package-bundle-ungroup" onClick={() => ungroupBundle(selectedDay, offer.group.key)} title="Take these parts back to ordinary lines of their own">Ungroup</button>
+                  </div>
+                )}
+                <article className={`package-canvas-service ${bandOnly ? 'band-only' : ''}${offer ? ' in-bundle' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: selectedDay, fromIndex: rawIndex }))}>
                 <GripVertical size={16} className="package-grip" />
-                <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{isStay(service) && service.room_type ? ` · ${service.room_type}` : ''}</small>
+                <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{isStay(service) && service.room_type ? ` · ${service.room_type}` : ''}{/extras?/i.test(String(service.category || '')) && lineChargeLabel(service) ? ` · ${lineChargeLabel(service)}` : ''}</small>
                   {bandOnly
                     ? <small className="package-band-flag">this band only</small>
                     : (service.tier_key && <small className="package-band-flag other">{packageBandLabel(mergedBands.find((band) => band.item_key === service.tier_key) || {})} only</small>)}
                   {!bandOnly && !service.tier_key && <small className="package-band-flag shared">all bands</small>}
+                  {/* Which offer this part is sold inside, answered on the line itself.
+                      A part already inside one leaves it here; a line on its own picks
+                      the offer it joins — a new one, or one this day already has. */}
+                  {offer
+                    ? <button type="button" className="package-bundle-chip" onClick={() => leaveBundle(selectedDay, service)} title="Take this part out of the offer"><Link2 size={11} aria-hidden="true" /> {offer.group.label || defaultBundleLabel(service)}</button>
+                    : <select className="package-bundle-join" value="" aria-label={`Compose ${service.item_name} into an offer`} onChange={(event) => {
+                      if (!event.target.value) return;
+                      joinBundle(selectedDay, service, event.target.value === 'new' ? '' : event.target.value);
+                    }}>
+                      <option value="">Compose into an offer…</option>
+                      <option value="new">New offer from this line</option>
+                      {offersOnDay.map((group) => <option key={group.key} value={group.key}>{group.label || defaultBundleLabel(group.lines[0])}</option>)}
+                    </select>}
                   {item?.item_rates?.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(selectedDay, rawIndex, 'rate_id', event.target.value)}>
                     {item.item_rates.map((rate) => {
-                    const opt = rateOptionLabel(rate, item);
+                    const opt = isExtrasItem(item) ? chargeNameOf(rate) : rateOptionLabel(rate, item);
                     const season = rate.season_name || rate.option_name || 'Contract rate';
                     const from = rate.valid_from ? String(rate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
                     const to = rate.valid_to ? String(rate.valid_to).slice(0, 10).replaceAll('-', '/') : '';
@@ -2279,34 +2633,50 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                   {/* The hire answers in full on the line: the car the contract names,
                       the whole 24-hour blocks it is out for, where it goes out and comes
                       back, and the six specs the documents print. Its contract fee is a
-                      line of its own, because a client asks what the paperwork cost. */}
-                  {service.rental && (
+                      line of its own and says nothing beyond its own name — the car, the
+                      tariff and the specs already belong to the hire beside it, and
+                      saying them twice reads as two vehicles. */}
+                  {service.rental && !isRentalFeeLine(service.rental) && (
                     <div className="package-rental-copy">
-                      <small>{rentalVehicleLabel(service.rental)} · {service.rental.seasonName || ''} band</small>
-                      {isRentalFeeLine(service.rental) ? (
-                        <small>
-                          {`${service.currency_code} ${Number(service.rental.contractFee).toFixed(2)} contract fee — the hire desk's charge for drawing up this agreement, billed once rather than per day`}
-                        </small>
-                      ) : (
-                        <small>
-                          {service.currency_code} {Number(service.rental.rentalDays || 0)} × 24h at {service.currency_code} {Number(service.rental.dailyRate || 0).toFixed(2)}
-                          {Number(service.rental.contractFee) > 0 ? ` + ${service.currency_code} ${Number(service.rental.contractFee).toFixed(2)} contract fee on its own line` : ' — no contract fee on this contract'}
-                          {` = ${service.currency_code} ${carRentalBuyTotal(service.rental).toFixed(2)} for the whole hire`}
-                          {/* A hire that arrived from an itinerary spread over its days
-                              crosses over one block at a time, so the line says which day
-                              of the contract it is rather than looking like it forgot the
-                              rest of the hire. */}
-                          {service.rental.dayShare && (
-                            ` — this line is day ${service.rental.dayShare.ordinal} of ${service.rental.dayShare.dayCount}, ${service.currency_code} ${rentalLineBuyTotal(service.rental).toFixed(2)}`
+                      {isReferenceHire(service.rental) ? (
+                        <>
+                          <small>{rentalVehicleLabel(service.rental)} · one transfer of {Number(service.rental.rentalDays || 0)} × 24h</small>
+                          <small>
+                            {`${service.currency_code} ${Number(service.rental.rentalDays || 0)} × 24h at ${service.currency_code} ${Number(service.rental.dailyRate || 0).toFixed(2)} = ${service.currency_code} ${carRentalBuyTotal(service.rental).toFixed(2)} for one transfer`}
+                            {Number(service.rental.contractFee) > 0 ? `, with its ${service.currency_code} ${Number(service.rental.contractFee).toFixed(2)} contract fee on a line of its own` : ' — no contract fee on this contract'}
+                          </small>
+                          {/* The offer sells a stretch of dates, not a departure, so the
+                              hire names where the car goes out and leaves the when to the
+                              booking — and says which tariff the figure came from. */}
+                          {service.rental.pickupLocation && (
+                            <small>{`Out of ${service.rental.pickupLocation}${service.rental.sameReturn === false ? ` → back at ${service.rental.returnLocation || 'the hire desk'}` : ' and back to it'} — no date is fixed; the booking says when`}</small>
                           )}
-                        </small>
-                      )}
+                          <small>{`Tariff ${service.rental.hireTariff || service.rental.seasonName || 'as the contract reads today'} · re-answered for the package validity dates${hireRangesWords ? ` (${hireRangesWords})` : ''}`}</small>
+                        </>
+                      ) : (
+                        <>
+                      <small>{rentalVehicleLabel(service.rental)} · {service.rental.seasonName || ''} band</small>
+                      <small>
+                        {service.currency_code} {Number(service.rental.rentalDays || 0)} × 24h at {service.currency_code} {Number(service.rental.dailyRate || 0).toFixed(2)}
+                        {Number(service.rental.contractFee) > 0 ? ` + ${service.currency_code} ${Number(service.rental.contractFee).toFixed(2)} contract fee on its own line` : ' — no contract fee on this contract'}
+                        {` = ${service.currency_code} ${carRentalBuyTotal(service.rental).toFixed(2)} for the whole hire`}
+                        {/* A hire that arrived from an itinerary spread over its days
+                            crosses over one block at a time, so the line says which day
+                            of the contract it is rather than looking like it forgot the
+                            rest of the hire. */}
+                        {service.rental.dayShare && (
+                          ` — this line is day ${service.rental.dayShare.ordinal} of ${service.rental.dayShare.dayCount}, ${service.currency_code} ${rentalLineBuyTotal(service.rental).toFixed(2)}`
+                        )}
+                      </small>
                       <small>
                         Out of {service.rental.pickupLocation || 'the hire desk'} {String(service.rental.pickupAt || '').replace('T', ' ')}
                         {' → back at '}{service.rental.returnLocation || 'the hire desk'} {String(service.rental.returnAt || '').replace('T', ' ')}
                       </small>
                       <small>Tariff {service.rental.validityFrom || 'open'} – {service.rental.validityTo || 'open'}</small>
-                      <CarSpecGrid spec={service.rental} />
+                        </>
+                      )}
+                      {/* One car is one spec box, on the block the car leaves the yard. */}
+                      {rentalPrintsSpecGrid(service.rental) && <CarSpecGrid spec={service.rental} />}
                     </div>
                   )}
                 </div>
@@ -2332,15 +2702,15 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                   : <label className="package-quantity">Qty <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(selectedDay, rawIndex, 'quantity', Number(event.target.value) || 1)} /></label>}
                 <button type="button" className="package-icon-button" aria-label={`Update ${service.item_name} from the library (re-locks today's rate)`} onClick={() => refreshServiceFromLibrary(selectedDay, rawIndex)} title={service.rental ? 'Update from library: re-price this hire from today\u2019s tariff' : 'Update from library: re-locks this line to the library\u2019s current rate'} disabled={!library.find((entry) => entry.id === service.item_id)}><RefreshCw size={16} /></button>
                 {service.rental && (
-                  <button type="button" className="package-icon-button" aria-label={`Change the hire on ${service.item_name}`} title="Change the hire — where and when the car goes out and comes back" onClick={() => openCarRentalEdit(selectedDay, rawIndex)}><Car size={16} /></button>
+                  <button type="button" className="package-icon-button" aria-label={`Change the hire on ${service.item_name}`} title={isReferenceHire(service.rental) ? 'Change the hire — how long one transfer is, and where the car goes out' : 'Change the hire — where and when the car goes out and comes back'} onClick={() => openCarRentalEdit(selectedDay, rawIndex)}><Car size={16} /></button>
                 )}
                 {isOverlandGuide(service.guide_service_types) && (
                   <button type="button" className="package-icon-button" aria-label={`Guide & driver details for ${service.item_name} on day ${selectedDay + 1}`} title="Guide & driver details — meals and overnight for this day" onClick={() => setGuideDetailsModal({ dayIndex: selectedDay, guideKey: service.item_key, defaultValues: guideDetailsDefaultsFor(selectedDay, service.item_key) })}><UtensilsCrossed size={16} /></button>
                 )}
                 <button type="button" className="package-icon-button" aria-label={bandScope ? `Remove ${service.item_name} from the ${packageBandLabel(mergedBands.find((band) => band.item_key === bandScope) || {})} band` : `Remove ${service.item_name}`} onClick={() => (bandScope ? removeServiceForBand(selectedDay, service, bandScope) : removeService(selectedDay, rawIndex))}><Trash2 size={16} /></button>
-              </article>;
+              </article></Fragment>;
             })}
-            {!scopedServicesFor(days[selectedDay]).length && <p className="package-drop-hint">Drop a library item here, or add from the sidebar.</p>}
+            {!visibleDayServices.length && <p className="package-drop-hint">Drop a library item here, or add from the sidebar.</p>}
             {days.length > 1 && <button type="button" className="package-remove-day" onClick={() => {
               const remaining = days.filter((_, index) => index !== selectedDay);
               setDays(remaining);
@@ -2515,6 +2885,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     />}
     {accomChargeModal && <AccommodationChargeModal
       item={accomChargeModal.item}
+      variant={accomChargeModal.variant || 'accommodation'}
       currency={accomChargeModal.item.currency_code || packageCurrency}
       travelStart={periods[0]?.valid_from || ''}
       travelEnd={periods[0]?.valid_to || ''}
@@ -2523,15 +2894,19 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       onCancel={() => setAccomChargeModal(null)}
     />}
     {/* The hire, asked the same way as on an itinerary. A package is sold for its
-        validity dates rather than one trip, so the dialog opens on the season being
-        worked on - the operator moves the two ends of the hire from there, and the
-        rental-length band follows the 24-hour blocks between them. */}
+        validity dates rather than one trip, so the dialog opens on the component
+        answer — how many 24-hour blocks one transfer uses, priced off the tariff
+        that runs for this package's dates — and still offers the fixed-date hire for
+        a car the operator is quoting for one particular collection. */}
     {carRentalModal && <CarRentalDropModal
       item={carRentalModal.item}
       currency={carRentalModal.item.currency || packageCurrency}
       defaultPickupDate={periods[activeSeason]?.valid_from || periods[0]?.valid_from || ''}
       pax={autoPattern.pax || 0}
       details={carRentalModal.details || null}
+      mode="package"
+      windows={hireWindows}
+      protectionPercent={protectionPercent}
       onConfirm={confirmCarRental}
       onCancel={cancelCarRental}
     />}

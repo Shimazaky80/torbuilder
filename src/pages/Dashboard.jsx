@@ -6,6 +6,7 @@ import { useCurrencies } from '../hooks/useCurrencies';
 import { round2 } from '../lib/financeJournal';
 import { fmtMoney, effectiveBalance } from '../lib/invoiceDoc';
 import { receiptDirection } from '../lib/settlement';
+import { scopeCompanyId } from '../lib/tenantScope';
 import {
   LayoutDashboard,
   RefreshCw,
@@ -247,7 +248,7 @@ export const Dashboard = () => {
         .eq('id', user.id)
         .single();
 
-      const cid = profile?.company_id;
+      const cid = scopeCompanyId(profile?.company_id);
       if (!cid) { setLoading(false); return; }
 
       const countRows = (table) => supabase

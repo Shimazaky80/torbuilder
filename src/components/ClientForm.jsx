@@ -5,6 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { Users, X } from 'lucide-react';
 import CountrySelect from './CountrySelect';
 import { useCountries } from '../hooks/useCountries';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) => {
   const countries = useCountries();
@@ -52,13 +53,13 @@ export const ClientForm = ({ onCancel, onCreated, title = 'Add New Client' }) =>
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         showToast('No active company found for your user profile', 'error');
         return;
       }
 
       const payload = {
-        company_id: profile.company_id,
+        company_id: scopeCompanyId(profile.company_id),
         name,
         email,
         contact_tel: form.contact_tel.trim(),

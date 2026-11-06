@@ -5,7 +5,9 @@ import { useToast } from '../context/ToastContext';
 import { UserPlus, Users, Calendar, User, StickyNote, Compass, UserCheck, Clock } from 'lucide-react';
 import ClientForm from './ClientForm';
 import { normaliseTravellerRole } from '../lib/roomAllocationHelper';
+import { vocabularyNames, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { PRECISION_EXACT, PRECISION_MONTH, daysBetween, monthOf, monthRangeLabel, monthTimingError, monthWindow } from '../lib/travelTiming';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 const TRAVELLER_ROLE_OPTIONS = [
   { value: 'client', label: 'Client' },
@@ -124,7 +126,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
         .select('*, company_id')
         .eq('id', user.id)
         .single();
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         setClients([]);
         setTourTypes([]);
         setLoading(false);
@@ -135,19 +137,18 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
         supabase
           .from('clients')
           .select('*')
-          .eq('company_id', profile.company_id)
+          .eq('company_id', scopeCompanyId(profile.company_id))
           .order('name', { ascending: true }),
         supabase
           .from('company_tour_types')
-          .select('name')
-          .eq('company_id', profile.company_id)
-          .eq('is_active', true)
+          .select('name, company_id, is_active')
+          .or(vocabularyReadFilter(scopeCompanyId(profile.company_id)))
           .order('name', { ascending: true })
       ]);
       if (error) throw error;
       if (tourTypeError) throw tourTypeError;
       setClients(data || []);
-      setTourTypes((tourTypeRows || []).map((row) => row.name));
+      setTourTypes(vocabularyNames(tourTypeRows));
     } catch (err) {
       showToast(err.message, 'error');
     } finally {

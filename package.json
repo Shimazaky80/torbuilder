@@ -30,7 +30,11 @@
     "test:destination-filter": "vite build --ssr scripts/destination-filter.test.mjs --outDir .tmp-destination-filter-test --emptyOutDir --logLevel error && node .tmp-destination-filter-test/destination-filter.test.js",
     "test:guide-person": "vite build --ssr scripts/guide-person.test.mjs --outDir .tmp-guide-person-test --emptyOutDir --logLevel error && node .tmp-guide-person-test/guide-person.test.js",
     "test:car-rental": "vite build --ssr scripts/car-rental.test.mjs --outDir .tmp-car-rental-test --emptyOutDir --logLevel error && node .tmp-car-rental-test/car-rental.test.js",
-    "test:i18n-documents": "vite build --ssr scripts/i18n-documents.test.mjs --outDir .tmp-i18n-documents-test --emptyOutDir --logLevel error && node .tmp-i18n-documents-test/i18n-documents.test.js"
+    "test:i18n-documents": "vite build --ssr scripts/i18n-documents.test.mjs --outDir .tmp-i18n-documents-test --emptyOutDir --logLevel error && node .tmp-i18n-documents-test/i18n-documents.test.js",
+    "test:company-vocabulary": "vite build --ssr scripts/company-vocabulary.test.mjs --outDir .tmp-company-vocabulary-test --emptyOutDir --logLevel error && node .tmp-company-vocabulary-test/company-vocabulary.test.js",
+    "test:package-bundle": "vite build --ssr scripts/package-bundle.test.mjs --outDir .tmp-package-bundle-test --emptyOutDir --logLevel error && node .tmp-package-bundle-test/package-bundle.test.js",
+    "test:extras-charge-types": "vite build --ssr scripts/extras-charge-types.test.mjs --outDir .tmp-extras-charge-types-test --emptyOutDir --logLevel error && node .tmp-extras-charge-types-test/extras-charge-types.test.js",
+    "test:rbac": "vite build --ssr scripts/rbac.test.mjs --outDir .tmp-rbac-test --emptyOutDir --logLevel error && node .tmp-rbac-test/rbac.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.3",

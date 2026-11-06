@@ -14,6 +14,7 @@ import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBase
 import { chargesChildRate } from '../lib/servicePricing';
 import { waiverLadder, waiverFromLadder, withWaiverNote } from '../lib/singleSupplement';
 import { nightBandLabel, WEEKEND_DAY_OPTIONS, weekendDaysOf } from '../lib/accommodationOptions';
+import { EXTRAS_CHARGE_SUGGESTIONS } from '../lib/extrasChargeTypes';
 import { crewLadderTiers, normaliseStaffTiers, staffRoomLadder, staffTierSummary } from '../lib/staffRoomTiers';
 import { STAR_GRADES, starGlyphs, starLabel, starRatingOf } from '../lib/starGrading';
 import { supplierColumns, supplierStarColumn } from '../lib/supplierStarColumn';
@@ -72,8 +73,10 @@ import {
 } from 'lucide-react';
 import LanguageText from '../components/LanguageText';
 import { carRentalGroups } from '../lib/carRentalPricing';
+import { VEHICLE_TYPES, activeVehicleTypes, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { SOURCE_LANGUAGE, textI18nPayload, translationsOf } from '../lib/i18n';
 import { useTenantLanguages } from '../lib/i18n/useTenantLanguages';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 /* Price and count fields may never hold a negative value. Clamps a typed
    negative number to "0" while leaving empty / non-numeric values (including
@@ -838,6 +841,10 @@ export const LibraryItems = () => {
   const isTrainCategory = (category) => category === 'Trains';
   const isTicketCategory = (category) => category === 'Tickets';
   const isExtrasCategory = (category) => category === 'Extras';
+  /* Accommodation and Extras both price one season at several named charges —
+     board basics for the one, separate charges for the other — so both are
+     edited season-first with a charge type standing on every rate row. */
+  const hasChargeTypes = (category) => category === 'Accommodation' || isExtrasCategory(category);
   const isCarRentalCategory = (category) => category === 'Car Rental';
   const isGuideCategory = (category) => category === 'Guide' || category === 'Guide / Driver';
   const normalizeCategoryName = (name) => {
@@ -1439,7 +1446,7 @@ export const LibraryItems = () => {
       .eq('id', user.id)
       .single();
 
-    if (profile?.company_id) return profile.company_id;
+    if (scopeCompanyId(profile?.company_id)) return scopeCompanyId(profile.company_id);
 
     // Fallback: find a company owned by this user
     const { data: ownedCompany } = await supabase
@@ -1571,13 +1578,16 @@ export const LibraryItems = () => {
         return;
       }
 
+      /* Vehicle types are a national list now: the standard rows plus this
+         company's own, with the company's row winning where both carry one code.
+         Active is decided after merging, because deactivating a standard type
+         means adding an override that says so, not editing the shared row. */
       const { data: vTypes } = await supabase
         .from('company_vehicle_types')
-        .select('id, code, name, max_capacity, is_active')
-        .eq('company_id', companyId)
-        .eq('is_active', true)
-        .order('max_capacity', { ascending: true });
-      setVehicleTypes(vTypes || []);
+        .select(VEHICLE_TYPES.columns)
+        .or(vocabularyReadFilter(companyId))
+        .order(...VEHICLE_TYPES.orderBy);
+      setVehicleTypes(activeVehicleTypes(mergeVocabulary(vTypes, VEHICLE_TYPES.keyColumn)));
 
       const { data: sups } = await supabase
         .from('suppliers')
@@ -1642,7 +1652,7 @@ export const LibraryItems = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) return;
+      if (!scopeCompanyId(profile?.company_id)) return;
 
       // ── Fetch pages of items as plain queries (no PostgREST FK joins).
       // This avoids "schema cache" errors regardless of FK registration state
@@ -1655,7 +1665,7 @@ export const LibraryItems = () => {
       let itemQuery = supabase
         .from('library_items')
         .select('*', { count: 'exact' })
-        .eq('company_id', profile.company_id)
+        .eq('company_id', scopeCompanyId(profile.company_id))
         .order('created_at', { ascending: false });
 
       if (supplierFilter !== 'All') {
@@ -1710,7 +1720,7 @@ export const LibraryItems = () => {
       const { data: suppliersData } = await supabase
         .from('suppliers')
         .select(await supplierColumns('id, name'))
-        .eq('company_id', profile.company_id);
+        .eq('company_id', scopeCompanyId(profile.company_id));
 
       // Build lookup maps and merge
       const ratesMap = {};
@@ -3263,7 +3273,9 @@ export const LibraryItems = () => {
                 item_id: targetItemId,
                 option_name: s.seasonName || 'Base Season',
                 season_name: s.seasonName || 'Base Season',
-                meal_plan: null,
+                /* The charge name rides on meal_plan, the column a board basic
+                   occupies for a room; blank means this row is the item's default charge. */
+                meal_plan: (s.optionName || '').trim() || null,
                 currency: itemData.currency,
                 valid_from: s.validFrom || null,
                 valid_to: s.validTo || null,
@@ -3793,6 +3805,7 @@ export const LibraryItems = () => {
         const extrasChildRate = moneyLoad((r.child_rates_breakdown || {}).child);
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
+          optionName: r.meal_plan || '',
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
           adultRate: moneyLoad(r.price_1_adult ?? r.unit_price),
@@ -6935,18 +6948,21 @@ export const LibraryItems = () => {
                       </div>
                     ))}
 
-                    {item.category === 'Accommodation' && (() => {
+                    {hasChargeTypes(item.category) && (() => {
+                      const isAccomItem = item.category === 'Accommodation';
                       const rooms = item.roomTypes || [];
-                      const activeRoomKey = activeRoomKeyFor(item);
+                      const activeRoomKey = isAccomItem ? activeRoomKeyFor(item) : '';
                       const groups = accommodationSeasonGroupsFor(item.seasons, activeRoomKey);
                       const currentGroup = groups[activeSeasonIndexOf(item.tempId, groups)];
                       const activeGroup = currentGroup || groups[0] || null;
                       const chargeLabels = (activeGroup?.memberIndices || [])
                         .map((idx) => (item.seasons[idx]?.optionName || item.mealPlan || '').trim());
                       const optionNames = [...new Set(chargeLabels.filter(Boolean))];
+                      const defaultCharge = isAccomItem ? (item.mealPlan || 'Bed & Breakfast') : (item.name || 'the service');
+                      const suggestions = isAccomItem ? optionNames : [...new Set([...EXTRAS_CHARGE_SUGGESTIONS, ...optionNames])];
                       return (
                         <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
-                          {rooms.length > 1 && (
+                          {isAccomItem && rooms.length > 1 && (
                             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem', paddingBottom: '0.6rem', borderBottom: '1px solid #ede9fe' }}>
                               <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#5b21b6' }}>Pricing room:</span>
                               {rooms.map((room) => {
@@ -6971,12 +6987,14 @@ export const LibraryItems = () => {
                           )}
                           <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#5b21b6', marginBottom: '0.2rem' }}>Charge types</div>
                           <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.6rem', lineHeight: 1.45 }}>
-                            One season is priced at several charge types (room only, half board, full board with activities). Add a charge type to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; below and set its prices in the matrix — on a drop the itinerary asks which season and charge type applies.
-                            {dbFeatures.nightBands && ' A charge type priced by the length of stay uses the same name again with its own night band, so it remains one charge type with an extra row.'}
+                            {isAccomItem
+                              ? <>One season is priced at several charge types (room only, half board, full board with activities). Add a charge type to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; below and set its prices in the matrix &mdash; on a drop the itinerary asks which season and charge type applies.
+                                  {dbFeatures.nightBands && ' A charge type priced by the length of stay uses the same name again with its own night band, so it remains one charge type with an extra row.'}</>
+                              : <>One Extras item can be priced at several charges instead of several library items: a fuel contract that sells 5 litres, a full tank and a different fuel again is three charge types on one item. Add one to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; and set its price below &mdash; on a drop the itinerary asks which charge the line is sold as.</>}
                           </div>
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.6rem' }}>
                             {optionNames.length === 0
-                              ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>This season uses the default &ldquo;{item.mealPlan || 'Bed & Breakfast'}&rdquo;. Add a charge type to price another board basis.</span>
+                              ? <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>This season uses the default &ldquo;{defaultCharge}&rdquo;. Add a charge type to price another{isAccomItem ? ' board basis' : ' charge'}.</span>
                               : optionNames.map((name) => (
                                 <span key={name} style={{ background: '#fff', border: '1px solid #ddd6fe', borderRadius: '999px', padding: '0.22rem 0.65rem', fontSize: '0.75rem', fontWeight: 600, color: '#5b21b6' }}>
                                   {name}
@@ -6988,12 +7006,12 @@ export const LibraryItems = () => {
                               list={`option-list-${item.tempId}`}
                               className="pricing-select"
                               style={{ maxWidth: '260px', padding: '0.4rem' }}
-                              placeholder="e.g. Half Board"
+                              placeholder={isAccomItem ? 'e.g. Half Board' : 'e.g. Fuel charge'}
                               value={chargeOptionDraft[item.tempId] || ''}
                               onChange={(e) => setChargeOptionDraft((prev) => ({ ...prev, [item.tempId]: e.target.value }))}
                             />
                             <datalist id={`option-list-${item.tempId}`}>
-                              {optionNames.map((n) => <option key={n} value={n} />)}
+                              {suggestions.map((n) => <option key={n} value={n} />)}
                             </datalist>
                             <button
                               type="button"
@@ -7013,23 +7031,27 @@ export const LibraryItems = () => {
 
                     {item.seasons.map((season, seasonIdx) => {
                       /* Seasonal Rates Matrix shows one season at a time; the
-                         arrows below move between them. Accommodation is edited
-                         season-first: the visible season shows one charge type at
-                         a time, and the chips below switch between them. */
+                         arrows below move between them. Accommodation and Extras
+                         are edited season-first: the visible season shows one
+                         charge type at a time, and the chips below switch
+                         between them. */
                       const isAccom = item.category === 'Accommodation';
-                      const accGroups = isAccom ? accommodationSeasonGroupsFor(item.seasons, activeRoomKeyFor(item)) : null;
-                      const activeGroupIdx = isAccom
-                        ? activeSeasonIndexOf(item.tempId, accGroups)
+                      const groupsSeasons = hasChargeTypes(item.category);
+                      const chargeGroups = groupsSeasons
+                        ? accommodationSeasonGroupsFor(item.seasons, isAccom ? activeRoomKeyFor(item) : '')
+                        : null;
+                      const activeGroupIdx = groupsSeasons
+                        ? activeSeasonIndexOf(item.tempId, chargeGroups)
                         : activeSeasonIndexOf(item.tempId, item.seasons);
-                      const activeGroup = isAccom ? accGroups[activeGroupIdx] : null;
-                      const activeMemberIdx = isAccom
+                      const activeGroup = groupsSeasons ? chargeGroups[activeGroupIdx] : null;
+                      const activeMemberIdx = groupsSeasons
                         ? activeChargeIndexOf(item.tempId, activeGroup)
                         : activeSeasonIndexOf(item.tempId, item.seasons);
                       if (seasonIdx !== activeMemberIdx) return null;
-                      const totalSeasons = isAccom ? accGroups.length : item.seasons.length;
-                      const seasonPos = isAccom ? activeGroupIdx : seasonIdx;
-                      const headerName = isAccom ? activeGroup?.seasonName : season.seasonName;
-                      const navSeasons = isAccom ? accGroups : item.seasons;
+                      const totalSeasons = groupsSeasons ? chargeGroups.length : item.seasons.length;
+                      const seasonPos = groupsSeasons ? activeGroupIdx : seasonIdx;
+                      const headerName = groupsSeasons ? activeGroup?.seasonName : season.seasonName;
+                      const navSeasons = groupsSeasons ? chargeGroups : item.seasons;
                       const bands = item.childAgeRanges || [];
                       /* Capacity decides which price boxes are live: a room
                          that cannot take two adults has no sharing rate, one
@@ -7138,35 +7160,35 @@ export const LibraryItems = () => {
                                 </span>
                               )}
                               {totalSeasons > 1 && (
-                                <button type="button" onClick={() => (isAccom ? handleRemoveSeasonGroup(item.tempId, activeGroup) : handleRemoveSeasonRow(item.tempId, seasonIdx))}
+                                <button type="button" onClick={() => (groupsSeasons ? handleRemoveSeasonGroup(item.tempId, activeGroup) : handleRemoveSeasonRow(item.tempId, seasonIdx))}
                                   style={{ color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                                  <Trash2 size={14} /> {isAccom ? 'Remove Season' : 'Remove Season'}
+                                  <Trash2 size={14} /> Remove Season
                                 </button>
                               )}
                             </div>
                           </div>
 
                           {/* Season Name & Dates */}
-                          <div style={{ display: 'grid', gridTemplateColumns: item.category === 'Accommodation' ? (dbFeatures.nightBands ? '1.2fr 1fr 1fr 1.1fr 0.7fr 0.7fr' : '1.2fr 1fr 1fr 1.1fr') : '2fr 1fr 1fr', gap: '1rem', marginBottom: isAccom ? '0.75rem' : '1rem' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: isAccom ? (dbFeatures.nightBands ? '1.2fr 1fr 1fr 1.1fr 0.7fr 0.7fr' : '1.2fr 1fr 1fr 1.1fr') : (groupsSeasons ? '1.2fr 1fr 1fr 1.1fr' : '2fr 1fr 1fr'), gap: '1rem', marginBottom: isAccom ? '0.75rem' : '1rem' }}>
                             <div>
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Season Name</label>
                               <input type="text" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 placeholder="e.g. Base / High Season"
                                 value={season.seasonName}
-                                onChange={(e) => (isAccom
+                                onChange={(e) => (groupsSeasons
                                   ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'seasonName', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'seasonName', e.target.value))} />
                             </div>
-                            {item.category === 'Accommodation' && (
+                            {groupsSeasons && (
                               <div>
                                 <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Charge type</label>
                                 <input type="text" className="pricing-select" list={`option-list-${item.tempId}`} style={{ padding: '0.4rem', fontSize: '0.85rem' }}
-                                  placeholder="e.g. Half Board (blank = default)"
+                                  placeholder={isAccom ? 'e.g. Half Board (blank = default)' : 'e.g. Fuel charge (blank = the item itself)'}
                                   value={season.optionName || ''}
                                   onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'optionName', e.target.value)} />
                               </div>
                             )}
-                            {item.category === 'Accommodation' && dbFeatures.nightBands && (
+                            {isAccom && dbFeatures.nightBands && (
                               <>
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Nights from</label>
@@ -7188,7 +7210,7 @@ export const LibraryItems = () => {
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Valid From</label>
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validFrom}
-                                onChange={(e) => (isAccom
+                                onChange={(e) => (groupsSeasons
                                   ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validFrom', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validFrom', e.target.value))} />
                             </div>
@@ -7196,7 +7218,7 @@ export const LibraryItems = () => {
                               <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Valid To</label>
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validTo}
-                                onChange={(e) => (isAccom
+                                onChange={(e) => (groupsSeasons
                                   ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validTo', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value))} />
                             </div>
@@ -7212,12 +7234,13 @@ export const LibraryItems = () => {
 
                           {/* Charge types of this season — pick which one the
                               prices below belong to. */}
-                          {isAccom && activeGroup && (
+                          {groupsSeasons && activeGroup && (
                             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem' }}>
                               <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#64748b' }}>Charge type:</span>
                               {activeGroup.memberIndices.map((idx) => {
-                                const band = nightBandLabel(item.seasons[idx]);
-                                const label = (item.seasons[idx]?.optionName || item.mealPlan || 'Default board').trim() || 'Default board';
+                                const band = isAccom ? nightBandLabel(item.seasons[idx]) : '';
+                                const unnamed = isAccom ? (item.mealPlan || 'Default board') : (item.name || 'Default charge');
+                                const label = (item.seasons[idx]?.optionName || unnamed).trim() || unnamed;
                                 const selected = idx === activeMemberIdx;
                                 return (
                                   <button
@@ -7459,9 +7482,8 @@ export const LibraryItems = () => {
                           ) : isExtrasCategory(item.category) ? (
                             <div style={{ background: '#fdf2f8', border: '1px solid #fbcfe8', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
-                                {item.pricingModel === 'per_unit'
-                                  ? `Extra Service Fare (${item.currency}) — Service only (per unit)`
-                                  : `Extra Service Fare (${item.currency}) — Per Person`}
+                                {(season.optionName || '').trim() ? `${(season.optionName || '').trim()} — ` : 'Extra Service Fare — '}
+                                ({item.currency}) {item.pricingModel === 'per_unit' ? 'Service only (per unit)' : 'Per Person'}
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>

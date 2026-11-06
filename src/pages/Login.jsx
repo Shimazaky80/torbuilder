@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Mail, Lock, Building2, User, Phone, Check, ArrowLeft, Ticket } from 'lucide-react';
 import fullLogo from '../assets/full_logo.png';
@@ -18,6 +18,18 @@ export const Login = () => {
   const [loading, setLoading] = useState(false);
   const { showToast } = useToast();
   const navigate = useNavigate();
+  const [queryParams] = useSearchParams();
+
+  /* The Admin copies a code into an email; clicking it should not make the new
+     person type it back in by hand. */
+  useEffect(() => {
+    const code = queryParams.get('code');
+    if (code) {
+      setInvitationCode(code);
+      setView('register');
+      setRegStep('invitation');
+    }
+  }, [queryParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,39 +79,31 @@ export const Login = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      // 1. Verify invitation code
-      const { data: invitation, error: invError } = await supabase
-        .from('invitations')
-        .select('*')
-        .eq('code', invitationCode)
-        .eq('status', 'pending')
-        .single();
-
-      if (invError || !invitation) {
-        throw new Error('Invalid or expired invitation code.');
-      }
-
-      // 2. Sign up user
+      /* 1. Create the login. The invitation is verified by the database rather
+             than read here: an anonymous caller cannot see the invitations
+             table, and the previous code tried to, so every code failed its own
+             check before the person even signed up. */
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email,
         password,
         options: { data: { full_name: fullName } }
       });
       if (authError) throw authError;
+      if (!authData.session) {
+        showToast('Confirm your email address, then return to this invitation and sign in.', 'success', 'Check your inbox');
+        return;
+      }
 
-      // 3. Register company
-      const { data: rpcData, error: rpcError } = await supabase.rpc('register_new_company', {
-        company_name: companyName,
-        company_phone: companyPhone,
-        user_full_name: fullName
-      });
-      if (rpcError) throw rpcError;
+      /* 2. Join the company that sent the code. This is what puts the person in
+             their employer's tenant with the job written on the invitation —
+             the old path called register_new_company instead and handed every
+             invited consultant a brand-new empty company of their own. */
+      const { data, error } = await supabase.rpc('join_company_by_invitation', { p_code: invitationCode.trim() });
+      if (error) throw error;
+      if (data?.success === false) throw new Error(data.error);
 
-      // 4. Update invitation status
-      await supabase.rpc('redeem_invitation', { inv_code: invitationCode });
-
-      showToast('Registration successful!', 'success');
-      setView('login');
+      showToast('You are in the team.', 'success', 'Invitation accepted.');
+      navigate('/dashboard', { replace: true });
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -185,13 +189,16 @@ export const Login = () => {
             <form onSubmit={handleRegisterWithInvitation} className="auth-form">
               <div className="form-group">
                 <label>Invitation Code</label>
-                <div className="input-with-icon"><Ticket size={18} /><input type="text" placeholder="Enter your 8-digit code" value={invitationCode} onChange={(e) => setInvitationCode(e.target.value.toUpperCase())} required /></div>
+                <div className="input-with-icon"><Ticket size={18} /><input type="text" placeholder="Paste the code from your invitation" value={invitationCode} onChange={(e) => setInvitationCode(e.target.value.trim())} required /></div>
               </div>
-              <div className="form-group"><label>Company Name</label><div className="input-with-icon"><Building2 size={18} /><input type="text" value={companyName} onChange={(e) => setCompanyName(e.target.value)} required /></div></div>
               <div className="form-group"><label>Full Name</label><div className="input-with-icon"><User size={18} /><input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} required /></div></div>
-              <div className="form-group"><label>Email Address</label><div className="input-with-icon"><Mail size={18} /><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></div></div>
+              <div className="form-group">
+                <label>Email Address</label>
+                <div className="input-with-icon"><Mail size={18} /><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></div>
+                <small style={{ color: '#64748b' }}>Use the address your Admin invited — the code only admits the person it names.</small>
+              </div>
               <div className="form-group"><label>Password</label><div className="input-with-icon"><Lock size={18} /><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></div></div>
-              <button type="submit" className="primary-btn" disabled={loading}>{loading ? 'Joining team...' : 'Register & Join'}</button>
+              <button type="submit" className="primary-btn" disabled={loading}>{loading ? 'Joining team...' : 'Join the team'}</button>
               <button type="button" onClick={() => setRegStep('choice')} style={{ display: 'flex', alignItems: 'center', gap: '8px', border: 'none', background: 'none', color: '#64748b', cursor: 'pointer', margin: '0 auto' }}><ArrowLeft size={16} /> Back</button>
             </form>
           ) : (

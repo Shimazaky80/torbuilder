@@ -7,6 +7,7 @@ import { fetchDestinationCatalog } from '../lib/destinationFilter';
 import { guideMemberName, guideUpliftPercent } from '../lib/guideRoster';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConfirm } from '../hooks/useConfirm';
+import { scopeCompanyId } from '../lib/tenantScope';
 import {
   UserCog,
   Search,
@@ -117,7 +118,7 @@ export const GuideTeam = () => {
       .select('company_id')
       .eq('id', user.id)
       .maybeSingle();
-    companyIdRef.current = profile?.company_id || null;
+    companyIdRef.current = scopeCompanyId(profile?.company_id) || null;
     return companyIdRef.current;
   }, []);
 

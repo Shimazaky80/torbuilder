@@ -6,6 +6,7 @@ import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useCountries } from '../hooks/useCountries';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConfirm } from '../hooks/useConfirm';
+import { scopeCompanyId } from '../lib/tenantScope';
 import {
   Users,
   Search,
@@ -181,7 +182,7 @@ export const Clients = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         setClients([]);
         setTotalClients(0);
         setFetchingClients(false);
@@ -193,7 +194,7 @@ export const Clients = () => {
       let clientQuery = supabase
         .from('clients')
         .select('*', { count: 'exact' })
-        .eq('company_id', profile.company_id);
+        .eq('company_id', scopeCompanyId(profile.company_id));
 
       if (term) {
         const t = esc(term);
@@ -332,13 +333,13 @@ useEffect(() => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         showToast('No active company found for your user profile', 'error');
         return;
       }
 
       const payload = {
-        company_id: profile.company_id,
+        company_id: scopeCompanyId(profile.company_id),
         name,
         email,
         client_type: form.clientType,

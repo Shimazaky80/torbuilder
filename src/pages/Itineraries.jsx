@@ -9,6 +9,7 @@ import { useListRowLimit } from '../hooks/useListRowLimit';
 import { Map as MapIcon, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
 import ClientTourForm from '../components/ClientTourForm';
 import { PRECISION_MONTH, travelTimingLabel } from '../lib/travelTiming';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 const STATUS_MODS = {
   quotation: 'quotation',
@@ -68,7 +69,7 @@ export const Itineraries = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         setItineraries([]);
         setTotalItineraries(0);
         setLoadingItineraries(false);
@@ -81,7 +82,7 @@ export const Itineraries = () => {
       let itineraryQuery = supabase
         .from('itineraries')
         .select('*, clients(name, client_type, markup_percentage, deposit_percentage, email, country)', { count: 'exact' })
-        .eq('company_id', profile.company_id);
+        .eq('company_id', scopeCompanyId(profile.company_id));
 
       const q = searchQuery.trim();
       if (q) {
@@ -138,13 +139,13 @@ export const Itineraries = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         showToast('No active company found for your user profile', 'error');
         return;
       }
 
       const { data: referenceNumber, error: refError } = await supabase
-        .rpc('get_next_itinerary_reference', { p_company_id: profile.company_id });
+        .rpc('get_next_itinerary_reference', { p_company_id: scopeCompanyId(profile.company_id) });
 
       if (!referenceNumber || refError) {
         showToast(refError?.message || 'Could not allocate itinerary reference number', 'error');
@@ -157,7 +158,7 @@ export const Itineraries = () => {
       const { data: newItinerary, error } = await supabase
         .from('itineraries')
         .insert([{
-          company_id: profile.company_id,
+          company_id: scopeCompanyId(profile.company_id),
           client_id: payload.clientId,
           reference_number: referenceNumber,
           itinerary_name: payload.itineraryName,
@@ -238,7 +239,7 @@ export const Itineraries = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         showToast('No active company found for your user profile', 'error');
         return;
       }
@@ -246,7 +247,7 @@ export const Itineraries = () => {
       const trav = Array.isArray(itinerary.travellers) ? itinerary.travellers : [];
 
       const { data: referenceNumber, error: refError } = await supabase
-        .rpc('get_next_itinerary_reference', { p_company_id: profile.company_id });
+        .rpc('get_next_itinerary_reference', { p_company_id: scopeCompanyId(profile.company_id) });
 
       if (!referenceNumber || refError) {
         showToast(refError?.message || 'Could not allocate itinerary reference number', 'error');
@@ -259,7 +260,7 @@ export const Itineraries = () => {
       const { data: copy, error } = await supabase
         .from('itineraries')
         .insert([{
-          company_id: profile.company_id,
+          company_id: scopeCompanyId(profile.company_id),
           // A copied itinerary is a new client assignment. The builder must
           // require an explicit client selection instead of silently reusing
           // the source itinerary's client.

@@ -6,6 +6,7 @@ import { useToast } from '../context/ToastContext';
 import { withStarGrade } from '../lib/starGrading';
 import { collapseOccupancyLadder, isOccupancyTiered } from '../lib/occupancyPricing';
 import { supplierColumns } from '../lib/supplierStarColumn';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 const DEFAULT_CATEGORIES = ['Accommodation', 'Transfers', 'Transport', 'Activities / Tours', 'Flights / Charter', 'Meals', 'Trains', 'Tickets', 'Extras', 'Car Rental'];
 const money = (value, currency) => `${currency || ''} ${Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.trim();
@@ -258,8 +259,8 @@ export const Tariffs = () => {
       if (!user) return;
       const { data: profile, error: profileError } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
       if (profileError) throw profileError;
-      if (!profile?.company_id) throw new Error('Tenant company profile was not found');
-      const cid = profile.company_id;
+      if (!scopeCompanyId(profile?.company_id)) throw new Error('Tenant company profile was not found');
+      const cid = scopeCompanyId(profile.company_id);
       setCompanyId(cid);
       const [companyRes, clientsRes, libraryCategoriesRes, tariffsRes, quotesRes] = await Promise.all([
         supabase.from('company_billing_settings').select('*').eq('company_id', cid).maybeSingle(),

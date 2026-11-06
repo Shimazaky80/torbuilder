@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
+import { scopeCompanyId } from './tenantScope';
 
 /* Tenant-wide amount entry rules, controlled from Settings -> Billing & Invoicing.
    - allowDecimals : whether money fields accept cents (step 0.01) or whole
@@ -33,11 +34,11 @@ const fetchAmountSettings = async () => {
       .select('company_id')
       .eq('id', user.id)
       .maybeSingle();
-    if (!profile?.company_id) return { ...AMOUNT_DEFAULTS };
+    if (!scopeCompanyId(profile?.company_id)) return { ...AMOUNT_DEFAULTS };
     const { data } = await supabase
       .from('company_billing_settings')
       .select('allow_decimal_amounts, input_rounding_mode, output_rounding_mode')
-      .eq('company_id', profile.company_id)
+      .eq('company_id', scopeCompanyId(profile.company_id))
       .maybeSingle();
     if (!data) return { ...AMOUNT_DEFAULTS };
     return {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../supabase';
 import { enabledLanguageCodes, SOURCE_LANGUAGE } from './index';
+import { scopeCompanyId } from '../tenantScope';
 
 /* Which languages this tenant can write and export content in, read once per
    session from company_billing_settings and shared by every page.
@@ -21,11 +22,11 @@ const fetchTenantLanguages = async () => {
       .select('company_id')
       .eq('id', user.id)
       .maybeSingle();
-    if (!profile?.company_id) return [SOURCE_LANGUAGE];
+    if (!scopeCompanyId(profile?.company_id)) return [SOURCE_LANGUAGE];
     const { data } = await supabase
       .from('company_billing_settings')
       .select('document_languages')
-      .eq('company_id', profile.company_id)
+      .eq('company_id', scopeCompanyId(profile.company_id))
       .maybeSingle();
     return enabledLanguageCodes(data?.document_languages);
   } catch {

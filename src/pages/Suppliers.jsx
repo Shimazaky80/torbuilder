@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { STAR_GRADES, starRatingOf, starGlyphs, starLabel, isAccommodationSupplier } from '../lib/starGrading';
 import { supplierStarColumn } from '../lib/supplierStarColumn';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 export const Suppliers = () => {
   const [suppliers, setSuppliers] = useState([]);
@@ -109,7 +110,7 @@ export const Suppliers = () => {
 
       setUserProfile(profile);
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         setSuppliers([]);
         setTotalSuppliers(0);
         return;
@@ -119,7 +120,7 @@ export const Suppliers = () => {
       let supplierQuery = supabase
         .from('suppliers')
         .select('*', { count: 'exact' })
-        .eq('company_id', profile.company_id);
+        .eq('company_id', scopeCompanyId(profile.company_id));
 
       if (trimmed) {
         supplierQuery = supplierQuery.or(
@@ -218,13 +219,13 @@ export const Suppliers = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) {
+      if (!scopeCompanyId(profile?.company_id)) {
         showToast('No active company found for your user profile', 'error');
         return;
       }
 
       const payload = {
-        company_id: profile.company_id,
+        company_id: scopeCompanyId(profile.company_id),
         name: form.name,
         category: form.category,
         /* Only a hotel carries a grade; switching the category away clears it so

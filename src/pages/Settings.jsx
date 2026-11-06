@@ -26,6 +26,7 @@ import {
   Eye,
   Compass,
   Truck,
+  Undo2,
   AlertTriangle,
   Globe
 } from 'lucide-react';
@@ -33,6 +34,8 @@ import LanguageText from '../components/LanguageText';
 import { LANGUAGES, SOURCE_LANGUAGE, enabledLanguageCodes, textI18nPayload, translationsOf } from '../lib/i18n';
 import { documentLanguagesColumn, textI18nColumn } from '../lib/i18n/textI18nColumn';
 import { refreshTenantLanguages } from '../lib/i18n/useTenantLanguages';
+import { TOUR_TYPES, VEHICLE_TYPES, mergeVocabulary, vocabularyKey, vocabularyOverridePayload, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 /* The stable key written into a rate row's price map. Derived once when a vehicle type
    is created and never recomputed, so renaming "Quantum (10)" cannot silently re-key
@@ -41,6 +44,21 @@ const vehicleCodeFrom = (value) => String(value || '').trim().toLowerCase()
   .replace(/[^a-z0-9]+/g, '_')
   .replace(/^_+|_+$/g, '')
   .slice(0, 40);
+
+/* Which list a vocabulary row came from, in one word. Tour types and vehicle sizes
+   are shared with every operator on the platform, so a person editing them needs to
+   see which names are the platform's and which are their own - that is what decides
+   whether renaming, deleting or restoring is even on the table. */
+const VocabularyTag = ({ shared }) => (
+  <span
+    title={shared
+      ? 'A standard type every operator shares. Your changes are kept as your own copy of it.'
+      : 'Your company\'s own row - the standard list does not answer for it.'}
+    style={{ display: 'inline-block', marginLeft: '0.4rem', padding: '0.12rem 0.45rem', borderRadius: '999px', fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.02em', verticalAlign: 'middle', background: shared ? '#f1f5f9' : '#ecfdf5', color: shared ? '#64748b' : '#047857' }}
+  >
+    {shared ? 'Standard' : 'Yours'}
+  </span>
+);
 
 const emptyBank = () => ({
   label: '',
@@ -229,10 +247,10 @@ export const Settings = () => {
   const [taxRates, setTaxRates] = useState([]);
   const [tourTypes, setTourTypes] = useState([]);
   const [tourTypeName, setTourTypeName] = useState('');
-  const [editingTourTypeId, setEditingTourTypeId] = useState(null);
+  const [editingTourType, setEditingTourType] = useState(null);
   const [vehicleTypes, setVehicleTypes] = useState([]);
   const [vehicleForm, setVehicleForm] = useState({ name: '', capacity: '' });
-  const [editingVehicleTypeId, setEditingVehicleTypeId] = useState(null);
+  const [editingVehicleType, setEditingVehicleType] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -292,7 +310,7 @@ export const Settings = () => {
       .select('company_id')
       .eq('id', user.id)
       .single();
-    return profile?.company_id || null;
+    return scopeCompanyId(profile?.company_id) || null;
   }, []);
 
   const fetchTaxRates = useCallback(async (cid) => {
@@ -367,27 +385,53 @@ export const Settings = () => {
     setBankAccounts(data || []);
   }, []);
 
+  /* Tour types and vehicle sizes are the platform's national lists now: every
+     tenant reads the standard rows plus its own, and its own row wins wherever the
+     two carry the same key. */
   const fetchTourTypes = useCallback(async (cid) => {
     if (!cid) return;
     const { data, error } = await supabase
-      .from('company_tour_types')
-      .select('id, name, is_active')
-      .eq('company_id', cid)
-      .order('name', { ascending: true });
+      .from(TOUR_TYPES.table)
+      .select(TOUR_TYPES.columns)
+      .or(vocabularyReadFilter(cid))
+      .order(...TOUR_TYPES.orderBy);
     if (error) throw error;
-    setTourTypes(data || []);
+    setTourTypes(mergeVocabulary(data, TOUR_TYPES.keyColumn));
   }, []);
 
   const fetchVehicleTypes = useCallback(async (cid) => {
     if (!cid) return;
     const { data, error } = await supabase
-      .from('company_vehicle_types')
-      .select('id, code, name, max_capacity, is_active')
-      .eq('company_id', cid)
-      .order('max_capacity', { ascending: true });
+      .from(VEHICLE_TYPES.table)
+      .select(VEHICLE_TYPES.columns)
+      .or(vocabularyReadFilter(cid))
+      .order(...VEHICLE_TYPES.orderBy);
     if (error) throw error;
-    setVehicleTypes(data || []);
+    setVehicleTypes(mergeVocabulary(data, VEHICLE_TYPES.keyColumn));
   }, []);
+
+  /* The one write a company makes against a standard row is never an edit of it.
+     The first change creates a row in the company's own name under the same key -
+     a vehicle keeps its code, so the price maps already saved against it still
+     resolve - and every change after that updates the company's own row. */
+  const saveVocabularyRow = useCallback(async (spec, row, changes) => {
+    if (row.shared) {
+      const { error } = await supabase
+        .from(spec.table)
+        .insert([vocabularyOverridePayload(row, changes, companyId, spec.keyColumn)]);
+      if (error) {
+        if (error.code === '23505') throw new Error(`One of your ${spec.label}s already uses that name.`);
+        throw error;
+      }
+      return;
+    }
+    const { error } = await supabase
+      .from(spec.table)
+      .update({ ...changes, updated_at: new Date().toISOString() })
+      .eq('id', row.id)
+      .eq('company_id', companyId);
+    if (error) throw error;
+  }, [companyId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -419,23 +463,32 @@ export const Settings = () => {
     }
     setSaving(true);
     try {
-      const result = editingTourTypeId
-        ? await supabase
-          .from('company_tour_types')
-          .update({ name, updated_at: new Date().toISOString() })
-          .eq('id', editingTourTypeId)
-          .eq('company_id', companyId)
-        : await supabase
-          .from('company_tour_types')
+      if (editingTourType) {
+        /* Only the company's own types reach here: a standard type is keyed on its
+           name, so renaming one would be renaming it for every tenant. */
+        await saveVocabularyRow(TOUR_TYPES, editingTourType, { name });
+      } else {
+        /* A name that is already on the list — standard or the company's — cannot be
+           added again. The database would let it through, because the standard row's
+           key belongs to the national half of the index, and the tenant would get a
+           private copy of a type they already had. */
+        const clash = tourTypes.find((t) => vocabularyKey(t, 'name') === vocabularyKey({ name }, 'name'));
+        if (clash) {
+          showToast(`"${clash.name}" is already on your list${clash.shared ? ' (it is a standard type)' : ''}.`, 'warning');
+          return;
+        }
+        const { error } = await supabase
+          .from(TOUR_TYPES.table)
           .insert([{ company_id: companyId, name }]);
-      if (result.error) {
-        if (result.error.code === '23505') throw new Error('That tour type already exists.');
-        throw result.error;
+        if (error) {
+          if (error.code === '23505') throw new Error('That tour type already exists.');
+          throw error;
+        }
       }
       await fetchTourTypes(companyId);
       setTourTypeName('');
-      setEditingTourTypeId(null);
-      showToast(editingTourTypeId ? 'Tour type updated' : 'Tour type added', 'success');
+      setEditingTourType(null);
+      showToast(editingTourType ? 'Tour type updated' : 'Tour type added', 'success');
     } catch (err) {
       showToast(err.message || 'Could not save tour type', 'error');
     } finally {
@@ -443,16 +496,13 @@ export const Settings = () => {
     }
   };
 
+  /* Switching a standard type off is this company's decision, not the platform's,
+     so it is written as an override that keeps the name and says inactive. */
   const handleTourTypeToggle = async (tourType) => {
     if (!companyId) return;
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from('company_tour_types')
-        .update({ is_active: !tourType.is_active, updated_at: new Date().toISOString() })
-        .eq('id', tourType.id)
-        .eq('company_id', companyId);
-      if (error) throw error;
+      await saveVocabularyRow(TOUR_TYPES, tourType, { is_active: !tourType.is_active });
       await fetchTourTypes(companyId);
       showToast(tourType.is_active ? 'Tour type deactivated' : 'Tour type activated', 'success');
     } catch (err) {
@@ -480,24 +530,27 @@ export const Settings = () => {
     }
     setSaving(true);
     try {
-      if (editingVehicleTypeId) {
-        const { error } = await supabase
-          .from('company_vehicle_types')
-          .update({ name, max_capacity: capacity, updated_at: new Date().toISOString() })
-          .eq('id', editingVehicleTypeId)
-          .eq('company_id', companyId);
-        if (error) {
-          if (error.code === '23505') throw new Error('A vehicle type with that name already exists.');
-          throw error;
-        }
+      if (editingVehicleType) {
+        /* A standard vehicle can be renamed and resized because its key is the
+           code, not the name - so the change goes into an override that carries
+           that code, and every price saved against it stays reachable. */
+        await saveVocabularyRow(VEHICLE_TYPES, editingVehicleType, { name, max_capacity: capacity });
       } else {
         const code = vehicleCodeFrom(name);
         if (!code) {
           showToast('That name cannot be turned into a vehicle code. Try something like "Sprinter (16)".', 'warning');
           return;
         }
+        /* Same rule as the tour types: a size already on the list, standard or the
+           company's own, is not a new size. Adding one would plant a private copy
+           over the row that is already being read. */
+        const clash = vehicleTypes.find((t) => vocabularyKey(t, 'code') === code || vocabularyKey(t, 'name') === vocabularyKey({ name }, 'name'));
+        if (clash) {
+          showToast(`"${clash.name}" is already on your list under the code ${clash.code}${clash.shared ? ' (it is a standard size)' : ''}.`, 'warning');
+          return;
+        }
         const { error } = await supabase
-          .from('company_vehicle_types')
+          .from(VEHICLE_TYPES.table)
           .insert([{ company_id: companyId, code, name, max_capacity: capacity }]);
         if (error) {
           if (error.code === '23505') throw new Error('A vehicle type with that code already exists.');
@@ -506,8 +559,8 @@ export const Settings = () => {
       }
       await fetchVehicleTypes(companyId);
       setVehicleForm({ name: '', capacity: '' });
-      setEditingVehicleTypeId(null);
-      showToast(editingVehicleTypeId ? 'Vehicle type updated' : 'Vehicle type added', 'success');
+      setEditingVehicleType(null);
+      showToast(editingVehicleType ? 'Vehicle type updated' : 'Vehicle type added', 'success');
     } catch (err) {
       showToast(err.message || 'Could not save vehicle type', 'error');
     } finally {
@@ -519,12 +572,7 @@ export const Settings = () => {
     if (!companyId) return;
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from('company_vehicle_types')
-        .update({ is_active: !vehicleType.is_active, updated_at: new Date().toISOString() })
-        .eq('id', vehicleType.id)
-        .eq('company_id', companyId);
-      if (error) throw error;
+      await saveVocabularyRow(VEHICLE_TYPES, vehicleType, { is_active: !vehicleType.is_active });
       await fetchVehicleTypes(companyId);
       showToast(vehicleType.is_active ? 'Vehicle type deactivated' : 'Vehicle type activated', 'success');
     } catch (err) {
@@ -534,26 +582,73 @@ export const Settings = () => {
     }
   };
 
+  /* Dropping your copy of a standard row is a delete of the row you own, so the
+     standard one underneath is simply what the list reads again. Nothing else moves:
+     the standard row was never touched, and the prices saved under its code were
+     always yours to keep. */
+  const handleRestoreVocabulary = async (spec, row) => {
+    if (!companyId || !row?.nationalId) return;
+    const ok = await confirm({
+      title: `Restore the standard ${spec.label}?`,
+      message: `Your version of "${row.name}" will be dropped and the standard ${spec.label} takes its place.`,
+      detail: `The standard row was never changed, so nothing else moves. Saved packages and itineraries keep the figures they were quoted at.`,
+      confirmLabel: `Restore standard ${spec.label}`,
+      destructive: true
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from(spec.table)
+        .delete()
+        .eq('id', row.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      if (spec.keyColumn === 'name') {
+        setEditingTourType(null);
+        setTourTypeName('');
+        await fetchTourTypes(companyId);
+      } else {
+        setEditingVehicleType(null);
+        setVehicleForm({ name: '', capacity: '' });
+        await fetchVehicleTypes(companyId);
+      }
+      showToast(`Standard ${spec.label} restored`, 'success');
+    } catch (err) {
+      showToast(err.message || `Could not restore the standard ${spec.label}`, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   /* A vehicle type is a pricing axis, not a label: the rate rows hold one price
      per code, and a quote resolves the smallest type that seats the party. So a
-     deletion must say what that does to work already priced - and the last type
-     cannot go, because with none left no party size resolves a vehicle at all and
-     every transport quote blocks. */
+     deletion must say what that does to work already priced - and the last active
+     type cannot go, because with none left no party size resolves a vehicle at all
+     and every transport quote blocks.
+
+     A standard type never reaches this button: it belongs to the platform, and
+     every other tenant is reading it. A type you customised has its own button -
+     Restore - because dropping your copy is not the same decision as deleting a
+     type you invented. */
   const handleDeleteVehicleType = async (vehicleType) => {
     if (!companyId) return;
-    if (vehicleTypes.length <= 1) {
-      showToast('Keep at least one vehicle type — a quote needs a vehicle to price against.', 'warning');
+    const active = vehicleTypes.filter((type) => type.is_active);
+    if (vehicleType.is_active && active.length <= 1) {
+      showToast('Keep at least one active vehicle type — a quote needs a vehicle to price against.', 'warning');
       return;
     }
-    const nextUp = [...vehicleTypes]
-      .filter((t) => t.id !== vehicleType.id && t.max_capacity >= vehicleType.max_capacity)
+    const remaining = active.filter((type) => type.id !== vehicleType.id);
+    const nextUp = remaining
+      .filter((type) => type.max_capacity >= vehicleType.max_capacity)
       .sort((a, b) => a.max_capacity - b.max_capacity)[0];
+    const largestSeats = remaining.reduce((max, type) => Math.max(max, Number(type.max_capacity) || 0), 0);
     const ok = await confirm({
       title: 'Delete vehicle type?',
       message: `"${vehicleType.name}" (${vehicleType.max_capacity} seats) will be removed and can no longer be chosen for new work.`,
       detail: nextUp
-        ? `A party that this vehicle seated will now be priced against ${nextUp.name}. Saved packages and itineraries keep the figures they were quoted at, and the prices already stored under "${vehicleType.code}" stay in the rate rows — re-adding a type with the same name brings them back. Use Deactivate instead to hide it without removing it.`
-        : `This is the largest vehicle on file, so a party bigger than ${vehicleTypes.filter((t) => t.id !== vehicleType.id).reduce((max, t) => Math.max(max, t.max_capacity), 0)} travellers will no longer have a vehicle to price against. Saved documents keep their quoted figures. Use Deactivate instead to hide it without removing it.`,
+        ? `A party that this vehicle seated will now be priced against ${nextUp.name}. Saved packages and itineraries keep the figures they were quoted at, and the prices already stored under "${vehicleType.code}" stay in the rate rows — re-adding a type with the same code brings them back. Use Deactivate instead to hide it without removing it.`
+        : `This is the largest active vehicle you have, so a party bigger than ${largestSeats} travellers will no longer have a vehicle to price against. Saved documents keep their quoted figures. Use Deactivate instead to hide it without removing it.`,
       confirmLabel: 'Delete vehicle type',
       destructive: true
     });
@@ -561,13 +656,13 @@ export const Settings = () => {
     setSaving(true);
     try {
       const { error } = await supabase
-        .from('company_vehicle_types')
+        .from(VEHICLE_TYPES.table)
         .delete()
         .eq('id', vehicleType.id)
         .eq('company_id', companyId);
       if (error) throw error;
-      if (editingVehicleTypeId === vehicleType.id) {
-        setEditingVehicleTypeId(null);
+      if (editingVehicleType && editingVehicleType.id === vehicleType.id) {
+        setEditingVehicleType(null);
         setVehicleForm({ name: '', capacity: '' });
       }
       await fetchVehicleTypes(companyId);
@@ -1119,7 +1214,7 @@ const handleSavePriceProtection = async () => {
             <Compass size={18} color="#0d7478" /> Tour Types
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            Manage the options available when creating itineraries. Deactivated types remain on existing itineraries but are hidden from new selections.
+            Manage the options available when creating itineraries. The list is shared with every operator on the platform: add your own types, switch a standard one off for your company, and the names you gave your itineraries keep working. A standard type's name is shared too, so it cannot be renamed here - only switched off, or copied into a name of your own. Deactivated types remain on existing itineraries but are hidden from new selections.
           </p>
         </div>
         <form onSubmit={handleTourTypeSubmit} style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
@@ -1133,14 +1228,14 @@ const handleSavePriceProtection = async () => {
             maxLength={80}
           />
           <button type="submit" className="primary-btn" disabled={saving}>
-            <Check size={15} /> {saving ? 'Saving...' : editingTourTypeId ? 'Save changes' : 'Add Tour Type'}
+            <Check size={15} /> {saving ? 'Saving...' : editingTourType ? 'Save changes' : 'Add Tour Type'}
           </button>
-          {editingTourTypeId && (
+          {editingTourType && (
             <button
               type="button"
               className="secondary-btn"
               disabled={saving}
-              onClick={() => { setEditingTourTypeId(null); setTourTypeName(''); }}
+              onClick={() => { setEditingTourType(null); setTourTypeName(''); }}
             >
               Cancel
             </button>
@@ -1156,19 +1251,21 @@ const handleSavePriceProtection = async () => {
             <tbody>
               {tourTypes.map((tourType) => (
                 <tr key={tourType.id} style={tourType.is_active ? undefined : { opacity: 0.65 }}>
-                  <td style={{ fontWeight: 700 }}>{tourType.name}</td>
+                  <td style={{ fontWeight: 700 }}>{tourType.name}<VocabularyTag shared={tourType.shared} /></td>
                   <td>{tourType.is_active ? 'Active' : 'Inactive'}</td>
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
-                      <button
-                        type="button"
-                        className="icon-btn outline"
-                        title="Edit tour type"
-                        disabled={saving}
-                        onClick={() => { setEditingTourTypeId(tourType.id); setTourTypeName(tourType.name); }}
-                      >
-                        <Edit3 size={15} />
-                      </button>
+                      {!tourType.shared && !tourType.overridden && (
+                        <button
+                          type="button"
+                          className="icon-btn outline"
+                          title="Rename this tour type"
+                          disabled={saving}
+                          onClick={() => { setEditingTourType(tourType); setTourTypeName(tourType.name); }}
+                        >
+                          <Edit3 size={15} />
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="icon-btn outline"
@@ -1178,6 +1275,17 @@ const handleSavePriceProtection = async () => {
                       >
                         <Power size={15} />
                       </button>
+                      {tourType.overridden && (
+                        <button
+                          type="button"
+                          className="icon-btn outline"
+                          title="Drop your version and take the standard type back"
+                          disabled={saving}
+                          onClick={() => handleRestoreVocabulary(TOUR_TYPES, tourType)}
+                        >
+                          <Undo2 size={15} />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -1194,6 +1302,7 @@ const handleSavePriceProtection = async () => {
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
             The vehicles every supplier quote is priced against. A service stores one price per type instead of one row per vehicle, and a quote picks the smallest type that seats the party. Deactivated types stay on saved packages but are hidden from new work. Delete removes a type that was added by mistake; deactivate the one a saved package still prices against.
+            The standard sizes are shared with every operator: rename or resize one and it becomes your own copy under the same code, so the prices already saved against it keep resolving. Restore drops your copy and takes the standard size back.
           </p>
         </div>
         <form onSubmit={handleVehicleTypeSubmit} style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
@@ -1218,14 +1327,14 @@ const handleSavePriceProtection = async () => {
             aria-label="Vehicle seating capacity"
           />
           <button type="submit" className="primary-btn" disabled={saving}>
-            <Check size={15} /> {saving ? 'Saving...' : editingVehicleTypeId ? 'Save changes' : 'Add Vehicle Type'}
+            <Check size={15} /> {saving ? 'Saving...' : editingVehicleType ? 'Save changes' : 'Add Vehicle Type'}
           </button>
-          {editingVehicleTypeId && (
+          {editingVehicleType && (
             <button
               type="button"
               className="secondary-btn"
               disabled={saving}
-              onClick={() => { setEditingVehicleTypeId(null); setVehicleForm({ name: '', capacity: '' }); }}
+              onClick={() => { setEditingVehicleType(null); setVehicleForm({ name: '', capacity: '' }); }}
             >
               Cancel
             </button>
@@ -1241,7 +1350,7 @@ const handleSavePriceProtection = async () => {
             <tbody>
               {vehicleTypes.map((vehicleType) => (
                 <tr key={vehicleType.id} style={vehicleType.is_active ? undefined : { opacity: 0.65 }}>
-                  <td style={{ fontWeight: 700 }}>{vehicleType.name}</td>
+                  <td style={{ fontWeight: 700 }}>{vehicleType.name}<VocabularyTag shared={vehicleType.shared} /></td>
                   <td>{vehicleType.max_capacity}</td>
                   <td><code>{vehicleType.code}</code></td>
                   <td>{vehicleType.is_active ? 'Active' : 'Inactive'}</td>
@@ -1250,9 +1359,9 @@ const handleSavePriceProtection = async () => {
                       <button
                         type="button"
                         className="icon-btn outline"
-                        title="Edit vehicle type"
+                        title={vehicleType.shared ? 'Rename or resize the standard type for your company' : 'Edit vehicle type'}
                         disabled={saving}
-                        onClick={() => { setEditingVehicleTypeId(vehicleType.id); setVehicleForm({ name: vehicleType.name, capacity: String(vehicleType.max_capacity) }); }}
+                        onClick={() => { setEditingVehicleType(vehicleType); setVehicleForm({ name: vehicleType.name, capacity: String(vehicleType.max_capacity) }); }}
                       >
                         <Edit3 size={15} />
                       </button>
@@ -1265,15 +1374,28 @@ const handleSavePriceProtection = async () => {
                       >
                         <Power size={15} />
                       </button>
-                      <button
-                        type="button"
-                        className="icon-btn danger"
-                        title="Delete vehicle type"
-                        disabled={saving}
-                        onClick={() => handleDeleteVehicleType(vehicleType)}
-                      >
-                        <Trash2 size={15} />
-                      </button>
+                      {vehicleType.overridden && (
+                        <button
+                          type="button"
+                          className="icon-btn outline"
+                          title="Drop your version and take the standard type back"
+                          disabled={saving}
+                          onClick={() => handleRestoreVocabulary(VEHICLE_TYPES, vehicleType)}
+                        >
+                          <Undo2 size={15} />
+                        </button>
+                      )}
+                      {!vehicleType.shared && !vehicleType.overridden && (
+                        <button
+                          type="button"
+                          className="icon-btn danger"
+                          title="Delete vehicle type"
+                          disabled={saving}
+                          onClick={() => handleDeleteVehicleType(vehicleType)}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -1935,7 +2057,7 @@ const handleSavePriceProtection = async () => {
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
               Tax applied on top of each service&apos;s sell price (markup already included in sell).
               For South African tenants this tax is currency-bound to ZAR — services in any other currency are always 0 / No Tax.
-              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. The default is 15% VAT — set your region&apos;s own tax types here.
+              Tenants outside South Africa define their own tax type and percentage, applied to every service regardless of currency. A new tenant starts with a 15% VAT row in this list, switched off — nothing is added to a quote until you activate it here.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAdd}>

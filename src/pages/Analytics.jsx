@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import SearchableSelect from '../components/SearchableSelect';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
+import { vocabularyNames, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { scopeCompanyId } from '../lib/tenantScope';
 import {
   BarChart3,
   Users,
@@ -169,26 +171,25 @@ export const Analytics = () => {
         .eq('id', user.id)
         .single();
 
-      if (!profile?.company_id) { setLoading(false); return; }
+      if (!scopeCompanyId(profile?.company_id)) { setLoading(false); return; }
 
       const [{ data, error }, { data: tourTypeRows, error: tourTypeError }] = await Promise.all([
         supabase
           .from('itineraries')
           .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(name, client_type)')
-          .eq('company_id', profile.company_id)
+          .eq('company_id', scopeCompanyId(profile.company_id))
           .order('travel_start_date', { ascending: true, nullsFirst: false }),
         supabase
           .from('company_tour_types')
-          .select('name')
-          .eq('company_id', profile.company_id)
-          .eq('is_active', true)
+          .select('name, company_id, is_active')
+          .or(vocabularyReadFilter(scopeCompanyId(profile.company_id)))
           .order('name', { ascending: true })
       ]);
 
       if (error) throw error;
       setItineraries(data || []);
       if (tourTypeError) throw tourTypeError;
-      const configuredTypes = (tourTypeRows || []).map((row) => row.name);
+      const configuredTypes = vocabularyNames(tourTypeRows);
       const previouslyUsedTypes = (data || []).map((itinerary) => itinerary.itinerary_tour_type).filter(Boolean);
       setTourTypes([...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b)));
     } catch (err) {

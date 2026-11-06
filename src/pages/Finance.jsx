@@ -42,6 +42,7 @@ import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import { rateForTravel } from '../lib/priceValidity';
 import { withRoomTypeRates } from '../lib/roomTypePricing';
+import { scopeCompanyId } from '../lib/tenantScope';
 import {
   Receipt,
   Plus,
@@ -130,7 +131,7 @@ export const Finance = () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return null;
     const { data: profile } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
-    return profile?.company_id || null;
+    return scopeCompanyId(profile?.company_id) || null;
   }, []);
 
   const fetchInvoices = useCallback(async (cid, { offset = 0, append = false } = {}) => {

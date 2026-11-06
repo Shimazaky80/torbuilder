@@ -7,6 +7,8 @@ import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../hooks/useConfirm';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { packageBandLabel } from '../lib/packagePricing';
+import { VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { scopeCompanyId } from '../lib/tenantScope';
 
 const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false, vehicleColumns: [] });
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
@@ -65,15 +67,20 @@ export const Packages = () => {
       if (!user) return;
       const { data: profile, error: profileErr } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
       if (profileErr) throw profileErr;
-      setCompanyId(profile?.company_id || null);
-      if (!profile?.company_id) { setRows([]); return; }
-      const { data: packages, error } = await supabase.from('packages').select('*').eq('company_id', profile.company_id).order('created_at', { ascending: false });
+      setCompanyId(scopeCompanyId(profile?.company_id) || null);
+      if (!scopeCompanyId(profile?.company_id)) { setRows([]); return; }
+      const { data: packages, error } = await supabase.from('packages').select('*').eq('company_id', scopeCompanyId(profile.company_id)).order('created_at', { ascending: false });
       if (error) throw error;
-      /* The vehicle price columns are picked from the company's vehicle types, ordered
-         smallest-first so the modal presents the options in the same order the builder uses. */
-      const { data: vehicleRes, error: vehicleErr } = await supabase.from('company_vehicle_types').select('*').eq('company_id', profile.company_id).order('max_capacity', { ascending: true });
+      /* The vehicle price columns are picked from the national list plus the
+         company's own rows, ordered smallest-first so the modal presents the
+         options in the same order the builder uses. */
+      const { data: vehicleRes, error: vehicleErr } = await supabase
+        .from('company_vehicle_types')
+        .select(VEHICLE_TYPES.columns)
+        .or(vocabularyReadFilter(scopeCompanyId(profile.company_id)))
+        .order(...VEHICLE_TYPES.orderBy);
       if (vehicleErr) throw vehicleErr;
-      setVehicleTypes(vehicleRes || []);
+      setVehicleTypes(mergeVocabulary(vehicleRes, VEHICLE_TYPES.keyColumn));
       const packageIds = (packages || []).map((pkg) => pkg.id);
       if (!packageIds.length) { setRows([]); return; }
 
