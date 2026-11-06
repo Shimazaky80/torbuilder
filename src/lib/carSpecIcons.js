@@ -8,9 +8,12 @@
    voucher are the same drawing, which is the whole point of asking for it in
    every document.
 
-   Two glyph substitutions worth knowing about: lucide has no car-door (DoorOpen
-   is the nearest) and no seatbelt, so Passengers is the head-and-shoulders figure
-   (UserRound) without the belt. */
+   Two glyph drawings worth knowing about: lucide has no car-door, and every
+   line-drawn door I tried reads as a house door or a folded document at grid
+   size, so Doors is the solid Material Design car-door shape - panel, raked
+   window and handle - drawn filled instead of stroked. There is no seatbelt
+   either, so Passengers is the head-and-shoulders figure (UserRound) without
+   the belt. */
 
 export const CAR_SPEC_ORDER = ['gear', 'luggage', 'doors', 'passengers', 'aircon', 'fuel'];
 
@@ -39,11 +42,7 @@ const ICON_NODES = {
     ['circle', { cx: '8', cy: '20', r: '2' }]
   ],
   doors: [
-    ['path', { d: 'M11 20H2' }],
-    ['path', { d: 'M11 4.562v16.157a1 1 0 0 0 1.242.97L19 20V5.562a2 2 0 0 0-1.515-1.94l-4-1A2 2 0 0 0 11 4.561z' }],
-    ['path', { d: 'M11 4H8a2 2 0 0 0-2 2v14' }],
-    ['path', { d: 'M14 12h.01' }],
-    ['path', { d: 'M22 20h-3' }]
+    ['path', { d: 'M19 14h-3v2h3zm3 7H3V11l8-8h10a1 1 0 0 1 1 1zM11.83 5l-6 6H20V5z', fill: 'currentColor', stroke: 'none' }]
   ],
   passengers: [
     ['circle', { cx: '12', cy: '8', r: '5' }],
@@ -76,7 +75,18 @@ const ICON_NODES = {
   cross: [['path', { d: 'M18 6 6 18' }], ['path', { d: 'm6 6 12 12' }]]
 };
 
-export const carSpecIconNodes = (name) => ICON_NODES[name] || [];
+const iconNodes = (name) => ICON_NODES[name] || [];
+
+/* A glyph is a line drawing unless its own node says otherwise: the car door is a
+   solid shape, so it declares a fill and no stroke. Both renderers hand the shape
+   the colour they were given, so a grid never prints half in the document's ink
+   and half in the interface's cyan. */
+export const carSpecIconShapes = (name, color = 'currentColor') =>
+  iconNodes(name).map(([tag, attrs]) => ({
+    tag,
+    attrs: Object.fromEntries(Object.entries(attrs)
+      .map(([key, value]) => [key, value === 'currentColor' ? color : value]))
+  }));
 
 const attributeText = (attrs) =>
   Object.entries(attrs)
@@ -86,8 +96,8 @@ const attributeText = (attrs) =>
 /* One glyph as markup. `currentColor` keeps it honest: a document that prints in
    black stays black, and the cyan editor stays cyan. */
 export const carSpecIconSvg = (name, { size = 18, color = 'currentColor', strokeWidth = 2 } = {}) => {
-  const shapes = carSpecIconNodes(name)
-    .map(([tag, attrs]) => `<${tag} ${attributeText(attrs)} />`)
+  const shapes = carSpecIconShapes(name, color)
+    .map(({ tag, attrs }) => `<${tag} ${attributeText(attrs)} />`)
     .join('');
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle">${shapes}</svg>`;
 };

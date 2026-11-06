@@ -83,14 +83,20 @@ check('the day heading is unchanged', DOCUMENT_LABELS.en['doc.day'], 'Day {n}');
 check('the sharing row is unchanged', DOCUMENT_LABELS.en['doc.perPersonSharingNote'], 'Per person, sharing price:');
 check('the ladder sentence is unchanged', DOCUMENT_LABELS.en['doc.contractLadder'], 'contract ladder: {bits}');
 
-/* The per-person cost breakdown rows, whose figures are one traveller's money. */
-check('the per-person supplement row says whose figure it is', t('en', 'doc.singleSupplementPerPerson'), 'Single supplement (per person)');
-check('the per-person total row reads as a total', DOCUMENT_LABELS.en['doc.totalPerPerson'], 'TOTAL PER PERSON');
-check('the child row names the children and each one price',
-  t('en', 'doc.childRateAdjustment', { count: 2, each: 'R -460.00' }), 'Child price difference (2 at R -460.00)');
-check('the child row reads in German',
-  t('de', 'doc.childRateAdjustment', { count: 2, each: 'R -460.00' }), 'Kinderpreisdifferenz (2 zu je R -460.00)');
-check('the per-person total row reads in French', t('fr', 'doc.totalPerPerson'), 'TOTAL PAR PERSONNE');
+/* The per-person cost breakdown prints each figure beside the number of
+   travellers who pay it, so a row only ever names whose money it is — the Qty
+   column carries the count, and the child row is a price, not a difference. */
+check('the sharing row names whose money it is',
+  DOCUMENT_LABELS.en['doc.perPersonSharing'], 'Per person sharing');
+check('the supplement row is the party bill, so it claims no per-person figure',
+  DOCUMENT_LABELS.en['doc.singleSupplement'], 'Single supplement');
+check('the child row is what one child costs', DOCUMENT_LABELS.en['doc.perChild'], 'Per child');
+check('and the child row is a price in German too', DOCUMENT_LABELS.de['doc.perChild'], 'Pro Kind');
+check('the closing row is the party\'s money, not a per-person total',
+  DOCUMENT_LABELS.en['doc.partyTotal'], 'TOTAL');
+check('every language counts the party total',
+  LANGUAGES.map((l) => DOCUMENT_LABELS[l]['doc.partyTotal']).join(','),
+  'TOTAL,TOTAL,TOTAL,GESAMT,TOTAL');
 
 check('a translated label is not English', DOCUMENT_LABELS['pt-BR']['doc.pricingBreakdown'], 'Preços Detalhados');
 check('a missing language falls back to English', t('xx', 'doc.itinerary'), 'Itinerary');

@@ -865,7 +865,11 @@ const transferRows = computePerPersonRows({
   rateBy: () => ({ ...mealRate, _ageRanges: [] }),
   defaultTaxRate: 15
 });
-check('a seat-selling line charges the child the adult rate, so the rows stay whole',
+/* A seat-selling line states no child fare, but the child still takes a seat, so
+   they pay the same figure as an adult and it lands on their own row. */
+check('a seat-selling line charges the child the adult price for their seat',
+  transferRows.perChild.sell, 420);
+check('and the adults carry only their own seats',
   Math.round(transferRows.perPersonSharing.sell), 420);
 
 /* 20. AN EXTRA CHARGED PER UNIT.
@@ -929,10 +933,14 @@ const unitRows = computePerPersonRows({
   rateBy: () => ({ ...unitExtraRate, _ageRanges: [] }),
   defaultTaxRate: 15
 });
-check('a per-unit extra prints no child discount - a child pays the party figure',
-  unitRows.perChild.sell, unitRows.perPersonSharing.sell);
-check('a per-unit extra keeps the whole party on one sharing row',
-  Math.round(unitRows.perPersonSharing.sell * 4), 3500);
+/* A boat hired once for the afternoon bills no head of its own, but every
+   traveller shares it - a child sits in it too - so each head carries their
+   quarter of the one charge. */
+check('a per-unit extra is shared by every traveller, child included',
+  unitRows.perChild.sell, 875);
+check('so the party figure divides by the heads, not by the adults',
+  Math.round(unitRows.perPersonSharing.sell * unitRows.adultsCount
+    + unitRows.perChild.sell * unitRows.childrenCount), 3500);
 const headRows = computePerPersonRows({
   services: [{
     category: 'Extras', basis: 'per_person', currencyCode: 'ZAR', sellPP: 1020, taxRate: 15,

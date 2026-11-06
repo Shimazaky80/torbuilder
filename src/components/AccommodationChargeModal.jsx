@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BedDouble, X } from 'lucide-react';
+import { BedDouble, Package, X } from 'lucide-react';
 import {
   accommodationRoomChoices,
   accommodationSeasonChoices,
@@ -10,6 +10,7 @@ import {
   weekendDaysLabel,
   weekendPriceOf
 } from '../lib/accommodationOptions';
+import { chargeNameOf, extrasChargeGroups } from '../lib/extrasChargeTypes';
 import { collapseOccupancyLadder, isOccupancyTiered } from '../lib/occupancyPricing';
 import {
   roomCapacityOf,
@@ -25,6 +26,13 @@ import { rateHasPrice, rateTravelCoverage } from '../lib/priceValidity';
    & breakfast, half board, full board with activities - and a season is priced
    at several of them. A drop is asked which season this booking falls in and,
    within that season, which charge type prices the line.
+
+   An extra is offered the same way: one fuel contract that sells 5 litres, a
+   full tank and a different fuel again is three charges on one library item, not
+   three items. The picker is the same because the shape is the same — a season
+   priced at several named charges, the name held on the row's meal_plan — but
+   with no rooms, night bands or weekend prices to scope, so those parts of the
+   dialog simply have nothing to say.
 
    Every season is always listed, with its exact window and how that window sits
    against the travel dates. Filtering to only the covering seasons left the
@@ -80,10 +88,13 @@ export default function AccommodationChargeModal({
   travelStart = '',
   travelEnd = '',
   defaultRateId = '',
+  variant = 'accommodation',
   onConfirm,
   onCancel
 }) {
-  const rooms = accommodationRoomChoices(item);
+  const isExtras = variant === 'extras';
+  const rooms = isExtras ? [] : accommodationRoomChoices(item);
+  const seasonGroupsOf = (room) => (isExtras ? extrasChargeGroups(item) : accommodationSeasonChoices(item, room));
   const rateBy = new Map((item?.item_rates || []).map((rate) => [rate.id, rate]));
   const coverageOf = (rateId) => rateTravelCoverage(rateBy.get(rateId), travelStart, travelEnd);
   const isEstimateWindow = (coverage) => ESTIMATE_COVERAGE.includes(coverage?.status);
@@ -94,7 +105,7 @@ export default function AccommodationChargeModal({
       ? option.bands
       : [{ rateId: option?.rateId, label: '', hasPrice: option?.hasPrice }]
   );
-  const bandsOfRoom = (room) => accommodationSeasonChoices(item, room)
+  const bandsOfRoom = (room) => seasonGroupsOf(room)
     .flatMap((season) => season.options.flatMap(bandsOfOption));
   /* A weekend price rides on the same row as the normal nightly figure, on the
      nights the property calls weekend, so it is stated beside the rate rather
@@ -105,6 +116,11 @@ export default function AccommodationChargeModal({
     return days && price !== null ? ` \u00b7 weekend ${days} ${money(price, currency)}` : '';
   };
   const hasWeekendRates = (item?.item_rates || []).some((rate) => weekendNote(rate) !== '');
+  /* An extra sells either the service or the seat on it, and the figure on the
+     row means different money in each case — the dialog has to say which. */
+  const extrasBasisNote = (rate) => (String(rate?.rate_basis || item?.pricing_model || '') === 'per_unit'
+    ? 'per service'
+    : 'per person');
 
   /* Prefer the row the builder already resolved for these dates, when it belongs
      to the room being priced. When there is none, prefer a covering priced row,
@@ -132,7 +148,7 @@ export default function AccommodationChargeModal({
   const [selectedRoomKey, setSelectedRoomKey] = useState(roomTypeKeyOf(initialRoom));
   const [selectedRateId, setSelectedRateId] = useState(() => chooseDefaultRate(initialRoom));
   const selectedRoom = rooms.find((room) => roomTypeKeyOf(room) === selectedRoomKey) || rooms[0] || null;
-  const seasons = accommodationSeasonChoices(item, selectedRoom);
+  const seasons = seasonGroupsOf(selectedRoom);
   const allBands = bandsOfRoom(selectedRoom);
   const hasNightBands = allBands.some((band) => band.banded);
 
@@ -142,7 +158,11 @@ export default function AccommodationChargeModal({
   };
 
   const selectedRate = rateBy.get(selectedRateId) || null;
-  const selectedOptionLabel = rateOptionLabel(selectedRate, item) || 'Standard';
+  /* An extra's default charge is the item itself, so it pins the row and keeps
+     the line's charge name blank rather than repeating the item's own name. */
+  const selectedOptionLabel = isExtras
+    ? chargeNameOf(selectedRate)
+    : (rateOptionLabel(selectedRate, item) || 'Standard');
   const selectedCoverage = selectedRateId ? coverageOf(selectedRateId) : null;
   const selectedNeedsEstimate = isEstimateWindow(selectedCoverage);
   const canApply = !!selectedRate && rateHasPrice(selectedRate);
@@ -163,9 +183,10 @@ export default function AccommodationChargeModal({
       <div className="modal-content service-guide-modal accom-charge-modal">
         <div className="modal-header">
           <div>
-            <h2>Accommodation charge type</h2>
+            <h2>{isExtras ? 'Extra charge type' : 'Accommodation charge type'}</h2>
             <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '0.3rem' }}>
-              {item?.name || 'Accommodation'} — pick the room, the season and, within it, the charge type this booking is priced from. {travelNote}.
+              {item?.name || (isExtras ? 'Extra' : 'Accommodation')} — pick the season
+              {isExtras ? ' and' : ', the room, the season and, within it,'} the charge type this {isExtras ? 'extra' : 'booking'} is priced from. {travelNote}.
             </p>
           </div>
           <button className="close-btn" onClick={onCancel}><X size={20} /></button>
@@ -250,6 +271,7 @@ export default function AccommodationChargeModal({
                                   {multipleBands ? `${option.label} · ` : ''}
                                   {band.hasPrice ? 'season rate' : 'no price on this season'}
                                   {coverage.status === 'covers' ? ' · matches travel dates' : ''}
+                                  {isExtras ? ` · ${extrasBasisNote(rate)}` : ''}
                                   {isOccupancyTiered(rate)
                                     ? ` · per person per night, by pax in the room (${occupancySizesLabel(rate)} pax)`
                                     : ''}
@@ -328,7 +350,7 @@ export default function AccommodationChargeModal({
               roomMaxChildren: selectedOccupancy.maxChildren
             })}
           >
-            <BedDouble size={16} /> {selectedNeedsEstimate ? 'Apply estimate' : 'Apply charge type'}
+            {isExtras ? <Package size={16} /> : <BedDouble size={16} />} {selectedNeedsEstimate ? 'Apply estimate' : 'Apply charge type'}
           </button>
         </div>
       </div>

@@ -2687,6 +2687,20 @@ aside.sidebar:not(.collapsed) .logo-full {
 .package-rental-copy { display: flex; flex-direction: column; gap: .15rem; padding: .35rem .45rem; border: 1px dashed #67e8f9; border-radius: 8px; background: #f0fdff; }
 .package-rental-copy small { color: #0e7490; font-size: .7rem; }
 .package-rental-copy small:first-child { font-weight: 800; }
+/* A composed offer: several library items sold as one thing — a transfer being the
+   car, its paperwork and the guide's time. The heading carries the name typed once
+   and the one figure the client is shown; the parts under it read as belonging. */
+.package-bundle-head { display: flex; align-items: center; gap: .5rem; margin-top: .6rem; padding: .45rem .55rem; border: 1px solid #cbd5e1; border-left: 3px solid #0891b2; border-radius: 8px; background: #f8fafc; }
+.package-bundle-head svg { flex: 0 0 auto; color: #0891b2; }
+.package-bundle-name { flex: 1 1 140px; min-width: 90px; padding: .3rem .45rem; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; color: #334155; font-size: .78rem; font-weight: 700; }
+.package-bundle-parts { flex: 0 0 auto; color: #64748b; font-size: .68rem; white-space: nowrap; }
+.package-bundle-total { flex: 0 0 auto; color: #0f766e; font-size: .78rem; white-space: nowrap; }
+.package-bundle-ungroup { flex: 0 0 auto; padding: .25rem .5rem; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; color: #64748b; font-size: .68rem; cursor: pointer; }
+.package-bundle-ungroup:hover { border-color: #fecaca; color: #b91c1c; }
+.package-canvas-service.in-bundle { border-left: 3px solid #cbd5e1; padding-left: .5rem; }
+.package-bundle-chip { display: inline-flex; align-items: center; gap: .25rem; width: fit-content; padding: .12rem .4rem; border: 1px solid #a5f3fc; border-radius: 5px; background: #ecfeff; color: #0e7490; font-size: .66rem; font-weight: 700; cursor: pointer; }
+.package-bundle-chip:hover { border-color: #fecaca; background: #fff1f2; color: #b91c1c; }
+.package-bundle-join { width: fit-content; max-width: 240px; padding: .2rem .35rem; border: 1px dashed #cbd5e1; border-radius: 5px; background: #fff; color: #64748b; font-size: .66rem; font-weight: 700; }
 .package-service-price { display: flex; min-width: 125px; flex-direction: column; gap: .2rem; color: #0f766e; font-size: .78rem; }
 .package-included-toggle,.package-quantity { display: flex; align-items: center; gap: .3rem; color: #475569; font-size: .73rem; white-space: nowrap; }
 .package-quantity input { width: 58px; padding: .4rem; border: 1px solid #cbd5e1; border-radius: 7px; }
@@ -2790,6 +2804,7 @@ aside.sidebar:not(.collapsed) .logo-full {
 
 @media (max-width: 750px) {
   .package-canvas-service { flex-wrap: wrap; }
+  .package-bundle-head { flex-wrap: wrap; }
   .package-service-main { flex-basis: calc(100% - 40px); }
   .package-service-price { margin-left: 1.8rem; }
   .package-pax-add { flex-wrap: wrap; }

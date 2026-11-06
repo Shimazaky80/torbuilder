@@ -4,6 +4,7 @@ import { crewShareOn } from './guidePricing';
 import { carSpecText } from './carSpecIcons';
 import { isRentalFeeLine, rentalDaysLabel, rentalVehicleLabel, rentalWindowLabel } from './carRentalPricing';
 import { allocatedRoomTypeLabel } from './roomTypes';
+import { lineChargeLabel } from './extrasChargeTypes';
 
 /* `specs` asks for the six vehicle facts as a written line. A print document that
    draws the icon grid passes false so the same six facts are not said twice;
@@ -100,6 +101,10 @@ export const voucherDetailLines = (sv, { specs = true } = {}) => {
   } else {
     const time = (sv.time || '').trim();
     if (time) lines.push(`Time: ${time}`);
+    /* An extra contracted at several charges has to name the one the client bought,
+       or the supplier is left guessing which fuel was sold. */
+    const charge = lineChargeLabel(sv);
+    if (/extras?/i.test(cat) && charge) lines.push(`Charge: ${charge}`);
   }
 
   /* The crew place this line buys is broken out for the supplier even though the

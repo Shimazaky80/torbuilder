@@ -4,7 +4,9 @@ import { rateCoversNights } from './accommodationOptions';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
 import { chargesChildRate, contractPaxRate } from './servicePricing';
 import { buildShareContext } from './staffPricing';
+import { chargeNameOf, ratesForCharge } from './extrasChargeTypes';
 import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal, crewShareOn } from './guidePricing';
+import { hireOfferRateSnapshot, resolveHireOfferForDetails } from './packageBundlePricing';
 import {
   combineSingleSupplements,
   normaliseSingleSupplementLadder,
@@ -120,15 +122,35 @@ const rateCoversWindow = (rate, window) => {
 const rateCoverageCount = (rate, windows) =>
   windows.reduce((total, window) => total + (rateCoversWindow(rate, window) ? 1 : 0), 0);
 
-const uniqueRates = (item, rate) => {  const rows = [rate, ...(Array.isArray(item?.item_rates) ? item.item_rates : [])].filter(Boolean);
+/* The seasons a line could still be priced from: every row of the item that sells the
+   SAME charge. A line bought as one charge must never be swapped onto another by a
+   coverage suggestion, and a blank charge — every row a legacy item carries — leaves
+   the whole matrix in play exactly as before. */
+const uniqueRates = (item, rate) => {
+  const rows = [rate, ...ratesForCharge(item, chargeNameOf(rate))].filter(Boolean);
   return [...new Map(rows.map((row) => [row.id ?? `${row.currency || ''}:${seasonLabel(row)}:${seasonWindowText(row)}`, row])).values()];
 };
 
-/* A hire line answers its own date question: the tariff window was tested against
-   the pick-up date when the hire was recorded, and the flat figure it came to is
-   stored on the line. Neither coverage nor protection has anything to say about a
-   contract row that was never a season, so both guards read it as settled. */
+/* A hire line is priced from the rental contract, not from an item_rates row, so the
+   guards above have nothing to say about it — but what happens next depends on which
+   hire it is. One recorded with real pick-up and return stamps has had its date
+   question answered by the day the car left the yard, and the figure on the line is
+   the agreement the client was quoted: settled. One recorded as a component of a
+   composed package offer carries no date at all, only a reference length, so it has
+   no answer of its own to freeze. It asks the same question as every other line on
+   the package — does a contract run for the dates this is sold for — and it asks it
+   again on every read, because a tariff that closed last season must not keep pricing
+   a package that is being sold all year. */
 const isRentalRate = (rate) => rate?.rental_price_validity === true;
+const isHireComponent = (rate) => isRentalRate(rate) && rate.reference_hire === true;
+
+/* The composed offer's hire, answered for the package's validity ranges. */
+const hireComponentAnswer = (item, rate, windows, protectionPercent) => resolveHireOfferForDetails({
+  item,
+  details: { groupKey: rate.hire_group_key, rentalDays: rate.hire_days },
+  windows,
+  protectionPercent
+});
 
 /**
  * Does the season behind this contract rate actually cover the dates the package
@@ -146,7 +168,18 @@ const isRentalRate = (rate) => rate?.rental_price_validity === true;
 export const packageSeasonCoverage = (item, rate, periods = []) => {
   const windows = packageValidityWindows(periods);
   const name = item?.name || 'This item';
-  if (isRentalRate(rate)) return { status: 'ok', ok: true, message: '' };
+  if (isRentalRate(rate) && !isHireComponent(rate)) return { status: 'ok', ok: true, message: '' };
+  if (isHireComponent(rate)) {
+    if (!windows.length) return { status: 'open', ok: true, message: '' };
+    const offer = hireComponentAnswer(item, rate, windows, 0);
+    /* Coverage asks one thing: does a tariff run for the whole range the package is
+       sold for. A hire priced off a tariff that closed before it is a stand-in, not a
+       cover — packageSeasonResolution is where that answer becomes money. */
+    if (!offer.canPrice || offer.status === 'protected' || offer.status === 'stale') {
+      return { status: 'missing', ok: false, message: offer.message || `${name}: no hire tariff covers this package's validity dates.` };
+    }
+    return { status: 'ok', ok: true, message: '' };
+  }
   if (!windows.length) return { status: 'open', ok: true, message: '' };
 
   const ranges = windows.map((window) => `${window.from} – ${window.to}`).join(', ');
@@ -203,12 +236,31 @@ export const packageItemSeasonError = (item, rate, periods = []) => packageSeaso
  */
 export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode = '', protectionPercent = 0 } = {}) => {
   const windows = packageValidityWindows(periods);
+  const name = item?.name || 'This item';
   if (!windows.length) return { status: 'open', ok: true, canAdd: true, protectionPercent: 0, rate: rate || null, seasonName: '', message: '' };
   if (isRentalRate(rate)) {
-    return { status: 'ok', ok: true, canAdd: true, protectionPercent: 0, rate, seasonName: rate.season_name || '', message: '' };
+    /* A hire with real dates is settled — see isHireComponent. A hire recorded as a
+       component of a composed offer has no date of its own, so the tariff is answered
+       here from the contract rows and the package's ranges, every time. */
+    if (!isHireComponent(rate)) {
+      return { status: 'ok', ok: true, canAdd: true, protectionPercent: 0, rate, seasonName: rate.season_name || '', message: '' };
+    }
+    const offer = hireComponentAnswer(item, rate, windows, protectionPercent);
+    if (!offer.canPrice) {
+      return { status: 'blocked', ok: false, canAdd: false, protectionPercent: 0, rate: null, seasonName: '', message: `${name}: ${offer.message}` };
+    }
+    const settled = offer.status !== 'protected' && offer.status !== 'stale';
+    return {
+      status: settled ? 'ok' : offer.status,
+      ok: true,
+      canAdd: true,
+      protectionPercent: offer.upliftPercent,
+      rate: hireOfferRateSnapshot(rate, offer),
+      seasonName: offer.tariffLabel || rate.season_name || '',
+      message: offer.message
+    };
   }
 
-  const name = item?.name || 'This item';
   const rates = uniqueRates(item, rate);
   const ranges = windows.map((window) => `${window.from} – ${window.to}`).join(', ');
   const results = windows.map((window) => resolveSeasonForTravel({

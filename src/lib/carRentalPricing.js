@@ -114,6 +114,13 @@ const byWindowStart = (a, b) => (
   || String(a.validTo || '9999-12-31').localeCompare(String(b.validTo || '9999-12-31'))
 );
 
+/* Ranking the tariffs that answer a stretch of dates, rather than one day. The
+   package guards ask a different question from the drop dialog — "which tariff
+   runs for the whole validity range" — and when more than one answers it, the same
+   tie-break applies: the window written for these six weeks says more about them
+   than a full-year season, and an undated tariff says least. */
+export const sortRentalSeasonsBySpecificity = (seasons = []) => [...seasons].sort(bySpecificity);
+
 export const carRentalGroups = (item) => {
   const rows = Array.isArray(item?.car_rental_rates) ? item.car_rental_rates : [];
   const byKey = new Map();
@@ -179,6 +186,19 @@ export const carRentalGroups = (item) => {
   });
   return [...byKey.values()];
 };
+
+/* The cheapest day on the whole contract, across every season and every band. A
+   sidebar card cannot know which tariff the operator's pick-up date will answer
+   from, so it says "from" over all of them. Null is the honest answer when
+   nothing on the contract prices a day above zero — that card can only ever
+   refuse the drop, so it locks and says so. */
+export const cheapestDailyRate = (groups = []) => groups.reduce((cheapest, group) => (
+  group.seasons.reduce((bySeason, season) => (
+    season.bands.reduce((low, band) => (
+      band.price > 0 && (low === null || band.price < low) ? band.price : low
+    ), bySeason)
+  ), cheapest)
+), null);
 
 /* The band is chosen by the block count, and an unfilled range is a refusal with
    the reason in it — a hire company does not quote a 20-day rental off a tariff
@@ -477,8 +497,15 @@ export const rentalDayPlacement = ({ details, startDayIndex = 0, itineraryDays =
    its locked snapshot, and a hire has no item_rates row to lock, so the snapshot
    is built here: flat, per trip, and carrying the seats the band engine needs.
    The `rental_price_validity` stamp is what tells the package's season guards that
-   this line answers its own date question — the tariff window was tested against
-   the pick-up date in the dialog, so there is no season left to check. */
+   this line is priced from a rental contract rather than an item_rates row.
+
+   What the guards then do with that answer depends on the hire. One recorded with
+   real pick-up and return stamps has already had its date question answered by the
+   day the car left the yard, and the figure on the line is the contract the client
+   was quoted — so it is settled. A hire recorded as a package component carries no
+   date at all, only a reference length, so there is nothing for it to have settled
+   on: the snapshot names the group and the length, and the guard re-answers "which
+   tariff covers the package dates" every time it is asked. */
 export const rentalPackageRate = (details, currency, unitCost) => {
   const amount = Number.isFinite(Number(unitCost)) && Number(unitCost) > 0
     ? round2(unitCost)
@@ -493,7 +520,11 @@ export const rentalPackageRate = (details, currency, unitCost) => {
     season_name: `Hire ${details?.seasonName || ''}`.trim(),
     valid_from: details?.validityFrom || null,
     valid_to: details?.validityTo || null,
-    rental_price_validity: true
+    rental_price_validity: true,
+    reference_hire: details?.referenceHire === true,
+    hire_group_key: details?.groupKey || null,
+    hire_days: details?.referenceHire === true ? asNumber(details.rentalDays) : 0,
+    hire_uplift_percent: asNumber(details?.upliftPercent)
   };
 };
 

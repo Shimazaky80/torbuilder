@@ -69,24 +69,31 @@ export const perPersonSummary = (inv, pax) => {
 /* Per-person breakdown rows stored on an invoice at issue time (JSON snapshot
    written by the shared perPersonPricing helper). Used when the Presentation
    preference is "per person" so the document shows the same Per person sharing
-   / Single supplement / Per child rows the itinerary exports produce. Falls
-   back to the single total-per-person line when no snapshot exists (older
-   invoices). */
+   / Single supplement / Per child rows the itinerary exports produce. Each row is
+   one class of traveller's price, so its stored count is the quantity and the
+   line total is that price for as many of them as the party holds - the rows then
+   add out to the money the invoice actually bills. Falls back to the single
+   total-per-person line when no snapshot exists (older invoices). */
 export const perPersonBreakdownRows = (inv, pax) => {
   const bd = inv?.per_person_breakdown;
   if (bd && Array.isArray(bd.rows) && bd.rows.length) {
-    return bd.rows.map((r) => ({
-      day_number: 'All',
-      item_name: r.label || 'Per person',
-      supplier_name: '',
-      quantity: 1,
-      unit_price: round2(Number(r.sell) || 0),
-      subtotal_excl: round2(Number(r.subExcl) || 0),
-      tax_amount: round2(Number(r.tax) || 0),
-      line_total: round2(Number(r.sell) || 0),
-      service_date: null,
-      category: ''
-    }));
+    return bd.rows.map((r) => {
+      const count = Math.max(1, Number(r.count) || 1);
+      const unit = round2(Number(r.sell) || 0);
+      const unitTax = round2(Number(r.tax) || 0);
+      return {
+        day_number: 'All',
+        item_name: r.label || 'Per person',
+        supplier_name: '',
+        quantity: count,
+        unit_price: unit,
+        subtotal_excl: round2((unit - unitTax) * count),
+        tax_amount: round2(unitTax * count),
+        line_total: round2(unit * count),
+        service_date: null,
+        category: ''
+      };
+    });
   }
   return [perPersonSummary(inv, pax)];
 };
@@ -145,10 +152,11 @@ export const abbrevMealPlan = (mp) => {
   return fuzzy[norm] || (String(mp || '').trim() || '');
 };
 
-/* Whether the accommodation meal plan abbreviation should appear under the
-   service description in the pricing breakdown. */
+/* Whether the charge a line is bought as should appear under the service
+   description in the pricing breakdown: the board basis on a room, the named
+   charge on an extra. */
 export const showMealPlanOn = (l, opts = {}) =>
-  /accommodation/i.test(l.category || '') && showMealPlanOnHelp(l, opts);
+  (/accommodation/i.test(l.category || '') || /extras?/i.test(l.category || '')) && showMealPlanOnHelp(l, opts);
 const showMealPlanOnHelp = (l, opts = {}) => {
   const mp = String(l?.meal_plan || '').trim();
   if (!mp) return false;

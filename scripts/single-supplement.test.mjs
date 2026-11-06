@@ -5,7 +5,7 @@ import { calculateRoomCharges } from '../src/lib/roomAllocationHelper.js';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PricingSeasonsTab } from '../src/components/PricingSeasonsTab.jsx';
-import { computePerPersonRows, perPersonHeadBreakdown } from '../src/lib/perPersonPricing.js';
+import { computePerPersonRows, perPersonHeadBreakdown, perPersonPrintRows } from '../src/lib/perPersonPricing.js';
 import { presentationPricingColumns, singleSupplementForSeason, accommodationRatesForTrip } from '../src/lib/packagePricing.js';
 import { applyProtectionToRate } from '../src/lib/priceValidity.js';
 import { libraryItemDetail } from '../src/lib/libraryItemDetail.js';
@@ -180,7 +180,8 @@ const ppChild = perPerson(
   587.5,
   childLodge.item_rates[0]
 );
-check('per-person child price keeps the child rate difference', ppChild.perChild.sell, 300);
+check('the child row is that child\'s own contracted room price', ppChild.perChild.sell, 300);
+check('and the adults carry the room money between them', ppChild.perPersonSharing.sell, 675);
 check('the child still consumes a waiver slot in per-person rows', ppChild.singleSupplement.sell, 112.5);
 
 /* ---------------- Marked-up contracts re-add to the day line ----------------
@@ -188,8 +189,9 @@ check('the child still consumes a waiver slot in per-person rows', ppChild.singl
    plain gap between the single and sharing rates is ALREADY a selling figure,
    so scaling that again marks the supplement up twice and the summary stops
    matching the total the room engine charged. Every case below prices one night
-   through the room engine and through the per-person rows and requires the three
-   rows to add back to the same money. */
+   through the room engine and through the per-person rows and requires the adult
+   row for every adult, the supplement once and the child row for every child to
+   add back to the same money. */
 const round2t = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const markedUp = (item, rooms, travellers, pp, markup = 15) => computePerPersonRows({
   services: [{
@@ -206,9 +208,9 @@ const dayLine = (item, rooms, markup = 15) => {
   return { sell: round2t(charges.totalSell), pp: round2t(charges.totalSell / pax), pax };
 };
 const rowsTotal = (r, childCount) => round2t(
-  r.perPersonSharing.sell * r.totalCount
+  r.perPersonSharing.sell * r.adultsCount
   + (r.hasSingle ? r.singleSupplement.sell : 0)
-  + (r.perChild && childCount ? (r.perChild.sell - r.perPersonSharing.sell) * childCount : 0)
+  + (r.perChild && childCount ? r.perChild.sell * childCount : 0)
 );
 
 const plainRate = { currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 1200, price_2_adults: 900 };
@@ -243,23 +245,41 @@ const kidRows = markedUp(kidLodge, kidRooms, kidParty, kidLine.pp);
 check('a marked-up child row is the selling child rate', kidRows.perChild.sell, 575);
 check('a marked-up contract with a child re-adds to the day line', rowsTotal(kidRows, 1), kidLine.sell);
 
-/* The exported per-person table turns the party's supplement bill and each
-   child's own price into one traveller's money. The column must add down to the
-   total per person, and that total times the heads must be the money the day
-   line charged — otherwise the document a client reads disagrees with the
-   invoice. */
+/* The exported per-person table prints one row per class of traveller: the figure
+   that traveller pays beside the number of them in the party. Multiplying the
+   column out must give the money the day line charged — otherwise the document a
+   client reads disagrees with the invoice. */
 const kidHeads = perPersonHeadBreakdown(kidRows);
 check('the per-person table counts every traveller in the party', kidHeads.heads, 4);
 check('the per-person table has a row for sharing, the supplement and the child', kidHeads.rows.length, 3);
-check('the supplement row is the party bill spread over the heads', kidHeads.rows[1].incl, round2t(345 / 4));
-check('the child row prices one child above the sharing base', kidHeads.rows[2].each, 575 - 1035);
-check('the child row is that difference for every child, spread over the heads', kidHeads.rows[2].incl, round2t((575 - 1035) / 4));
-check('the per-person column adds down to the total per person',
+checkJson('the sharing row is an adult\'s price for each of the three adults',
+  [kidHeads.rows[0].unit, kidHeads.rows[0].count, kidHeads.rows[0].incl], [1035, 3, 3105]);
+check('the supplement row is the party bill spread over the adults', kidHeads.rows[1].unit, round2t(345 / 3));
+checkJson('the child row is that child\'s own price, not a discount off an adult',
+  [kidHeads.rows[2].unit, kidHeads.rows[2].count, kidHeads.rows[2].incl], [575, 1, 575]);
+check('no row on the per-person table is negative', kidHeads.rows.some((r) => r.unit < 0 || r.incl < 0), false);
+check('the per-person column multiplies out to the money the party is charged',
   kidHeads.total.incl, round2t(kidHeads.rows.reduce((sum, r) => sum + r.incl, 0)));
-check('the total per person times the heads is the money the day line charged',
-  round2t(kidHeads.total.incl * kidHeads.heads), kidLine.sell);
+check('and that is exactly what the day line charged', kidHeads.total.incl, kidLine.sell);
 check('a party with neither a single nor a child prints one row and no total split',
   perPersonHeadBreakdown({ ...kidRows, hasSingle: false, hasChildren: false, perChild: null }).rows.length, 1);
+
+/* The same table under the export choice that refuses totals: every figure is one
+   traveller's money, so a row that has been multiplied out into party money is not
+   a fuller document — it is the document the consultant did not ask for. */
+const kidHeadsOnly = perPersonPrintRows(kidRows, { totals: false });
+checkJson('per-person-only quantities are one traveller each',
+  kidHeadsOnly.rows.map((r) => r.qty), ['1', '1', '1']);
+checkJson('per-person-only prints each class at its own price, never the party money',
+  kidHeadsOnly.rows.map((r) => r.incl), [1035, 115, 575]);
+checkJson('and the columns of one traveller add up to that traveller\'s price',
+  kidHeadsOnly.rows.map((r) => round2t(r.subExcl + r.tax) === r.incl), [true, true, true]);
+const kidDetailed = perPersonPrintRows(kidRows, { totals: true });
+checkJson('the detailed choice keeps the class money and the heads who pay it',
+  kidDetailed.rows.map((r) => [r.qty, r.incl].join('/')), ['3/3105', '3/345', '1/575']);
+check('which is the money the party is charged', kidDetailed.total.incl, kidLine.sell);
+check('a document with no rows to price prints nothing rather than a zero',
+  perPersonPrintRows(null, { totals: false }), null);
 
 const tieredLodge = {
   category: 'Accommodation',

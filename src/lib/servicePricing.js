@@ -3,6 +3,7 @@ import { isOccupancyTiered, occupancyCeiling, occupancyRateForPax } from './occu
 import { isSurchargeItem, isSurchargeChargeable, surchargeBuyTotal, surchargePricing, surchargeRateAmount } from './surchargeFees';
 import { isGuideService, isGuideOnly, guideChargeTotal, lineGuideUpliftPercent, crewShareOn, refreshCrewShare, crewSharePerPerson } from './guidePricing';
 import { rentalLineBuyTotal } from './carRentalPricing';
+import { lineChargeLabel, ratesForCharge } from './extrasChargeTypes';
 import { allocatedTravellerCount, childRateForAge, hasStaffAccommodation, isAdultTraveller, payingClientCount, tourGuideCount, travellersPlusTlCount } from './roomAllocationHelper';
 
 /* 'per_unit' is an Extras charged once for the service itself - a meet-and-greet,
@@ -346,8 +347,11 @@ export const repriceServicesForPax = ({
       }
 
       const currencyCode = service.currencyCode || item.currency || '';
+      /* Re-priced from the charge this line was actually bought as: an item can
+         contract several named charges on one season and the matrix order has no
+         bearing on which one the operator chose. */
       const season = resolveSeasonForTravel({
-        rates: item.item_rates,
+        rates: ratesForCharge(item, lineChargeLabel(service)),
         currencyCode,
         startDate: travelWindow.start,
         endDate: travelWindow.end,
@@ -496,7 +500,7 @@ export const revalidateServicesForWindow = ({
 
       const currencyCode = service.currencyCode || item.currency || '';
       const season = resolveSeasonForTravel({
-        rates: item.item_rates,
+        rates: ratesForCharge(item, lineChargeLabel(service)),
         currencyCode,
         startDate: travelWindow.start,
         endDate: travelWindow.end,

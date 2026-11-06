@@ -468,3 +468,51 @@ BEGIN
     WHERE p.user_role = 'admin';
 END;
 $$;
+
+-- 12. Default tax row for a new company
+-- Step 2 dropped and recreated companies with CASCADE, which took this trigger
+-- with it. Re-attaching it here keeps the reset script in step with
+-- 20261254_seed_inactive_vat_on_new_companies.sql: a brand-new tenant gets the
+-- standard 15% VAT row already listed but switched off, so they price at 0%
+-- until they deliberately turn tax on. tax_rates itself comes from its own
+-- migration, so the whole block is skipped until that has been applied.
+
+DO $$ BEGIN
+  IF to_regclass('public.tax_rates') IS NOT NULL THEN
+    CREATE OR REPLACE FUNCTION public.seed_company_default_tax_rate()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = public
+    AS $fn$
+    BEGIN
+      INSERT INTO public.tax_rates (
+        company_id, name, code, rate, country, applies_to, is_default, is_active
+      )
+      VALUES (
+        NEW.id,
+        'Value Added Tax (VAT)',
+        'VAT',
+        15,
+        'South Africa',
+        'all',
+        false,
+        false
+      )
+      WHERE NOT EXISTS (
+        SELECT 1 FROM public.tax_rates WHERE company_id = NEW.id
+      );
+      RETURN NEW;
+    END;
+    $fn$;
+
+    REVOKE ALL ON FUNCTION public.seed_company_default_tax_rate() FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.seed_company_default_tax_rate() TO authenticated, anon, service_role;
+
+    DROP TRIGGER IF EXISTS company_seed_default_tax_rate ON public.companies;
+    CREATE TRIGGER company_seed_default_tax_rate
+      AFTER INSERT ON public.companies
+      FOR EACH ROW
+      EXECUTE FUNCTION public.seed_company_default_tax_rate();
+  END IF;
+END $$;

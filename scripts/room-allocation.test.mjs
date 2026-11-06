@@ -875,21 +875,24 @@ near('a night with a solo suite re-adds to what the room engine charged', soloRo
 const refusedRows = rowsAgainstEngine(soldWithVilla, villaRoom);
 near('an unpriceable room contributes nothing to the per-person rows either', refusedRows.total, refusedRows.charges.totalSell);
 
-/* The per-person document table: the party's supplement bill becomes each
-   traveller's share of it, and the printed column still re-adds to the money the
-   room engine charged for the two different contracts. */
+/* The per-person document table: each row is one class of traveller's price with
+   the number of them that pays it, so the printed money multiplies out to exactly
+   what the room engine charged for the two different contracts. */
 const mixedHead = perPersonHeadBreakdown(mixedRows.rows);
 check('a party with no solo traveller prints one row', mixedHead.rows.length, 1);
-near('the per-person table is the engine money divided by the heads',
-  money(mixedHead.total.incl * mixedHead.heads), mixedRows.charges.totalSell);
+check('one row is one figure per adult, for every adult in the party', mixedHead.rows[0].count, mixedHead.heads);
+near('the per-person table multiplies out to the engine money',
+  mixedHead.total.incl, mixedRows.charges.totalSell);
 const soloHead = perPersonHeadBreakdown(soloRows.rows);
 check('a solo traveller adds the supplement row', soloHead.rows.length, 2);
-near('the supplement row is the party bill spread over the heads',
-  soloHead.rows[1].incl, money(soloRows.rows.singleSupplement.sell / soloHead.heads));
-near('the typed party total per person re-adds to what the room engine charged',
-  money(soloHead.total.incl * soloHead.heads), soloRows.charges.totalSell);
+near('the supplement row is the party bill spread over the adults',
+  soloHead.rows[1].unit, money(soloRows.rows.singleSupplement.sell / soloHead.adults));
+near('and it multiplies back to the whole supplement bill',
+  soloHead.rows[1].incl, money(soloRows.rows.singleSupplement.sell));
+near('the printed money re-adds to what the room engine charged',
+  soloHead.total.incl, soloRows.charges.totalSell);
 near('a refused room leaves the per-person table at nothing',
-  money(perPersonHeadBreakdown(refusedRows.rows).total.incl * refusedRows.rows.totalCount), refusedRows.charges.totalSell);
+  money(perPersonHeadBreakdown(refusedRows.rows).total.incl), refusedRows.charges.totalSell);
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll checks passed.');
 process.exit(failures ? 1 : 0);

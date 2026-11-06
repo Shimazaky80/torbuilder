@@ -23,6 +23,7 @@ import {
 } from '../src/lib/surchargeFees.js';
 import { libraryItemKind } from '../src/lib/libraryItemDetail.js';
 import { sidebarLibraryRate } from '../src/lib/servicePricing.js';
+import { computePerPersonRows, perPersonHeadBreakdown } from '../src/lib/perPersonPricing.js';
 
 const check = (label, actual, expected) => {
   const passed = JSON.stringify(actual) === JSON.stringify(expected);
@@ -415,5 +416,69 @@ check('a basis only a levy stores is refused elsewhere',
 check('a legacy per-unit basis stays priced on every type',
   [isValidUnitBasis(entranceItem, 'per_unit'), isValidUnitBasis(levyItem, 'per_unit')],
   [true, true]);
+
+/* (J) THE FAMILY QUOTE. A fee's child figure is money the contract applies to a
+       child, so the per-person table has to print it on the child's row - the
+       category rename moved it outside the head-selling gate that Meals,
+       Tickets and Extras pass, and reading the fee's own columns is the only way
+       the quotation agrees with what the day line was bought at. */
+const familyParty = [{ age: 44 }, { age: 41 }, { age: 8 }];
+const gateRate = { entrance_fee_per_person: 400, entrance_fee_per_child: 200 };
+const gateItem = { ...entranceItem, surcharge_unit_basis: 'per_person' };
+const gateSell = surchargePricing({
+  buyTotal: surchargeBuyTotal({ rate: gateRate, item: gateItem, paxCount: 3, childCount: 1 }).total,
+  markupPercent: 20
+}).sell;
+const feeLine = (rate, unitBasis, sellPP) => ({
+  category: SURCHARGE_CATEGORY, basis: unitBasis === 'per_unit' ? 'per_unit' : 'per_person',
+  currencyCode: 'ZAR', sellPP, taxRate: 0, itemId: 'gate', markup: 20, roomAllocations: [],
+  surchargeType: 'entrance_fee', surchargeUnitBasis: unitBasis
+});
+const familyRows = computePerPersonRows({
+  services: [feeLine(gateRate, 'per_person', gateSell / 3)],
+  travellers: familyParty,
+  rateBy: () => gateRate,
+  defaultTaxRate: 0
+});
+check('the fee line is two visitors and one child, markuped', gateSell, 1200);
+check('a child pays their own entrance fee on the child row', familyRows.perChild.sell, 240);
+check('and the adults carry only the visitor figures between them', familyRows.perPersonSharing.sell, 480);
+check('the two rows re-add to what the day line was bought at',
+  familyRows.perPersonSharing.sell * familyRows.adultsCount
+  + familyRows.perChild.sell * familyRows.childrenCount, gateSell);
+check('and the printed per-person table prints that money once each',
+  perPersonHeadBreakdown(familyRows).rows.map((r) => [r.count, r.unit, r.incl].join('/')),
+  ['2/480/960', '1/240/240']);
+check('a fee that gives no child figure admits the child on the visitor figure',
+  computePerPersonRows({
+    services: [feeLine({ entrance_fee_per_person: 400 }, 'per_person', 400)],
+    travellers: familyParty,
+    rateBy: () => ({ entrance_fee_per_person: 400 }),
+    defaultTaxRate: 0
+  }).perChild.sell, 400);
+/* A booking fee buys a thing, not a head, but the party shares it and a child is
+   one of the party - so the one charge divides by every traveller. */
+check('a fee that buys a thing still splits its share over every traveller',
+  computePerPersonRows({
+    services: [feeLine({ unit_price: 300 }, 'per_unit', 100)],
+    travellers: familyParty,
+    rateBy: () => ({ unit_price: 300 }),
+    defaultTaxRate: 0
+  }).perChild.sell, 100);
+const levyRate = { conservation_levy_per_adult: 100, conservation_levy_per_child: 50 };
+const levyHead = { ...levyItem, surcharge_unit_basis: 'per_person' };
+check('a levy quotes its child from the levy columns, like its adult figure',
+  computePerPersonRows({
+    services: [{
+      ...feeLine({}, 'per_person', surchargePricing({
+        buyTotal: surchargeBuyTotal({ rate: levyRate, item: levyHead, paxCount: 3, childCount: 1 }).total,
+        markupPercent: 20
+      }).sell / 3),
+      surchargeType: 'conservation_levy'
+    }],
+    travellers: familyParty,
+    rateBy: () => levyRate,
+    defaultTaxRate: 0
+  }).perChild.sell, 60);
 
 if (!process.exitCode) console.log('\nAll Fees & Tickets checks passed');

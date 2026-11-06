@@ -5,7 +5,7 @@
    and another way on the voucher. The printed documents use carSpecGridHtml from
    the same module, which is why the geometry lives there rather than here. */
 import { createElement } from 'react';
-import { CAR_SPEC_ORDER, CAR_SPEC_TITLES, carSpecIconNodes, carSpecValue } from '../lib/carSpecIcons';
+import { CAR_SPEC_ORDER, CAR_SPEC_TITLES, carSpecIconShapes, carSpecValue } from '../lib/carSpecIcons';
 
 const Glyph = ({ name, size = 18, color = '#0891b2' }) => (
   <svg
@@ -21,7 +21,7 @@ const Glyph = ({ name, size = 18, color = '#0891b2' }) => (
     style={{ verticalAlign: 'middle', display: 'inline-block' }}
     aria-hidden="true"
   >
-    {carSpecIconNodes(name).map(([tag, attrs], index) =>
+    {carSpecIconShapes(name, color).map(({ tag, attrs }, index) =>
       createElement(tag, { ...attrs, key: `${name}-${index}` })
     )}
   </svg>

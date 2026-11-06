@@ -4,6 +4,7 @@ import {
   carRentalGroupChoices,
   carRentalGroups,
   carRentalHireTotal,
+  cheapestDailyRate,
   isCarRentalItem,
   isRentalFeeLine,
   rentalCollectionDayIndex,
@@ -23,7 +24,7 @@ import {
   resolveRentalSeason,
   selectRentalBand
 } from '../src/lib/carRentalPricing.js';
-import { carSpecGridHtml, carSpecText, carSpecValue } from '../src/lib/carSpecIcons.js';
+import { carSpecGridHtml, carSpecIconShapes, carSpecText, carSpecValue } from '../src/lib/carSpecIcons.js';
 import { voucherDetailLines } from '../src/lib/voucherDetails.js';
 import {
   repriceServicesForPax,
@@ -110,6 +111,18 @@ check('each season names its own window', groupOf('C').seasons.map((s) => s.wind
 check('a refusal names the car and the tariff it was looked for in', groupOf('C').seasons[1].label, 'C · Toyota Corolla Quest or similar (2027-06-01 → 2027-06-30)');
 check('the contract type rides on the group', groupOf('C').rateCode, 'Classic Max (CM)');
 check('gear and fuel keep the words the grid maps', [groupOf('E').gear, groupOf('E').fuelType], ['automatic', 'electric']);
+
+/* The sidebar card's "from" figure: the cheapest day anywhere on the contract,
+   because the card cannot know which pick-up date the operator will type. */
+check('the contract is advertised from its cheapest day, not its first row', cheapestDailyRate(groups), 520);
+check('a contract whose every band is unfilled advertises no price at all',
+  cheapestDailyRate(carRentalGroups({
+    category: 'Car Rental',
+    currency: 'ZAR',
+    car_rental_rates: [
+      { vehicle_group: 'C', vehicle_name: 'Toyota Corolla', rate_code: 'CM', min_days: 1, max_days: 6, price: 0 }
+    ]
+  })), null);
 
 /* 2b. The pick-up date picks the season and the block count picks the band inside
    it — and the band is never looked for in the other season's ladder. */
@@ -245,6 +258,15 @@ check('the printed grid is exactly two rows', (grid.match(/<tr>/g) || []).length
 check('the printed grid is exactly six columns per row', (grid.match(/<td /g) || []).length, 12);
 check('the printed grid draws six icons and the aircon tick it answers with', (grid.match(/<svg /g) || []).length, 7);
 check('an electric hire prints the bolt in place of the pump', (carSpecGridHtml({ ...details, fuelType: 'electric' }).match(/M4 14a1 1 0 0 1/g) || []).length, 1);
+
+/* Doors is the one column a line drawing cannot carry: every stroked door tried
+   read as a house door or a folded page, so the grid draws the solid car-door
+   shape. It is filled in the colour the grid asked for, never in the page's own
+   text colour, because a half-teal grid is two grids. */
+check('the doors glyph is one solid shape', carSpecIconShapes('doors').length, 1);
+check('drawn filled and not outlined', carSpecIconShapes('doors', '#0e7490').map((s) => `${s.attrs.fill}/${s.attrs.stroke}`), ['#0e7490/none']);
+check('and it takes whatever colour the renderer passes', carSpecIconShapes('doors', '#0891b2')[0].attrs.fill, '#0891b2');
+check('the printed grid paints the door in the document colour', (grid.match(/fill="#0e7490" stroke="none"/g) || []).length, 1);
 
 /* 6. The repricers must leave a hire alone: its money came from the band and the
    block count, not from a season the trip happens to sit in. The pair the builder
