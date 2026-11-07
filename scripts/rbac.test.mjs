@@ -7,11 +7,13 @@ import {
   FLAGS,
   MODULES,
   MODULE_IDS,
+  PLATFORM_ROLE_KEY,
   assignableRoles,
   builtInRole,
   can,
   canSeeCosts,
   hasOverrides,
+  isPlatformProfile,
   levelLabel,
   normaliseOverrides,
   resolveAccess,
@@ -213,6 +215,34 @@ check('the platform overrides with the tenant it picked', scopeCompanyId(null), 
 check('even over its own null profile', scopeCompanyId('own-company'), 'tenant-b');
 setPlatformScope(null);
 check('leaving the tenant restores the own company', scopeCompanyId('own-company'), 'own-company');
+
+/* 12. One place answers "is this the platform". The database accepts either the
+        flag or the role, so every copy of that test in the app was a place the
+        two could drift apart — and a page that checked only the role would hand
+        a company account the whole product. */
+check('the flag alone is the platform', isPlatformProfile({ is_super_admin: true, user_role: 'admin' }), true);
+check('the role alone is the platform', isPlatformProfile({ is_super_admin: null, user_role: 'super_admin' }), true);
+check('a role with the flag written false is still the platform', isPlatformProfile({ is_super_admin: false, user_role: 'super_admin' }), true);
+check('an admin with no flag is not', isPlatformProfile({ is_super_admin: false, user_role: 'admin' }), false);
+check('a null flag on its own is not', isPlatformProfile({ is_super_admin: null, user_role: 'operations' }), false);
+check('no profile at all is not the platform', isPlatformProfile(null), false);
+check('the role key the helper matches is the seeded platform role', PLATFORM_ROLE_KEY, BUILT_IN_ROLES[BUILT_IN_ROLES.length - 1].key);
+/* The guard that keeps the drift from coming back: the comparison is written
+   once, in rbac.js, and pages ask it. */
+const copiesOfTheTest = ['src/pages/Users.jsx', 'src/components/SessionProvider.jsx', 'src/components/Sidebar.jsx', 'src/App.jsx']
+  .filter((file) => /is_super_admin\s*===/.test(readFileSync(join(here, '..', file), 'utf8')));
+check('no page re-reads the flag for itself', copiesOfTheTest, []);
+check('the users page asks the helper', readFileSync(join(here, '..', 'src', 'pages', 'Users.jsx'), 'utf8').includes('isPlatformProfile(member)'), true);
+check('the session asks the helper', readFileSync(join(here, '..', 'src', 'components', 'SessionProvider.jsx'), 'utf8').includes('isPlatformProfile(profile)'), true);
+
+/* 13. The command centre is where a company is looked at, so it is where the
+        operator should be able to step inside one. Managing the rows and doing
+        the work used to be two places with the sidebar picker as the only road
+        between them. */
+const commandCentre = readFileSync(join(here, '..', 'src', 'pages', 'SuperAdmin.jsx'), 'utf8');
+check('the command centre takes the session scope', /useSession\(\)/.test(commandCentre), true);
+check('a company row moves the picker onto it', /setViewingCompany\(company\.id\)/.test(commandCentre), true);
+check('and opens that tenant rather than staying on the list', /navigate\('\/dashboard'\)/.test(commandCentre), true);
 
 console.log(failures
   ? `\n${failures} rbac example(s) FAILED\n`

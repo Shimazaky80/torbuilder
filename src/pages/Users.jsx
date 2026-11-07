@@ -26,6 +26,7 @@ import {
   assignableRoles,
   canSeeCosts,
   hasOverrides,
+  isPlatformProfile,
   levelLabel,
   resolveAccess
 } from '../lib/rbac';
@@ -50,7 +51,7 @@ const nameOf = (member) => [member.first_name, member.last_name].filter(Boolean)
 const accessOf = (member, roleRows) => resolveAccess({
   roleKey: member.user_role,
   overrides: member.access_overrides || {},
-  isPlatformAdmin: member.is_super_admin === true || member.user_role === 'super_admin',
+  isPlatformAdmin: isPlatformProfile(member),
   isActive: member.is_active !== false,
   roleRows
 });
@@ -151,7 +152,9 @@ export const Users = () => {
       setRosterMissing(false);
       setMembers(Array.isArray(data) ? data : []);
       /* The select is built from the rows the roster shows, so a company that
-         has added its own job to `roles` sees it here without a deploy. */
+         has added its own job to `roles` sees it here without a deploy.
+         `assignableRoles` already leaves the platform role out of the list for
+         anybody who is not the platform, so the two pickers render it as is. */
       setRoleOptions(assignableRoles(roleRows, { callerIsPlatform: isPlatformAdmin }));
     }
 
@@ -376,7 +379,7 @@ export const Users = () => {
               </Field>
               <Field label="Job" hint="The invitation carries the role, so nothing has to be set after they arrive.">
                 <select className="pricing-select" value={inviteForm.roleKey} onChange={(e) => setInviteForm({ ...inviteForm, roleKey: e.target.value })}>
-                  {roleOptions.filter((r) => r.key !== 'super_admin' || isPlatformAdmin).map((r) => <option key={r.key} value={r.key}>{r.name}</option>)}
+                  {roleOptions.map((r) => <option key={r.key} value={r.key}>{r.name}</option>)}
                 </select>
               </Field>
               <div style={{ gridColumn: '1 / -1', display: 'flex', gap: '0.6rem' }}>
@@ -426,7 +429,7 @@ export const Users = () => {
             </tr>
           ) : members.map((member) => {
             const access = accessOf(member, roleRows);
-            const platform = member.is_super_admin === true || member.user_role === 'super_admin';
+            const platform = isPlatformProfile(member);
             const isSelf = member.user_id === userId;
             const disabled = member.is_active === false;
             /* Nobody edits their own platform row and a company never edits one
@@ -457,7 +460,7 @@ export const Users = () => {
                       onChange={(e) => changeRole(member, e.target.value)}
                       style={{ maxWidth: '200px' }}
                     >
-                      {roleOptions.filter((r) => isPlatformAdmin || r.key !== 'super_admin').map((r) => (
+                      {roleOptions.map((r) => (
                         <option key={r.key} value={r.key}>{r.name}</option>
                       ))}
                     </select>

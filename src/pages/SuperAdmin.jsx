@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
+import { useSession } from '../hooks/useSession';
 import {
   Building2,
   Users,
@@ -37,6 +39,8 @@ export const SuperAdmin = () => {
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [deleteCompanyId, setDeleteCompanyId] = useState('');
   const { showToast } = useToast();
+  const navigate = useNavigate();
+  const { viewingCompany, setViewingCompany } = useSession();
 
   // Form states
   const [inviteEmail, setInviteEmail] = useState('');
@@ -223,6 +227,17 @@ export const SuperAdmin = () => {
     c.name.toLowerCase().includes(search.toLowerCase()) ||
     c.id.includes(search)
   );
+
+  /* The command centre reads every company, but work inside one used to mean
+     finding its name in the sidebar picker first. This is that same call made
+     from the row you are already looking at: the session takes the tenant as
+     its scope and the dashboard remounts under it, so the pages that follow
+     open on this company's data. Coming back here is the picker's job, and
+     the page below does not read the scope at all — it still lists everyone. */
+  const openTenant = (company) => {
+    setViewingCompany(company.id);
+    navigate('/dashboard');
+  };
 
   return (
     <div className="super-admin-page">
@@ -411,6 +426,18 @@ export const SuperAdmin = () => {
                   </td>
                   <td>
                     <div className="action-buttons">
+                      <button
+                        className="action-btn"
+                        onClick={() => openTenant(company)}
+                        style={viewingCompany === company.id
+                          ? { borderColor: '#0d7478', color: '#0d7478', fontWeight: 700 }
+                          : undefined}
+                        title={viewingCompany === company.id
+                          ? 'The app is already reading this company — go into its dashboard'
+                          : 'Work inside this company: the sidebar picker moves to it and its dashboard opens'}
+                      >
+                        <ExternalLink size={18} /> Open tenant
+                      </button>
                       <button className="action-btn" title="Reset Admin Password">
                         <Key size={18} />
                       </button>

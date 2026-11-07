@@ -113,6 +113,13 @@ export const BUILT_IN_ROLES = [
 
 export const PLATFORM_ROLE_KEY = 'super_admin';
 
+/* The one answer to "is this account the platform", written down once.
+   public.is_super_admin() in the database accepts either the flag or the role,
+   and every copy of that test in the app is a place the two can drift apart —
+   so there is only this one. */
+export const isPlatformProfile = (profile) => !!profile
+  && (profile.is_super_admin === true || profile.user_role === PLATFORM_ROLE_KEY);
+
 export const levelRank = (level) => LEVEL_RANK[level] ?? 0;
 
 export const isKnownLevel = (level) => ACCESS_LEVELS.includes(level);

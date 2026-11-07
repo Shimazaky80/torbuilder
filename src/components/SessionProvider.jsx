@@ -11,6 +11,7 @@ import {
   builtInRole,
   can as holdsAccess,
   canSeeCosts as holdsCosts,
+  isPlatformProfile,
   resolveAccess
 } from '../lib/rbac';
 
@@ -107,7 +108,7 @@ export const SessionProvider = ({ children }) => {
       .select('key, name, description, access, flags, is_builtin, company_id, sort_order')
       .order('sort_order');
 
-    const isPlatformAdmin = profile?.is_super_admin === true || profile?.user_role === 'super_admin';
+    const isPlatformAdmin = isPlatformProfile(profile);
 
     /* The platform console is the one account that reads more than its own
        company, so it is the only one allowed to hold a tenant scope. Anyone
