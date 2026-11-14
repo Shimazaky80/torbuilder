@@ -1,0 +1,3960 @@
+{
+  "source": {
+    "name": "GeoNames",
+    "url": "https://www.geonames.org/",
+    "cities500": {
+      "url": "https://download.geonames.org/export/dump/cities500.zip",
+      "sha256": "b3c9187e3904161ef9d68e66df0e63cf7b7780aab4dd4d321f0e072d3f7c47b2",
+      "hashedFile": "cities500.txt"
+    },
+    "admin1CodesASCII": {
+      "url": "https://download.geonames.org/export/dump/admin1CodesASCII.txt",
+      "sha256": "2e4867f5397acb056ea26377601b57af37cb4c81399770225018e9e439e91ad3"
+    },
+    "readme": "https://download.geonames.org/export/dump/readme.txt",
+    "coverage": "Population >500 or administrative seats down to PPLA4; not all tourism destinations.",
+    "modifications": "Active class-P settlements only; source names retained; admin1 lookup; natural-key deduplication.",
+    "activeFeatureCodes": [
+      "PPL",
+      "PPLA",
+      "PPLA2",
+      "PPLA3",
+      "PPLA4",
+      "PPLA5",
+      "PPLC",
+      "PPLF",
+      "PPLG",
+      "PPLL",
+      "PPLR",
+      "PPLS",
+      "STLMT"
+    ],
+    "hubFeatureCodes": [
+      "PPLC",
+      "PPLA",
+      "PPLG"
+    ],
+    "missingRegion": "Region not recorded",
+    "deduplication": "Exact country/province/place; lowest GeoNames ID; merged aliases and hub flags.",
+    "aliases": "ASCII name, then Latin-script variants, then other scripts; max 12 names, 120 chars/name, 320 chars total."
+  },
+  "license": {
+    "name": "Creative Commons Attribution 4.0 International (CC BY 4.0)",
+    "url": "https://creativecommons.org/licenses/by/4.0/",
+    "attribution": "Contains GeoNames data (https://www.geonames.org/), filtered and reformatted."
+  },
+  "retrievedAt": "2026-11-13T18:12:11.757Z",
+  "countries": {
+    "BW": "Botswana",
+    "MZ": "Mozambique",
+    "NA": "Namibia",
+    "ZM": "Zambia",
+    "ZW": "Zimbabwe"
+  },
+  "places": [
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Bobonong",
+      "alt_name": "Bahonong; bo bo nong; bwbwnwng  bwtswana; bwbwnwnq  bwtswana; Бобононг; بوبونونق، بوتسوانا; بوبونونگ، بوتسوانا; 博博農",
+      "hub": false,
+      "geoname_id": 933885
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Bonwapitse",
+      "alt_name": "Bonapitse; Bonapitse Stadt; Bonapitsi Stadt; Bownapitse",
+      "hub": false,
+      "geoname_id": 933875
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Borolong",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11258456
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Chadibe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7754329
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Gobojango",
+      "alt_name": "Gubujango; Kobajango; Kobojango",
+      "hub": false,
+      "geoname_id": 933753
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Gweta",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933734
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Kalamare",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933696
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Lerala",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11550118
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Letlhakane",
+      "alt_name": "Lethakane; Letlhakawe",
+      "hub": false,
+      "geoname_id": 933535
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Letsheng",
+      "alt_name": "Lechen",
+      "hub": false,
+      "geoname_id": 933555
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Maapi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933498
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Machaneng",
+      "alt_name": "Machenen",
+      "hub": false,
+      "geoname_id": 933488
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mahalapye",
+      "alt_name": "Mahalapje; Mahalapjė; Mahalatswe; Makhalap'e; Makhalape; ma ha la pei; mahalapyh  bwtswana; mahallapie; maharapie; Махалапе; Махалапье; ماهالاپیه، بوتسوانا",
+      "hub": false,
+      "geoname_id": 933471
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Makobeng",
+      "alt_name": "Mokobeng",
+      "hub": false,
+      "geoname_id": 933313
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Makwata",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933437
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Malaka",
+      "alt_name": "Malake",
+      "hub": false,
+      "geoname_id": 933432
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mathakola",
+      "alt_name": "Matlakola",
+      "hub": false,
+      "geoname_id": 933377
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mathambgwane",
+      "alt_name": "Matangwan; Matangwan Stad",
+      "hub": false,
+      "geoname_id": 933387
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mathangwane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11467814
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mathathane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933383
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Maunatlala",
+      "alt_name": "Monnatlala",
+      "hub": false,
+      "geoname_id": 933292
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mmadinare",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12640340
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mogapi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933333
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mogapinyana",
+      "alt_name": "Mokhapinyana",
+      "hub": false,
+      "geoname_id": 933321
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Moijabana",
+      "alt_name": "Moiyabana",
+      "hub": false,
+      "geoname_id": 933329
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mookane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933290
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mopipi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933288
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Moremi",
+      "alt_name": "Horeme; Moreme",
+      "hub": false,
+      "geoname_id": 933284
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Mosetse",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933277
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Nata",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933238
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Orapa",
+      "alt_name": "ORP; Орапа",
+      "hub": false,
+      "geoname_id": 933186
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Palapye",
+      "alt_name": "Palap'e; Palapaye Road; Palape; Palapie; Palapye Road; Palatswe; QPH; pa la pei; palapy  bwtswana; Παλάπιε; Палапье; Палапє",
+      "hub": false,
+      "geoname_id": 933182
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Pilikwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933162
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Ramokgonami",
+      "alt_name": "Ramakonami",
+      "hub": false,
+      "geoname_id": 933148
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Ratholo",
+      "alt_name": "Ratolo",
+      "hub": false,
+      "geoname_id": 933137
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Sefhare",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7867072
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Sefophe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933112
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Serowe",
+      "alt_name": "Serooue; Serova; Serove; Serovė; sai luo wei; selowe; sero'oye; seroue; srwbh; srwwh  bwtswana; syrwy; syrwې",
+      "hub": true,
+      "geoname_id": 933088
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Shakgwe",
+      "alt_name": "Shakawe; Shakwe",
+      "hub": false,
+      "geoname_id": 933076
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Shashe Mooke",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7754332
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Shoshong",
+      "alt_name": "Shushong; shao xiong; shwshwng  bwtswana; shwshwnq  bwtswana; Шошонг; شوشونق، بوتسوانا; شوشونگ، بوتسوانا; 紹雄; 绍雄",
+      "hub": false,
+      "geoname_id": 933064
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Sua",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933040
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Tamasane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933030
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Tonota",
+      "alt_name": "Tonoto",
+      "hub": false,
+      "geoname_id": 933000
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Tsetsebjwe",
+      "alt_name": "tstsbyw  bwtswana; تستسبیو، بوتسوانا",
+      "hub": false,
+      "geoname_id": 7847878
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Tutume",
+      "alt_name": "tu tu mei; twtwm  bwtswana; Тутуме; توتوم، بوتسوانا; 圖圖梅",
+      "hub": false,
+      "geoname_id": 7573818
+    },
+    {
+      "country": "Botswana",
+      "province": "Central",
+      "place": "Xumo",
+      "alt_name": "Gomo; Khomo; Xhumo",
+      "hub": false,
+      "geoname_id": 933640
+    },
+    {
+      "country": "Botswana",
+      "province": "Chobe",
+      "place": "Kachikau",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933711
+    },
+    {
+      "country": "Botswana",
+      "province": "Chobe",
+      "place": "Kasane",
+      "alt_name": "BBK; ka sa nei; kasan; kasan  bwtswana; kasaነ; Касане; كاسان; کاسان; کاسان، بوتسوانا; कसाने; কাসানে; ਕਸਾਨੇ",
+      "hub": true,
+      "geoname_id": 933677
+    },
+    {
+      "country": "Botswana",
+      "province": "Chobe",
+      "place": "Kavimba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933662
+    },
+    {
+      "country": "Botswana",
+      "province": "City of Francistown",
+      "place": "Francistown",
+      "alt_name": "FRW; Francistaun; Fransistaoun; Fransistaun; Frensistaun; Frensistaunas; fransstawn; fransystawn; fransystwwn  bwtswana; fu lang xi si dui; furanshisutaun; peulaensiseutaun",
+      "hub": true,
+      "geoname_id": 933778
+    },
+    {
+      "country": "Botswana",
+      "province": "Gaborone",
+      "place": "Gaborone",
+      "alt_name": "GBE; Gabaroneh; Gaberones; Gaberones Village; Gaberono; Gaboron; Gaboronas; Gaboròn; Gaboróne; IGaborone; Nkamporone; Qaborone",
+      "hub": true,
+      "geoname_id": 933773
+    },
+    {
+      "country": "Botswana",
+      "province": "Ghanzi",
+      "place": "Charles Hill",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11204768
+    },
+    {
+      "country": "Botswana",
+      "province": "Ghanzi",
+      "place": "Dekar",
+      "alt_name": "D'kar",
+      "hub": false,
+      "geoname_id": 933815
+    },
+    {
+      "country": "Botswana",
+      "province": "Ghanzi",
+      "place": "Ghanzi",
+      "alt_name": "GNZ; Ganzi; Khanzi; Nkanzi; ganizi; ganji; ghanaji; ghanazi; ghanji; ghanzy; ghanzy  bwtswana; gnzy",
+      "hub": true,
+      "geoname_id": 933759
+    },
+    {
+      "country": "Botswana",
+      "province": "Ghanzi",
+      "place": "Kuli",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933578
+    },
+    {
+      "country": "Botswana",
+      "province": "Ghanzi",
+      "place": "Ncojane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11287036
+    },
+    {
+      "country": "Botswana",
+      "province": "Jwaneng",
+      "place": "Jwaneng",
+      "alt_name": "Dzhvaneng; JWA; Jwaneng Township Area; jbanem; jiwanengu; jvanenga; jwanyng; jwanynj; jiwaነniግ; Джванeng; Джванenг; جوانينج",
+      "hub": true,
+      "geoname_id": 8308627
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgalagadi",
+      "place": "Hukuntsi",
+      "alt_name": "Choukountsi; HUK; Khukunci; Motsana wa Hukuntsi; hakantoshi; hwkwntsy  bwtswana; Χουκούντσι; Хукунци; هوکونتسی، بوتسوانا; ハカントシー",
+      "hub": false,
+      "geoname_id": 933726
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgalagadi",
+      "place": "Kang",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933692
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgalagadi",
+      "place": "Lehututu",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933548
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgalagadi",
+      "place": "Tshabong",
+      "alt_name": "Cabongas; Chabong; TBY; Tsabong; Tsampon'nk; cha bang; cyabam; tasabonga; tsabonga; tshabwng  bwtswana; tshabwnj; tsuabon",
+      "hub": true,
+      "geoname_id": 932987
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgalagadi",
+      "place": "Tshane",
+      "alt_name": "Tsane",
+      "hub": false,
+      "geoname_id": 932984
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgalagadi",
+      "place": "Werda",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 932960
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Artesia",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7697027
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Bokaa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933881
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Mmathubudukwane",
+      "alt_name": "Mathobudukwane; Mathubudukwane; Mmathubudkwane",
+      "hub": false,
+      "geoname_id": 933347
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Mochudi",
+      "alt_name": "Mochudi Village; Mocudis; Motsounti; Močudis; mo qiu di; mocudi; mwchwdy; mwchwdy  bwtswana; mwtshwdy; Μοτσούντι; Мочуди; Мочуді",
+      "hub": true,
+      "geoname_id": 933340
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Morwa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11468280
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Pilane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933164
+    },
+    {
+      "country": "Botswana",
+      "province": "Kgatleng",
+      "place": "Rasesa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11353058
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Botlhapatlou",
+      "alt_name": "Botlapatla",
+      "hub": false,
+      "geoname_id": 933862
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Dumadumana",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106214
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Dutlwe",
+      "alt_name": "Luzwe",
+      "hub": false,
+      "geoname_id": 933787
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Gabane",
+      "alt_name": "Khabane; gaban  bwtswana; ha ba nei; qaban  bwtswana; Габане; قابان، بوتسوانا; گابان، بوتسوانا; گابان، بوټسوانا; 哈巴內; 哈巴内",
+      "hub": false,
+      "geoname_id": 933777
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Galekgatshwane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106205
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Gaphatshwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106203
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Kgaphamadi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106211
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Khudumelapye",
+      "alt_name": "Kudumalapshwe",
+      "hub": false,
+      "geoname_id": 933633
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Kumakwane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7752587
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Lenchwe Le Tau",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933541
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Lentsweletau",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7908686
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Letlhakeng",
+      "alt_name": "Letlaking",
+      "hub": false,
+      "geoname_id": 933534
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Metsemotlhaba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106206
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Mmankgodi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7752616
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Mmokolodi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106195
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Mmopone",
+      "alt_name": "Mmopane Lands",
+      "hub": false,
+      "geoname_id": 1106213
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Mogoditshane",
+      "alt_name": "Mogoditsane; Mogoditšane; Monkontitsane; mo ge di sha nei; mohoditsuane; mwgwdytshan  bwtswana; mwqwdytshan  bwtswana; Μογκοντιτσάνε; Могодитшане; Могодітшане; موقودیتشان، بوتسوانا; موگودیتشان، بوتسوانا",
+      "hub": false,
+      "geoname_id": 933331
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Molepolole",
+      "alt_name": "Molepololė; mo lai bo luo lai; mollepollolle; moreporore; mwlbwlwl; mwlpwlwl; mwlpwlwlh; mwlpwlwlh  bwtswana; mwlypwlwl; moleፖlole; Μολεπολόλε; Молепололе",
+      "hub": true,
+      "geoname_id": 933305
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Mononyane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106204
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Nkoyaphiri",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1106215
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Salajwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11352358
+    },
+    {
+      "country": "Botswana",
+      "province": "Kweneng",
+      "place": "Thamaga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933018
+    },
+    {
+      "country": "Botswana",
+      "province": "Lobatse",
+      "place": "Lobatse",
+      "alt_name": "LOQ; Lobace; Lobatsi; Lompatse; lobache; luo ba ce; lwbats  bwtswana; robatsue; Λομπάτσε; Лобаце; لوباتس، بوتسوانا; لوباٹسے",
+      "hub": false,
+      "geoname_id": 933521
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Good Hope",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7739165
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Kanye",
+      "alt_name": "Kan'e; Kane; Kanie; Kanje; Kanjė; ka nei; kan'ye; kanaye; kaniye; kanyh  bwtswana; kanyy; knyy",
+      "hub": true,
+      "geoname_id": 933685
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Kgomokasitwa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13308079
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Khakhea",
+      "alt_name": "Kakia",
+      "hub": false,
+      "geoname_id": 933649
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Lorolwana",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13308081
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Lotlhakane",
+      "alt_name": "Lotlakani",
+      "hub": false,
+      "geoname_id": 933506
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Manyana",
+      "alt_name": "Manyane",
+      "hub": false,
+      "geoname_id": 933416
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Mmathete",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7739123
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Mosopa",
+      "alt_name": "Moshupa",
+      "hub": false,
+      "geoname_id": 933271
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Pitseng",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13308083
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Sese",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11258235
+    },
+    {
+      "country": "Botswana",
+      "province": "Ngwaketsi",
+      "place": "Tlhareselele",
+      "alt_name": "Tlhareseleele",
+      "hub": false,
+      "geoname_id": 933007
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Dukwe",
+      "alt_name": "Dukwe Quarantine Camp",
+      "hub": false,
+      "geoname_id": 933790
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Kalakamate",
+      "alt_name": "Kalakamati",
+      "hub": false,
+      "geoname_id": 933698
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Maitengwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7573795
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Makaleng",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933456
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Masunga",
+      "alt_name": "Masungas",
+      "hub": false,
+      "geoname_id": 933390
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Sebina",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933117
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Siviya",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7926646
+    },
+    {
+      "country": "Botswana",
+      "province": "North-East",
+      "place": "Tati Siding",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11205055
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Gumare",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11205277
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Maun",
+      "alt_name": "MUB; Maoun; Maunas; ma weng; ma'una; mawn; mawn  bwtswana; maʿuni; Μαούν; Маун; Маўн; מאון",
+      "hub": true,
+      "geoname_id": 933366
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Nokaneng",
+      "alt_name": "Nokanen; Nokaning",
+      "hub": false,
+      "geoname_id": 933211
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Pandamatenga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933178
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Sehithwa",
+      "alt_name": "Sehithwe",
+      "hub": false,
+      "geoname_id": 933109
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Shakawe",
+      "alt_name": "SWX; Sakaoue; Shakave; sha ka wei; shakaue; shakaw  bwtswana; Σακάουε; Шакаве; شاکاو، بوتسوانا; シャカウェ; 沙卡韋; 沙卡韦",
+      "hub": false,
+      "geoname_id": 933077
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Toteng",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 932997
+    },
+    {
+      "country": "Botswana",
+      "province": "North-West",
+      "place": "Tsau",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 932993
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Boatlaname",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933887
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Bokspits",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933880
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Khuis",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933632
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Kurametsi",
+      "alt_name": "Kudumatsi; Kurametse",
+      "hub": false,
+      "geoname_id": 933573
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Lokwabe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933510
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Mabuli",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933491
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Magothla",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933474
+    },
+    {
+      "country": "Botswana",
+      "province": "Region not recorded",
+      "place": "Makoba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933446
+    },
+    {
+      "country": "Botswana",
+      "province": "Selibe Phikwe",
+      "place": "Selebi-Phikwe",
+      "alt_name": "PKW; Phikwe; Pikwe; Pikwe-Selibe; Selebi; Selebi Pikve; Selebi Pikvė; Selebi Pikwe; Selebi-Pikwe; Selebi-Pkhikve; Selempi-Fikoue; Selibe",
+      "hub": false,
+      "geoname_id": 933099
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Janeng",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933719
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Kopong",
+      "alt_name": "Kopong Villages",
+      "hub": false,
+      "geoname_id": 933596
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Oodi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11205201
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Otse",
+      "alt_name": "Ootsi; Ootsi Siding",
+      "hub": false,
+      "geoname_id": 933184
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Ramotswa",
+      "alt_name": "Ramocva; Ramoutsa; ramotasava; ramotisiwa; ramotsa'oya; ramotsava; ramotsuwa; ramw tswa; ramwtswa; Рамоцва; رامو تسوا; راموتسوا",
+      "hub": true,
+      "geoname_id": 933141
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Ramotswa Station/Taung",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12640342
+    },
+    {
+      "country": "Botswana",
+      "province": "South-East",
+      "place": "Tlokweng",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 933004
+    },
+    {
+      "country": "Botswana",
+      "province": "Sowa Town",
+      "place": "Sowa",
+      "alt_name": "SXN",
+      "hub": false,
+      "geoname_id": 11593974
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Chiúre",
+      "alt_name": "Chiure",
+      "hub": false,
+      "geoname_id": 1048468
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Ibo",
+      "alt_name": "Vila do Ibo",
+      "hub": false,
+      "geoname_id": 1024695
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Macomia",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1042456
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Mocímboa",
+      "alt_name": "Mocimboa",
+      "hub": false,
+      "geoname_id": 1037370
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Mocímboa da Praia",
+      "alt_name": "Mocimboa da Praia; MZB; Mocimboa; Mocímboa; Vila de Mocimboa da Praia; Vila de Mocímboa da Praia",
+      "hub": false,
+      "geoname_id": 1024699
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Montepuez",
+      "alt_name": "Distretto di Montepuez; MTU; Montepveze; Vila de Montepuez; meng te pu ai zi; mwntpwz  mwzambyk; mwntybwyz; Монтепвезе; مونتيبويز; مونتپوز، موزامبیک; მონტეპუეზი; 蒙特普埃茲",
+      "hub": false,
+      "geoname_id": 1037125
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Mueda",
+      "alt_name": "MUD",
+      "hub": false,
+      "geoname_id": 1036263
+    },
+    {
+      "country": "Mozambique",
+      "province": "Cabo Delgado Province",
+      "place": "Pemba",
+      "alt_name": "POL; Pempa; Porto Amelia; bymba; paba; penba; peng ba; pmba; pymba  mwzmbyq; Πέμπα; Пемба; بيمبا",
+      "hub": true,
+      "geoname_id": 1028918
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Bilene",
+      "alt_name": "Praia do Bilene; Vila Praia Do Bilene",
+      "hub": false,
+      "geoname_id": 1028576
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Caniçado",
+      "alt_name": "Canicado",
+      "hub": false,
+      "geoname_id": 12718694
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Chibuto",
+      "alt_name": "Vila do Chibuto",
+      "hub": false,
+      "geoname_id": 1049861
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Chokwé",
+      "alt_name": "Chokwe; Chokue; Chokué; Choque; Chókwè; TGS; Trigo Morais; Trigo de Morais; Vila Trigo de Morais",
+      "hub": false,
+      "geoname_id": 1048364
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Macia",
+      "alt_name": "Vila de Macia",
+      "hub": false,
+      "geoname_id": 1024701
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Manjacaze",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1040937
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Vila Eduardo Mondlane",
+      "alt_name": "Chicualacuala; Chiqualaquala; Chirotera; Malvernia; Malvérnia",
+      "hub": false,
+      "geoname_id": 1049629
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Xai-Xai",
+      "alt_name": "Chai Chai; Joa Belo; Joao Belo; João Belo; Khaj-Khaj; Khoj-Khoj; Sai Sajus; Sai-Sai; Shai-Shai; VJB; Vila de Joao Belo; Vila de João Belo",
+      "hub": true,
+      "geoname_id": 1024552
+    },
+    {
+      "country": "Mozambique",
+      "province": "Gaza Province",
+      "place": "Xilembene",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718700
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Homoíne",
+      "alt_name": "Homoine; Manhica",
+      "hub": false,
+      "geoname_id": 1045449
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Inhambane",
+      "alt_name": "INH; In'jambane; Injambane; Injambanė; Inkhambane; anhamban; aynhambanh; inahamabana; inahambena; iniambane; inyambaneu; inyanbane shi",
+      "hub": true,
+      "geoname_id": 1045114
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Inharrime",
+      "alt_name": "Poelelane; yi ni ya li mei; 伊尼雅利梅",
+      "hub": false,
+      "geoname_id": 1045007
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Inhassoro",
+      "alt_name": "inyasoro; yi ni ya suo luo; イニャソロ; 伊尼亚索洛; 伊尼亞索洛; 伊尼雅索羅",
+      "hub": false,
+      "geoname_id": 1044995
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Massinga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1040201
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Maxixe",
+      "alt_name": "Mashishe; Masise; Mašiše; Mašišė; ma si se; ma xi xie; maiksiksa; maksi mocampik; maksy  mwzambyk; maksyksy; masiseu; mazyzy   mwzambyqwy",
+      "hub": false,
+      "geoname_id": 1039536
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Morrumbene",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1037042
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Nova Mambone",
+      "alt_name": "Mambone; Nova",
+      "hub": false,
+      "geoname_id": 1029537
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Quissico",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1028307
+    },
+    {
+      "country": "Mozambique",
+      "province": "Inhambane Province",
+      "place": "Vilankulo",
+      "alt_name": "VNX; Vilan'koulo; Vilanculo; Vilanculos; Vilankulas; Villancuios; vuirankuro; wei lan ku luo; wylankwlw  mwzambyk; wylnqwlw; Βιλανκούλο; Виланкуло",
+      "hub": false,
+      "geoname_id": 1024683
+    },
+    {
+      "country": "Mozambique",
+      "province": "Manica",
+      "place": "Catandica",
+      "alt_name": "Catambica; Vila Gouveia; Vila Goveia",
+      "hub": false,
+      "geoname_id": 1050871
+    },
+    {
+      "country": "Mozambique",
+      "province": "Manica",
+      "place": "Chimoio",
+      "alt_name": "Chimojo; Chimoyo; Shimojo; Simojas; VPY; Vila Pery; chymwayw; cimo'i'o; cimoyo; shimoio; shymwyw; simoiu",
+      "hub": true,
+      "geoname_id": 1049261
+    },
+    {
+      "country": "Mozambique",
+      "province": "Manica",
+      "place": "Gondola",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1045826
+    },
+    {
+      "country": "Mozambique",
+      "province": "Manica",
+      "place": "Machipanda",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1095961
+    },
+    {
+      "country": "Mozambique",
+      "province": "Manica",
+      "place": "Manica",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1040950
+    },
+    {
+      "country": "Mozambique",
+      "province": "Manica",
+      "place": "Messica",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718697
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo City",
+      "place": "Bairro 25 de Junho A",
+      "alt_name": "25 de Junho A; 25 de Junho ”A”; Bairro 25 de Junho ”A”",
+      "hub": false,
+      "geoname_id": 1106292
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo City",
+      "place": "Bairro 25 de Junho B",
+      "alt_name": "25 de Junho ”B”; Bairro 25 de Junho ”B”",
+      "hub": false,
+      "geoname_id": 1106294
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo City",
+      "place": "Maputo",
+      "alt_name": "Can Pfumo; Kapfumo; Lourenco Marques; Lourenço Marques; MPM; Mabuto; Mabutu; Mapouto; Maputu; Mapútó; ma pu to; ma pu tuo",
+      "hub": true,
+      "geoname_id": 1040652
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Bela Vista",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1052365
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Boane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1052191
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Magude",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1041867
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Manhiça",
+      "alt_name": "Manhica; Vila da Manhica; Vila da Manhiça",
+      "hub": false,
+      "geoname_id": 1040989
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Marracuene",
+      "alt_name": "Vila Luisa; Vila Luiza; Vila Luísa; ma la kua nei; marakyn  mwzambyk; ماراکین، موزامبیک; 馬拉夸內; 馬拉誇內; 马拉夸内",
+      "hub": false,
+      "geoname_id": 1024688
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Matola",
+      "alt_name": "Cidade da Matola; Vila Salazar; matora; matwla; Матола; ماتولا; मातोला; মাতোলা; ਮਾਤੋਲਾ; ማቶላ; マトラ",
+      "hub": true,
+      "geoname_id": 1039854
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Moamba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1037408
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Namaacha",
+      "alt_name": "Namahacha",
+      "hub": false,
+      "geoname_id": 1034421
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Ponta d'Ouro",
+      "alt_name": "PDD",
+      "hub": false,
+      "geoname_id": 6942241
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Ressano Garcia",
+      "alt_name": "Resano Garcia; Ressano Garkia; Рессано Гаркиа",
+      "hub": false,
+      "geoname_id": 1028079
+    },
+    {
+      "country": "Mozambique",
+      "province": "Maputo Province",
+      "place": "Xinavane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718701
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Angoche",
+      "alt_name": "ANO; An'nkotse; Antonio Enes; Antonio Engs; Antonio Ennes; António Enes; Vila de Antonio Enes; Vila de António Enes; an ge xie; anghwtshy; angoshe; angwsh  mwzambyk",
+      "hub": false,
+      "geoname_id": 1052944
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Iapala",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1091197
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Malema",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718696
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Meconta",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1088746
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Micolene",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1037792
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Monapo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1037180
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Mossuril",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1037021
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Mozambique",
+      "alt_name": "Ilha de Mocambique; Ilha de Moçambique; Mocambique; Moçambique",
+      "hub": false,
+      "geoname_id": 1037390
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Murrupula",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1035471
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Mutuáli",
+      "alt_name": "Mutuali",
+      "hub": false,
+      "geoname_id": 1088155
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Nacala",
+      "alt_name": "Cidade de Nacala; Fernao Veloso; Fernão Veloso; Gorod-de-Nakala; MNC; Maaia; Maiaia; Nacala-Porto; Город-де-Накала",
+      "hub": false,
+      "geoname_id": 1035025
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Namapa-erati",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 11205324
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Nametil",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1033827
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Namialo",
+      "alt_name": "namialu; ნამიალუ",
+      "hub": false,
+      "geoname_id": 1033797
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Nampula",
+      "alt_name": "APL; Nampoula; namapula; nambwla; nampulla; nampwla; nan pu la; nanpura; naምፑla; Ναμπούλα; Нампула; نامبولا",
+      "hub": true,
+      "geoname_id": 1033356
+    },
+    {
+      "country": "Mozambique",
+      "province": "Nampula",
+      "place": "Ribáuè",
+      "alt_name": "Ribaue",
+      "hub": false,
+      "geoname_id": 12718698
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Cuamba",
+      "alt_name": "Cuanda; FXO; Guamba; Kwamba; Mucuamba; Mukwamba; Nova Freixo; ku an ba; kua mu ba; 库安巴; 誇姆巴",
+      "hub": false,
+      "geoname_id": 1047660
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Insaca",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718695
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Lichinga",
+      "alt_name": "Lishinga; Lisinga; Lišinga; VXC; Vila Cabral; li xin jia; licinga; liciniga; lising-ga; lychynga; lytshynja; rishinga",
+      "hub": true,
+      "geoname_id": 1043893
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Mandimba",
+      "alt_name": "Мандимба",
+      "hub": false,
+      "geoname_id": 1041190
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Marrupa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1040370
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Metangula",
+      "alt_name": "Augusto Cardoso; M'tangula; M’tangula; mei tan gu la; 梅坦古拉",
+      "hub": false,
+      "geoname_id": 1052702
+    },
+    {
+      "country": "Mozambique",
+      "province": "Niassa Province",
+      "place": "Sanga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718699
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Beira",
+      "alt_name": "BEW; Bejra; Beyra; Beyrə; be'ira; bei la; beila; bera; byra; byra  mwzambyk; byyra  mwzmbyq; Μπέιρα",
+      "hub": true,
+      "geoname_id": 1052373
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Búzi",
+      "alt_name": "Buzi",
+      "hub": false,
+      "geoname_id": 12718693
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Caia",
+      "alt_name": "Vila Fontes",
+      "hub": false,
+      "geoname_id": 1024692
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Dondo",
+      "alt_name": "Vila do Dondo; Дондо",
+      "hub": false,
+      "geoname_id": 1024696
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Gorongosa",
+      "alt_name": "Vila Gorongosa; Vila Paiva d'Andrada; Vila Paiva de Andada; Vila Paiva de Andrada; Vila Paiva d’Andrada",
+      "hub": false,
+      "geoname_id": 1024680
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Inhaminga",
+      "alt_name": "IMG",
+      "hub": false,
+      "geoname_id": 1045088
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Marromeu",
+      "alt_name": "Marrumeu; RRM",
+      "hub": false,
+      "geoname_id": 1040397
+    },
+    {
+      "country": "Mozambique",
+      "province": "Sofala",
+      "place": "Nhamatanda",
+      "alt_name": "Vila Macahdo; Vila Machado; Vila Sede; en ya ma tan da; 恩雅馬坦達",
+      "hub": false,
+      "geoname_id": 1024687
+    },
+    {
+      "country": "Mozambique",
+      "province": "Tete",
+      "place": "Moatize",
+      "alt_name": "Maotize; Muatize; Vila Moatize",
+      "hub": false,
+      "geoname_id": 1024685
+    },
+    {
+      "country": "Mozambique",
+      "province": "Tete",
+      "place": "Nhamayabué",
+      "alt_name": "Nhamayabue; Don 'Nana; Don ’Nana; Dona Ana; Donana; Nhamalabue",
+      "hub": false,
+      "geoname_id": 1046919
+    },
+    {
+      "country": "Mozambique",
+      "province": "Tete",
+      "place": "Songo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1026755
+    },
+    {
+      "country": "Mozambique",
+      "province": "Tete",
+      "place": "Tete",
+      "alt_name": "TET; Tetė; Vila-de-Santiago-Maior; tai te; teteu; tth; tyth; tyty; Τέτε; Тете; تته; تيتي",
+      "hub": true,
+      "geoname_id": 1026014
+    },
+    {
+      "country": "Mozambique",
+      "province": "Tete",
+      "place": "Ulongué",
+      "alt_name": "Ulongue",
+      "hub": false,
+      "geoname_id": 1025104
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Alto Molocue",
+      "alt_name": "AME; Alto Molokwe; Alto Molócuè; Molocue; Molócué",
+      "hub": false,
+      "geoname_id": 1053143
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Chinde",
+      "alt_name": "INE; Shinde; Vila do Chinde; chyndh  mwzambyk; xin dai; Шинде; چینده، موزامبیک; 欣代",
+      "hub": false,
+      "geoname_id": 1024697
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Gurúè",
+      "alt_name": "Gurue; Gerju; Guruje; Gurujė; Gurué; VJQ; Vila Junqueiro; grwyh  mwzambyk; gu lu ai; Герю; گروئه، موزامبیک; გურუე",
+      "hub": false,
+      "geoname_id": 1045512
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Luabo",
+      "alt_name": "LBM",
+      "hub": false,
+      "geoname_id": 1043458
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Maganja",
+      "alt_name": "MJS; Maganja da Costa; Vila Maganja da Costa; Vila da Maganja",
+      "hub": false,
+      "geoname_id": 1024703
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Milange",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 1037721
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Mocuba",
+      "alt_name": "Mokuba; Mukuba; Vila de Mocuba; mo ku ba; mwkwba  mwzambyk; Мокуба; موکوبا، موزامبیک; მოკუბა; モクバ; 莫庫巴",
+      "hub": false,
+      "geoname_id": 1024694
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Morrumbala",
+      "alt_name": "Marrumbala; Murrumbala",
+      "hub": false,
+      "geoname_id": 1037044
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Namacurra",
+      "alt_name": "Namakoura; Nhamacurra; namkwra; Ναμακούρα; نامکورا",
+      "hub": false,
+      "geoname_id": 1034311
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Pebane",
+      "alt_name": "PEB",
+      "hub": false,
+      "geoname_id": 1028970
+    },
+    {
+      "country": "Mozambique",
+      "province": "Zambezia Province",
+      "place": "Quelimane",
+      "alt_name": "Kelimane; Kelimaneh; Kelimanė; UEL; kavelimana; ke li ma nei; kelimena; kellimaneu; kerimane; klyman; kuwilimane; kuyelimena",
+      "hub": true,
+      "geoname_id": 1028434
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Arandis",
+      "alt_name": "ADI; Arandys; arandisu; Арандис; Арандыс; Арандіс; ארנדיס; アランディス",
+      "hub": false,
+      "geoname_id": 3358670
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Henties Bay",
+      "alt_name": "HentiesBay; Hentiesbaai",
+      "hub": false,
+      "geoname_id": 3356832
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Karibib",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3356332
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Okombahe",
+      "alt_name": "Okombakhe; Окомбахе",
+      "hub": false,
+      "geoname_id": 3354676
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Omaruru",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354540
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Otjimbingwe",
+      "alt_name": "Ochimbingve; Otjimbingue; ao qin bin gui; Очимбингве; 奥钦宾圭; 奧欽賓圭",
+      "hub": false,
+      "geoname_id": 3353871
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Swakopmund",
+      "alt_name": "SWP; Svakopmund; Svakopmundas; savakopamunda; seubakopeumunteu; si wa ke pu meng de; sokapamunda; suwakopumunto; svakopamunda; swakwbmwnd; swakwpmnd; swakwpmwnd",
+      "hub": true,
+      "geoname_id": 3352844
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Uis",
+      "alt_name": "Groot Uis; Uis Mine; Uis Myn",
+      "hub": false,
+      "geoname_id": 3352523
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Usakos",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3352461
+    },
+    {
+      "country": "Namibia",
+      "province": "Erongo Region",
+      "place": "Walvis Bay",
+      "alt_name": "Uolfish Bej; Uolfish-Bej; Uolvis-Behj; Valvis Bej; Volfis-Bej; Volvis Bejus; Volvis Bėjus; WVB; Walfisch-Bucht-Niederland; Walfischbucht; Walvisbaai; jing wan gang",
+      "hub": false,
+      "geoname_id": 3359638
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Aranos",
+      "alt_name": "Аранос",
+      "hub": false,
+      "geoname_id": 3358666
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Gibeon",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3357293
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Gochas",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3357234
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Hoachanas",
+      "alt_name": "Khoachanas; Хоачанас",
+      "hub": false,
+      "geoname_id": 3356802
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Kalkrand",
+      "alt_name": "Khalkrand",
+      "hub": false,
+      "geoname_id": 3356477
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Maltahöhe",
+      "alt_name": "Maltahoehe; Maltahohe",
+      "hub": false,
+      "geoname_id": 3355624
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Mariental",
+      "alt_name": "Mar'ental'; Mariental'; Marientalis; ma lin ta er; maliental; mari'atala; mari'entala; marientaru; mariyentala; maryantal; maryyntal; mariyenitaል",
+      "hub": true,
+      "geoname_id": 3355595
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Rehoboth",
+      "alt_name": "Rehkhobat; Rekhobot; Rikhobot; li huo bo si; rehobosu; rhwbwt; ryhwbwth; Рехобот; Рихобот; Рэхобат; רהובות; ريهوبوث",
+      "hub": false,
+      "geoname_id": 3353540
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Schlip",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3353231
+    },
+    {
+      "country": "Namibia",
+      "province": "Hardap Region",
+      "place": "Stampriet",
+      "alt_name": "Stampried; Stamprietfontein",
+      "hub": false,
+      "geoname_id": 3352934
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Ariamsvlei",
+      "alt_name": "Ariamsvley",
+      "hub": false,
+      "geoname_id": 3358633
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Aroab",
+      "alt_name": "Araob",
+      "hub": false,
+      "geoname_id": 3358610
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Aus",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3358522
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Aussenkehr",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718702
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Berseba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3358422
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Bethanie",
+      "alt_name": "Bethanien; Bethany",
+      "hub": false,
+      "geoname_id": 3358416
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Grünau",
+      "alt_name": "Gruenau; Grunau",
+      "hub": false,
+      "geoname_id": 3357074
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Karasburg",
+      "alt_name": "KAS; Kalkfontein; Kalkfontein South; ka la si bao; karasubagu; karazbwrgh; karazbwrj; Карасбург; كارازبورج; كارازبورغ; カラスバーグ; 卡拉斯堡",
+      "hub": false,
+      "geoname_id": 3356343
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Keetmanshoop",
+      "alt_name": "KMP; Ketmanshopas; Ketmanskhop; Kitmanskhup; ji te man si hu pu; keiteumanseuhopeu; ketomansufupu; kitamanasupa; kitamyanasupa; kytmanshwb; kytmanshwp; kytmnshwp",
+      "hub": true,
+      "geoname_id": 3356264
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Koës",
+      "alt_name": "Koes",
+      "hub": false,
+      "geoname_id": 3356049
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Lüderitz",
+      "alt_name": "Luderitz; LUD; Lideric; Ljudehryc; Ljuderic; Lounteritz; Luderitzort; Luederitz; lu de li ci; luderitsi; lwdrytz; lwidelicheu",
+      "hub": false,
+      "geoname_id": 3355672
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Noordoewer",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3355099
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Oranjemund",
+      "alt_name": "OMD; Orange Mouth; Orangemund; Oranjemond",
+      "hub": false,
+      "geoname_id": 3354071
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Rosh Pinah",
+      "alt_name": "RHN",
+      "hub": false,
+      "geoname_id": 7116015
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Tses",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3352609
+    },
+    {
+      "country": "Namibia",
+      "province": "Karas Region",
+      "place": "Warmbad",
+      "alt_name": "Varmbad; wamubaddo; Вармбад; ワームバッド",
+      "hub": false,
+      "geoname_id": 3352263
+    },
+    {
+      "country": "Namibia",
+      "province": "Kavango East",
+      "place": "Ndiyona",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 876961
+    },
+    {
+      "country": "Namibia",
+      "province": "Kavango East",
+      "place": "Rundu",
+      "alt_name": "NDU; Runtu; long du; lundu; rndw; rudu; rundou; runidu; rwndu; rwndw; rwnډw; Рунду",
+      "hub": true,
+      "geoname_id": 3353383
+    },
+    {
+      "country": "Namibia",
+      "province": "Kavango West",
+      "place": "Nkurenkuru",
+      "alt_name": "Kuring Kuru; nakurenakuru; nikurenikuru; nkwrnkwrw; Нкуренкуру; نكورنكورو; نکورنکورو; नकुरेनकुरु; নকুরেনকুরু; ਨਕੁਰੇਨਕੁਰੂ; ንኩረንኩሩ; ンクレンクル",
+      "hub": true,
+      "geoname_id": 3355137
+    },
+    {
+      "country": "Namibia",
+      "province": "Khomas Region",
+      "place": "Groot Aub",
+      "alt_name": "Aub",
+      "hub": false,
+      "geoname_id": 3357124
+    },
+    {
+      "country": "Namibia",
+      "province": "Khomas Region",
+      "place": "Windhoek",
+      "alt_name": "Gouintchouk; Vindguk; Vindhuk; Vindhuka; Vindhukas; Vindhuko; Vindkhuk; Vinduque; Vindxuk; Vintchouk; WDH; Windhuk",
+      "hub": true,
+      "geoname_id": 3352136
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Fransfontein",
+      "alt_name": "Franzfontein; Франсфонтеин",
+      "hub": false,
+      "geoname_id": 3357509
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Kamanjab",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3356469
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Khorixas",
+      "alt_name": "Khoriksas; Kkhorikhas; Wallwitch; Wellwitsch; Welwitsch; Welwitschia; huo li ke sa si; Кхорихас; Хориксас; 霍里克薩斯",
+      "hub": false,
+      "geoname_id": 3356213
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Okanguati",
+      "alt_name": "Okangwati",
+      "hub": false,
+      "geoname_id": 10175820
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Opuwo",
+      "alt_name": "OPW; Ohopoho; Ohopuho; Opuvo; Opuwa; apwww; awbww; awpwww; opu'o'o; opuuo; ʿoፑwo; Опуво",
+      "hub": true,
+      "geoname_id": 3354077
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Outjo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3353715
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Ruacana",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3353400
+    },
+    {
+      "country": "Namibia",
+      "province": "Kunene Region",
+      "place": "Sesfontein",
+      "alt_name": "Ohamuheke; Zesfontein; Zessfontein",
+      "hub": false,
+      "geoname_id": 3353172
+    },
+    {
+      "country": "Namibia",
+      "province": "Ohangwena Region",
+      "place": "Eenhana",
+      "alt_name": "Eenana; Ehehnkhana; Enana; aynhana; aynnhana; enahana; enhana; inahana; aynnہana; ʿenihana; Ээнхана; إينهانا",
+      "hub": true,
+      "geoname_id": 3357804
+    },
+    {
+      "country": "Namibia",
+      "province": "Ohangwena Region",
+      "place": "Ekongo",
+      "alt_name": "Okongo; Оконго",
+      "hub": false,
+      "geoname_id": 3354650
+    },
+    {
+      "country": "Namibia",
+      "province": "Ohangwena Region",
+      "place": "Helao Nafidi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718704
+    },
+    {
+      "country": "Namibia",
+      "province": "Ohangwena Region",
+      "place": "Omungwelume",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354399
+    },
+    {
+      "country": "Namibia",
+      "province": "Ohangwena Region",
+      "place": "Ongenga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354170
+    },
+    {
+      "country": "Namibia",
+      "province": "Ohangwena Region",
+      "place": "Oshikango",
+      "alt_name": "Osikangas; Ošikangas; ao xi kan ge; awshykanghw; awshykanjw; Ошиканго; أوشيكانغو; اوشيكانجو; オシカンゴ; 奧希坎戈",
+      "hub": false,
+      "geoname_id": 3353996
+    },
+    {
+      "country": "Namibia",
+      "province": "Omaheke Region",
+      "place": "Gobabis",
+      "alt_name": "GOG; ge ba bi si; ghwbabys; gobabisa; gobabisi; gobabisu; gwabys; gwbabs; gwbabys; Гобабис; Гобабіс; غوبابيس",
+      "hub": true,
+      "geoname_id": 3357247
+    },
+    {
+      "country": "Namibia",
+      "province": "Omaheke Region",
+      "place": "Leonardville",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3355748
+    },
+    {
+      "country": "Namibia",
+      "province": "Omaheke Region",
+      "place": "Omawewozonyanda",
+      "alt_name": "Omauozonjanda",
+      "hub": false,
+      "geoname_id": 3354518
+    },
+    {
+      "country": "Namibia",
+      "province": "Omaheke Region",
+      "place": "Omitara",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354445
+    },
+    {
+      "country": "Namibia",
+      "province": "Omaheke Region",
+      "place": "Otjinene",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3353863
+    },
+    {
+      "country": "Namibia",
+      "province": "Omaheke Region",
+      "place": "Witvlei",
+      "alt_name": "Witlvey; Witvley",
+      "hub": false,
+      "geoname_id": 3352083
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Ogongo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354965
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Okahao",
+      "alt_name": "Okahau",
+      "hub": false,
+      "geoname_id": 3354897
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Okalongo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354850
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Ongandjera",
+      "alt_name": "Angandzhehra; Okandjera; Ongandzhera; Rehoboth; Анганджэра; Онганджера; אונגנדג'רה",
+      "hub": false,
+      "geoname_id": 3354178
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Oshikuku",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3353989
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Outapi",
+      "alt_name": "Autapi; Ombalantu; Uutapi; a'utapi; awtaby; awtapy; ʿeውtaፒ; Аутапи; أوتابي; اؤتاپی; اوتاپی; आउटापी",
+      "hub": true,
+      "geoname_id": 3371197
+    },
+    {
+      "country": "Namibia",
+      "province": "Omusati Region",
+      "place": "Tsandi",
+      "alt_name": "Candi; Tshandi; Цанди",
+      "hub": false,
+      "geoname_id": 3352636
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshana Region",
+      "place": "Ondangwa",
+      "alt_name": "OND; Ondangua; Ondangva; Ondonga; weng dan gua; Ондангва; 翁丹瓜",
+      "hub": false,
+      "geoname_id": 3354247
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshana Region",
+      "place": "Ongwediva",
+      "alt_name": "Onguedira; Onguediva; Onguehdiva; weng gui di wa; Онгуедіва; Онгуэдива; Օնգուեդիվա; אונגוודיבה; 翁圭迪瓦",
+      "hub": false,
+      "geoname_id": 3354147
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshana Region",
+      "place": "Oshakati",
+      "alt_name": "OHI; Okatana; Osakatis; Ošakatis; ao sha ka di; awshakaty; osakati; ʿoshakati; Ошакати; Ошакаті; أوشاكاتي; اوشاکاتی",
+      "hub": true,
+      "geoname_id": 3354021
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshikoto Region",
+      "place": "Omuthiya",
+      "alt_name": "Omuthiya Gwiipundi; Omutija; amwtya; awmwthya; omuthi'a; omutia; amwtھya; awmwtھya; ʿomutiya; Омутия; أوموثيا; اموتھیا",
+      "hub": true,
+      "geoname_id": 3354367
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshikoto Region",
+      "place": "Ondangwa East",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718705
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshikoto Region",
+      "place": "Oniipa",
+      "alt_name": "Ониипа",
+      "hub": false,
+      "geoname_id": 3354130
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshikoto Region",
+      "place": "Oshivelo",
+      "alt_name": "Oshawello",
+      "hub": false,
+      "geoname_id": 3353962
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshikoto Region",
+      "place": "Tsintsabis",
+      "alt_name": "Fischfontein",
+      "hub": false,
+      "geoname_id": 3352604
+    },
+    {
+      "country": "Namibia",
+      "province": "Oshikoto Region",
+      "place": "Tsumeb",
+      "alt_name": "Cumeb; Cumebo; TSB; Tsoumeb; chu mei bu; chumebeu; tsumebu; Τσουμέμπ; Цумеб; צואמב; ツメブ; 楚梅布",
+      "hub": false,
+      "geoname_id": 3352593
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Grootfontein",
+      "alt_name": "GFY; Groutfontein; Grutfontejn; Khrutfontejn; geuluteupontein; gurutofontein; he lu te fang dan; Грутфонтейн; Хрутфонтейн; グルートフォンテイン; 赫魯特方丹; 그루트폰테인",
+      "hub": false,
+      "geoname_id": 3357114
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Kalkfeld",
+      "alt_name": "Kal'kfel'd; Kalkveld; Калькфельд",
+      "hub": false,
+      "geoname_id": 3356487
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Okahandja",
+      "alt_name": "Okahanja; Okakhandzha; ao ka han gu; Окаханджа; オカハンジャ; 奧卡漢賈",
+      "hub": false,
+      "geoname_id": 3354898
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Okakarara",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354876
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Okondjatu",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 3354654
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Osire",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718706
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Otavi",
+      "alt_name": "Otawi",
+      "hub": false,
+      "geoname_id": 3353934
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Otjituuo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 12718707
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Otjiwarongo",
+      "alt_name": "OTJ; Ochivarongo; Ocivarongas; Ot'ivarongo; Otiwarongo; Otzhivarongo; Očivarongas; ao qi wa long ge; awtjywarwnghw; awtjywarwngw; ochiwarongo; otaji'oyarongo",
+      "hub": true,
+      "geoname_id": 3353811
+    },
+    {
+      "country": "Namibia",
+      "province": "Otjozondjupa Region",
+      "place": "Tsumkwe",
+      "alt_name": "Cumkve; Tsumkwa; chu mu kui; chumkue; tsumukuue; Цумкве; ツムクウェ; 楚姆奎; 춤쿠에",
+      "hub": false,
+      "geoname_id": 876747
+    },
+    {
+      "country": "Namibia",
+      "province": "Zambezi Region",
+      "place": "Bagani",
+      "alt_name": "BQI",
+      "hub": false,
+      "geoname_id": 877349
+    },
+    {
+      "country": "Namibia",
+      "province": "Zambezi Region",
+      "place": "Bukalo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 877338
+    },
+    {
+      "country": "Namibia",
+      "province": "Zambezi Region",
+      "place": "Katima Mulilo",
+      "alt_name": "Katima Molilo; Katima Mulilas; Katima-Mulilo; MPA; ka di ma mu li luo; katimamullillo; katyma mwlilw; katyma mwlylw; Катима Мулило; Катима-Мулило; Катіма-Муліло; קאטימה מולילו",
+      "hub": true,
+      "geoname_id": 877178
+    },
+    {
+      "country": "Namibia",
+      "province": "Zambezi Region",
+      "place": "Linyanti",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 877130
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Chibombo",
+      "alt_name": "Чибомбо",
+      "hub": false,
+      "geoname_id": 920233
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Kabwe",
+      "alt_name": "Broken Hill; Kabue; Kabve; Kabveh; Kabvė; QKE; ka bu wei; kaba'oye; kabave; kabeuwe; kabiwe; kabuue",
+      "hub": true,
+      "geoname_id": 916095
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Kapiri Mposhi",
+      "alt_name": "Kapiri Imposhi",
+      "hub": false,
+      "geoname_id": 913029
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Mkushi",
+      "alt_name": "Mkusis; Mkušis; mu ku xi; mukushi; Мкуши; ムクシ; 姆库希",
+      "hub": false,
+      "geoname_id": 906221
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Mumbwa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 904422
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Nampundwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 8298600
+    },
+    {
+      "country": "Zambia",
+      "province": "Central Province",
+      "place": "Serenje",
+      "alt_name": "Serendzhe; sai lun jie; srnz'h; Серендже; סרנז'ה; セレンジェ; 塞伦杰",
+      "hub": false,
+      "geoname_id": 898912
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Chambishi",
+      "alt_name": "Chambezi",
+      "hub": false,
+      "geoname_id": 920820
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Chililabombwe",
+      "alt_name": "Bancroft; Chilabombwe; Chiliabombwe; Chiliadomewe; Chililabombve; Чилилабомбве",
+      "hub": false,
+      "geoname_id": 919544
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Chingola",
+      "alt_name": "CGJ; Cingola; ching-golla; chingora; chngwla; qin ge la; shynghwla; Čingola; Чингола; شينغولا; چنگولا; チンゴラ",
+      "hub": false,
+      "geoname_id": 919009
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Ibenga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 916938
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Kalulushi",
+      "alt_name": "Kalulshi; Калулуши",
+      "hub": false,
+      "geoname_id": 914959
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Kataba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 912226
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Kitwe",
+      "alt_name": "KIW; Kitoue; Kitue; Kitve; Kitve-Nkana; Kitvė; Kitwe Nkana; Nkana-Kitwe; ji te wei; kiteuwe; kytwy; Κίτουε",
+      "hub": false,
+      "geoname_id": 911148
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Luanshya",
+      "alt_name": "Luansh'ja; Luansha; Luanshyo; Luansija; Luanšija; lu an xia; luansya; lwanshya; ruansha; Луанша; Луаншья; لوانشیا",
+      "hub": false,
+      "geoname_id": 909863
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Mapalo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132729
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Mpongwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 905789
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Mufulira",
+      "alt_name": "Mufulire; Муфулире",
+      "hub": false,
+      "geoname_id": 905395
+    },
+    {
+      "country": "Zambia",
+      "province": "Copperbelt",
+      "place": "Ndola",
+      "alt_name": "NLA; Ntola; ainadola; en duo la; enadola; eundolla; ndora; ndwla; nidola; Ντόλα; Ндола; ندولا",
+      "hub": true,
+      "geoname_id": 901344
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Chadiza",
+      "alt_name": "qia di zha; Чадиза; 恰迪扎",
+      "hub": false,
+      "geoname_id": 921028
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Chipata",
+      "alt_name": "CIP; Cipata; Fort Jameson; Tsipata; chpata; chypata; qi pa ta; tshybata; Çipata; Čipata; ciፓta; Τσιπάτα",
+      "hub": true,
+      "geoname_id": 918702
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Katete",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 912072
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Lundazi",
+      "alt_name": "lndazy; long da ji; rundaji; Лундази; لندازی; ルンダジ; 隆達濟",
+      "hub": false,
+      "geoname_id": 909299
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Nyimba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 900056
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Petauke",
+      "alt_name": "pei tao ke; Петауке; ペタウケ; 佩陶克",
+      "hub": false,
+      "geoname_id": 899825
+    },
+    {
+      "country": "Zambia",
+      "province": "Eastern Province",
+      "place": "Sinda",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 897454
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Chiengi",
+      "alt_name": "Chienge; Chienji; lu a pu la; Чиенге; Чиенги; 盧阿普拉",
+      "hub": false,
+      "geoname_id": 177748
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Kawambwa",
+      "alt_name": "Kauambua; Kavambva; Kawamowa; ka wan bu wa; kawanbuwa; Кавамбва; Кауамбуа; كاوامبوا; カワンブワ; 卡萬布瓦",
+      "hub": false,
+      "geoname_id": 176555
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Lubwe",
+      "alt_name": "Saint Joseph's; Saint Joseph’s",
+      "hub": false,
+      "geoname_id": 909722
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Mansa",
+      "alt_name": "Fort Rosebery; MNS; Mbila; Roseberry; man sa; manasa; manisa; mansa  zymbya; Манса; مانسا; مانسا، زیمبیا; मांसा",
+      "hub": true,
+      "geoname_id": 907770
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Mununga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 175808
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Mwansabombwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132731
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Mwense",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 902721
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Nchelenge",
+      "alt_name": "en qie lun ge; ncherenge; ryf nshylnjy; Нчеленге; ريف نشيلنجى; ريف نشيلنجي; ンチェレンゲ; 恩切倫戈",
+      "hub": false,
+      "geoname_id": 175499
+    },
+    {
+      "country": "Zambia",
+      "province": "Luapula Province",
+      "place": "Samfya",
+      "alt_name": "Samf'ja; Samfja; sa mu fei ya; samuhya; smpyh; Самфья; Самфя; סמפיה; サムヒャ; 薩姆菲亞",
+      "hub": false,
+      "geoname_id": 899274
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chalimbana",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132720
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chilanga Township",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 7932530
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chilongolo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132721
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chinkuli",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132723
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chisankane",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132724
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chongwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 917688
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Chunga",
+      "alt_name": "Kkhunga; Кхунга",
+      "hub": false,
+      "geoname_id": 13132725
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Kafue",
+      "alt_name": "Kafe; Кафе",
+      "hub": false,
+      "geoname_id": 915883
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Luangwa",
+      "alt_name": "Feira",
+      "hub": false,
+      "geoname_id": 909887
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Lusaka",
+      "alt_name": "LUN; Lousaka; Louzaka; Lusaca; Lusak; Lusako; Lúsaka; Lûsaka; lu sa ka; lu sha ka; lucakka; lwsaka",
+      "hub": true,
+      "geoname_id": 909137
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Lusaka West",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132726
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Madido",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132727
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Namalombwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132732
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Ntandabale",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132733
+    },
+    {
+      "country": "Zambia",
+      "province": "Lusaka Province",
+      "place": "Palabana",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132734
+    },
+    {
+      "country": "Zambia",
+      "province": "Muchinga",
+      "place": "Chama",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 920901
+    },
+    {
+      "country": "Zambia",
+      "province": "Muchinga",
+      "place": "Chinsali",
+      "alt_name": "Chinsala; Cinsali; chinsari; chnsaly; chynsaly; cinasali; cinisali; tshynsaly; Çinsali; Чинсали; تشينسالي; چنسالي",
+      "hub": true,
+      "geoname_id": 918905
+    },
+    {
+      "country": "Zambia",
+      "province": "Muchinga",
+      "place": "Isoka",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 916668
+    },
+    {
+      "country": "Zambia",
+      "province": "Muchinga",
+      "place": "Mpika",
+      "alt_name": "mupika; Мпика; ムピカ",
+      "hub": false,
+      "geoname_id": 905846
+    },
+    {
+      "country": "Zambia",
+      "province": "Muchinga",
+      "place": "Nakonde",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 175555
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Chavuma",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 920470
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Chisasa",
+      "alt_name": "Чисаса",
+      "hub": false,
+      "geoname_id": 918398
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Kabompo",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 916246
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Kalengwa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 915285
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Kansanshi",
+      "alt_name": "Kansanshi Mine; Kansenshi",
+      "hub": false,
+      "geoname_id": 913613
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Kasempa",
+      "alt_name": "Kasama; ka sen pa; kasymba; Κασέμπα; Касемпа; كاسيمبا; 卡森帕",
+      "hub": false,
+      "geoname_id": 912628
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Manyama",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132728
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Manyinga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 907705
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Mufumbwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 905382
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Mwinilunga",
+      "alt_name": "Mvinilunga; Wwinilunga; Мвинилунга",
+      "hub": false,
+      "geoname_id": 902620
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Solwezi",
+      "alt_name": "SLI; Solouezi; Soluezi; Solvezi; Solvezis; Solwesi; sol-weji; sola'oyeji; solaveji; solavezi; soruueji; suo lu wei qi",
+      "hub": true,
+      "geoname_id": 897045
+    },
+    {
+      "country": "Zambia",
+      "province": "North-Western",
+      "place": "Zambezi",
+      "alt_name": "BBZ; Balovale; Rio Zambeze; Sambesi; Sambesí; Zambesi; Zambeze; Zambezė; Zambèze; Zambézi; zan bi xi he; zanbeji chuan",
+      "hub": false,
+      "geoname_id": 895953
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Chilubi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132722
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Kaputa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 176758
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Kasama",
+      "alt_name": "Arcidiocesi di Kasama; KAA; Kazama; ka sa ma; kasama  zymbya; kasma; Καζάμα; Касама; Կասամա; كاسما; کاساما، زیمبیا; کاسما",
+      "hub": true,
+      "geoname_id": 912764
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Luwingu",
+      "alt_name": "Luingu; Luwingo",
+      "hub": false,
+      "geoname_id": 908913
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Mbala",
+      "alt_name": "Abercorn; Aberkorn; MMQ; mu ba la; mubara; Аберкорн; Мбала; מבאלה; مبالا; ムバラ; 姆巴拉",
+      "hub": false,
+      "geoname_id": 176146
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Mporokoso",
+      "alt_name": "Mpolokoso",
+      "hub": false,
+      "geoname_id": 175967
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Mpulungu",
+      "alt_name": "Mpolungu",
+      "hub": false,
+      "geoname_id": 175961
+    },
+    {
+      "country": "Zambia",
+      "province": "Northern Province",
+      "place": "Mungwi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 904241
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Chirundu",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 918488
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Choma",
+      "alt_name": "Coma; chwma; tshwma; Çoma; Чома; تشوما; چوما; चोमा; চোমা; ਚੋਮਾ; ቾማ; チョマ",
+      "hub": true,
+      "geoname_id": 917748
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Gwembe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 917011
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Itezhi-Tezhi",
+      "alt_name": "Itezhitezhi",
+      "hub": false,
+      "geoname_id": 6695527
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Kalomo",
+      "alt_name": "ka luo mo; karomo; Каломо; カロモ; 卡洛莫",
+      "hub": false,
+      "geoname_id": 915086
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Kazungula",
+      "alt_name": "Kasungula; Kasungulu",
+      "hub": false,
+      "geoname_id": 911300
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Livingstone",
+      "alt_name": "LVI; Livin'nkston; Livingston; Livingston shaary; Livingstonas; Livingstore; Livingstun; Maramba; li wen si dun; libingseuteon; lywwyngstwn; Λίβινγκστον",
+      "hub": false,
+      "geoname_id": 910111
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Lubombo",
+      "alt_name": "Lubombo Siding",
+      "hub": false,
+      "geoname_id": 909752
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Maamba",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 908718
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Mazabuka",
+      "alt_name": "Мазабука",
+      "hub": false,
+      "geoname_id": 907111
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Monze",
+      "alt_name": "Chief Monze",
+      "hub": false,
+      "geoname_id": 906043
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Nakambala",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 902344
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Namwala",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 901766
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Siavonga",
+      "alt_name": "Chapvonga",
+      "hub": false,
+      "geoname_id": 898188
+    },
+    {
+      "country": "Zambia",
+      "province": "Southern Province",
+      "place": "Sinazongwe",
+      "alt_name": "Sinasongwe",
+      "hub": false,
+      "geoname_id": 897456
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Kalabo",
+      "alt_name": "KLB",
+      "hub": false,
+      "geoname_id": 915471
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Kaoma",
+      "alt_name": "KMZ; Mankoya; Mankoye; Nankoya; Nunkoya",
+      "hub": false,
+      "geoname_id": 913323
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Limulunga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 910361
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Lukulu",
+      "alt_name": "LXU",
+      "hub": false,
+      "geoname_id": 909488
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Mongu",
+      "alt_name": "MNR; Monqu; Mungu; monigu; mwnghw; mwngw; mwnګw; Монгу; مونغو; مونګو; مونگو; मोंगु",
+      "hub": true,
+      "geoname_id": 906054
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Senanga",
+      "alt_name": "SXG; Sinanga; sai nan jia; synangha; synanja; Сенанга; سينانجا; سينانغا; სენანგა; セナンガ; 塞南加",
+      "hub": false,
+      "geoname_id": 898947
+    },
+    {
+      "country": "Zambia",
+      "province": "Western Province",
+      "place": "Sesheke",
+      "alt_name": "SJQ; Shesheke; Sisheke; Шешеке",
+      "hub": false,
+      "geoname_id": 898905
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Bulawayo",
+      "place": "Bulawayo",
+      "alt_name": "BUQ; Bulavajas; Bulavajo; Bulavejo; blawyw; bu la wa yue; bula'oyayo; bulava'i'o; bulavayo; bullawayo; burawayo; bwlawayw",
+      "hub": true,
+      "geoname_id": 894701
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Harare",
+      "place": "Chitungwiza",
+      "alt_name": "Chitungviza; Chytungviza; Citungviza; chytwngwyza; Čitungviza; Читунгвиза; Читунгвіза; Чытунгвіза; چیتونگویزا",
+      "hub": false,
+      "geoname_id": 1106542
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Harare",
+      "place": "Harare",
+      "alt_name": "Arare; Charare; HRE; Hararensis Urbs; Harareo; Hararė; Kharare; Kharareh; Salisbury; ha la lei; halale; harary",
+      "hub": true,
+      "geoname_id": 890299
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Chimanimani",
+      "alt_name": "Mandidzudzure; Melsetter",
+      "hub": false,
+      "geoname_id": 893813
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Chipinge",
+      "alt_name": "CHJ; Chipinga",
+      "hub": false,
+      "geoname_id": 893549
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Dorowa Mining Lease",
+      "alt_name": "Dorowa; Dorowa Claims",
+      "hub": false,
+      "geoname_id": 892156
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Headlands",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 890242
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Mutare",
+      "alt_name": "Mutareh; Mutarė; Nyautare; UTA; Umtali; mu ta lei; mutale; mwtarh; mwtary; Мутаре; Мутарэ; موتاره",
+      "hub": true,
+      "geoname_id": 884979
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Nyanga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 883481
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Nyazura",
+      "alt_name": "Inyazura; Nyazure",
+      "hub": false,
+      "geoname_id": 883258
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Odzi",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 883183
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Penhalonga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 882955
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Manicaland",
+      "place": "Rusape",
+      "alt_name": "Rusapi",
+      "hub": false,
+      "geoname_id": 882100
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Bindura",
+      "alt_name": "Bindura Town; Kimberley Reefs; bidura; bindoura; binidura; bndwra; byndwra; Биндура; بندورا; بيندورا; बिंदुरा; বিন্দুরা",
+      "hub": true,
+      "geoname_id": 895061
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Centenary",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 894460
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Concession",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 892876
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Glendale",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 891099
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Madziwa",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 887997
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Mazowe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 886384
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Mount Darwin",
+      "alt_name": "Darwin; Fura; Mount Fura",
+      "hub": false,
+      "geoname_id": 885800
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Mvurwi",
+      "alt_name": "Dawsons; Umvukwes; n'vurui; ンヴルィ",
+      "hub": false,
+      "geoname_id": 884798
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland Central",
+      "place": "Shamva",
+      "alt_name": "Tsambvi; Tsamvi",
+      "hub": false,
+      "geoname_id": 881345
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Beatrice",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 895308
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Chivhu",
+      "alt_name": "Enkeldoorn",
+      "hub": false,
+      "geoname_id": 893172
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Macheke",
+      "alt_name": "Mucheki",
+      "hub": false,
+      "geoname_id": 888089
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Marondera",
+      "alt_name": "Marandellas; maronidera; marwndyra; marwnڈyra; Маронdera; مارونديرا; مارونڈیرا; मारोंडेरा; মারোন্ডেরা; ਮਾਰੋਂਡੇਰਾ; ማሮንደራ; マロンデラ",
+      "hub": true,
+      "geoname_id": 886990
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Murewa",
+      "alt_name": "Mrewa; Murehwa; mwrywa; موریوا",
+      "hub": false,
+      "geoname_id": 885159
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Mutoko",
+      "alt_name": "Mtoko",
+      "hub": false,
+      "geoname_id": 884927
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland East Province",
+      "place": "Ruwa",
+      "alt_name": "Ruva; lu wa; rwwa; Рува; رووا; ルワ; 魯瓦; 鲁瓦",
+      "hub": false,
+      "geoname_id": 882009
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Banket",
+      "alt_name": "Banket Junction",
+      "hub": false,
+      "geoname_id": 895417
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Chakari",
+      "alt_name": "Shagari",
+      "hub": false,
+      "geoname_id": 894413
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Chegutu",
+      "alt_name": "Cheguto; Hartley; New Hartley",
+      "hub": false,
+      "geoname_id": 894239
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Chinhoyi",
+      "alt_name": "Chinkhoi; Chinkhoji; Chinoyi; Cinhojis; Sinoia; chinhoi; chynhwy; chynhwyy; cinahayi; cinaho'i; cinahoyi; cinihoyi",
+      "hub": true,
+      "geoname_id": 893697
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Chirundu",
+      "alt_name": "Chirunda; Chirundo; Chirundu Township; Otto Beit Bridge",
+      "hub": false,
+      "geoname_id": 893397
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Harare Western Suburbs",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132735
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Kadoma",
+      "alt_name": "Gatooma; Kadome; Katoma; ka duo ma; Кадома; Кадоме; کادوما، زمبابوے; カドマ; 卡多馬; 카도마",
+      "hub": false,
+      "geoname_id": 889453
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Kariba",
+      "alt_name": "KAB; ka li ba; kaliba; karyba; Кариба; كاريبا; کاریبا، زمبابوے; 卡里巴; 카리바",
+      "hub": false,
+      "geoname_id": 889215
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Karoi",
+      "alt_name": "Karoyi; ka lai yi; karwy; Карои; کاروی; カロイ; 卡萊伊",
+      "hub": false,
+      "geoname_id": 889191
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Mhangura",
+      "alt_name": "Mangula",
+      "hub": false,
+      "geoname_id": 886146
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Mhangura Mine",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 13132736
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Norton",
+      "alt_name": "Нортон",
+      "hub": false,
+      "geoname_id": 884141
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Mashonaland West",
+      "place": "Raffingora",
+      "alt_name": "Rafingora; Рафингора",
+      "hub": false,
+      "geoname_id": 882722
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Masvingo Province",
+      "place": "Chiredzi",
+      "alt_name": "BFO",
+      "hub": false,
+      "geoname_id": 893485
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Masvingo Province",
+      "place": "Mashava",
+      "alt_name": "Mashaba",
+      "hub": false,
+      "geoname_id": 886864
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Masvingo Province",
+      "place": "Masvingo",
+      "alt_name": "Fort Victoria; MVZ; Mashvingo; Nyanda; masabhingo; masavigo; masfynjw; masivinigo; masubingo; maswyngw; maswynګw; Масвинго",
+      "hub": true,
+      "geoname_id": 886763
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Masvingo Province",
+      "place": "Zvishavane",
+      "alt_name": "Shabani; Shavani",
+      "hub": false,
+      "geoname_id": 878549
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Binga",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 895057
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Dete",
+      "alt_name": "Dett",
+      "hub": false,
+      "geoname_id": 892440
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Hwange",
+      "alt_name": "Hvange; Hvangė; Khvange; WKI; Wange; Wankie; hwang-ge; hwanj; wan ji; Хванге; هوانج; ワンゲ",
+      "hub": false,
+      "geoname_id": 889942
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Inyati",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 889723
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Kamativi Mine",
+      "alt_name": "Kamativi; Kamitivi",
+      "hub": false,
+      "geoname_id": 889390
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Lupane",
+      "alt_name": "Lupani; lwban; lwpan; rupane; luፓne; Лупане; لوبان; لوپان; लुपाने; লুপানে; ਲੁਪਾਨੇ; ሉፓኔ",
+      "hub": true,
+      "geoname_id": 888225
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland North",
+      "place": "Victoria Falls",
+      "alt_name": "Chutes Victoria; VFA; Viktoria Akvofalo",
+      "hub": false,
+      "geoname_id": 879431
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland South Province",
+      "place": "Beitbridge",
+      "alt_name": "Bajtbridz; Bajtbridzh; Beitbridzas; Beitbridžas; Beitbrug; bei te qiao; beitoburijji; bytbrydj; Байтбридж; Бајтбриџ; Беитбридге; بيتبريدج",
+      "hub": false,
+      "geoname_id": 895269
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland South Province",
+      "place": "Esigodini",
+      "alt_name": "Essexvale",
+      "hub": false,
+      "geoname_id": 891699
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland South Province",
+      "place": "Filabusi",
+      "alt_name": "Emfelabuso",
+      "hub": false,
+      "geoname_id": 891515
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland South Province",
+      "place": "Gwanda",
+      "alt_name": "Gvanda; Jawunda; gavanda; gbanda; guan da; guwanda; gwandaa; gwandh; jwnda; Гванда; جوندا; گوانداا",
+      "hub": true,
+      "geoname_id": 890516
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland South Province",
+      "place": "Insiza",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 889795
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Matabeleland South Province",
+      "place": "Plumtree",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 882859
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Gokwe",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 890983
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Gweru",
+      "alt_name": "GWE; Gveru; Gvru; Gwelo; gaveru; gberu; guueruu; gwyrw; jwyrw; Гверу; Гвру; جويرو",
+      "hub": true,
+      "geoname_id": 890422
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Kwekwe",
+      "alt_name": "Hwe Hwe; Kvekve; Kvekvė; Que Que; kui kui shi; kwykwy; kwyykwyy; Квекве; كويكوى; کوئیکوئی; 奎奎市; 퀘퀘",
+      "hub": false,
+      "geoname_id": 888710
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Lalapanzi",
+      "alt_name": "Lalapansi; Лалапанзи",
+      "hub": false,
+      "geoname_id": 888667
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Mvuma",
+      "alt_name": "Muvumi; Umvuma",
+      "hub": false,
+      "geoname_id": 884814
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Redcliff",
+      "alt_name": "Redcliffe; Redklif; Redkliff; Rehdkliff; reddokurifu; Редклиф; Редкліфф; Рэдклифф; ریڈکلف، زمبابوے; レッドクリフ",
+      "hub": false,
+      "geoname_id": 882599
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Shangani",
+      "alt_name": null,
+      "hub": false,
+      "geoname_id": 881331
+    },
+    {
+      "country": "Zimbabwe",
+      "province": "Midlands Province",
+      "place": "Shurugwi",
+      "alt_name": "Churugwi; Salukwe; Selukwe",
+      "hub": false,
+      "geoname_id": 881164
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import { rateForTravel } from './priceValidity';
 import { travellersPlusTlCount } from './roomAllocationHelper';
-import { crewLadderTiers, hasStaffRate, staffRateValue, staffRoomLadder, staffRoomRates } from './staffRoomTiers';
+import { crewLadderTiers, hasStaffRate, staffLadderBasis, staffRateValue, staffRoomLadder, staffRoomRates } from './staffRoomTiers';
 
 export const getGuideShareDivisor = (travellers = []) => {
   const n = travellersPlusTlCount(travellers);
@@ -373,26 +373,36 @@ const clientRoomCount = (clientRooms) => (
     : Number(clientRooms)
 );
 
-const crewBedRate = (rate, bed, { clientRooms, minRooms } = {}) => {
-  const included = staffRoomRates(crewRoomLadder(rate, { minRooms }), clientRoomCount(clientRooms))[bed];
+/* A guest-based ladder judges its thresholds on the paying head count instead
+   of the rooms booked; an unknown count of either kind keeps the legacy
+   "threshold met" reading. */
+const crewLadderCount = (ladder, { clientRooms, payingGuests } = {}) => clientRoomCount(
+  staffLadderBasis(ladder) === 'guests' ? payingGuests : clientRooms
+);
+
+const crewBedRate = (rate, bed, { clientRooms, minRooms, payingGuests } = {}) => {
+  const ladder = crewRoomLadder(rate, { minRooms });
+  const included = staffRoomRates(ladder, crewLadderCount(ladder, { clientRooms, payingGuests }))[bed];
   return included !== undefined ? included : singleOvernightRate(rate);
 };
 
-/* How many crew rooms the pool releases at this many paying client rooms. A
-   note names it to say why the second bed is being charged the single rate. */
-export const crewPoolRooms = (rate = {}, { clientRooms, minRooms } = {}) => (
-  staffRoomRates(crewRoomLadder(rate, { minRooms }), clientRoomCount(clientRooms)).length
-);
+/* How many crew rooms the pool releases at this many paying client rooms (or
+   paying guests, on a ladder that counts people). A note names it to say why
+   the second bed is being charged the single rate. */
+export const crewPoolRooms = (rate = {}, { clientRooms, minRooms, payingGuests } = {}) => {
+  const ladder = crewRoomLadder(rate, { minRooms });
+  return staffRoomRates(ladder, crewLadderCount(ladder, { clientRooms, payingGuests })).length;
+};
 
-export const guideTravelRate = (rate = {}, guideNeeded = true, { clientRooms, minRooms, crewBed = 0 } = {}) => {
+export const guideTravelRate = (rate = {}, guideNeeded = true, { clientRooms, minRooms, payingGuests, crewBed = 0 } = {}) => {
   if (guideNeeded === false) return 0;
-  return crewBedRate(rate, crewBed, { clientRooms, minRooms });
+  return crewBedRate(rate, crewBed, { clientRooms, minRooms, payingGuests });
 };
 
 /* The driver beds from the same pool as the guide, from the same threshold. */
-export const driverTravelRate = (rate = {}, guideNeeded = true, { clientRooms, minRooms, crewBed = 0 } = {}) => {
+export const driverTravelRate = (rate = {}, guideNeeded = true, { clientRooms, minRooms, payingGuests, crewBed = 0 } = {}) => {
   if (guideNeeded === false) return 0;
-  return crewBedRate(rate, crewBed, { clientRooms, minRooms });
+  return crewBedRate(rate, crewBed, { clientRooms, minRooms, payingGuests });
 };
 
 /* One night of crew bedding at one property. A 'both' night draws from the same

@@ -1,10 +1,11 @@
 import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus, protectionForSeason } from './priceValidity';
 import { isOccupancyTiered, occupancyCeiling, occupancyRateForPax } from './occupancyPricing';
-import { isSurchargeItem, isSurchargeChargeable, surchargeBuyTotal, surchargePricing, surchargeRateAmount } from './surchargeFees';
+import { isSurchargeItem, isSurchargeChargeable, surchargeNightsBuy, surchargePricing, surchargeRateAmount } from './surchargeFees';
 import { isGuideService, isGuideOnly, guideChargeTotal, lineGuideUpliftPercent, crewShareOn, refreshCrewShare, crewSharePerPerson } from './guidePricing';
 import { rentalLineBuyTotal } from './carRentalPricing';
-import { lineChargeLabel, ratesForCharge } from './extrasChargeTypes';
+import { isVehicleExtra, lineChargeLabel, ratesForCharge } from './extrasChargeTypes';
 import { allocatedTravellerCount, childRateForAge, hasStaffAccommodation, isAdultTraveller, payingClientCount, tourGuideCount, travellersPlusTlCount } from './roomAllocationHelper';
+import { ratesForServiceRoom, roomTypesOf, serviceRoomName } from './roomTypes';
 
 /* 'per_unit' is an Extras charged once for the service itself - a meet-and-greet,
    a boat hire - whatever the party size. Like the other flat bases its figure is
@@ -33,6 +34,16 @@ const rateForItem = (item, code) => {
   const rates = Array.isArray(item?.item_rates) ? item.item_rates : [];
   const currency = String(code || '').toUpperCase();
   return rates.find((rate) => String(rate.currency || '').toUpperCase() === currency) || rates[0] || null;
+};
+
+/* The season pool a line re-prices from: the charge it was bought as, narrowed
+   to the room it sold. Two rooms on one property can share a season name,
+   validity dates and board, so a room-blind pool lets the sibling room's row
+   win the tie and reprice the line off a ladder it never contracted. */
+const roomChargeRates = (item, service) => {
+  const chargeRates = ratesForCharge(item, lineChargeLabel(service));
+  const scoped = ratesForServiceRoom(chargeRates, service, roomTypesOf(item));
+  return { chargeRates, scoped };
 };
 
 const tierRateForPax = (rate, pax) => {
@@ -140,7 +151,7 @@ const childSharedPaxRate = (rate, item, count, adultFigure, childOptions = {}) =
   return (adultFigure * adults + childTotal) / count;
 };
 
-export const contractPaxRate = (item, code, pax, childOptions = {}) => {
+export const contractPaxRate = (item, code, pax, options = {}) => {
   const rate = rateForItem(item, code);
   const raw = rate ? parseFloat(rate.price_1_adult) || parseFloat(rate.unit_price) || 0 : 0;
   const basis = rate?.rate_basis || item?.pricing_model || 'per_person';
@@ -149,12 +160,15 @@ export const contractPaxRate = (item, code, pax, childOptions = {}) => {
   if (isOccupancyTiered(rate)) return accommodationPaxRate(rate, count);
   if (basis === 'per_person_sharing') return accommodationPaxRate(rate, count);
   if (String(rate?.rate_basis || '') === 'per_room') return accommodationPaxRate(rate, count);
-  if (FLAT_BASIS.has(basis)) return count > 0 ? raw / count : raw;
+  if (FLAT_BASIS.has(basis)) {
+    const quantity = isVehicleExtra(item, basis) ? Math.max(1, Math.floor(Number(options.quantity) || 1)) : 1;
+    return count > 0 ? raw * quantity / count : raw * quantity;
+  }
   /* Per person: the whole party pays the adult figure, unless this category
      contracts a child price of its own and the party has children in it. A meal,
      an entry ticket and an extra are bought per head, so a child who costs the
      supplier less is charged what the supplier contracts. */
-  const shared = childSharedPaxRate(rate, item, count, raw, childOptions);
+  const shared = childSharedPaxRate(rate, item, count, raw, options);
   return shared === null ? raw : shared;
 };
 
@@ -270,6 +284,10 @@ export const repriceServicesForPax = ({
   const updatedDays = (Array.isArray(days) ? days : []).map((day) => ({
     ...day,
     services: (Array.isArray(day.services) ? day.services : []).map((service) => {
+      /* A free night has already been valued by the stay-pay engine; re-pricing
+         it from the library would put the room charge back on a night the
+         promotion waives. The engine re-stamps it when the stay changes. */
+      if (service.stayPayFree === true || service.stay_pay_free === true) return service;
       /* The car costs what the contract says it costs whoever is sitting in it, so
          a party that grows or shrinks re-splits the same hire total instead of
          repricing the hire — or being reported as a line the builder could not
@@ -347,14 +365,25 @@ export const repriceServicesForPax = ({
       }
 
       const currencyCode = service.currencyCode || item.currency || '';
+      /* A fee night bills the figure valid on that night, not the season that
+         covers the whole trip: a levy changing on 1 Jan has two prices inside
+         one room season. An undated (month-timed) day keeps the trip window. */
+      const feeDate = isSurchargeItem(item) ? String(day.date || '').slice(0, 10) : '';
       /* Re-priced from the charge this line was actually bought as: an item can
          contract several named charges on one season and the matrix order has no
-         bearing on which one the operator chose. */
+         bearing on which one the operator chose. The pool is then narrowed to
+         the room the line sold, so a sibling room sharing the season name can
+         never win the tie. */
+      const { chargeRates, scoped } = roomChargeRates(item, service);
+      if (!scoped.length && chargeRates.length) {
+        skipped.push(`${service.name || item.name || 'Unnamed service'} (${serviceRoomName(service) || 'sold room'} has no library rates)`);
+        return service;
+      }
       const season = resolveSeasonForTravel({
-        rates: ratesForCharge(item, lineChargeLabel(service)),
+        rates: scoped,
         currencyCode,
-        startDate: travelWindow.start,
-        endDate: travelWindow.end,
+        startDate: feeDate || travelWindow.start,
+        endDate: feeDate || travelWindow.end,
         protectionPercent,
         allowPartial
       });
@@ -372,32 +401,43 @@ export const repriceServicesForPax = ({
         const chargeable = typeof service.surchargeChargeable === 'boolean'
           ? service.surchargeChargeable
           : isSurchargeChargeable(item);
-        const { unitBasis, total } = surchargeBuyTotal({
-          rate,
+        /* The line's nights are summed at each night's own figure, so a bigger
+           party re-prices every night it bills. A night the library can no
+           longer price leaves the whole line untouched and named, rather than
+           silently dropping that night's money. */
+        const nightBuy = surchargeNightsBuy({
           item,
+          currencyCode,
+          firstDate: feeDate,
+          fallbackStart: travelWindow.start,
+          fallbackEnd: travelWindow.end,
+          nights: Math.max(1, Number(service.quantity) || 1),
+          protectionPercent: pct,
+          allowPartial,
           paxCount: count,
           childCount,
-          /* The gate charges the touring guide a place of their own when the
-             fee contracts one, so the crew head rides with the party. */
-          guideCount: tourGuideCount(travellers),
-          nights: 1
+          guideCount: tourGuideCount(travellers)
         });
-        const priced = surchargePricing({ buyTotal: total, markupPercent: markup, chargeable });
+        if (nightBuy.pricedNights < nightBuy.nights.length) {
+          skipped.push(service.name || item.name || 'Unnamed service');
+          return service;
+        }
+        const priced = surchargePricing({ buyTotal: nightBuy.total, markupPercent: markup, chargeable });
         repriced += 1;
         return {
           ...service,
-          basis: unitBasis,
+          basis: nightBuy.unitBasis,
           buyPP: round2(priced.buy / count),
           sellPP: round2(priced.sell / count),
           pax: count,
-          surchargeUnitBasis: unitBasis,
+          surchargeUnitBasis: nightBuy.unitBasis,
           surchargePassedThrough: priced.passedThrough,
           surchargeReference: round2(priced.reference || 0)
         };
       }
 
       const basis = rate.rate_basis || item.pricing_model || 'per_person';
-      const buyPP = round2(contractPaxRate(pricedItem, currencyCode, count, { childCount, travellers }));
+      const buyPP = round2(contractPaxRate(pricedItem, currencyCode, count, { childCount, travellers, quantity: service.quantity }));
       /* The crew figure the line folded in rides the same new season row as the
          clients' fare and re-shares over the same party, so a bigger group neither
          multiplies the guide's seat nor drops it. */
@@ -489,6 +529,10 @@ export const revalidateServicesForWindow = ({
       /* Guide & driver detail lines are flat per-trip figures pinned when the
          operator chose them, not season per-person rates. */
       if (service.guideOnly || service.guideForKey) return service;
+      /* A free night is priced by the stay-pay engine, not by a season: its
+         stored value is what the room-night was worth before it was waived, and
+         re-deriving it here would charge the night again. */
+      if (service.stayPayFree === true || service.stay_pay_free === true) return service;
       /* A line saved before season tracking cannot be re-derived safely; leave
          it visible rather than replacing its price with a guess. */
       const hasSeasonStamp = !!(service.seasonValidFrom || service.seasonValidTo
@@ -499,11 +543,28 @@ export const revalidateServicesForWindow = ({
       if (!item || !Array.isArray(item.item_rates) || !item.item_rates.length) return service;
 
       const currencyCode = service.currencyCode || item.currency || '';
+      /* A fee line is checked against the night it sits on: a levy changing on
+         1 Jan has two prices inside one room season, so the whole-trip window
+         would validate every night against one figure. */
+      const feeDate = isSurchargeItem(item) ? String(day.date || '').slice(0, 10) : '';
+      /* The pool is narrowed to the room the line sold: two rooms can share a
+         season name, dates and board, and resolving over the whole matrix
+         would reprice the line off the sibling room's ladder. A room whose
+         rows are gone is reported on its own terms, never repriced from a
+         neighbour. */
+      const { chargeRates, scoped } = roomChargeRates(item, service);
+      if (!scoped.length && chargeRates.length) {
+        issues.push({
+          name: service.name || item.name || 'Unnamed service',
+          reason: `The ${serviceRoomName(service) || 'sold room'} room has no season prices in the library.`
+        });
+        return service;
+      }
       const season = resolveSeasonForTravel({
-        rates: ratesForCharge(item, lineChargeLabel(service)),
+        rates: scoped,
         currencyCode,
-        startDate: travelWindow.start,
-        endDate: travelWindow.end,
+        startDate: feeDate || travelWindow.start,
+        endDate: feeDate || travelWindow.end,
         protectionPercent,
         allowFuture,
         allowPartial
@@ -512,8 +573,11 @@ export const revalidateServicesForWindow = ({
       const nextStatus = seasonLineStatus(season, pct);
 
       /* Same season and same status: the price is still the right one for the
-         new window, so it must not move. */
-      if (seasonStampMatches(service, season) && service.rateSeasonStatus === nextStatus) {
+         new window, so it must not move. A multi-night fee's stamp only names
+         its first night, so the mix can change while that stamp holds - those
+         lines are re-summed below and compared on the money instead. */
+      const multiNightFee = isSurchargeItem(item) && Number(service.quantity) > 1;
+      if (!multiNightFee && seasonStampMatches(service, season) && service.rateSeasonStatus === nextStatus) {
         return service;
       }
 
@@ -529,34 +593,62 @@ export const revalidateServicesForWindow = ({
       const rate = pct ? applyProtectionToRate(season.rate, pct) : season.rate;
       const markup = Number(service.markup) || 0;
       const nextStamp = stamp(season, pct);
-      repriced += 1;
 
       if (isSurchargeItem(item)) {
         const linePax = Math.max(1, Number(service.pax) || count || 1);
         const chargeable = typeof service.surchargeChargeable === 'boolean'
           ? service.surchargeChargeable
           : isSurchargeChargeable(item);
-        const { unitBasis, total } = surchargeBuyTotal({
-          rate,
+        const nightBuy = surchargeNightsBuy({
           item,
+          currencyCode,
+          firstDate: feeDate,
+          fallbackStart: travelWindow.start,
+          fallbackEnd: travelWindow.end,
+          nights: Math.max(1, Number(service.quantity) || 1),
+          protectionPercent: pct,
+          allowFuture,
+          allowPartial,
           paxCount: linePax,
           childCount,
-          guideCount: tourGuideCount(travellers),
-          nights: Math.max(1, Number(service.quantity) || 1)
+          guideCount: tourGuideCount(travellers)
         });
-        const priced = surchargePricing({ buyTotal: total, markupPercent: markup, chargeable });
+        /* A night the new window leaves unpriceable is reported, not billed at
+           a guess and not silently dropped from the line. */
+        if (nightBuy.pricedNights < nightBuy.nights.length) {
+          const unpriced = nightBuy.nights.find((row) => !row.priced);
+          issues.push({
+            name: service.name || item.name || 'Unnamed service',
+            reason: unpriced?.season?.reason || 'No fee season covers every night of this line in the new travel window.'
+          });
+          return service;
+        }
+        const priced = surchargePricing({ buyTotal: nightBuy.total, markupPercent: markup, chargeable });
+        const statuses = new Set(nightBuy.nights.map((row) => seasonLineStatus(row.season, row.protectionPercent)));
+        const lineStatus = statuses.size === 1 ? [...statuses][0] : 'estimate';
+        const buyPP = round2(priced.buy / linePax);
+        /* Re-summed but unchanged: the move kept every night on the same
+           figure, so the line is not rewritten or counted as re-priced. */
+        if (buyPP === round2(Number(service.buyPP) || 0)
+          && seasonStampMatches(service, season) && service.rateSeasonStatus === lineStatus) {
+          return service;
+        }
+        repriced += 1;
         return {
           ...service,
           ...nextStamp,
-          basis: unitBasis,
-          buyPP: round2(priced.buy / linePax),
+          rateSeasonStatus: lineStatus,
+          basis: nightBuy.unitBasis,
+          buyPP,
           sellPP: round2(priced.sell / linePax),
-          surchargeUnitBasis: unitBasis,
+          surchargeUnitBasis: nightBuy.unitBasis,
           surchargePassedThrough: priced.passedThrough,
           surchargeReference: round2(priced.reference || 0),
           item_rates: [rate]
         };
       }
+
+      repriced += 1;
 
       if (isGuideLineService(service) && Array.isArray(service.guideServiceTypes) && service.guideServiceTypes.length) {
         /* The destination's rate resolves to a new season, and the person named on
@@ -594,7 +686,7 @@ export const revalidateServicesForWindow = ({
 
       const pricedItem = { ...item, item_rates: [rate] };
       const linePax = servicePax(service, count, shareContext) || count || 1;
-      const buyPP = round2(contractPaxRate(pricedItem, currencyCode, linePax, { childCount, travellers }));
+      const buyPP = round2(contractPaxRate(pricedItem, currencyCode, linePax, { childCount, travellers, quantity: service.quantity }));
       /* A crew figure folded onto the line rides the same season row as the
          clients' ticket, so a new season re-prices the seat too. */
       const crew = crewShareOn(service);

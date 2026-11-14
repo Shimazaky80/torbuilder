@@ -40,6 +40,7 @@ packageRateForDates,
   vehicleColumnPools,
   vehicleVectorPrice
 } from '../lib/packagePricing';
+import { ratesForServiceRoom, roomTypesOf } from '../lib/roomTypes';
 import { singleSupplementLadderSummary } from '../lib/singleSupplement';
 import {
   crewChargeOf,
@@ -50,12 +51,35 @@ import {
   isOverlandGuide,
   refreshCrewShare
 } from '../lib/guidePricing';
+import {
+  feeBasisChargesHeads,
+  isSurchargeChargeable,
+  isSurchargeItem,
+  surchargeBasisOf,
+  surchargeBuyTotal,
+  surchargeTypeOf,
+  surchargeUnitBasisOf
+} from '../lib/surchargeFees';
 import GuideServiceTypeModal from '../components/GuideServiceTypeModal';
 import GuideDetailsModal from '../components/GuideDetailsModal';
 import AccommodationChargeModal from '../components/AccommodationChargeModal';
 import CarRentalDropModal from '../components/CarRentalDropModal';
+import FuelVehicleModal from '../components/FuelVehicleModal';
+import FuelForVehicleModal from '../components/FuelForVehicleModal';
 import CarSpecGrid from '../components/CarSpecGrid';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { DayRail, DayBoardModal, DayStepper } from '../components/DayNavigator';
+import DayDestinationEditor from '../components/DayDestinationEditor';
+import {
+  DAY_DESTINATION_COLUMNS,
+  applyDayDestination,
+  destinationFields,
+  destinationLabel,
+  dayDestinationHeading,
+  dayRoute,
+  dayEndLabel
+} from '../lib/dayDestination';
+import { columnExists } from '../lib/schemaColumnProbe';
 import {
   buildRentalDetails,
   carRentalBuyTotal,
@@ -107,7 +131,17 @@ import {
 import { textI18nColumn } from '../lib/i18n/textI18nColumn';
 import { useTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { accommodationHasChoices, nightBandLabel, rateOptionLabel } from '../lib/accommodationOptions';
-import { extrasHasChargeChoices, chargeNameOf, isExtrasItem, lineChargeLabel } from '../lib/extrasChargeTypes';
+import { normalizeStayPayPromotions, planStayPay, roomKeyForService, stayPayExcludedService } from '../lib/stayPay';
+import { extrasHasChargeChoices, chargeNameOf, chargeLabelOf, isExtrasItem, isVehicleExtra, lineChargeLabel } from '../lib/extrasChargeTypes';
+import {
+  fuelIncludedOf,
+  fuelVehiclesFromPackage,
+  fuelVehicleOptions,
+  isFuelAllowanceLine,
+  isFuelChargeName,
+  isVehicleProviderLine,
+  itemHasFuelCharge
+} from '../lib/fuelAllowance';
 import { starRatingOf, withStarGrade } from '../lib/starGrading';
 import { supplierColumns } from '../lib/supplierStarColumn';
 import { fetchRoomTypesForItems } from '../lib/roomTypeTable';
@@ -134,6 +168,135 @@ const selectLibraryItems = async (buildQuery) => {
 
 
 const uuid = packageKey;
+
+/* A package has no travel dates of its own, so its nights are ordered from the
+ * first validity period's start. That start is also the check-in date a
+ * promotion's window is tested against; a package with no period has no
+ * check-in, and only an open-ended offer may apply. */
+const stayPayAddDays = (iso, n) => {
+  const [y, m, d] = String(iso || '').slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return '';
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+const stayPayRound = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+/* Recompute the stay-pay stamp on every package accommodation line.
+ *
+ * A package is built a day at a time, so the same property appears once per
+ * night. The free nights are stamped by moving the waived figure into
+ * stay_pay_value and zeroing unit_cost; the pricing engine reads stay_pay_free
+ * and contributes nothing for that row. Recomputing from the original value is
+ * what lets a line come back to its real price when the stay or the offer
+ * changes. */
+const applyStayPayStampsToPackage = ({ days, library, periods }) => {
+  const libraryById = new Map((library || []).map((item) => [item.id, item]));
+  const periodStart = (periods || [])
+    .map((period) => String(period.valid_from || '').slice(0, 10))
+    .filter(Boolean)
+    .sort()[0] || '';
+  const groups = new Map();
+  /* A line that has since become optional or a crew bed is no longer a client
+     room-night; its real price comes back instead of staying waived. */
+  const excluded = [];
+  (days || []).forEach((day, dayIndex) => {
+    (day.services || []).forEach((service, serviceIndex) => {
+      if (!/accommodation/i.test(service.category || '')) return;
+      if (stayPayExcludedService(service)) {
+        if (service.stay_pay_free === true || service.stayPayFree === true) {
+          excluded.push({ dayIndex, serviceIndex });
+        }
+        return;
+      }
+      const item = libraryById.get(service.item_id || service.itemId);
+      if (!item) return;
+      const promotions = normalizeStayPayPromotions(
+        item.stay_pay_promotions ?? item.stayPayPromotions
+      );
+      const roomKey = roomKeyForService(service, item);
+      const groupKey = `${service.item_id || service.itemId || service.item_name || 'accommodation'}|${roomKey}`;
+      const wasFree = service.stay_pay_free === true || service.stayPayFree === true;
+      const original = wasFree
+        ? Number(service.stay_pay_value ?? service.stayPayValue) || 0
+        : Number(service.unit_cost) || 0;
+      const quantity = Math.max(1, Number(service.quantity) || 1);
+      if (!groups.has(groupKey)) groups.set(groupKey, { promotions, roomKey, entries: [] });
+      groups.get(groupKey).entries.push({
+        dayIndex,
+        serviceIndex,
+        date: stayPayAddDays(periodStart || '1970-01-01', dayIndex),
+        value: original * quantity
+      });
+    });
+  });
+  if (!groups.size && !excluded.length) return days;
+
+  let changed = false;
+  const nextDays = days.map((day) => ({ ...day, services: [...(day.services || [])] }));
+
+  const unstamp = (entry) => {
+    const day = nextDays[entry.dayIndex];
+    const service = day.services[entry.serviceIndex];
+    if (service.stay_pay_free !== true && service.stayPayFree !== true) return;
+    const original = Number(service.stay_pay_value ?? service.stayPayValue) || 0;
+    day.services[entry.serviceIndex] = {
+      ...service,
+      stay_pay_free: false,
+      stay_pay_rule: null,
+      stay_pay_value: null,
+      unit_cost: stayPayRound(original),
+      unit_price: stayPayRound(original)
+    };
+    changed = true;
+  };
+
+  const stamp = (entry, free, rule) => {
+    if (!free) {
+      unstamp(entry);
+      return;
+    }
+    const day = nextDays[entry.dayIndex];
+    const service = day.services[entry.serviceIndex];
+    const wasFree = service.stay_pay_free === true || service.stayPayFree === true;
+    const original = wasFree
+      ? Number(service.stay_pay_value ?? service.stayPayValue) || 0
+      : Number(service.unit_cost) || 0;
+    const ruleName = rule?.name || '';
+    if (!wasFree || Number(service.unit_cost) !== 0 || (service.stay_pay_rule || service.stayPayRule) !== ruleName) {
+      day.services[entry.serviceIndex] = {
+        ...service,
+        stay_pay_free: true,
+        stay_pay_rule: ruleName,
+        stay_pay_value: original,
+        unit_cost: 0,
+        unit_price: 0
+      };
+      changed = true;
+    }
+  };
+
+  excluded.forEach(unstamp);
+
+  groups.forEach((group) => {
+    /* No validity period means no check-in to test, so only an offer with no
+       window can apply to an undated package. */
+    const promotions = periodStart
+      ? group.promotions
+      : group.promotions.filter((rule) => !rule.validFrom && !rule.validTo);
+    const plan = promotions.length
+      ? planStayPay({
+        nights: group.entries.map((entry) => ({ date: entry.date, value: entry.value })),
+        promotions,
+        roomKey: group.roomKey,
+        checkInDate: periodStart || undefined
+      })
+      : { freeIndexes: new Set(), rule: null };
+    group.entries.forEach((entry, index) => {
+      stamp(entry, plan.freeIndexes.has(index), plan.ruleByDate?.get(entry.date) || plan.rule);
+    });
+  });
+
+  return changed ? nextDays : days;
+};
 
 const round = (value) => Math.round((Number(value) || 0) * 100) / 100;
 const money = (value, code) => `${code} ${round(value).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -235,7 +398,7 @@ export const PackageBuilder = () => {
   const [companyId, setCompanyId] = useState(null);
   const [pkg, setPkg] = useState(null);
   const [form, setForm] = useState(initialForm);
-  const [days, setDays] = useState([]);
+  const [packageDays, setDays] = useState([]);
   const [periods, setPeriods] = useState([]);
   const [paxOptions, setPaxOptions] = useState([]);
   const [clients, setClients] = useState([]);
@@ -255,6 +418,7 @@ const [tab, setTab] = useState('itinerary');
      click that lets them go: a day carries every line worked on it. */
   const [markedDayIndexes, setMarkedDayIndexes] = useState([]);
   const [bulkDeleteArmed, setBulkDeleteArmed] = useState(false);
+  const [dayBoardOpen, setDayBoardOpen] = useState(false);
 /* Which band the Itinerary tab is being edited as. Empty string means the shared base
    itinerary that every band uses. */
 const [bandScope, setBandScope] = useState('');
@@ -268,7 +432,37 @@ const [bandScope, setBandScope] = useState('');
   /* Newer season columns are written on the same insert as the season itself, where an
      unknown column rejects the whole payload. They stay off until the database proves it
      has them, so an unmigrated package still saves. */
-  const [dbFeatures, setDbFeatures] = useState({ singleRooms: false, roomTypes: false });
+  const [dbFeatures, setDbFeatures] = useState({ singleRooms: false, roomTypes: false, stayPay: false, lineLink: false });
+  const [dayDestinationsAvailable, setDayDestinationsAvailable] = useState(false);
+  useEffect(() => {
+    let active = true;
+    columnExists('package_days', DAY_DESTINATION_COLUMNS.join(', '))
+      .then((available) => { if (active) setDayDestinationsAvailable(available); });
+    return () => { active = false; };
+  }, []);
+  const days = useMemo(() => (
+    dbFeatures.stayPay
+      ? applyStayPayStampsToPackage({ days: packageDays, library, periods })
+      : packageDays
+  ), [dbFeatures.stayPay, packageDays, library, periods]);
+  /* Left / right arrows step between days on the Itinerary tab, guarded so typing
+     in a field, holding a modifier, or working inside any dialog never moves the
+     day out from under the consultant. */
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (dayBoardOpen || tab !== 'itinerary') return;
+      const el = document.activeElement;
+      const tag = el ? el.tagName : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el && el.isContentEditable)) return;
+      if (document.querySelector('.modal-overlay')) return;
+      event.preventDefault();
+      setSelectedDay((prev) => Math.max(0, Math.min(days.length - 1, prev + (event.key === 'ArrowLeft' ? -1 : 1))));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dayBoardOpen, tab, days.length, setSelectedDay]);
   /* Pricing Protection, read from the same tenant setting the itinerary builder uses,
      so a package and an itinerary price the same superseded season the same way. */
   const [protectionPercent, setProtectionPercent] = useState(0);
@@ -321,6 +515,10 @@ const [bandScope, setBandScope] = useState('');
      the car goes out and comes back, and which vehicle group fills it. The hire
      copy on the line is what every later read prices and prints from. */
   const [carRentalModal, setCarRentalModal] = useState(null);
+  /* Fuel allowance detours: the allowance drop asking which vehicle it fuels, and
+     a fuel-excluded vehicle offering to add an allowance. Both land one linked line. */
+  const [fuelPickerModal, setFuelPickerModal] = useState(null);
+  const [fuelForVehicleModal, setFuelForVehicleModal] = useState(null);
   const [rentalColumnReady, setRentalColumnReady] = useState(false);
   /* A crew figure folded onto a line is carried in its own column. Until that
      migration is applied PostgREST is asked for no such column, so every other
@@ -385,6 +583,24 @@ const [bandScope, setBandScope] = useState('');
         setDbFeatures((current) => ({ ...current, roomTypes: !error }));
       } catch {
         // Probe unavailable; keep room types off.
+      }
+      /* Whether a package line can record a stay-pay free night. Until the
+         migration is applied the line still prices to zero on screen, it simply
+         has nowhere to say why. */
+      try {
+        const { error } = await supabase.from('package_day_items').select('stay_pay_free').limit(1);
+        setDbFeatures((current) => ({ ...current, stayPay: !error }));
+      } catch {
+        // Probe unavailable; keep the stamp off.
+      }
+      /* Whether a package line can record the vehicle a fuel allowance fuels. Until
+         the migration is applied the allowance still lands and prices, it simply
+         has no stored link to remove it by. */
+      try {
+        const { error } = await supabase.from('package_day_items').select('linked_item_id').limit(1);
+        setDbFeatures((current) => ({ ...current, lineLink: !error }));
+      } catch {
+        // Probe unavailable; keep the link off.
       }
       /* Whether a package line can carry the hire copy. Until that migration is
          applied, the drop still prices - the answer simply lives in the line's
@@ -740,6 +956,10 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
      showToast('Your role can read packages but not save them. An Admin can give your job write access on the Users page.', 'warning');
      return false;
    }
+   if (!dayDestinationsAvailable && nextDays.some((day) => DAY_DESTINATION_COLUMNS.some((column) => String(day[column] ?? '').trim()))) {
+     showToast('Package not saved: day destination data is present, but the database destination columns are unavailable. Apply the day destinations migration and reload before saving; existing destination data will not be discarded.', 'error');
+     return false;
+   }
    const validPeriods = nextPeriods.filter((period) => period.valid_from && period.valid_to);
     if (nextPeriods.some((period) => Boolean(period.valid_from) !== Boolean(period.valid_to))) {
       showToast('Complete both dates for each validity period, or remove the incomplete row.', 'warning');
@@ -749,6 +969,9 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       showToast('Each validity end date must be on or after its start date.', 'warning');
       return false;
     }
+    const daysWithStayPay = dbFeatures.stayPay
+      ? applyStayPayStampsToPackage({ days: nextDays, library, periods: validPeriods })
+      : nextDays;
     /* An item whose season does not span the package dates is not refused outright: the
        same Pricing Protection the itinerary builder applies takes over, and only a
        genuine dead end (no usable season on the item at all) stops the save. The
@@ -760,7 +983,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
        tariff run for the dates this offer is sold for — and refuses the save when the
        contract does not answer. Its paperwork fee is not a hire length, so it is not
        asked either. */
-    const seasonProblem = nextDays.flatMap((day) => day.services || [])
+    const seasonProblem = daysWithStayPay.flatMap((day) => day.services || [])
       .filter((service) => !service.rental || (isReferenceHire(service.rental) && !isRentalFeeLine(service.rental)))
       .map((service) => {
         const item = library.find((entry) => entry.id === service.item_id) || null;
@@ -812,10 +1035,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
 
       const { error: dayDeleteError } = await supabase.from('package_days').delete().eq('package_id', pkg.id);
       if (dayDeleteError) throw dayDeleteError;
-      for (let dayIndex = 0; dayIndex < nextDays.length; dayIndex += 1) {
-        const day = nextDays[dayIndex];
+      for (let dayIndex = 0; dayIndex < daysWithStayPay.length; dayIndex += 1) {
+        const day = daysWithStayPay[dayIndex];
         const { data: dayRow, error: dayInsertError } = await supabase.from('package_days').insert({
           package_id: pkg.id, company_id: companyId, day_number: dayIndex + 1, notes: day.notes || null,
+          ...(dayDestinationsAvailable ? destinationFields(day) : {}),
           /* The day's own prose travels with it in every language the operator has
              written it in; an English-only tenant sends no key at all. */
           ...textI18nPayload(canStoreTranslations, day.text_i18n)
@@ -878,6 +1102,20 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           ...(bundleColumnReady ? {
             bundle_key: service.bundle_key || null,
             bundle_label: service.bundle_key ? (service.bundle_label || defaultBundleLabel(service)) : null
+          } : {}),
+          /* The vehicle a fuel allowance fuels, so a reloaded package still removes
+             the allowance with its vehicle. Only written once the column exists. */
+          ...(dbFeatures.lineLink ? { linked_item_id: service.linked_item_id || null } : {}),
+          /* The stay-pay stamp, so a reloaded package still knows which night
+             was waived and what it was worth. */
+          ...(dbFeatures.stayPay ? {
+            stay_pay_free: service.stay_pay_free === true || service.stayPayFree === true,
+            stay_pay_rule: (service.stay_pay_free === true || service.stayPayFree === true)
+              ? (service.stay_pay_rule || service.stayPayRule || null)
+              : null,
+            stay_pay_value: (service.stay_pay_free === true || service.stayPayFree === true)
+              ? (Number(service.stay_pay_value ?? service.stayPayValue) || 0)
+              : null
           } : {})
         }));
         if (rows.length) {
@@ -934,8 +1172,9 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
 
       /* Accommodation is stored with the room count the party size works out to, so
          the saved package and the on-screen rows can never disagree. */
-      const savedDays = nextDays.map((day, index) => ({
+      const savedDays = daysWithStayPay.map((day, index) => ({
         ...day,
+        ...(dayDestinationsAvailable ? destinationFields(day) : {}),
         day_number: index + 1,
         services: (day.services || []).map((service) => {
           const rooms = autoRoomsFor(service);
@@ -966,7 +1205,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, dbFeatures.stayPay, dbFeatures.lineLink, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage, dayDestinationsAvailable]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -1076,6 +1315,9 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
           index === dayIndex ? { ...day, services: [...day.services, ...componentLines] } : day
         ));
       });
+      if (details.fuelIncluded === false && fuelExtrasItems.length) {
+        setFuelForVehicleModal({ dayIndex, vehicleItemId: item.id, vehicleName: item.name });
+      }
       return;
     }
     /* One line per 24-hour cycle, on the day it bills — the same rule the
@@ -1120,6 +1362,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         perDay.has(index) ? { ...day, services: [...day.services, ...perDay.get(index)] } : day
       ));
     });
+    /* A hire whose tariff excludes fuel needs an allowance, asked once for the whole
+       engagement on the day the car is collected. */
+    if (details.fuelIncluded === false && fuelExtrasItems.length) {
+      setFuelForVehicleModal({ dayIndex: lines[0].dayIndex, vehicleItemId: item.id, vehicleName: item.name });
+    }
   };
   /* The hire copy a line is re-priced from after "update from library". A dated hire
      keeps the rule it always had: the same group, the same 24-hour blocks and the
@@ -1179,6 +1426,163 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       : null;
     return { details: rentalDayDetails(details, shareOfDay) };
   };
+  /* A fee linked to the accommodation travels with it, the same contract the
+     itinerary keeps: a once-off fee (porterage included) is added once, on the
+     first day the property is dropped, and never again while that line stands;
+     a per-night fee lands on each day the property is dropped, one charge each.
+     The fee owns its validity windows, so the window covering this package's
+     dates prices it - a stand-in season is uplifted on the same percentage the
+     accommodation agreed to, never at a guess. */
+  const addLinkedFees = async (accommodationItem, dayIndex, scope = {}) => {
+    if (!accommodationItem?.id) return;
+    let feeRows = [];
+    let ratesData = [];
+    try {
+      const { data } = await supabase
+        .from('library_items')
+        .select('id,company_id,supplier_id,name,category,sub_category,currency,pricing_model,surcharge_type,surcharge_charge_basis,surcharge_unit_basis,surcharge_chargeable,linked_item_id')
+        .eq('linked_item_id', accommodationItem.id);
+      feeRows = (data || []).filter(isSurchargeItem);
+      if (feeRows.length) {
+        const { data: rates } = await supabase
+          .from('item_rates')
+          .select('*')
+          .in('item_id', feeRows.map((fee) => fee.id));
+        ratesData = rates || [];
+      }
+    } catch {
+      // No fee columns on this database, or the lookup failed: nothing to add.
+      return;
+    }
+    if (!feeRows.length) return;
+    let supplierById = new Map();
+    const supIds = [...new Set(feeRows.map((fee) => fee.supplier_id).filter(Boolean))];
+    if (supIds.length) {
+      try {
+        const { data: suppliers } = await supabase.from('suppliers').select(await supplierColumns('id, name')).in('id', supIds);
+        supplierById = new Map((suppliers || []).map((supplier) => [supplier.id, supplier.name]));
+      } catch {
+        supplierById = new Map();
+      }
+    }
+    const services = [];
+    const skipped = [];
+    feeRows.forEach((feeRow) => {
+      const fee = { ...feeRow, item_rates: ratesData.filter((rate) => rate.item_id === feeRow.id) };
+      const perNight = surchargeBasisOf(fee) === 'per_night';
+      const already = (day) => (day?.services || []).some((service) => service.item_id === fee.id);
+      if (perNight ? already(days[dayIndex]) : days.some(already)) return;
+      const rate = rateForDates(fee);
+      const season = rate ? seasonFor(fee, rate, scope) : null;
+      if (!rate || !season?.canAdd || !season.rate) {
+        skipped.push(fee.name);
+        return;
+      }
+      const storedRate = seasonStoredRate(season, rate);
+      const unitBasis = surchargeUnitBasisOf(fee);
+      /* A package line stores the cost of ONE unit: a head basis carries one
+         head's figure and the band multiplies it by its party; a flat basis
+         carries the whole thing. A child-only fee is priced from one child. */
+      const buy = surchargeBuyTotal({
+        rate: storedRate,
+        item: fee,
+        paxCount: 1,
+        childCount: unitBasis === 'per_child' ? 1 : 0,
+        guideCount: 0,
+        nights: 1
+      });
+      const isPorterage = surchargeTypeOf(fee) === 'porterage';
+      services.push({
+        item_key: uuid(),
+        item_id: fee.id,
+        rate_id: rate.id,
+        item_name: fee.name,
+        category: fee.category || '',
+        supplier_name: supplierById.get(fee.supplier_id) || '',
+        currency_code: packageCurrency,
+        rate_basis: feeBasisChargesHeads(unitBasis) ? 'per_person' : 'per_trip',
+        unit_cost: buy.total,
+        unit_price: buy.total,
+        quantity: 1,
+        is_included: isSurchargeChargeable(fee),
+        vehicle_capacity: 0,
+        room_type_id: null,
+        room_type: '',
+        tier_key: scope.tier_key || null,
+        replaces_item_key: null,
+        rate_snapshot: storedRate,
+        crew_share: null,
+        price_protection_percent: season.protectionPercent || 0,
+        protected_season_name: season.status === 'protected' ? season.seasonName : '',
+        guide_service_types: null,
+        guide_only: false,
+        guide_for_item_key: null,
+        guide_charge_type: null,
+        notes: isPorterage
+          ? 'Once per stay, per person. Guide and driver excluded.'
+          : perNight ? '' : 'Once for the whole stay.'
+      });
+    });
+    if (services.length) {
+      setDays((previous) => previous.map((day, index) => (index === dayIndex
+        ? { ...day, services: [...(day.services || []), ...services] }
+        : day)));
+      showToast(`Added with ${accommodationItem.name}: ${services.map((service) => service.item_name).join(', ')}.`, 'success');
+    }
+    if (skipped.length) {
+      showToast(`${skipped.join(', ')} linked to ${accommodationItem.name} ${skipped.length === 1 ? 'has' : 'have'} no rate in ${packageCurrency} covering this package's dates, so ${skipped.length === 1 ? 'it was' : 'they were'} not added.`, 'warning');
+    }
+  };
+
+  /* The tenant's own fuel charges, offered when a fuel-excluded vehicle lands. */
+  const fuelExtrasItems = library.filter(itemHasFuelCharge);
+
+  /* Land the allowance as one line. With a vehicle named, the line sits on that
+     vehicle's day and is linked to it, so it is removed with the vehicle. The add
+     is re-entered with the link in scope; the season guard inside addService still
+     asks its own question if the tariff needs one. */
+  const placeFuelAllowance = (item, rateId, dayIndex, scope, vehicle) => {
+    const nextScope = { ...scope, fuelResolved: true };
+    let targetDay = dayIndex;
+    if (vehicle) {
+      targetDay = vehicle.dayIndex;
+      nextScope.linkedItemId = vehicle.itemId;
+      nextScope.lineNote = `Fuel allowance for ${vehicle.name}.`;
+    }
+    addService(item, rateId, targetDay, nextScope);
+  };
+
+  /* The allowance drop asks which vehicle it fuels. A vehicle whose tariff includes
+     fuel, or one already carrying an allowance, is refused inline by the picker. */
+  const openFuelPicker = (item, rateId, dayIndex, scope) => {
+    const vehicles = fuelVehiclesFromPackage(days);
+    const covered = days.flatMap((day) => day.services || [])
+      .filter((service) => isFuelAllowanceLine(service) && service.linked_item_id)
+      .map((service) => service.linked_item_id);
+    setFuelPickerModal({ item, rateId, dayIndex, scope, options: fuelVehicleOptions(vehicles, covered) });
+  };
+
+  const confirmFuelVehicle = (selection) => {
+    const pending = fuelPickerModal;
+    if (!pending) return;
+    setFuelPickerModal(null);
+    placeFuelAllowance(pending.item, pending.rateId, pending.dayIndex, pending.scope, selection);
+  };
+
+  /* A fuel-excluded vehicle was dropped and the operator named an allowance item:
+     add it pre-linked to that vehicle. */
+  const confirmFuelForVehicle = (chosenItem) => {
+    const pending = fuelForVehicleModal;
+    if (!pending) return;
+    setFuelForVehicleModal(null);
+    if (!chosenItem) return;
+    placeFuelAllowance(chosenItem, null, pending.dayIndex, {}, {
+      itemId: pending.vehicleItemId,
+      name: pending.vehicleName,
+      dayIndex: pending.dayIndex
+    });
+  };
+
   const addService = (item, rateId, dayIndex = selectedDay, scope = {}) => {
     /* The hire is asked for before anything else, because none of the rate, currency
        or season guards below have anything to say about a car. */
@@ -1220,6 +1624,15 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
        dialog: which of them this line is bought as. */
     if (isExtrasItem(item) && extrasHasChargeChoices(item) && !scope.accommodationChargeChosen) {
       setAccomChargeModal({ item, rateId, dayIndex, scope, rate, variant: 'extras' });
+      return;
+    }
+    /* A fuel allowance dropped from the sidebar asks which vehicle it fuels before
+       it lands. The charge the rate resolves to decides: an extra that also sells a
+       non-fuel charge drops normally when that is the one priced. A link already
+       chosen — from the picker or a vehicle prompt — rides through without asking. */
+    if (!scope.fuelResolved && !scope.linkedItemId && isExtrasItem(item) && itemHasFuelCharge(item)
+      && isFuelChargeName(chargeLabelOf(rate, item))) {
+      openFuelPicker(item, rateId, dayIndex, scope);
       return;
     }
     /* Whether this item is fit to be in a package at all. Whether it is big enough is not
@@ -1310,7 +1723,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       guide_service_types: guideTotal !== null ? guideTypes : null,
       guide_only: false,
       guide_for_item_key: null,
-      guide_charge_type: null
+      guide_charge_type: null,
+      /* A fuel allowance points at the vehicle it fuels (its library item id), so it
+         is removed with the vehicle. Every other line carries no link. */
+      linked_item_id: scope.linkedItemId || null,
+      notes: scope.lineNote || null
     };
     if (season.message) showToast(season.message, seasonToastKind(season));
     setDays((previous) => {
@@ -1324,6 +1741,15 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
        has to remember. */
     if (isOverlandGuide(guideTypes)) {
       setGuideDetailsModal({ dayIndex, guideKey: service.item_key, defaultValues: guideDetailsDefaultsFor(dayIndex, service.item_key) });
+    }
+    /* The property's linked fees (park fee, levy, porterage) arrive with it. */
+    if (isStayItem) addLinkedFees(item, dayIndex, scope);
+    /* A transfer or transport whose tariff excludes fuel needs an allowance. Ask now,
+       on the day it landed, while the hire is fresh — the allowance links back to this
+       vehicle and is removed with it. Only ask when the library has one to offer. */
+    if (/transfers?|transport/i.test(String(item.category || '')) && fuelExtrasItems.length
+      && fuelIncludedOf(storedRate) === false) {
+      setFuelForVehicleModal({ dayIndex, vehicleItemId: item.id, vehicleName: item.name });
     }
   };
 
@@ -1371,13 +1797,28 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     const pending = accomChargeModal;
     if (!pending) return;
     setAccomChargeModal(null);
-    addService(pending.item, choice.rateId, pending.dayIndex, {
+    const scope = {
       ...pending.scope,
       accommodationChargeChosen: true,
       roomTypeId: choice.roomTypeId || null,
       roomType: choice.roomType || '',
       roomMaxOccupancy: choice.roomMaxOccupancy || 0
-    });
+    };
+    /* A fuel charge picked from a multi-charge Extras item still has to say which
+       vehicle it fuels. A link already in scope — a vehicle prompt — lands straight
+       onto that vehicle; otherwise the picker asks. */
+    if (isExtrasItem(pending.item)) {
+      const chosenRate = (pending.item.item_rates || []).find((entry) => entry.id === choice.rateId);
+      if (isFuelChargeName(choice.optionLabel || chargeLabelOf(chosenRate, pending.item))) {
+        if (scope.linkedItemId) {
+          addService(pending.item, choice.rateId, pending.dayIndex, { ...scope, fuelResolved: true });
+        } else {
+          openFuelPicker(pending.item, choice.rateId, pending.dayIndex, scope);
+        }
+        return;
+      }
+    }
+    addService(pending.item, choice.rateId, pending.dayIndex, scope);
   };
 
   /* The hire dialog's answer. A new drop builds its lines from the copy; an edit
@@ -1666,19 +2107,34 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     }));
   };
 
-  const removeService = (dayIndex, serviceIndex) => setDays((previous) => previous.map((day, index) => index !== dayIndex ? day : {
-    ...day,
-    /* Removing a guide line takes its guide & driver detail lines (lunch / dinner /
-       overnight) with it, so the day never keeps orphaned meals and beds. */
-    services: (() => {
-      const target = day.services[serviceIndex];
-      const removedKey = target?.item_key;
-      return day.services.filter((service, itemIndex) => (
-        itemIndex !== serviceIndex
-        && (!removedKey || !service.guide_for_item_key || service.guide_for_item_key !== removedKey)
-      ));
-    })()
-  }));
+  const removeService = (dayIndex, serviceIndex) => setDays((previous) => {
+    const target = previous[dayIndex]?.services?.[serviceIndex];
+    /* A fuel allowance belongs to its vehicle, so removing the vehicle's last line
+       takes the allowance with it, wherever it sits — a hire lays a line per day and
+       the allowance is on the first of them. */
+    const fuelLinkId = isVehicleProviderLine(target) ? target?.item_id : null;
+    const keepsVehicle = fuelLinkId
+      ? previous.some((day, i) => (day.services || []).some((service, j) => (
+        service.item_id === fuelLinkId && !(i === dayIndex && j === serviceIndex)
+      )))
+      : false;
+    return previous.map((day, index) => {
+      if (index !== dayIndex && !(fuelLinkId && !keepsVehicle)) return day;
+      return {
+        ...day,
+        /* Removing a guide line takes its guide & driver detail lines (lunch / dinner /
+           overnight) with it, so the day never keeps orphaned meals and beds. */
+        services: (() => {
+          const removedKey = index === dayIndex ? target?.item_key : null;
+          return day.services.filter((service, itemIndex) => (
+            !(index === dayIndex && itemIndex === serviceIndex)
+            && (!removedKey || !service.guide_for_item_key || service.guide_for_item_key !== removedKey)
+            && !(fuelLinkId && !keepsVehicle && service.linked_item_id === fuelLinkId && isFuelAllowanceLine(service))
+          ));
+        })()
+      };
+    });
+  });
 
   /* "Update from library" (D18): copy the item's CURRENT contract rate over the line's
      locked snapshot, so a supplier change the operator has accepted moves the package.
@@ -1730,7 +2186,13 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
             } : {})
           };
         }
-        const liveRate = (item.item_rates || []).find((entry) => entry.id === service.rate_id) || rateForDates(item);
+        /* The pinned rate_id is the exact row this line sold, so it wins. When it
+           is gone the fallback must stay in this line's room: rateForDates over the
+           whole matrix would hand back a sibling villa's covering season just
+           because the two share a season name, and re-price the line off it. */
+        const pinnedRate = (item.item_rates || []).find((entry) => entry.id === service.rate_id);
+        const roomItem = { ...item, item_rates: ratesForServiceRoom(item.item_rates || [], service, roomTypesOf(item)) };
+        const liveRate = pinnedRate || rateForDates(roomItem);
         if (!liveRate) {
           showToast(`${service.item_name} has no library rate in ${packageCurrency} to refresh from.`, 'warning');
           return service;
@@ -1923,6 +2385,16 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     });
   };
 
+  const updateDayDestination = (patch) => {
+    if (!mayEditPackage || !dayDestinationsAvailable || loading || saving) return;
+    setDays((previous) => applyDayDestination(previous, [selectedDay], patch));
+  };
+
+  const applyDayDestinations = (indices, patch) => {
+    if (!mayEditPackage || !dayDestinationsAvailable || loading || saving) return;
+    setDays((previous) => applyDayDestination(previous, indices, patch));
+  };
+
   const toggleDayMark = (dayIndex) => {
     setMarkedDayIndexes((prev) => (
       prev.includes(dayIndex) ? prev.filter((entry) => entry !== dayIndex) : [...prev, dayIndex]
@@ -2089,6 +2561,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
   const singleSupplementForDisplay = hasSupplementOverride
     ? Number(activePeriod.single_supplement)
     : derivedSingleSupplement.total;
+  const missingDestinationDays = days.flatMap((day, index) => destinationLabel(day) ? [] : [index + 1]);
 
   const buildExportHtml = (options) => {
     /* The reader's language. Words come from the document dictionary, operator
@@ -2136,7 +2609,13 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         const charge = /extras?/i.test(String(service.category || '')) && lineChargeLabel(service)
           ? ` (${escapeHtml(lineChargeLabel(service))})`
           : '';
-        return `${escapeHtml(service.item_name)}${room}${charge}${supplier ? ` — ${escapeHtml(supplier)}` : ''}`;
+        const stayPay = service.stay_pay_free === true || service.stayPayFree === true
+          ? ` — Free night — ${escapeHtml(service.stay_pay_rule || service.stayPayRule || 'Stay-pay promotion')} (value ${escapeHtml(amount(
+            service.stay_pay_value ?? service.stayPayValue,
+            service.currency_code || packageCurrency
+          ))})`
+          : '';
+        return `${escapeHtml(service.item_name)}${room}${charge}${supplier ? ` — ${escapeHtml(supplier)}` : ''}${stayPay}`;
       };
       /* A day's lines, printed. Several parts sold as one composed offer print as one
          named block with its parts indented under it, because the client is buying
@@ -2168,7 +2647,9 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         .map((service) => `<div class="car-specs">${carSpecGridHtml(service.rental)}</div>`)
         .join('');
       const dayNotes = localizedText(day, 'notes', lang);
-      return `<section><h2>${L('doc.day', { n: index + 1, count: index + 1 })}</h2>${dayNotes ? `<p>${escapeHtml(dayNotes)}</p>` : ''}${services ? `<ul>${services}</ul>` : ''}${hireSpecs}</section>`;
+      const route = dayRoute(day, days[index - 1], lang);
+      const endLabel = dayEndLabel(day, lang);
+      return `<section><h2>${escapeHtml(dayDestinationHeading(day, index + 1, lang))}</h2>${route ? `<p>${escapeHtml(route)}</p>` : ''}${endLabel ? `<p>${escapeHtml(endLabel)}</p>` : ''}${dayNotes ? `<p>${escapeHtml(dayNotes)}</p>` : ''}${services ? `<ul>${services}</ul>` : ''}${hireSpecs}</section>`;
     }).join('');
     /* A working sheet shows every vehicle, because the operator needs to see the ladder they
        are pricing. A client document does not: the client gets one vehicle sized to their
@@ -2461,58 +2942,54 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             <button className="secondary-btn" onClick={addDay}><Plus size={15} /> Add day</button>
           </div></div>
           {bandScope && <p className="package-band-scope-note">Anything you add here is priced in the {packageBandLabel(mergedBands.find((band) => band.item_key === bandScope) || {})} band only. The other bands keep the shared itinerary. Switch back to &ldquo;All bands&rdquo; to edit what every band pays for.</p>}
-          <div className="day-strip-wrap" style={{ flexShrink: 0 }}>
-            <div className="day-strip">
-              {days.map((day, dayIndex) => {
-                const dayValue = dayTotal(day);
-                const marked = markedDayIndexes.includes(dayIndex);
-                return (
-                  <div key={day.id || `day-${dayIndex}`} className={`day-strip-cell${marked ? ' marked' : ''}`}>
-                    {days.length > 1 && (
-                      <input
-                        type="checkbox"
-                        className="day-strip-mark"
-                        checked={marked}
-                        onChange={() => toggleDayMark(dayIndex)}
-                        title={`Tick Day ${dayIndex + 1} to delete it together with the other ticked days`}
-                        aria-label={`Tick Day ${dayIndex + 1} for bulk delete`}
-                      />
-                    )}
-                    <button type="button" className={`day-strip-card ${selectedDay === dayIndex ? 'active' : ''}`} onClick={() => setSelectedDay(dayIndex)}>
-                      <div className="day-strip-card-title">Day {dayIndex + 1}</div>
-                      <div className="day-strip-card-date">{dayDayLabel(day)}</div>
-                      <div className="day-strip-card-summary"><span>{day.services.length} item{day.services.length === 1 ? '' : 's'}</span><span>{money(dayValue, dayValueCurrency(day))}</span></div>
-                    </button>
-                  </div>
-                );
-              })}
-              <button type="button" className="day-add-chip" onClick={addDay}><Plus size={15} /> Add Day</button>
-            </div>
-            {markedDayIndexes.length > 0 && (() => {
-              const doomed = days.filter((_, index) => markedDayIndexes.includes(index));
-              const lines = doomed.reduce((count, day) => count + (day.services || []).length, 0);
-              return (
-                <div className="day-bulk-bar">
-                  <span className="day-bulk-count">
-                    {doomed.length} day{doomed.length === 1 ? '' : 's'} ticked
-                    {lines ? ` · ${lines} service line${lines === 1 ? '' : 's'} on them` : ''}
-                  </span>
-                  <button
-                    type="button"
-                    className={`secondary-btn danger${bulkDeleteArmed ? ' armed' : ''}`}
-                    onClick={deleteMarkedDays}
-                    title="Deleting a day takes every service line worked on it"
-                  >
-                    <Trash2 size={15} />
-                    {bulkDeleteArmed
-                      ? `Click again to delete ${doomed.length} day${doomed.length === 1 ? '' : 's'}`
-                      : `Delete ${doomed.length} day${doomed.length === 1 ? '' : 's'}`}
-                  </button>
-                  <button type="button" className="secondary-btn" onClick={clearDayMarks}>Clear</button>
-                </div>
-              );
-            })()}
-          </div>
+          {(() => {
+            const dayDescriptors = days.map((day, i) => {
+              const services = day.services || [];
+              return {
+                key: day.id || `day-${i}`,
+                index: i,
+                dayNumber: i + 1,
+                dateLabel: dayDayLabel(day),
+                fullLabel: dayDayLabel(day),
+                destinationName: day.destination_name || '',
+                destinationLabel: destinationLabel(day),
+                count: services.length,
+                valueLabel: money(dayTotal(day), dayValueCurrency(day)),
+                marked: markedDayIndexes.includes(i),
+                status: { empty: services.length === 0, estimate: false, guideUnnamed: false },
+              };
+            });
+            const markedDays = dayDescriptors.filter((d) => d.marked);
+            const markedLines = markedDays.reduce((n, d) => n + d.count, 0);
+            return (
+              <>
+                <DayRail
+                  days={dayDescriptors}
+                  activeIndex={selectedDay}
+                  onSelect={(i) => setSelectedDay(i)}
+                  canMark={days.length > 1}
+                  onToggleMark={toggleDayMark}
+                  onAddDay={addDay}
+                  onOpenBoard={() => setDayBoardOpen(true)}
+                  markedCount={markedDays.length}
+                  markedLines={markedLines}
+                  bulkArmed={bulkDeleteArmed}
+                  onBulkDelete={deleteMarkedDays}
+                  onClearMarks={clearDayMarks}
+                  variant="package"
+                />
+                <DayBoardModal
+                  open={dayBoardOpen}
+                  days={dayDescriptors}
+                  activeIndex={selectedDay}
+                  onSelect={(i) => { setSelectedDay(i); setDayBoardOpen(false); }}
+                  onClose={() => setDayBoardOpen(false)}
+                  title="All days"
+                  subtitle={`${days.length} day${days.length === 1 ? '' : 's'} · click a day to jump to it`}
+                />
+              </>
+            );
+          })()}
           {days[selectedDay] && <section key={days[selectedDay].id || `day-${selectedDay}`} className="package-canvas-day selected"
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
@@ -2527,7 +3004,34 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                 showToast(`Could not add the dragged item: ${error.message}`, 'error');
               }
             }}>
-            <header><h3><CalendarDays size={17} /> Day {selectedDay + 1}</h3><span>{days[selectedDay].services.length} item{days[selectedDay].services.length === 1 ? '' : 's'}</span></header>
+            <header>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', minWidth: 0 }}>
+                <div>
+                  <h3><CalendarDays size={17} /> {dayDestinationHeading(days[selectedDay], selectedDay + 1)}</h3>
+                  {dayRoute(days[selectedDay], days[selectedDay - 1]) && <p>{dayRoute(days[selectedDay], days[selectedDay - 1])}</p>}
+                  {dayEndLabel(days[selectedDay]) && <p>{dayEndLabel(days[selectedDay])}</p>}
+                </div>
+                <span>{days[selectedDay].services.length} item{days[selectedDay].services.length === 1 ? '' : 's'}</span>
+              </div>
+              <DayStepper
+                index={selectedDay}
+                count={days.length}
+                onPrev={() => setSelectedDay((i) => Math.max(0, i - 1))}
+                onNext={() => setSelectedDay((i) => Math.min(days.length - 1, i + 1))}
+              />
+            </header>
+            <DayDestinationEditor
+              key={`${days[selectedDay].id || 'new'}-${selectedDay}`}
+              day={days[selectedDay]}
+              previousDay={days[selectedDay - 1]}
+              days={days}
+              dayIndex={selectedDay}
+              defaultCountry=""
+              disabled={!mayEditPackage || !dayDestinationsAvailable || loading || saving}
+              available={dayDestinationsAvailable}
+              onChange={updateDayDestination}
+              onApply={applyDayDestinations}
+            />
             <LanguageText
               field="notes"
               ariaLabel={`Day ${selectedDay + 1} notes`}
@@ -2548,7 +3052,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
               const crew = crewShareOn(service);
               const coverage = seasonFor(item, rateForService(service), { service });
               const roomPlan = isStay(service) ? roomPlanFor(service) : null;
-              const capacity = isStay(service)
+              const capacity = isExtrasItem(service) ? 0 : isStay(service)
                 ? (Number(service.vehicle_capacity) || Number(item?.max_occupancy) || 0)
                 : (Number(item?.max_occupancy || service.vehicle_capacity) || 0);
               const capacitySummary = capacity
@@ -2563,7 +3067,11 @@ const childRange = packageChildAgeRange(form.childAgeRange);
               const pillRate = service.rate_snapshot && Object.keys(service.rate_snapshot).length
                 ? service.rate_snapshot
                 : (item?.item_rates || []).find((rate) => rate.id === service.rate_id);
-              const vectorPills = !isStay(service)
+              /* The season picker offers this line's room alone: a sibling villa's
+                 seasons share the name and dates, and offering them here is how a
+                 line gets switched onto a ladder it never contracted. */
+              const lineRateRows = ratesForServiceRoom(item?.item_rates || [], service, roomTypesOf(item));
+              const vectorPills = !isStay(service) && !isExtrasItem(service)
                 && String(pillRate?.rate_basis || service.rate_basis || item?.pricing_model || '').toLowerCase() === 'per_vehicle'
                 && pillRate?.prices_by_vehicle && Object.keys(pillRate.prices_by_vehicle).length;
               const serviceCurrency = service.currency_code || packageCurrency;
@@ -2589,6 +3097,12 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                 <article className={`package-canvas-service ${bandOnly ? 'band-only' : ''}${offer ? ' in-bundle' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('application/json', JSON.stringify({ type: 'service', fromDay: selectedDay, fromIndex: rawIndex }))}>
                 <GripVertical size={16} className="package-grip" />
                 <div className="package-service-main"><strong>{service.item_name}</strong><small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{isStay(service) && service.room_type ? ` · ${service.room_type}` : ''}{/extras?/i.test(String(service.category || '')) && lineChargeLabel(service) ? ` · ${lineChargeLabel(service)}` : ''}</small>
+                  {(service.stay_pay_free === true || service.stayPayFree === true) && (
+                    <small className="package-band-flag">
+                      Free night — {service.stay_pay_rule || service.stayPayRule || 'Stay-pay promotion'}
+                      {' '}(value {service.currency_code || packageCurrency} {Number(service.stay_pay_value ?? service.stayPayValue) || 0})
+                    </small>
+                  )}
                   {bandOnly
                     ? <small className="package-band-flag">this band only</small>
                     : (service.tier_key && <small className="package-band-flag other">{packageBandLabel(mergedBands.find((band) => band.item_key === service.tier_key) || {})} only</small>)}
@@ -2606,8 +3120,8 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                       <option value="new">New offer from this line</option>
                       {offersOnDay.map((group) => <option key={group.key} value={group.key}>{group.label || defaultBundleLabel(group.lines[0])}</option>)}
                     </select>}
-                  {item?.item_rates?.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(selectedDay, rawIndex, 'rate_id', event.target.value)}>
-                    {item.item_rates.map((rate) => {
+                  {lineRateRows.length > 1 && <select aria-label={`Rate for ${service.item_name}`} value={service.rate_id || ''} onChange={(event) => updateService(selectedDay, rawIndex, 'rate_id', event.target.value)}>
+                    {lineRateRows.map((rate) => {
                     const opt = isExtrasItem(item) ? chargeNameOf(rate) : rateOptionLabel(rate, item);
                     const season = rate.season_name || rate.option_name || 'Contract rate';
                     const from = rate.valid_from ? String(rate.valid_from).slice(0, 10).replaceAll('-', '/') : '';
@@ -2680,7 +3194,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                     </div>
                   )}
                 </div>
-                <div className="package-service-price"><span>{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)}</span><small>{service.rate_basis || 'per_person'} · no markup</small>
+                <div className="package-service-price"><span>{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)}</span><small>{isVehicleExtra(service) ? 'per vehicle' : service.rate_basis || 'per_person'} · no markup</small>
                   {crew && <small className="package-crew-flag" title={`${crew.label} at ${service.currency_code} ${Number(crew.fare).toFixed(2)}${crew.heads > 1 ? ` × ${crew.heads}` : ''} = ${service.currency_code} ${Number(crew.total).toFixed(2)}, bought on this line and split across whichever party the band sells to. It is not a head and never a line of its own.`}>
                     + {service.currency_code} {Number(crew.total).toFixed(2)} {crew.label.toLowerCase()}, shared by the band
                   </small>}
@@ -2699,7 +3213,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
                 <label className="package-included-toggle"><input type="checkbox" checked={service.is_included !== false} onChange={(event) => updateService(selectedDay, rawIndex, 'is_included', event.target.checked)} /> Included</label>
                 {roomPlan
                   ? <span className="package-quantity auto" title={`Rooms are worked out from ${autoPattern.pax} pax at ${roomPlan.capacity} per room`}>Rooms {roomPlan.roomCount}</span>
-                  : <label className="package-quantity">Qty <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(selectedDay, rawIndex, 'quantity', Number(event.target.value) || 1)} /></label>}
+                  : <label className="package-quantity">{isVehicleExtra(service) ? 'Vehicles' : 'Qty'} <input type="number" min="1" step="1" value={service.quantity || 1} onChange={(event) => updateService(selectedDay, rawIndex, 'quantity', isVehicleExtra(service) ? Math.max(1, Math.floor(Number(event.target.value) || 1)) : Number(event.target.value) || 1)} /></label>}
                 <button type="button" className="package-icon-button" aria-label={`Update ${service.item_name} from the library (re-locks today's rate)`} onClick={() => refreshServiceFromLibrary(selectedDay, rawIndex)} title={service.rental ? 'Update from library: re-price this hire from today\u2019s tariff' : 'Update from library: re-locks this line to the library\u2019s current rate'} disabled={!library.find((entry) => entry.id === service.item_id)}><RefreshCw size={16} /></button>
                 {service.rental && (
                   <button type="button" className="package-icon-button" aria-label={`Change the hire on ${service.item_name}`} title={isReferenceHire(service.rental) ? 'Change the hire — how long one transfer is, and where the car goes out' : 'Change the hire — where and when the car goes out and comes back'} onClick={() => openCarRentalEdit(selectedDay, rawIndex)}><Car size={16} /></button>
@@ -2837,7 +3351,14 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             {days.length ? days.map((day, dayIndex) => <section key={day.id || `preview-${dayIndex}`}>
               <strong>Day {dayIndex + 1}</strong>
               {(day.services || []).map((service, serviceIndex) => <div className="package-preview-item" key={`${service.id || service.item_id}-${serviceIndex}`}>
-                <span>{service.item_name}<small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{service.is_included === false ? ' · optional' : ''}{packageIsTransport(service, library) && !service.tier_key ? ' · vehicle ladder, party picks one' : ''}</small></span>
+                <span>{service.item_name}<small>{service.category || 'Service'}{packageServiceSupplier(service, library) ? ` · ${packageServiceSupplier(service, library)}` : ''}{service.is_included === false ? ' · optional' : ''}{packageIsTransport(service, library) && !service.tier_key ? ' · vehicle ladder, party picks one' : ''}</small>
+                  {(service.stay_pay_free === true || service.stayPayFree === true) && (
+                    <small className="package-band-flag">
+                      Free night — {service.stay_pay_rule || service.stayPayRule || 'Stay-pay promotion'}
+                      {' '}(value {service.currency_code || packageCurrency} {Number(service.stay_pay_value ?? service.stayPayValue) || 0})
+                    </small>
+                  )}
+                </span>
                 <span className="package-preview-price">{service.currency_code} {Number(service.unit_cost || 0).toFixed(2)} A- {service.quantity || 1}</span>
                 <button type="button" className="package-icon-button" aria-label={`Remove ${service.item_name} from the package`} onClick={() => removeService(dayIndex, serviceIndex)}><Trash2 size={14} /></button>
               </div>)}
@@ -2849,6 +3370,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     </>}
     {exportDialog && <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setExportDialog(false); }}><section className="modal-content package-export-modal">
       <div className="modal-header"><div><h2>Export package</h2><p>Who it's for, the format, and what goes in.</p></div><button className="close-btn" onClick={() => setExportDialog(false)}><X size={20} /></button></div>
+      {missingDestinationDays.length > 0 && <p role="status">Destination missing for day{missingDestinationDays.length === 1 ? '' : 's'} {missingDestinationDays.join(', ')}. You can still export; these days will have no destination in their headings.</p>}
       {/* Two columns rather than one long stack. Every group here is a short list of
           radio buttons or checkboxes, so the old layout spent a whole screen on about
           fifteen controls and pushed Export below the fold on a laptop. */}
@@ -2892,6 +3414,18 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       defaultRateId={accomChargeModal.rate?.id || ''}
       onConfirm={confirmAccommodationCharge}
       onCancel={() => setAccomChargeModal(null)}
+    />}
+    {fuelPickerModal && <FuelVehicleModal
+      itemName={fuelPickerModal.item?.name}
+      options={fuelPickerModal.options}
+      onConfirm={confirmFuelVehicle}
+      onCancel={() => setFuelPickerModal(null)}
+    />}
+    {fuelForVehicleModal && <FuelForVehicleModal
+      vehicleName={fuelForVehicleModal.vehicleName}
+      items={fuelExtrasItems}
+      onConfirm={confirmFuelForVehicle}
+      onCancel={() => setFuelForVehicleModal(null)}
     />}
     {/* The hire, asked the same way as on an itinerary. A package is sold for its
         validity dates rather than one trip, so the dialog opens on the component

@@ -19,6 +19,7 @@ import {
   crewPoolRooms,
   OVERNIGHT_RIDER_LABELS
 } from '../lib/guidePricing';
+import { staffCountWord, staffLadderBasis } from '../lib/staffRoomTiers';
 
 /* Overland guide detail: the lunch, dinner and overnight the guide and driver are
    fed and bedded on the days the guide is used.
@@ -64,6 +65,10 @@ export default function GuideDetailsModal({
      the rooms booked at the property the guide is bedded at rather than the
      whole day's. */
   clientRoomsByAccommodation = null,
+  /* The same counts in paying heads, for a property whose crew ladder counts
+     guests rather than rooms. */
+  payingGuests,
+  payingGuestsByAccommodation = null,
   travelStart = '',
   travelEnd = '',
   defaultValues = {},
@@ -133,14 +138,22 @@ export default function GuideDetailsModal({
     const count = item ? clientRoomsByAccommodation?.[item.id] : undefined;
     return count === undefined ? clientRooms : count;
   };
+  const payingGuestsAt = (item) => {
+    const count = item ? payingGuestsByAccommodation?.[item.id] : undefined;
+    return count === undefined ? payingGuests : count;
+  };
   const hostClientRooms = clientRoomsAt(overnightHost);
+  const hostPayingGuests = payingGuestsAt(overnightHost);
   /* A crew ladder states each threshold; the note names the first one. Without
      a ladder the property's legacy minimum still applies. */
   const hostCrewLadder = crewRoomLadder(hostRate, { minRooms: guideMinClientRooms(overnightHost) });
+  const hostCountWord = staffCountWord(staffLadderBasis(hostCrewLadder));
+  const hostCount = staffLadderBasis(hostCrewLadder) === 'guests' ? hostPayingGuests : hostClientRooms;
   const guideMinRooms = hostCrewLadder[0]?.minRooms ?? 1;
-  const guideThresholdMet = guideRateApplies(hostClientRooms, guideMinRooms);
+  const guideThresholdMet = guideRateApplies(hostCount, guideMinRooms);
   const guideRateOptions = {
     clientRooms: hostClientRooms,
+    payingGuests: hostPayingGuests,
     minRooms: guideMinRooms
   };
   const guideCost = overnightHost ? guideTravelRate(hostRate, true, guideRateOptions) : 0;
@@ -303,18 +316,20 @@ export default function GuideDetailsModal({
               <option value="">Select a property that offers a guide &amp; driver room</option>
               {altOptions.map((item) => {
                 const rate = overnightRateRow(item, currency, travelStart, travelEnd);
-                const itemClientRooms = clientRoomsAt(item);
                 /* One crew pool per property, so the option names the first bed
                    and the second one rather than the same contracted room twice. */
+                const itemLadder = crewRoomLadder(rate, { minRooms: guideMinClientRooms(item) });
+                const itemWord = staffCountWord(staffLadderBasis(itemLadder));
                 const crewOptions = {
-                  clientRooms: itemClientRooms,
-                  minRooms: crewRoomLadder(rate, { minRooms: guideMinClientRooms(item) })[0]?.minRooms ?? 1
+                  clientRooms: clientRoomsAt(item),
+                  payingGuests: payingGuestsAt(item),
+                  minRooms: itemLadder[0]?.minRooms ?? 1
                 };
                 const guideNight = guideTravelRate(rate, true, crewOptions);
                 const driverNight = driverTravelRate(rate, true, { ...crewOptions, crewBed: 1 });
                 return (
                   <option key={item.id} value={item.id}>
-                    {item.name} — crew bed {money(guideNight, currency)} then {money(driverNight, currency)} / night{crewOptions.minRooms > 1 ? ` (crew rate from ${crewOptions.minRooms} client rooms)` : ''}
+                    {item.name} — crew bed {money(guideNight, currency)} then {money(driverNight, currency)} / night{crewOptions.minRooms > 1 ? ` (crew rate from ${crewOptions.minRooms} ${itemWord})` : ''}
                   </option>
                 );
               })}
@@ -356,7 +371,7 @@ export default function GuideDetailsModal({
                         {who === 'both'
                           ? `Guide ${money(guideCost, currency)} + driver ${money(driverCost, currency)} — `
                             + (crewPoolSize > 1
-                              ? `${crewPoolSize} crew rooms contracted for this many client rooms`
+                              ? `${crewPoolSize} crew rooms contracted for this many ${hostCountWord}`
                               : 'one crew room in the pool, so the second bed pays single')
                           : `${money(cost, currency)} / night`}
                       </small>
@@ -379,11 +394,11 @@ export default function GuideDetailsModal({
             </p>
           )}
 
-          {overnightHost && riderCharge !== 'driver' && guideMinRooms > 1 && hostClientRooms !== undefined && hostClientRooms !== null && (
+          {overnightHost && riderCharge !== 'driver' && guideMinRooms > 1 && hostCount !== undefined && hostCount !== null && (
             <p className="service-guide-note">
               {guideThresholdMet
-                ? `${overnightHost.name} guide rate applies from ${guideMinRooms} client rooms — ${hostClientRooms} booked, so the guide is charged ${money(guideCost, currency)} / night.`
-                : `${overnightHost.name} guide rate needs ${guideMinRooms} client rooms — only ${hostClientRooms} booked, so the guide is charged the single rate (${money(guideCost, currency)} / night).`}
+                ? `${overnightHost.name} guide rate applies from ${guideMinRooms} ${hostCountWord} — ${hostCount} booked, so the guide is charged ${money(guideCost, currency)} / night.`
+                : `${overnightHost.name} guide rate needs ${guideMinRooms} ${hostCountWord} — only ${hostCount} booked, so the guide is charged the single rate (${money(guideCost, currency)} / night).`}
             </p>
           )}
         </div>

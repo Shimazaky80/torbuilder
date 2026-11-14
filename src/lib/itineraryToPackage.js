@@ -2,8 +2,11 @@ import { packageKey, packageRateForDates, packageSeasonResolution } from './pack
 import { rentalLineBuyTotal, rentalPackageRate } from './carRentalPricing';
 import { applyProtectionToRate } from './priceValidity';
 import { servicePax } from './servicePricing';
+import { isExtrasItem } from './extrasChargeTypes';
+import { destinationFields } from './dayDestination';
 import { crewShareOn, crewSharePerPerson } from './guidePricing';
 import { isAdultTraveller, normaliseTravellerRole } from './roomAllocationHelper';
+import { monthOf, monthStartIso, monthEndIso, monthRangeLabel } from './travelTiming';
 
 /* A package line stores the contract cost of ONE unit, while an itinerary line
    stores a per-person share of the whole line. Flat bases (a vehicle, a guide's
@@ -21,11 +24,21 @@ const isGuideDetail = (service) => service?.guideOnly === true || Boolean(servic
 
 const isSurchargeLine = (service) => Boolean(service?.surchargeType || service?.surchargeUnitBasis);
 
-const validityPeriodsFor = (start, end) => (
-  start && end && end >= start
-    ? [{ valid_from: start, valid_to: end, name: 'Itinerary dates', accommodation_per_person: null, single_supplement: 0 }]
-    : []
-);
+const validityPeriodsFor = (start, end) => {
+  const fromM = monthOf(start);
+  const toM = monthOf(end || start);
+  if (!fromM) return [];
+  const validFrom = monthStartIso(fromM);
+  const validTo = monthEndIso(toM);
+  const seasonName = monthRangeLabel(fromM, toM);
+  return [{
+    valid_from: validFrom,
+    valid_to: validTo,
+    name: seasonName || 'Itinerary Season',
+    accommodation_per_person: null,
+    single_supplement: 0
+  }];
+};
 
 /* The season the itinerary line was priced from, so the package can re-price
    itself at other party sizes from the same contract row. Lines built in this
@@ -188,6 +201,11 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
     replaces_item_key: null,
     rate_snapshot: snapshot,
     rental: rental || null,
+    /* A free night crosses over still free: the package would otherwise price
+       the room again from the library and quietly undo the promotion. */
+    stay_pay_free: service?.stayPayFree === true,
+    stay_pay_rule: service?.stayPayFree === true ? (service.stayPayRule || null) : null,
+    stay_pay_value: service?.stayPayFree === true ? (Number(service.stayPayValue) || 0) : null,
     crew_share: crew ? { ...crew, divisor: crew.divisor } : null,
     price_protection_percent: protectionStamp,
     protected_season_name: service?.protectedSeasonName || '',
@@ -199,14 +217,61 @@ const lineFor = (service, item, periods, currency, fallbackPax, shareContext) =>
 };
 
 /* The package party is the paying party, not the staffing: tour leaders and
-   guides are priced into a package as services, never as travellers. */
-const partyFor = (meta) => {
+   guides are priced into a package as services, never as travellers. Retains
+   the exact number of travellers (adults + children). */
+export const partyFor = (meta) => {
   const travellers = Array.isArray(meta?.travellers) ? meta.travellers : [];
   const clients = travellers.filter((traveller) => normaliseTravellerRole(traveller?.role) === 'client');
-  const adults = clients.filter(isAdultTraveller).length;
-  if (adults > 0) return adults;
-  if (clients.length > 0) return clients.length;
-  return Math.max(1, (Number(meta?.numAdults) || 0) + (Number(meta?.numChildren) || 0));
+  if (clients.length > 0) {
+    const adults = clients.filter(isAdultTraveller).length;
+    const children = clients.length - adults;
+    return {
+      adults: Math.max(0, adults),
+      children: Math.max(0, children),
+      pax: Math.max(1, adults + children)
+    };
+  }
+  const adults = Number(meta?.numAdults) || 0;
+  const children = Number(meta?.numChildren) || 0;
+  const pax = Math.max(1, adults + children);
+  return {
+    adults: adults || pax,
+    children,
+    pax
+  };
+};
+
+export const vehicleCapacityFromItinerary = (days = [], meta = {}, libraryById = new Map()) => {
+  const capacities = [];
+  (Array.isArray(days) ? days : []).forEach((day) => {
+    (day?.services || []).forEach((service) => {
+      const item = libraryById.get ? libraryById.get(String(service?.itemId)) : null;
+      const cat = String(service?.category || item?.category || '');
+      if (isExtrasItem({ category: cat })) return;
+      const isVeh = /transfers?|transport|car\s*rental|activities?|tours?|flights?\s*\/?\s*charter/i.test(cat);
+      const cap = Number(service?.rental?.passengers)
+        || Number(service?.vehicle_capacity)
+        || (isVeh ? (Number(service?.maxOccupancy) || Number(item?.max_occupancy) || Number(item?.capacity)) : 0);
+      if (cap > 0) capacities.push(cap);
+    });
+  });
+  if (capacities.length) {
+    return Math.max(...capacities);
+  }
+  const party = partyFor(meta);
+  return party.pax;
+};
+
+export const vehicleColumnsForCapacity = (capacity, vehicleTypes = []) => {
+  const types = (Array.isArray(vehicleTypes) ? vehicleTypes : []).filter(Boolean);
+  if (!types.length) return [];
+  const exact = types.find((t) => Number(t.max_capacity) === capacity);
+  if (exact) return [exact.code];
+  const fitting = types
+    .filter((t) => Number(t.max_capacity) >= capacity)
+    .sort((a, b) => Number(a.max_capacity) - Number(b.max_capacity));
+  if (fitting.length) return [fitting[0].code];
+  return types[0]?.code ? [types[0].code] : [];
 };
 
 const clientChildren = (meta) => {
@@ -237,7 +302,10 @@ const packageNameFor = (meta) => {
 const descriptionFor = (meta, start, end) => {
   const reference = String(meta?.referenceNumber || '').trim();
   const source = reference ? `Converted from itinerary ${reference}` : 'Converted from an itinerary';
-  const dates = start && end ? ` (${start} to ${end})` : '';
+  const fromM = monthOf(start);
+  const toM = monthOf(end || start);
+  const seasonName = fromM ? monthRangeLabel(fromM, toM) : '';
+  const dates = seasonName ? ` (${seasonName})` : '';
   return `${source}${dates}.`;
 };
 
@@ -248,7 +316,8 @@ export const buildItineraryPackage = ({
   shareContext = null,
   fallbackPax = 0,
   travelWindow = {},
-  currencyCode = 'ZAR'
+  currencyCode = 'ZAR',
+  vehicleTypes = []
 } = {}) => {
   const currency = String(currencyCode || 'ZAR').trim().toUpperCase() || 'ZAR';
   const start = String(travelWindow?.start || '').trim();
@@ -260,6 +329,7 @@ export const buildItineraryPackage = ({
   const sourceDays = Array.isArray(days) ? days : [];
 
   const mappedDays = sourceDays.map((day, dayIndex) => ({
+    ...destinationFields(day),
     day_number: dayIndex + 1,
     notes: day?.notes || null,
     /* The day's notes are operator prose, so the languages they were written in
@@ -295,7 +365,9 @@ export const buildItineraryPackage = ({
     });
   });
 
-  const bandPax = partyFor(meta);
+  const party = partyFor(meta);
+  const vehCap = vehicleCapacityFromItinerary(sourceDays, meta, libraryById);
+  const vehCols = vehicleColumnsForCapacity(vehCap, vehicleTypes);
   const childRange = childAgeRangeFor(meta);
   const hasTravellers = Array.isArray(meta?.travellers) && meta.travellers.length > 0;
   return {
@@ -304,15 +376,17 @@ export const buildItineraryPackage = ({
     currency_code: currency,
     accepts_children: hasTravellers ? clientChildren(meta).length > 0 : (Number(meta?.numChildren) || 0) > 0,
     child_age_ranges: childRange ? [childRange] : [],
+    vehicle_capacity: vehCap,
+    vehicle_columns: vehCols,
     days: mappedDays,
     validity_periods: periods,
     pax_options: [{
       item_key: packageKey(),
-      pax: bandPax,
-      adults: bandPax,
-      children: 0,
-      min_pax: bandPax,
-      max_pax: bandPax,
+      pax: party.pax,
+      adults: party.adults,
+      children: party.children,
+      min_pax: party.pax,
+      max_pax: party.pax,
       is_auto_generated: false
     }]
   };

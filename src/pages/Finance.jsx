@@ -42,6 +42,8 @@ import { computePerPersonRows, breakdownSnapshot } from '../lib/perPersonPricing
 import { accommodationBreakdown } from '../lib/accommodationBreakdown';
 import { rateForTravel } from '../lib/priceValidity';
 import { withRoomTypeRates } from '../lib/roomTypePricing';
+import { ratesForServiceRoom, roomTypesOf } from '../lib/roomTypes';
+import { lineChargeLabel, ratesForCharge } from '../lib/extrasChargeTypes';
 import { scopeCompanyId } from '../lib/tenantScope';
 import {
   Receipt,
@@ -659,21 +661,27 @@ export const Finance = () => {
             sellPP: (Number(it.total_sell) || 0) / pax,
             taxRate: it.tax_rate,
             itemId: it.item_id || null,
+            roomType: it.room_type || '',
+            roomTypeId: it.room_type_id || null,
+            mealPlan: it.meal_plan || '',
             roomAllocations: Array.isArray(it.room_allocations) ? it.room_allocations : [],
             markup: Number(it.markup_percentage) || 0
           });
         });
       });
-      const rateBy = (itemId) => {
+      const rateBy = (itemId, svcRates, dayDate, sv = null) => {
         if (!itemId) return null;
         const arr = itineraryRates.get(String(itemId)) || [];
         /* Season-aware: a library item holds one row per season, and taking the
            first row for the currency priced the invoice's per-person and
            per-room breakdowns from whichever season came back first — the same
            winter-rate bug the room-allocation dialog had. Resolve against this
-           itinerary's travel window instead. */
+           itinerary's travel window instead, over the charge and room the line
+           sold: a sibling room sharing the season name must never win the tie. */
+        const item = { item_rates: arr };
+        const scoped = ratesForServiceRoom(ratesForCharge(item, lineChargeLabel(sv)), sv, roomTypesOf(item));
         const rate = rateForTravel({
-          rates: arr,
+          rates: scoped,
           currencyCode: code,
           startDate: selectedItinerary?.travel_start_date,
           endDate: selectedItinerary?.travel_end_date,
@@ -749,7 +757,9 @@ export const Finance = () => {
                 return;
               }
               const itemId = it.item_id || null;
-              const baseRate = itemId ? rateBy(itemId) : null;
+              const baseRate = itemId
+                ? rateBy(itemId, null, '', { roomTypeId: it.room_type_id || null, roomType: it.room_type || '', mealPlan: it.meal_plan || '' })
+                : null;
               const bd = accommodationBreakdown({
                 mode: 'rooms',
                 lineTotal: gross,

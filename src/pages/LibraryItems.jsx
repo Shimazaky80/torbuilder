@@ -10,12 +10,14 @@ import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
-import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis, isSurchargeItem, surchargeTypeLabel, feeEditorRowFromRecord, feeRatePayload, feeSeasonKey, moveFeeAmount, feeBasisChargesHeads } from '../lib/surchargeFees';
+import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis, isSurchargeItem, surchargeTypeLabel, feeEditorRowFromRecord, feeRatePayload, moveFeeAmount, feeBasisChargesHeads, emptyFeeWindow, feeWindowKey, feeWindowsFromSeasons, feeWindowOverlapError } from '../lib/surchargeFees';
 import { chargesChildRate } from '../lib/servicePricing';
 import { waiverLadder, waiverFromLadder, withWaiverNote } from '../lib/singleSupplement';
-import { nightBandLabel, WEEKEND_DAY_OPTIONS, weekendDaysOf } from '../lib/accommodationOptions';
+import { nightBandLabel, WEEKEND_DAY_OPTIONS, weekendDaysOf, weekendRatesOf, withWeekendRatesNote } from '../lib/accommodationOptions';
+import { STAY_PAY_FREE_NIGHT_RULES, emptyStayPayPromotion, normalizeStayPayPromotions, stayPayPromotionError, stayPayPromotionsOverlapError, stayPayRuleScopeLabel, stayPayRuleSummary } from '../lib/stayPay';
 import { EXTRAS_CHARGE_SUGGESTIONS } from '../lib/extrasChargeTypes';
-import { crewLadderTiers, normaliseStaffTiers, staffRoomLadder, staffTierSummary } from '../lib/staffRoomTiers';
+import { FUEL_INCLUDED_OPTIONS, fuelFlagToColumn, fuelFlagFromColumn } from '../lib/fuelAllowance';
+import { crewLadderTiers, normaliseStaffTiers, staffCountWord, staffRoomLadder, staffTierSummary } from '../lib/staffRoomTiers';
 import { STAR_GRADES, starGlyphs, starLabel, starRatingOf } from '../lib/starGrading';
 import { supplierColumns, supplierStarColumn } from '../lib/supplierStarColumn';
 import { normalizeRoomTypes, roomForRate, roomsFromRates } from '../lib/roomTypes';
@@ -102,6 +104,10 @@ const createCarRentalSeason = (copyFrom = null) => {
     seasonId: `crs_${carSeasonCount}`,
     validFrom: '',
     validTo: '',
+    /* Fuel inclusion is a contract fact, not a figure: a new season keeps the
+       answer the season before it gave, because the same supplier rarely flips
+       it between weeks. */
+    fuelIncluded: copyFrom?.fuelIncluded || '',
     /* A new season starts as the ladder before it with the money blanked, because a
        hire contract cuts its weeks the same way all year; only the figures move. A
        carried-over price would be money nobody had typed. */
@@ -175,7 +181,10 @@ const tierLadderPayload = (tiers) => (Array.isArray(tiers) ? tiers : [])
       minClientRooms: Math.max(0, Math.round(minRooms)),
       maxClientRooms: ceiling === null ? null : Math.max(Math.round(minRooms), ceiling),
       rooms: Math.max(1, Math.floor(parseFloat(tier.rooms) || 1)),
-      rate
+      rate,
+      /* Only a guest-counting ladder says so; a rooms ladder stores the shape
+         it always had, so old rows and old readers are untouched. */
+      ...(tier.basis === 'guests' ? { basis: 'guests' } : {})
     };
   })
   .filter(Boolean)
@@ -189,7 +198,8 @@ const tierLadderFromRow = (tiers) => (Array.isArray(tiers)
       minClientRooms: moneyLoadKeepZero(tier?.minClientRooms ?? tier?.min_rooms),
       maxClientRooms: moneyLoadKeepZero(tier?.maxClientRooms ?? tier?.max_rooms),
       rooms: moneyLoadKeepZero(tier?.rooms) || '1',
-      rate: moneyLoadKeepZero(tier?.rate)
+      rate: moneyLoadKeepZero(tier?.rate),
+      basis: tier?.basis === 'guests' ? 'guests' : 'rooms'
     }))
   : []);
 
@@ -204,7 +214,8 @@ const emptySeasonMoney = () => ({
   adultRate: '', childRate: '', fastTrackAdultRate: '', fastTrackChildRates: {}, tiers: [],
   vehicleRate: '', pricesByVehicle: {}, entranceFeePerson: '', entranceFeeVehicle: '', entranceFeeChild: '',
   levyAdultRate: '', levyChildRate: '', unitRate: '', taxesAndSurcharges: '',
-  minNights: '', maxNights: '', weekendDays: [], weekendPrice: '', occupancyRates: []
+  minNights: '', maxNights: '', weekendDays: [], weekendPrice: '',
+  weekendPrice1Adult: '', weekendPrice2Adults: '', weekendPrice3PlusAdults: '', weekendChildRates: {}, occupancyRates: []
 });
 
 /* The adult/child slots a priced season can actually use. Accommodation takes
@@ -478,20 +489,49 @@ const feeTypeHeading = (type) => {
    for the rooms it adds (0 = free, a partial amount = discounted) and — when
    the deal has an end — the client-room count it stops covering. */
 const TierLadderEditor = ({
-  legend, roomLabel, currency, tiers = [], tone = 'teal', moneyStep, onAdd, onChange, onRemove
+  legend, roomLabel, currency, tiers = [], tone = 'teal', moneyStep, onAdd, onChange, onRemove, onBasisChange
 }) => {
   const palette = tone === 'amber'
     ? { border: '#fde68a', title: '#92400e', label: '#a16207', note: '#b45309' }
     : { border: '#99f6e4', title: '#115e59', label: '#0f766e', note: '#0f766e' };
+  /* The basis lives on the rows; the draft only holds the choice while the
+     ladder is empty, so the first tier added is stamped with what was picked. */
+  const [draftBasis, setDraftBasis] = useState(() => (tiers[0]?.basis === 'guests' ? 'guests' : 'rooms'));
+  const basis = tiers.length ? (tiers[0]?.basis === 'guests' ? 'guests' : 'rooms') : draftBasis;
+  const countWord = staffCountWord(basis);
   return (
     <div style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: `1px dashed ${palette.border}` }}>
       <span style={{ fontSize: '0.78rem', fontWeight: 700, color: palette.title, display: 'block', marginBottom: '0.35rem' }}>
         {legend}
       </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600 }}>Thresholds count:</span>
+        {[{ id: 'rooms', label: 'Client rooms' }, { id: 'guests', label: 'Paying guests' }].map((option) => {
+          const selected = basis === option.id;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => { setDraftBasis(option.id); onBasisChange?.(option.id); }}
+              style={{
+                padding: '0.2rem 0.65rem', borderRadius: '999px', cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
+                border: `1px solid ${selected ? palette.title : palette.border}`,
+                background: selected ? palette.title : '#fff',
+                color: selected ? '#fff' : palette.label
+              }}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+        <span style={{ fontSize: '0.68rem', color: palette.note }}>
+          {basis === 'guests' ? 'Some properties count people, not rooms — the deal releases from the paying head count.' : 'The deal releases once enough paying client rooms are booked.'}
+        </span>
+      </div>
       {tiers.map((tier, tierIdx) => (
         <div key={tierIdx} style={{ display: 'flex', alignItems: 'flex-end', gap: '0.5rem', marginBottom: '0.45rem', flexWrap: 'wrap' }}>
           <div>
-            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>From client rooms</span>
+            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>From {countWord}</span>
             <input
               type="number"
               min="0"
@@ -503,7 +543,7 @@ const TierLadderEditor = ({
             />
           </div>
           <div>
-            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>To client rooms</span>
+            <span style={{ fontSize: '0.7rem', color: palette.label, fontWeight: 600, display: 'block' }}>To {countWord}</span>
             <input
               type="number"
               min="0"
@@ -553,15 +593,15 @@ const TierLadderEditor = ({
         type="button"
         className="secondary-btn"
         style={{ padding: '0.35rem 0.7rem', fontSize: '0.78rem' }}
-        onClick={onAdd}
+        onClick={() => onAdd(basis)}
       >
         + Add tier
       </button>
       <div style={{ fontSize: '0.72rem', color: palette.note, marginTop: '0.4rem' }}>
-        Each tier covers the client rooms from its From count up to its To count. Leave
+        Each tier covers the {countWord} from its From count up to its To count. Leave
         To blank and the tier runs to the next one, or forever when it is the last row:
-        1 with no To reads as “1 and above”, 10 with a To of 20 reads as “10–20 client
-        rooms” and nothing beyond 20. Enter the total {roomLabel.toLowerCase()} rooms
+        1 with no To reads as “1 and above”, 10 with a To of 20 reads as “10–20 {countWord}”
+        and nothing beyond 20. Enter the total {roomLabel.toLowerCase()} rooms
         included from that threshold and the rate for those rooms; repeating the same
         room count with a new rate changes the price for that band (0 = free). A bed
         outside every band — past a stopped ladder or in a gap between two tiers — pays
@@ -644,7 +684,7 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, staffOptions: false, minPaxToRun: false, feeChildRate: false, rentalContractFee: false, textI18n: false });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, staffOptions: false, minPaxToRun: false, feeChildRate: false, rentalContractFee: false, textI18n: false, stayPay: false });
 
   /* The languages this tenant writes content in. The tabs the editors show are
      this list narrowed by the column actually existing: a tenant that switched
@@ -832,6 +872,10 @@ export const LibraryItems = () => {
      a transfer - capacity, per-vehicle pricing, the vehicle price vector - and the
      same driver rules, because a bus always comes with its driver. */
   const isTransportCategory = (category) => category === 'Transport';
+  /* The vehicle providers whose tariff can state whether fuel is already in the
+     price. An activity or a flight sells a place, not a vehicle, so the fuel
+     question is never asked of them. */
+  const isFuelVehicleCategory = (category) => category === 'Transfers' || isTransportCategory(category);
 
   // Categories that use the simplified tour/transfer form: vehicle capacity,
   // per-vehicle / per-person / tiered pricing, and a minimal seasonal matrix.
@@ -1115,6 +1159,10 @@ export const LibraryItems = () => {
          accommodation rather than creating a separate library item. */
       linkedFees: [],
       linkedFeeOriginalIds: [],
+      /* Stay X Pay Y offers belong to the property, not to a season: the offer
+         decides which room-nights are billed, while the season decides what a
+         billed night costs. */
+      stayPayPromotions: [],
       childAge: 12,
       pricingModel: 'per_person', // 'per_person' | 'per_room' | transfer: 'per_vehicle' | 'tiered'
       maxOccupancy: initialMaxOcc,
@@ -1417,6 +1465,25 @@ export const LibraryItems = () => {
     }));
   };
 
+  const handleWeekendChildRateChange = (tempId, seasonIdx, bandId, rate) => {
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId === tempId) {
+        const updatedSeasons = item.seasons.map((s, idx) => {
+          if (idx === seasonIdx) {
+            const updatedChildRates = {
+              ...(s.weekendChildRates || {}),
+              [bandId]: clampNonNegative(rate)
+            };
+            return { ...s, weekendChildRates: updatedChildRates };
+          }
+          return s;
+        });
+        return { ...item, seasons: updatedSeasons };
+      }
+      return item;
+    }));
+  };
+
   const handleFastTrackChildRateChange = (tempId, seasonIdx, bandId, rate) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
@@ -1492,9 +1559,9 @@ export const LibraryItems = () => {
           guideDriverRates, guideMinRooms, guideDriverTiers,
           contracts, tieredPricing, transferType, tourType, transportType,
           feeTypeLib, feeTypeRates, driverOption, surchargeFees,
-          pricesByVehicle, tourLeaderTiers, singleSupplementTiers, nightBands, weekendRates,
+          pricesByVehicle, tourLeaderTiers, singleSupplementTiers, nightBands, weekendRates, weekendRatesPerPerson,
           roomPricingModel, occupancyRatesColumn, staffOptions, minPaxToRun, entranceFeeChildRate,
-          rentalContractFee, textI18n
+          rentalContractFee, textI18n, stayPay, fuelIncluded, carFuelIncluded
         ] = await Promise.all([
           hasColumns('item_rates', ['guide_rate', 'driver_rate', 'guide_meal_plan', 'driver_meal_plan']),
           hasColumns('library_items', ['guide_min_rooms']),
@@ -1515,6 +1582,7 @@ export const LibraryItems = () => {
           hasColumns('item_rates', ['single_supplement_tiers']),
           hasColumns('item_rates', ['min_nights', 'max_nights']),
           hasColumns('item_rates', ['weekend_days', 'weekend_price']),
+          hasColumns('item_rates', ['weekend_rates']),
           /* A villa ladder spans two tables: the room says which contract it is
              sold on and the rate row carries the per-person bands. Both must
              exist before the editor offers the basis, or a save would write a
@@ -1536,7 +1604,16 @@ export const LibraryItems = () => {
           hasColumns('library_items', ['rental_contract_fee']),
           /* The translation column 20261251 adds. Until it lands, the item keeps
              its single English description and no language tabs appear. */
-          hasColumns('library_items', ['text_i18n'])
+          hasColumns('library_items', ['text_i18n']),
+          /* Stay-pay promotions arrive with 20261262. Until then the editor
+             keeps the panel closed rather than writing a column the database
+             has not got. */
+          hasColumns('library_items', ['stay_pay_promotions']),
+          /* Whether a vehicle tariff's price covers fuel arrives with 20261263,
+             on the rate table for transfers/transport and on the hire table for
+             car rental. Until it lands the editors keep the question closed. */
+          hasColumns('item_rates', ['fuel_included']),
+          hasColumns('car_rental_rates', ['fuel_included'])
         ]);
         setDbFeatures({
           guideDriver: guideDriverRates,
@@ -1555,12 +1632,16 @@ export const LibraryItems = () => {
           singleSupplementTiers,
           nightBands,
           weekendRates,
+          weekendRatesPerPerson,
           occupancyPricing: roomPricingModel && occupancyRatesColumn,
           staffOptions,
           minPaxToRun,
           feeChildRate: entranceFeeChildRate,
           rentalContractFee,
-          textI18n
+          textI18n,
+          stayPay,
+          fuelIncluded,
+          carFuelIncluded
         });
       } catch {
         // Probes failed (offline / row-level security) — keep the defaults.
@@ -1796,7 +1877,14 @@ export const LibraryItems = () => {
   const handleItemFieldChange = (tempId, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        return { ...item, [field]: clampNonNegative(value) };
+        const next = { ...item, [field]: clampNonNegative(value) };
+        /* Porterage is once per stay and per person, so switching to it must
+           not leave a per-night or flat basis behind. */
+        if (field === 'surchargeType' && value === 'porterage') {
+          next.surchargeChargeBasis = 'once_off';
+          next.surchargeUnitBasis = 'per_person';
+        }
+        return next;
       }
       return item;
     }));
@@ -2163,35 +2251,41 @@ export const LibraryItems = () => {
 
   // Seasons Management within an item
   const handleAddSeasonRow = (tempId, optionName = '', roomKey = '') => {
-    setItemsToSave(prev => prev.map(item => {
-      if (item.tempId === tempId) {
-        const room = (item.roomTypes || []).find(entry => entry.key === roomKey) || item.roomTypes?.[0];
-        const seasonCount = room
-          ? item.seasons.filter(s => s.roomKey === room.key).length + 1
-          : item.seasons.length + 1;
-        return {
-          ...item,
-          seasons: [
-            ...item.seasons,
-            {
-              seasonName: `Season ${seasonCount}`,
-              /* The charge option this season belongs to. Empty means the
-                 item's default board; a named value makes it one option of a
-                 multi-price accommodation. */
-              optionName: optionName || item.mealPlan || '',
-              /* A season is priced for one room type. The key is the room the
-                 new row is entered under; a legacy one-room item leaves it on
-                 its only room. */
-              roomKey: room?.key || '',
-              validFrom: '',
-              validTo: '',
-              ...emptySeasonMoney()
-            }
-          ]
-        };
-      }
-      return item;
-    }));
+    const current = itemsToSave.find(entry => entry.tempId === tempId);
+    if (!current) return;
+    const room = (current.roomTypes || []).find(entry => entry.key === roomKey) || current.roomTypes?.[0];
+    const seasonCount = room
+      ? current.seasons.filter(s => s.roomKey === room.key).length + 1
+      : current.seasons.length + 1;
+    const newSeason = {
+      seasonName: `Season ${seasonCount}`,
+      /* The charge option this season belongs to. Empty means the
+         item's default board; a named value makes it one option of a
+         multi-price accommodation. */
+      optionName: optionName || current.mealPlan || '',
+      /* A season is priced for one room type. The key is the room the
+         new row is entered under; a legacy one-room item leaves it on
+         its only room. */
+      roomKey: room?.key || '',
+      validFrom: '',
+      validTo: '',
+      ...emptySeasonMoney()
+    };
+    const newIndex = current.seasons.length;
+    setItemsToSave(prev => prev.map(item => (
+      item.tempId === tempId ? { ...item, seasons: [...item.seasons, newSeason] } : item
+    )));
+    /* Land on the row just added. The carousel remembers one index per item,
+       so after a room switch it can still point at another room's season. */
+    const grouped = hasChargeTypes(current.category);
+    const navIndex = grouped
+      ? accommodationSeasonGroupsFor(
+        [...current.seasons, newSeason],
+        current.category === 'Accommodation' ? (room?.key || '') : ''
+      ).findIndex(group => group.memberIndices.includes(newIndex))
+      : newIndex;
+    setActiveSeasonByItem(prev => ({ ...prev, [tempId]: Math.max(0, navIndex) }));
+    setActiveChargeByItem(prev => ({ ...prev, [tempId]: newIndex }));
   };
 
   /* A transfer names its vehicle from the company's own Settings list, and the
@@ -2362,7 +2456,7 @@ export const LibraryItems = () => {
     }));
   };
 
-  const handleTierAdd = (tempId, seasonIdx, field, defaultMinRooms = 1) => {
+  const handleTierAdd = (tempId, seasonIdx, field, defaultMinRooms = 1, basis = '') => {
     updateSeasonTierList(tempId, seasonIdx, field, (tiers) => {
       const previous = tiers[tiers.length - 1];
       /* A first tier seeds from the item's minimum; a later one starts blank
@@ -2371,8 +2465,17 @@ export const LibraryItems = () => {
       const next = previous
         ? { minClientRooms: '', maxClientRooms: '', rooms: String(Math.max(1, parseInt(previous.rooms, 10) || 1) + 1), rate: '' }
         : { minClientRooms: String(defaultMinRooms || 1), maxClientRooms: '', rooms: '1', rate: '' };
-      return [...tiers, next];
+      return [...tiers, { ...next, basis: basis || previous?.basis || 'rooms' }];
     });
+  };
+
+  /* One ladder counts one thing: switching its basis restamps every row, so a
+     rooms contract becomes a paying-guests contract without retyping it. */
+  const handleTierBasisChange = (tempId, seasonIdx, field, basis) => {
+    updateSeasonTierList(tempId, seasonIdx, field, (tiers) => tiers.map((tier) => ({
+      ...tier,
+      basis: basis === 'guests' ? 'guests' : 'rooms'
+    })));
   };
 
   const handleTierChange = (tempId, seasonIdx, field, tierIdx, key, value) => {
@@ -2509,30 +2612,15 @@ export const LibraryItems = () => {
   };
 
   /* Editing the season name / dates edits EVERY charge type of that season, so a
-     season is retyped or redated once rather than once per board basis. */
+     season is retyped or redated once rather than once per board basis. A linked
+     fee keeps its own validity windows, so redating a room season here does not
+     move the fee's calendar with it. */
   const handleSeasonGroupChange = (tempId, memberIndices, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const targets = new Set(memberIndices || []);
-      const first = item.seasons[(memberIndices || [])[0]];
-      const oldKey = first ? feeSeasonKey(first.seasonName, first.validFrom, first.validTo) : '';
-      const next = first ? { ...first, [field]: clampNonNegative(value) } : null;
-      const newKey = next ? feeSeasonKey(next.seasonName, next.validFrom, next.validTo) : '';
-      /* A fee amount is keyed by its season's name and window. Retyping either
-         moves the figure with the season, otherwise the save would read the new
-         key, find no amount, and drop a fee the operator never touched. The
-         child figure rides along in its own map and has to move with it. */
-      const linkedFees = oldKey && newKey && oldKey !== newKey
-        ? (item.linkedFees || []).map((fee) => {
-            const amounts = moveFeeAmount(fee.amounts, oldKey, newKey);
-            const childAmounts = moveFeeAmount(fee.childAmounts, oldKey, newKey);
-            if (amounts === fee.amounts && childAmounts === fee.childAmounts) return fee;
-            return { ...fee, amounts, childAmounts };
-          })
-        : item.linkedFees;
       return {
         ...item,
-        linkedFees,
         seasons: item.seasons.map((s, idx) => (targets.has(idx) ? { ...s, [field]: clampNonNegative(value) } : s))
       };
     }));
@@ -2599,6 +2687,33 @@ export const LibraryItems = () => {
                 unitBasis: 'per_person',
                 chargeable: true,
                 amount: '',
+                windows: [emptyFeeWindow()],
+                amounts: {},
+                childAmounts: {}
+              }
+            ]
+          }
+        : item
+    )));
+  };
+
+  const handleAddPorterage = (tempId) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? {
+            ...item,
+            linkedFees: [
+              ...(item.linkedFees || []),
+              {
+                key: `fee_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                dbId: null,
+                name: 'Porterage',
+                type: 'porterage',
+                chargeBasis: 'once_off',
+                unitBasis: 'per_person',
+                chargeable: true,
+                amount: '',
+                windows: [emptyFeeWindow()],
                 amounts: {},
                 childAmounts: {}
               }
@@ -2616,6 +2731,78 @@ export const LibraryItems = () => {
     )));
   };
 
+  /* Stay X Pay Y is a property-level offer, so it is edited beside the rooms it
+     applies to rather than inside a season. A new row starts as the common
+     7-for-5 offer so the operator only has to change the numbers they sell. */
+  const handleAddStayPayPromotion = (tempId) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? {
+            ...item,
+            stayPayPromotions: [
+              ...(item.stayPayPromotions || []),
+              { ...emptyStayPayPromotion(), name: 'Stay 7 Pay 5' }
+            ]
+          }
+        : item
+    )));
+  };
+
+  const handleRemoveStayPayPromotion = (tempId, promotionId) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? { ...item, stayPayPromotions: (item.stayPayPromotions || []).filter((rule) => rule.id !== promotionId) }
+        : item
+    )));
+  };
+
+  const handleStayPayPromotionChange = (tempId, promotionId, field, value) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        stayPayPromotions: (item.stayPayPromotions || []).map((rule) => {
+          if (rule.id !== promotionId) return rule;
+          if (field === 'stayNights') {
+            const stayNights = Math.max(2, parseInt(value, 10) || 2);
+            /* Paying for every night is not an offer, so the paid nights follow
+               the stay down rather than leaving a rule that waives nothing. */
+            const payNights = Math.min(stayNights - 1, Math.max(1, parseInt(rule.payNights, 10) || 1));
+            return { ...rule, stayNights, payNights };
+          }
+          if (field === 'payNights') {
+            const payNights = Math.max(1, Math.min((parseInt(rule.stayNights, 10) || 2) - 1, parseInt(value, 10) || 1));
+            return { ...rule, payNights };
+          }
+          if (field === 'maxFreeNights') {
+            return { ...rule, maxFreeNights: Math.max(0, parseInt(value, 10) || 0) };
+          }
+          if (field === 'active' || field === 'repeat') return { ...rule, [field]: !!value };
+          return { ...rule, [field]: value };
+        })
+      };
+    }));
+  };
+
+  const handleStayPayRoomToggle = (tempId, promotionId, roomKey) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        stayPayPromotions: (item.stayPayPromotions || []).map((rule) => {
+          if (rule.id !== promotionId) return rule;
+          const keys = Array.isArray(rule.roomKeys) ? rule.roomKeys : [];
+          return {
+            ...rule,
+            roomKeys: keys.includes(roomKey)
+              ? keys.filter((key) => key !== roomKey)
+              : [...keys, roomKey]
+          };
+        })
+      };
+    }));
+  };
+
   const handleLinkedFeeChange = (tempId, feeKey, field, value) => {
     setItemsToSave((prev) => prev.map((item) => {
       if (item.tempId !== tempId) return item;
@@ -2625,11 +2812,13 @@ export const LibraryItems = () => {
           if (fee.key !== feeKey) return fee;
           if (field === 'type') {
             /* An entrance fee has no per-child figure, so switching the type
-               must not leave a basis behind that would price as zero. */
+               must not leave a basis behind that would price as zero.
+               Porterage is once per stay, so it cannot keep a per-night answer. */
             const unitBasis = isValidUnitBasis({ surcharge_type: value }, fee.unitBasis)
               ? fee.unitBasis
               : 'per_person';
-            return { ...fee, type: value, unitBasis };
+            const chargeBasis = value === 'porterage' ? 'once_off' : fee.chargeBasis;
+            return { ...fee, type: value, unitBasis, chargeBasis };
           }
           return { ...fee, [field]: value };
         })
@@ -2649,6 +2838,106 @@ export const LibraryItems = () => {
         linkedFees: (item.linkedFees || []).map((fee) => (
           fee.key === feeKey
             ? { ...fee, [map]: { ...(fee[map] || {}), [seasonKey]: clampNonNegative(value) } }
+            : fee
+        ))
+      };
+    }));
+  };
+
+  /* A fee's calendar is its own: a levy runs on the park authority's year while
+     the room season straddles it. Retyping a window's name or dates moves the
+     figure with the window, exactly as a renamed season used to, so the save
+     never reads a key the operator just moved away from. */
+  const handleFeeWindowChange = (tempId, feeKey, windowId, field, value) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        linkedFees: (item.linkedFees || []).map((fee) => {
+          if (fee.key !== feeKey) return fee;
+          const windows = fee.windows || [];
+          const current = windows.find((window) => window.id === windowId);
+          if (!current) return fee;
+          const next = { ...current, [field]: value };
+          const oldKey = feeWindowKey(current);
+          const newKey = feeWindowKey(next);
+          const amounts = moveFeeAmount(fee.amounts, oldKey, newKey);
+          const childAmounts = moveFeeAmount(fee.childAmounts, oldKey, newKey);
+          return {
+            ...fee,
+            amounts,
+            childAmounts,
+            windows: windows.map((window) => (window.id === windowId ? next : window))
+          };
+        })
+      };
+    }));
+  };
+
+  const handleAddFeeWindow = (tempId, feeKey) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? {
+            ...item,
+            linkedFees: (item.linkedFees || []).map((fee) => (
+              fee.key === feeKey
+                ? { ...fee, windows: [...(fee.windows || []), emptyFeeWindow()] }
+                : fee
+            ))
+          }
+        : item
+    )));
+  };
+
+  const handleRemoveFeeWindow = (tempId, feeKey, windowId) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        linkedFees: (item.linkedFees || []).map((fee) => {
+          if (fee.key !== feeKey) return fee;
+          const windows = fee.windows || [];
+          if (windows.length <= 1) return fee;
+          const removed = windows.find((window) => window.id === windowId);
+          const key = removed ? feeWindowKey(removed) : '';
+          const without = (map) => {
+            if (!key || !map || !Object.prototype.hasOwnProperty.call(map, key)) return map;
+            const next = { ...map };
+            delete next[key];
+            return next;
+          };
+          return {
+            ...fee,
+            windows: windows.filter((window) => window.id !== windowId),
+            amounts: without(fee.amounts),
+            childAmounts: without(fee.childAmounts)
+          };
+        })
+      };
+    }));
+  };
+
+  /* The common case is a gate price that does follow the room contract, so one
+     click copies the property's seasons into the fee's calendar. A window the
+     fee already carries and the property does not have stays on the end with its
+     figure: copying the contract must not delete a year the operator typed. */
+  const handleFeeWindowsFromProperty = (tempId, feeKey) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      const seeded = feeWindowsFromSeasons(item.seasons);
+      if (!seeded.length) return item;
+      const seededKeys = new Set(seeded.map(feeWindowKey));
+      return {
+        ...item,
+        linkedFees: (item.linkedFees || []).map((fee) => (
+          fee.key === feeKey
+            ? {
+                ...fee,
+                windows: [
+                  ...seeded,
+                  ...(fee.windows || []).filter((window) => !seededKeys.has(feeWindowKey(window)))
+                ]
+              }
             : fee
         ))
       };
@@ -2805,6 +3094,42 @@ export const LibraryItems = () => {
               }
             }
           }
+          /* A fee's periods are its contract: two overlapping windows would give
+             one night two prices, and a window that ends before it starts covers
+             nothing at all. Refuse here rather than saving a fee the itinerary
+             cannot resolve. */
+          if (dbFeatures.surchargeFees && dbFeatures.feeType) {
+            for (const fee of itemsToSave[i].linkedFees || []) {
+              const label = fee.name || surchargeTypeLabel(fee.type);
+              const overlap = feeWindowOverlapError(fee.windows);
+              if (overlap) {
+                showToast(`Accommodation Item ${i + 1}, fee "${label}": ${overlap}`, 'warning');
+                return;
+              }
+              const inverted = (fee.windows || []).find((w) => w.validFrom && w.validTo && w.validFrom > w.validTo);
+              if (inverted) {
+                showToast(`Accommodation Item ${i + 1}, fee "${label}": the period "${inverted.seasonName || 'Unnamed'}" is valid from ${inverted.validFrom} to ${inverted.validTo}, which ends before it starts`, 'warning');
+                return;
+              }
+            }
+          }
+          /* A stay-pay offer that can never waive a night is a promise the
+             builders cannot keep, so it is refused at save rather than stored. */
+          if (dbFeatures.stayPay) {
+            const rules = itemsToSave[i].stayPayPromotions || [];
+            for (const rule of rules) {
+              const problem = stayPayPromotionError(rule);
+              if (problem) {
+                showToast(`Accommodation Item ${i + 1}: ${problem}`, 'warning');
+                return;
+              }
+            }
+            const overlap = stayPayPromotionsOverlapError(rules);
+            if (overlap) {
+              showToast(`Accommodation Item ${i + 1}: ${overlap}`, 'warning');
+              return;
+            }
+          }
         }
         if (itemsToSave[i].category === 'Transfers' && dbFeatures.transferType && !itemsToSave[i].transferType) {
           showToast(`Transfer Item ${i + 1} requires a Transfer Type`, 'warning');
@@ -2939,7 +3264,7 @@ export const LibraryItems = () => {
             ? (itemData.pricingModel || 'per_person')
             : (isCarRental
               ? 'per_vehicle'
-              : (isExtras ? (itemData.pricingModel === 'per_unit' ? 'per_unit' : 'per_person') : 'per_person')));
+              : (isExtras && ['per_unit', 'per_vehicle'].includes(itemData.pricingModel) ? itemData.pricingModel : 'per_person')));
 
         const itemPayload = {
           company_id: companyId,
@@ -3027,7 +3352,7 @@ export const LibraryItems = () => {
           children_own_room_policy: itemData.childrenOwnRoomPolicy || 'child_rates',
           child_age_ranges: isTourStyle
             ? [{ id: 'child', name: `Child (up to ${parseInt(itemData.childAge) || 12} yrs)`, ageFrom: 0, ageTo: (parseInt(itemData.childAge) || 12) }]
-            : (isExtras && pricingModel === 'per_unit' ? [] : (itemData.childAgeRanges || [])),
+            : (isExtras && ['per_unit', 'per_vehicle'].includes(pricingModel) ? [] : (itemData.childAgeRanges || [])),
           images: itemData.imageUrls,
                 ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
                   ? {
@@ -3040,6 +3365,12 @@ export const LibraryItems = () => {
                 ...(itemData.category === 'Accommodation'
                   ? { tour_leader_room_offered: !!itemData.tourLeaderRoomOffered, tour_leader_min_rooms: parseInt(itemData.tourLeaderMinRooms) || 1 }
                   : {}),
+          /* Stay X Pay Y rules belong to the property. Written only once the
+             column exists, so an unmigrated workspace still saves the rest of
+             the item and simply has nowhere to keep the offer. */
+          ...(dbFeatures.stayPay && itemData.category === 'Accommodation'
+            ? { stay_pay_promotions: normalizeStayPayPromotions(itemData.stayPayPromotions) }
+            : {}),
           ...(dbFeatures.feeType
             ? {
                 /* Base categories no longer carry a bundled fee: entrance fees
@@ -3052,9 +3383,11 @@ export const LibraryItems = () => {
           ...(dbFeatures.surchargeFees && isSurchargeItem(itemData)
             ? {
                 surcharge_type: itemData.surchargeType || 'entrance_fee',
-                surcharge_charge_basis: CHARGE_BASIS.some((b) => b.id === itemData.surchargeChargeBasis)
-                  ? itemData.surchargeChargeBasis
-                  : 'once_off',
+                surcharge_charge_basis: itemData.surchargeType === 'porterage'
+                  ? 'once_off'
+                  : CHARGE_BASIS.some((b) => b.id === itemData.surchargeChargeBasis)
+                    ? itemData.surchargeChargeBasis
+                    : 'once_off',
                 surcharge_unit_basis: UNIT_BASES.some((b) => b.id === itemData.surchargeUnitBasis)
                   ? itemData.surchargeUnitBasis
                   : 'per_person',
@@ -3267,8 +3600,8 @@ export const LibraryItems = () => {
               /* A per-unit extra sells the service, not a seat on it: the figure
                  is charged once however many guests take it, so it is stored on
                  the flat basis the pricing engines divide across the party. */
-              const extrasBasis = pricingModel === 'per_unit' ? 'per_unit' : 'per_person';
-              const childRate = extrasBasis === 'per_unit' ? null : childEntry(s.childRate);
+              const extrasBasis = pricingModel;
+              const childRate = extrasBasis === 'per_person' ? childEntry(s.childRate) : null;
               return {
                 item_id: targetItemId,
                 option_name: s.seasonName || 'Base Season',
@@ -3354,6 +3687,11 @@ export const LibraryItems = () => {
                    that way - a per-vehicle hire buys the vehicle, not heads. */
                 ...(dbFeatures.guideDriver && itemData.category === 'Activities / Tours' && !isPerVehicle
                   ? { guide_rate: moneyOrNull(s.guideRate) }
+                  : {}),
+                /* Whether this tariff's price already covers fuel. Only a vehicle
+                   provider states it; blank stays NULL so nothing is assumed. */
+                ...(dbFeatures.fuelIncluded && isFuelVehicleCategory(itemData.category)
+                  ? { fuel_included: fuelFlagToColumn(s.fuelIncluded) }
                   : {})
               };
             }
@@ -3402,6 +3740,29 @@ export const LibraryItems = () => {
             const canTakeThirdAdult = capacity.maxAdults >= 3;
             const takesChildren = capacityTakesChildren(capacity);
             const weekendDays = weekendDaysOf(s);
+            /* The per-person weekend card mirrors the normal one: a disabled box
+               is not a price, and a blank column is left out so the normal figure
+               for that band stands on the weekend night. An empty card is no
+               weekend pricing at all. */
+            const weekendCard = (() => {
+              if (isFlatRoom || occupancyPriced || !weekendDays.length) return null;
+              const card = {};
+              const single = moneyOrNull(s.weekendPrice1Adult);
+              const sharing = canShare ? moneyOrNull(s.weekendPrice2Adults) : null;
+              const third = canTakeThirdAdult ? moneyOrNull(s.weekendPrice3PlusAdults) : null;
+              if (single !== null) card.price_1_adult = single;
+              if (sharing !== null) card.price_2_adults = sharing;
+              if (third !== null) card.price_3_plus_adults = third;
+              if (takesChildren) {
+                const childWeekend = {};
+                Object.entries(s.weekendChildRates || {}).forEach(([bandId, val]) => {
+                  const v = moneyOrNull(val);
+                  if (v !== null) childWeekend[bandId] = v;
+                });
+                if (Object.keys(childWeekend).length) card.child_rates = childWeekend;
+              }
+              return Object.keys(card).length ? card : null;
+            })();
             const roomRate = moneyOrNull(s.roomRate);
             /* A flat rate is quoted for the room, so it covers everyone who
                sleeps in it up to its occupancy. A party of one still occupies
@@ -3477,12 +3838,31 @@ export const LibraryItems = () => {
               /* Weekend pricing is per NIGHT, not per stay: the picked weekdays
                  and the price those nights carry ride on the same rate row as
                  the normal figure, so the itinerary charges each night from its
-                 own date without duplicating the room. */
+                 own date without duplicating the room. A per-person room carries
+                 the whole weekend card; a flat room carries one room figure. */
               ...(dbFeatures.weekendRates && itemData.category === 'Accommodation'
-                ? {
-                    weekend_days: occupancyPriced || !weekendDays.length ? null : weekendDays,
-                    weekend_price: occupancyPriced || !weekendDays.length ? null : moneyOrNull(s.weekendPrice)
-                  }
+                ? (() => {
+                    if (occupancyPriced || !weekendDays.length) {
+                      return { weekend_days: null, weekend_price: null, ...(dbFeatures.weekendRatesPerPerson ? { weekend_rates: null } : {}) };
+                    }
+                    if (!isFlatRoom) {
+                      /* The card lives in the weekend_rates column once the
+                         database has it; until then it travels in the notes
+                         marker (composed with the waiver note below). The flat
+                         weekend_price column stays null so a per-person row is
+                         never read as a single room figure. */
+                      return {
+                        weekend_days: weekendDays,
+                        weekend_price: null,
+                        ...(dbFeatures.weekendRatesPerPerson ? { weekend_rates: weekendCard } : {})
+                      };
+                    }
+                    return {
+                      weekend_days: weekendDays,
+                      weekend_price: moneyOrNull(s.weekendPrice),
+                      ...(dbFeatures.weekendRatesPerPerson ? { weekend_rates: null } : {})
+                    };
+                  })()
                 : {}),
                 ...(dbFeatures.guideDriver && itemData.category === 'Accommodation'
                   ? {
@@ -3503,7 +3883,15 @@ export const LibraryItems = () => {
                       ...(dbFeatures.singleSupplementTiers
                         ? { single_supplement_tiers: !isFlatRoom && singleSuppTiers.length ? singleSuppTiers : null }
                         : {}),
-                      ...(!isFlatRoom && waiverCount > 0 ? { notes: withWaiverNote(null, waiverCount) } : {})
+                      /* Both contract markers travel in the one notes field: the
+                         waiver count, and the per-person weekend card while the
+                         database has no weekend_rates column to hold it. Once the
+                         column exists it is authoritative and the note is dropped. */
+                      ...(() => {
+                        const weekendNote = dbFeatures.weekendRates && !dbFeatures.weekendRatesPerPerson ? weekendCard : null;
+                        const notes = withWeekendRatesNote(withWaiverNote(null, waiverCount), weekendNote);
+                        return notes ? { notes } : {};
+                      })()
                     }
                   : {}),
               ...(roomList.length
@@ -3562,7 +3950,8 @@ export const LibraryItems = () => {
               price: parseFloat(r.price) || 0,
               valid_from: s.validFrom || null,
               valid_to: s.validTo || null,
-              currency: itemData.currency
+              currency: itemData.currency,
+              ...(dbFeatures.carFuelIncluded ? { fuel_included: fuelFlagToColumn(s.fuelIncluded) } : {})
             })));
           });
 
@@ -3579,36 +3968,27 @@ export const LibraryItems = () => {
            gets its own rate row, and the same season resolution that prices the
            room also finds the fee row that covers the trip. */
         if (itemData.category === 'Accommodation' && dbFeatures.surchargeFees && dbFeatures.feeType) {
-          /* A fee follows the season, not the room: the same season priced for
-             several rooms is still one season to the fee, so it gets one rate
-             row per season window rather than one per room. */
-          const seenSeasonKeys = new Set();
-          const seasonGroups = accommodationSeasonGroupsFor(itemData.seasons).filter((group) => {
-            const key = feeSeasonKey(group.seasonName, group.validFrom, group.validTo);
-            if (seenSeasonKeys.has(key)) return false;
-            seenSeasonKeys.add(key);
-            return true;
-          });
-          const rateSeasons = seasonGroups.length
-            ? seasonGroups
-            : [{ seasonName: 'Base Season', validFrom: '', validTo: '' }];
+          /* A fee keeps its own calendar: one rate row per validity period the
+             operator gave it, not per room season. A levy that changes on 1
+             January therefore survives a room season that straddles the year,
+             and each night is charged the row covering that night. */
           const keptFeeIds = [];
 
           for (const fee of itemData.linkedFees || []) {
-            /* A blank amount means the fee is not charged in that season. Only
-               priced seasons get a rate row; a fee with no priced season is not
+            /* A blank amount means the fee is not charged in that period. Only
+               priced periods get a rate row; a fee with no priced period is not
                a fee at all, so a half-started row is dropped and an existing
                one is detached with the removed rows below. A typed 0 stays 0. */
             const amounts = fee.amounts && typeof fee.amounts === 'object' ? fee.amounts : null;
             const childAmounts = fee.childAmounts && typeof fee.childAmounts === 'object' ? fee.childAmounts : null;
-            const pricedSeasons = rateSeasons
+            const pricedSeasons = (fee.windows || [])
               .map((group) => {
-                const key = feeSeasonKey(group.seasonName, group.validFrom, group.validTo);
+                const key = feeWindowKey(group);
                 const raw = amounts
                   ? (Object.prototype.hasOwnProperty.call(amounts, key) ? amounts[key] : '')
                   : fee.amount;
-                /* A child figure rides on the season's own row and never makes
-                   one: a season with only a child amount is a season with no
+                /* A child figure rides on the period's own row and never makes
+                   one: a period with only a child amount is a period with no
                    fee, because nothing bills a child on its own. */
                 const childRaw = childAmounts
                   ? (Object.prototype.hasOwnProperty.call(childAmounts, key) ? childAmounts[key] : '')
@@ -3633,7 +4013,7 @@ export const LibraryItems = () => {
               currency: itemData.currency,
               pricing_model: 'per_person',
               surcharge_type: fee.type || 'entrance_fee',
-              surcharge_charge_basis: fee.chargeBasis === 'per_night' ? 'per_night' : 'once_off',
+              surcharge_charge_basis: fee.type !== 'porterage' && fee.chargeBasis === 'per_night' ? 'per_night' : 'once_off',
               surcharge_unit_basis: isValidUnitBasis({ surcharge_type: fee.type }, fee.unitBasis) ? fee.unitBasis : 'per_person',
               surcharge_chargeable: fee.chargeable !== false,
               linked_item_id: targetItemId
@@ -3726,12 +4106,13 @@ export const LibraryItems = () => {
   const buildItemFromRecord = (item, linkedFees = [], linkedFeeOriginalIds = []) => {
     const rates = item.item_rates || [];
     const isTourStyle = isTourStyleCategory(item.category);
-    const pricingModel = item.pricing_model || (item.category === 'Accommodation' ? 'per_person' : (item.category === 'Transfers' ? 'per_vehicle' : 'per_person'));
+    const pricingModel = item.pricing_model || (isExtrasCategory(item.category) ? rates[0]?.rate_basis : null) || (item.category === 'Accommodation' ? 'per_person' : (item.category === 'Transfers' ? 'per_vehicle' : 'per_person'));
+    const isFlatExtras = isExtrasCategory(item.category) && ['per_unit', 'per_vehicle'].includes(pricingModel);
     const maxOcc = Math.max(1, parseInt(item.max_occupancy) || 2);
     const maxAdults = Math.max(1, parseInt(item.max_adults) || maxOcc);
-    const childBands = Array.isArray(item.child_age_ranges) && item.child_age_ranges.length > 0
+    const childBands = isFlatExtras ? [] : (Array.isArray(item.child_age_ranges) && item.child_age_ranges.length > 0
       ? item.child_age_ranges
-      : createNewItemTemplate().childAgeRanges;
+      : createNewItemTemplate().childAgeRanges);
 
     /* A property carries its room types; every season row is priced for one of
        them. A database without the lodging migration (or an item saved before
@@ -3802,7 +4183,7 @@ export const LibraryItems = () => {
         };
       }
       if (isExtrasCategory(item.category)) {
-        const extrasChildRate = moneyLoad((r.child_rates_breakdown || {}).child);
+        const extrasChildRate = isFlatExtras ? '' : moneyLoad((r.child_rates_breakdown || {}).child);
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
           optionName: r.meal_plan || '',
@@ -3843,7 +4224,8 @@ export const LibraryItems = () => {
           entranceFeeVehicle: moneyLoad(r.entrance_fee_per_vehicle),
           levyAdultRate: moneyLoad(r.conservation_levy_per_adult),
           levyChildRate: moneyLoad(r.conservation_levy_per_child),
-          taxesAndSurcharges: moneyLoad(r.taxes_and_surcharges)
+          taxesAndSurcharges: moneyLoad(r.taxes_and_surcharges),
+          fuelIncluded: fuelFlagFromColumn(r.fuel_included)
         };
       }
       const isFlat = pricingModel === 'per_room' || r.rate_basis === 'per_room';
@@ -3873,6 +4255,12 @@ export const LibraryItems = () => {
         maxNights: r.max_nights ?? '',
         weekendDays: weekendDaysOf(r),
         weekendPrice: moneyLoad(r.weekend_price),
+        /* Per-person weekend rates (loaded from the weekend_rates JSONB or the
+           notes-encoded fallback). Falls back gracefully when the column is absent. */
+        weekendPrice1Adult: moneyLoad(weekendRatesOf(r)?.price_1_adult),
+        weekendPrice2Adults: moneyLoad(weekendRatesOf(r)?.price_2_adults),
+        weekendPrice3PlusAdults: moneyLoad(weekendRatesOf(r)?.price_3_plus_adults),
+        weekendChildRates: weekendRatesOf(r)?.child_rates || {},
         occupancyRates: occupancyBandsForEdit(r),
         validFrom: r.valid_from || '',
         validTo: r.valid_to || '',
@@ -3955,6 +4343,7 @@ export const LibraryItems = () => {
           seasonId: `crs_load_${carSeasonLoads}`,
           validFrom: r.valid_from || '',
           validTo: r.valid_to || '',
+          fuelIncluded: fuelFlagFromColumn(r.fuel_included),
           ranges: []
         };
         carSeasonMap[seasonKey] = season;
@@ -4055,6 +4444,7 @@ export const LibraryItems = () => {
       carGroups,
       roomTypes: roomListWithFloor,
       seasons,
+      stayPayPromotions: normalizeStayPayPromotions(item.stay_pay_promotions),
       linkedFees,
       linkedFeeOriginalIds
     };
@@ -4071,21 +4461,6 @@ export const LibraryItems = () => {
           .eq('linked_item_id', item.id);
         const feeRows = (feeItems || []).filter(isSurchargeItem);
         if (feeRows.length) {
-          /* The fee amount is entered per property season. The season list is
-             taken from the accommodation's own rate rows, deduped across rooms,
-             so a renamed or redated season can still find the figure it was
-             saved with. */
-          const seenSeasons = new Set();
-          const feeSeasons = (item.item_rates || []).reduce((groups, rate) => {
-            const seasonName = rate.season_name || rate.option_name || 'Base Season';
-            const validFrom = rate.valid_from || '';
-            const validTo = rate.valid_to || '';
-            const key = feeSeasonKey(seasonName, validFrom, validTo);
-            if (seenSeasons.has(key)) return groups;
-            seenSeasons.add(key);
-            groups.push({ seasonName, validFrom, validTo });
-            return groups;
-          }, []);
           const feeIds = feeRows.map((fee) => fee.id);
           const { data: feeRates } = await supabase
             .from('item_rates')
@@ -4096,9 +4471,11 @@ export const LibraryItems = () => {
             if (!ratesByItem[rate.item_id]) ratesByItem[rate.item_id] = [];
             ratesByItem[rate.item_id].push(rate);
           });
+          /* The fee's calendar is read off its own rows: rows saved before fees
+             owned their validity borrowed the property's seasons, and those
+             windows are still the contract the fee was quoted on. */
           linkedFees = feeRows.map((fee) => feeEditorRowFromRecord(
-            { ...fee, item_rates: ratesByItem[fee.id] || [] },
-            feeSeasons
+            { ...fee, item_rates: ratesByItem[fee.id] || [] }
           ));
           linkedFeeOriginalIds = feeIds;
         }
@@ -6246,7 +6623,7 @@ export const LibraryItems = () => {
                         {isFlightCategory(item.category)
                           ? 'Choose whether the fare is quoted per person or per charter (whole flight).'
                           : (isExtrasCategory(item.category)
-                            ? 'Choose whether the extra is bought once for the service itself, or for every guest taking it.'
+                            ? 'Choose once for the whole service, per vehicle (such as tolls), or per guest taking the extra.'
                             : (isTourStyle
                             ? 'Choose how the rate is quoted: per vehicle, per person, or tiered by pax count.'
                             : 'Choose whether rates are quoted per person sharing or as a flat room/unit price.'))}
@@ -6255,7 +6632,7 @@ export const LibraryItems = () => {
 
                     {isExtrasCategory(item.category) ? (
                       <div style={{ display: 'inline-flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '3px', flexWrap: 'wrap' }}>
-                        {[{ id: 'per_unit', label: '✨ Service only (per unit)' }, { id: 'per_person', label: '👥 Per person' }].map(opt => (
+                        {[{ id: 'per_unit', label: '✨ Service only (per unit)' }, { id: 'per_vehicle', label: 'Per vehicle' }, { id: 'per_person', label: '👥 Per person' }].map(opt => (
                           <button
                             key={opt.id}
                             type="button"
@@ -6394,7 +6771,8 @@ export const LibraryItems = () => {
                             value={item.surchargeChargeBasis || 'once_off'}
                             onChange={(e) => handleItemFieldChange(item.tempId, 'surchargeChargeBasis', e.target.value)}
                           >
-                            {CHARGE_BASIS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                            {(item.surchargeType === 'porterage' ? CHARGE_BASIS.filter((opt) => opt.id === 'once_off') : CHARGE_BASIS)
+                              .map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
                           </SearchableSelect>
                         </div>
                         <div>
@@ -6691,6 +7069,22 @@ export const LibraryItems = () => {
                                 </div>
                               </div>
 
+                              {dbFeatures.carFuelIncluded && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.6rem', flexWrap: 'wrap' }}>
+                                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569' }}>Fuel in this tariff:</label>
+                                  <select
+                                    className="pricing-select"
+                                    style={{ padding: '0.35rem', fontSize: '0.82rem', maxWidth: '300px' }}
+                                    value={season.fuelIncluded || ''}
+                                    onChange={(e) => handleCarSeasonFieldChange(item.tempId, group.groupId, season.seasonId, 'fuelIncluded', e.target.value)}
+                                  >
+                                    {FUEL_INCLUDED_OPTIONS.map((option) => (
+                                      <option key={option.id} value={option.id}>{option.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              )}
+
                               <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
                                 Rental Length Ranges <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: '0.72rem' }}>(per day, in {item.currency})</span>
                               </div>
@@ -6801,7 +7195,7 @@ export const LibraryItems = () => {
                             : (isTicketCategory(item.category)
                             ? 'Seasonal Ticket Fares (Per Person)'
                             : (isExtrasCategory(item.category)
-                            ? `Seasonal Extras Fares (${item.pricingModel === 'per_unit' ? 'Service Only — Per Unit' : 'Per Person'})`
+                            ? `Seasonal Extras Fares (${item.pricingModel === 'per_unit' ? 'Service Only — Per Unit' : item.pricingModel === 'per_vehicle' ? 'Per Vehicle' : 'Per Person'})`
                             : (isTourStyle
                             ? `Seasonal Price Matrices (${item.pricingModel === 'tiered' ? 'Tiered by Pax Count' : item.pricingModel === 'per_vehicle' ? 'Flat Vehicle Rate' : 'Per Person Rates'})`
                             : `Seasonal Pricing Matrices ${item.pricingModel === 'per_room' ? '(Flat Room Rates)' : '(Per Person Rates)'}`))))}
@@ -6846,6 +7240,14 @@ export const LibraryItems = () => {
                             <div>• Repeating the line on the itinerary (or its quantity) is the only thing that multiplies it. Guests never do.</div>
                             <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
                               This extra is charged per unit, so children pay nothing extra for it.
+                            </div>
+                          </>
+                        ) : item.pricingModel === 'per_vehicle' ? (
+                          <>
+                            <div><strong>Price per vehicle:</strong> charged for each vehicle, such as a toll charge.</div>
+                            <div>Set the line quantity to the number of vehicles being charged, not the number of guests.</div>
+                            <div style={{ color: '#db2777', fontWeight: 600, marginTop: '0.25rem' }}>
+                              No separate adult or child rate applies.
                             </div>
                           </>
                         ) : (
@@ -7044,8 +7446,12 @@ export const LibraryItems = () => {
                         ? activeSeasonIndexOf(item.tempId, chargeGroups)
                         : activeSeasonIndexOf(item.tempId, item.seasons);
                       const activeGroup = groupsSeasons ? chargeGroups[activeGroupIdx] : null;
+                      /* A room with no seasons of its own shows the empty state
+                         below, never another room's first season: index 0 would
+                         render a foreign row under this room's matrix and its
+                         group edits would crash on the missing group. */
                       const activeMemberIdx = groupsSeasons
-                        ? activeChargeIndexOf(item.tempId, activeGroup)
+                        ? (activeGroup ? activeChargeIndexOf(item.tempId, activeGroup) : -1)
                         : activeSeasonIndexOf(item.tempId, item.seasons);
                       if (seasonIdx !== activeMemberIdx) return null;
                       const totalSeasons = groupsSeasons ? chargeGroups.length : item.seasons.length;
@@ -7113,11 +7519,6 @@ export const LibraryItems = () => {
                       const childOffTitle = isFeeItem
                         ? feeOnlyNote
                         : (!childRatesCharged ? spaceChildNote : 'This room has no child slots');
-                      /* The fee block inside this season is keyed by the season
-                         it belongs to, so its amount box edits that season only. */
-                      const feeSeason = isAccom && activeGroup
-                        ? feeSeasonKey(activeGroup.seasonName, activeGroup.validFrom, activeGroup.validTo)
-                        : '';
 
                       return (
                         <div key={seasonIdx} style={{ background: '#fff', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1rem' }}>
@@ -7141,6 +7542,14 @@ export const LibraryItems = () => {
                                   of {totalSeasons} ({headerName})
                                 </span>
                               </span>
+                              {isAccom && (item.roomTypes || []).length > 1 && (
+                                <span
+                                  title="The room type these seasons and validity dates price"
+                                  style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0d7478', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '999px', padding: '0.15rem 0.6rem', whiteSpace: 'nowrap' }}
+                                >
+                                  {activeRoomFor(item, activeGroup?.roomKey)?.name || 'Untitled room'}
+                                </span>
+                              )}
                               {totalSeasons > 1 && (
                                 <button
                                   type="button"
@@ -7223,6 +7632,29 @@ export const LibraryItems = () => {
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value))} />
                             </div>
                           </div>
+
+                          {/* Whether this tariff's price already covers fuel. A
+                              fuel-included contract refuses a fuel allowance on
+                              top; a fuel-excluded one offers to add one when the
+                              vehicle is dropped. Not stated asks nothing. */}
+                          {isFuelVehicleCategory(item.category) && dbFeatures.fuelIncluded && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b' }}>Fuel in this tariff:</label>
+                              <select
+                                className="pricing-select"
+                                style={{ padding: '0.4rem', fontSize: '0.85rem', maxWidth: '320px' }}
+                                value={season.fuelIncluded || ''}
+                                onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'fuelIncluded', e.target.value)}
+                              >
+                                {FUEL_INCLUDED_OPTIONS.map((option) => (
+                                  <option key={option.id} value={option.id}>{option.label}</option>
+                                ))}
+                              </select>
+                              <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                                Included refuses a fuel allowance on top; excluded offers one when the vehicle is dropped.
+                              </span>
+                            </div>
+                          )}
 
                           {isAccom && dbFeatures.nightBands && (
                             <p style={{ fontSize: '0.74rem', color: '#64748b', margin: '0 0 0.9rem', lineHeight: 1.45 }}>
@@ -7483,27 +7915,27 @@ export const LibraryItems = () => {
                             <div style={{ background: '#fdf2f8', border: '1px solid #fbcfe8', borderRadius: '8px', padding: '1rem' }}>
                               <label style={{ fontSize: '0.82rem', fontWeight: 700, color: '#1e293b', display: 'block', marginBottom: '0.5rem' }}>
                                 {(season.optionName || '').trim() ? `${(season.optionName || '').trim()} — ` : 'Extra Service Fare — '}
-                                ({item.currency}) {item.pricingModel === 'per_unit' ? 'Service only (per unit)' : 'Per Person'}
+                                ({item.currency}) {item.pricingModel === 'per_unit' ? 'Service only (per unit)' : item.pricingModel === 'per_vehicle' ? 'Per Vehicle' : 'Per Person'}
                               </label>
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', maxWidth: '520px' }}>
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
-                                    {item.pricingModel === 'per_unit' ? 'Unit Price' : 'Adult Rate'} ({item.currency})
+                                    {item.pricingModel === 'per_unit' ? 'Unit Price' : item.pricingModel === 'per_vehicle' ? 'Price per vehicle' : 'Adult Rate'} ({item.currency})
                                   </label>
                                   <input
                                     type="number"
                                     min="0"
                                     className="pricing-select"
                                     style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, width: '100%' }}
-                                    placeholder={item.pricingModel === 'per_unit' ? 'e.g. 3500' : 'e.g. 850'}
+                                    placeholder={item.pricingModel === 'per_unit' ? 'e.g. 3500' : item.pricingModel === 'per_vehicle' ? 'e.g. 250' : 'e.g. 850'}
                                     value={season.adultRate !== undefined ? season.adultRate : ''}
                                     onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'adultRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'adultRate')}
                                   />
                                   <span style={{ fontSize: '0.7rem', color: '#94a3b8', display: 'block' }}>
-                                    {item.pricingModel === 'per_unit' ? 'Charged once for the whole service' : 'Charged per adult'}
+                                    {item.pricingModel === 'per_unit' ? 'Charged once for the whole service' : item.pricingModel === 'per_vehicle' ? 'Charged for each vehicle' : 'Charged per adult'}
                                   </span>
                                 </div>
-                                {item.pricingModel === 'per_unit' ? null : (
+                                {['per_unit', 'per_vehicle'].includes(item.pricingModel) ? null : (
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '0.25rem' }}>
                                     Child Rate ({item.currency})
@@ -7524,7 +7956,9 @@ export const LibraryItems = () => {
                               <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.6rem', lineHeight: 1.45 }}>
                                 {item.pricingModel === 'per_unit'
                                   ? 'Charged once for the service itself, however many guests take it. Only repeating the line multiplies it, and no guest - adult or child - is priced on it.'
-                                  : 'Charged for every guest taking the extra. Set the child rate if children pay a different price.'}
+                                  : item.pricingModel === 'per_vehicle'
+                                    ? 'Charged for each vehicle, multiplied by line quantity. Guest count does not multiply it, and no separate child rate applies.'
+                                    : 'Charged for every guest taking the extra. Set the child rate if children pay a different price.'}
                               </div>
                             </div>
                           ) : isFlightCategory(item.category) ? (
@@ -8124,8 +8558,6 @@ export const LibraryItems = () => {
                               .map((value) => parseInt(value, 10))
                               .filter((value) => value >= 1 && value <= 7)
                               .sort((a, b) => a - b);
-                            const price = parseFloat(season.weekendPrice) || 0;
-                            const normal = parseFloat(season.roomRate) || parseFloat(season.price2Adults) || 0;
                             const weekendDisabled = days.length === 0;
                             const dayNames = WEEKEND_DAY_OPTIONS
                               .filter((day) => days.includes(day.value))
@@ -8137,15 +8569,28 @@ export const LibraryItems = () => {
                                 : [...days, value].sort((a, b) => a - b);
                               handleSeasonValueChange(item.tempId, seasonIdx, 'weekendDays', next);
                             };
+                            /* Per-person weekend: the same three adult bands and the
+                               child-age rows from the normal pricing section are reused,
+                               so the operator enters the weekend figure for each occupancy
+                               band separately. The card saves to the weekend_rates column
+                               when the database has it and travels in the rate notes until
+                               then, so the fields are live either way. */
+                            const showPerPerson = !isFlatRoom;
+                            const normal = parseFloat(season.roomRate) || parseFloat(season.price2Adults) || 0;
+                            /* Summary helper for flat-room hint line */
+                            const flatPrice = parseFloat(season.weekendPrice) || 0;
                             return (
                               <div style={{ background: '#fdf4ff', border: '1px solid #f0abfc', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
                                 <label style={{ fontSize: '0.8rem', fontWeight: 700, color: '#86198f', display: 'block', marginBottom: '0.35rem' }}>
-                                  Weekend Rate — per Room per Night ({item.currency})
+                                  {showPerPerson
+                                    ? `Weekend Rate — Per Person per Night (${item.currency})`
+                                    : `Weekend Rate — per Room per Night (${item.currency})`}
                                 </label>
                                 <div style={{ fontSize: '0.74rem', color: '#7e22ce', marginBottom: '0.55rem', lineHeight: 1.45 }}>
-                                  Tick the nights this contract treats as weekend, then enter the figure those nights carry.
+                                  Tick the nights this contract treats as weekend, then enter the figure{showPerPerson ? 's' : ''} those nights carry.
                                   Weekend pricing is per night, so a single booking can mix the normal and weekend price.
                                 </div>
+                                {/* Day picker — shared by both modes */}
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.65rem' }}>
                                   {WEEKEND_DAY_OPTIONS.map((day) => {
                                     const selected = days.includes(day.value);
@@ -8169,204 +8614,133 @@ export const LibraryItems = () => {
                                     );
                                   })}
                                 </div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '320px' }}>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, ...(weekendDisabled ? disabledPriceInputStyle : {}) }}
-                                    placeholder={weekendDisabled ? 'Tick weekend nights first' : (normal > 0 ? `e.g. ${normal}` : 'e.g. 3200')}
-                                    title={weekendDisabled ? 'Tick at least one weekend night to set a weekend price' : undefined}
-                                    disabled={weekendDisabled}
-                                    value={weekendDisabled ? '' : (season.weekendPrice !== undefined ? season.weekendPrice : '')}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'weekendPrice', e.target.value)}
-                                    step={moneyStep}
-                                    onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'weekendPrice')}
-                                  />
-                                  <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Room / Night</span>
-                                </div>
-                                <div style={{ fontSize: '0.7rem', color: '#7e22ce', marginTop: '0.4rem', lineHeight: 1.45 }}>
-                                  {days.length === 0
-                                    ? 'Tick at least one weekend night to set a weekend price. Until then every night is charged the normal rate above.'
-                                    : price <= 0
-                                      ? 'No weekend price entered, so every night is charged the normal rate above.'
-                                      : `${dayNames} nights are charged ${item.currency} ${price.toLocaleString()} instead of the normal nightly rate. A single room keeps its own contracted single rate when one is entered.`}
-                                </div>
+
+                                {showPerPerson ? (
+                                  /* ── Per-person weekend inputs ──────────────────────────────── */
+                                  <div style={{ opacity: weekendDisabled ? 0.45 : 1, pointerEvents: weekendDisabled ? 'none' : undefined }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
+                                      {/* 1 Adult (Single Room) */}
+                                      <div>
+                                        <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
+                                          1 Adult ({isTrainCategory(item.category) ? 'Single Cabin' : 'Single Room'})
+                                        </span>
+                                        <input
+                                          type="number" min="0"
+                                          className="pricing-select"
+                                          style={{ padding: '0.35rem', ...(!singleRateLive ? disabledPriceInputStyle : {}) }}
+                                          placeholder={singleRateLive ? `e.g. ${parseFloat(season.price1Adult) || ''}` : 'Not used'}
+                                          disabled={weekendDisabled || !singleRateLive}
+                                          value={!weekendDisabled && singleRateLive ? (season.weekendPrice1Adult ?? '') : ''}
+                                          onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'weekendPrice1Adult', e.target.value)}
+                                          step={moneyStep}
+                                          onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'weekendPrice1Adult')}
+                                        />
+                                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>1 Adult Single rate</span>
+                                      </div>
+                                      {/* 2 Adults (Double/Twin) */}
+                                      <div>
+                                        <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
+                                          2 Adults (Double/Twin)
+                                        </span>
+                                        <input
+                                          type="number" min="0"
+                                          className="pricing-select"
+                                          style={{ padding: '0.35rem', ...(!canShare ? disabledPriceInputStyle : {}) }}
+                                          placeholder={canShare ? `e.g. ${parseFloat(season.price2Adults) || ''}` : 'Not used'}
+                                          disabled={weekendDisabled || !canShare}
+                                          value={!weekendDisabled && canShare ? (season.weekendPrice2Adults ?? '') : ''}
+                                          onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'weekendPrice2Adults', e.target.value)}
+                                          step={moneyStep}
+                                          onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'weekendPrice2Adults')}
+                                        />
+                                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{canShare ? 'Per Person Sharing (PPS)' : rateOffCaption}</span>
+                                      </div>
+                                      {/* 3+ Adults */}
+                                      <div>
+                                        <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block' }}>
+                                          3+ Adults (Per Person)
+                                        </span>
+                                        <input
+                                          type="number" min="0"
+                                          className="pricing-select"
+                                          style={{ padding: '0.35rem', ...(!canTakeThirdAdult ? disabledPriceInputStyle : {}) }}
+                                          placeholder={canTakeThirdAdult ? `e.g. ${parseFloat(season.price3PlusAdults) || ''}` : 'Not used'}
+                                          disabled={weekendDisabled || !canTakeThirdAdult}
+                                          value={!weekendDisabled && canTakeThirdAdult ? (season.weekendPrice3PlusAdults ?? '') : ''}
+                                          onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'weekendPrice3PlusAdults', e.target.value)}
+                                          step={moneyStep}
+                                          onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'weekendPrice3PlusAdults')}
+                                        />
+                                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{canTakeThirdAdult ? 'Extra adult sharing' : rateOffCaption}</span>
+                                      </div>
+                                    </div>
+                                    {/* Children Pricing per Age Range — weekend */}
+                                    {bands.length > 0 && (
+                                      <div style={{ marginTop: '0.75rem' }}>
+                                        <span style={{ fontSize: '0.75rem', color: '#475569', fontWeight: 600, display: 'block', marginBottom: '0.4rem' }}>
+                                          Children Pricing per Age Range (Per Person — {item.currency})
+                                        </span>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.6rem' }}>
+                                          {bands.map((band) => (
+                                            <div key={band.id}>
+                                              <span style={{ fontSize: '0.72rem', color: '#475569', fontWeight: 500, display: 'block' }}>
+                                                {band.name} ({band.ageFrom}–{band.ageTo} yrs)
+                                              </span>
+                                              <input
+                                                type="number" min="0"
+                                                className="pricing-select"
+                                                style={{ padding: '0.35rem', ...(!takesChildren ? disabledPriceInputStyle : {}) }}
+                                                placeholder={takesChildren ? `e.g. ${parseFloat((season.childRates || {})[band.id]) || ''}` : 'Not used'}
+                                                title={takesChildren ? undefined : childOffTitle}
+                                                disabled={weekendDisabled || !takesChildren}
+                                                value={!weekendDisabled && takesChildren ? ((season.weekendChildRates || {})[band.id] ?? '') : ''}
+                                                onChange={(e) => handleWeekendChildRateChange(item.tempId, seasonIdx, band.id, e.target.value)}
+                                                step={moneyStep}
+                                                onBlur={(e) => snapBandRate(e, item.tempId, seasonIdx, band.id, handleWeekendChildRateChange)}
+                                              />
+                                              <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>{takesChildren ? 'Sharing with adult/s' : childOffCaption}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                    <div style={{ fontSize: '0.7rem', color: '#7e22ce', marginTop: '0.55rem', lineHeight: 1.45 }}>
+                                      {weekendDisabled
+                                        ? 'Tick at least one weekend night to set weekend per-person prices.'
+                                        : `${dayNames} nights are charged these per-person rates instead of the normal nightly rates above.`}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  /* ── Flat per-room weekend input ────────────────────────────── */
+                                  <>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '320px' }}>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        className="pricing-select"
+                                        style={{ padding: '0.45rem 0.75rem', fontSize: '1rem', fontWeight: 700, ...(weekendDisabled ? disabledPriceInputStyle : {}) }}
+                                        placeholder={weekendDisabled ? 'Tick weekend nights first' : (normal > 0 ? `e.g. ${normal}` : 'e.g. 3200')}
+                                        title={weekendDisabled ? 'Tick at least one weekend night to set a weekend price' : undefined}
+                                        disabled={weekendDisabled}
+                                        value={weekendDisabled ? '' : (season.weekendPrice !== undefined ? season.weekendPrice : '')}
+                                        onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'weekendPrice', e.target.value)}
+                                        step={moneyStep}
+                                        onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'weekendPrice')}
+                                      />
+                                      <span style={{ fontSize: '0.8rem', color: '#64748b', whiteSpace: 'nowrap' }}>/ Room / Night</span>
+                                    </div>
+                                    <div style={{ fontSize: '0.7rem', color: '#7e22ce', marginTop: '0.4rem', lineHeight: 1.45 }}>
+                                      {days.length === 0
+                                        ? 'Tick at least one weekend night to set a weekend price. Until then every night is charged the normal rate above.'
+                                        : flatPrice <= 0
+                                          ? 'No weekend price entered, so every night is charged the normal rate above.'
+                                          : `${dayNames} nights are charged ${item.currency} ${flatPrice.toLocaleString()} instead of the normal nightly rate. A single room keeps its own contracted single rate when one is entered.`}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             );
                           })()}
-
-                          {/* Park fees and conservation levies belong to the
-                              season they are charged in. The fee's name, type and
-                              basis are shared across the property; the amount box
-                              edits this season only, and a blank box means the fee
-                              is not charged in this season. */}
-                          {isAccom && activeGroup && (
-                            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
-                              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
-                                <div>
-                                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#9a3412', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                                    <Receipt size={16} color="#ea580c" /> Park fees &amp; conservation levies
-                                  </span>
-                                  <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.2rem' }}>
-                                    {dbFeatures.surchargeFees && dbFeatures.feeType
-                                      ? `Amounts below apply to ${activeGroup.seasonName || 'this season'}${activeGroup.validFrom ? ` (${activeGroup.validFrom} to ${activeGroup.validTo || 'open'})` : ''}. Leave a fee blank in a season it is not charged.`
-                                      : 'Park fees and conservation levies aren\u2019t available in this workspace yet.'}
-                                  </span>
-                                </div>
-                                {dbFeatures.surchargeFees && dbFeatures.feeType && (
-                                  <button
-                                    type="button"
-                                    className="secondary-btn"
-                                    style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap' }}
-                                    onClick={() => handleAddLinkedFee(item.tempId)}
-                                  >
-                                    <Plus size={13} /> Add fee
-                                  </button>
-                                )}
-                              </div>
-
-                              {dbFeatures.surchargeFees && dbFeatures.feeType && (item.linkedFees || []).map((fee) => {
-                                const feeType = fee.type || 'entrance_fee';
-                                const chargedLabel = (fee.chargeBasis === 'per_night') ? 'per night' : 'once for the whole stay';
-                                const amount = fee.amounts && Object.prototype.hasOwnProperty.call(fee.amounts, feeSeason)
-                                  ? fee.amounts[feeSeason]
-                                  : (fee.amounts ? '' : (fee.amount ?? ''));
-                                const unitBasis = fee.unitBasis || 'per_person';
-                                /* Only "per person" bills both ages, so it is the
-                                   one basis with a child figure to record. */
-                                const showChildAmount = dbFeatures.feeChildRate && unitBasis === 'per_person';
-                                const childAmount = fee.childAmounts && Object.prototype.hasOwnProperty.call(fee.childAmounts, feeSeason)
-                                  ? fee.childAmounts[feeSeason]
-                                  : '';
-                                return (
-                                  <div key={fee.key} style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid #fed7aa' }}>
-                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.6rem' }}>
-                                      <div>
-                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Fee name</label>
-                                        <input
-                                          type="text"
-                                          className="pricing-select"
-                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
-                                          placeholder={surchargeTypeLabel(feeType)}
-                                          value={fee.name}
-                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'name', e.target.value)}
-                                        />
-                                      </div>
-                                      <div>
-                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Fee type</label>
-                                        <SearchableSelect
-                                          className="pricing-select"
-                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
-                                          value={feeType}
-                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'type', e.target.value)}
-                                        >
-                                          {SURCHARGE_TYPES.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
-                                        </SearchableSelect>
-                                      </div>
-                                      <div>
-                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Charged</label>
-                                        <SearchableSelect
-                                          className="pricing-select"
-                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
-                                          value={fee.chargeBasis || 'once_off'}
-                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'chargeBasis', e.target.value)}
-                                        >
-                                          {CHARGE_BASIS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
-                                        </SearchableSelect>
-                                      </div>
-                                      <div>
-                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Rate is per</label>
-                                        <SearchableSelect
-                                          className="pricing-select"
-                                          style={{ padding: '0.4rem 0.55rem', width: '100%' }}
-                                          value={fee.unitBasis || 'per_person'}
-                                          onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'unitBasis', e.target.value)}
-                                        >
-                                          {unitBasesFor({
-                                            surcharge_type: feeType,
-                                            surcharge_unit_basis: fee.unitBasis
-                                          }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
-                                        </SearchableSelect>
-                                      </div>
-                                      <div>
-                                        <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>
-                                          Amount ({item.currency}) — {activeGroup.seasonName || 'this season'}
-                                        </label>
-                                        <input
-                                          type="number"
-                                          min="0"
-                                          className="pricing-select"
-                                          style={{ padding: '0.4rem 0.55rem', width: '100%', fontWeight: 700 }}
-                                          placeholder="Blank = not charged"
-                                          value={amount}
-                                          onChange={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, e.target.value)}
-                                          step={moneyStep}
-                                          onBlur={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, applyInputRounding(e.target.value, amountSettings.inputRounding))}
-                                        />
-                                      </div>
-                                      {showChildAmount && (
-                                        <div>
-                                          <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>
-                                            Child amount ({item.currency}) — {activeGroup.seasonName || 'this season'}
-                                          </label>
-                                          <input
-                                            type="number"
-                                            min="0"
-                                            className="pricing-select"
-                                            style={{ padding: '0.4rem 0.55rem', width: '100%', fontWeight: 700 }}
-                                            placeholder="Blank = adult amount"
-                                            value={childAmount}
-                                            onChange={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, e.target.value, 'childAmounts')}
-                                            step={moneyStep}
-                                            onBlur={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, feeSeason, applyInputRounding(e.target.value, amountSettings.inputRounding), 'childAmounts')}
-                                          />
-                                          <span style={{ fontSize: '0.66rem', color: '#9a3412', display: 'block', marginTop: '0.15rem' }}>
-                                            Some properties charge a child less at the gate. Blank bills a child the adult amount.
-                                          </span>
-                                        </div>
-                                      )}
-                                      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: '0.2rem' }}>
-                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.76rem', fontWeight: 600, color: '#7c2d12', cursor: 'pointer' }}>
-                                          <input
-                                            type="checkbox"
-                                            checked={fee.chargeable !== false}
-                                            onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'chargeable', e.target.checked)}
-                                            style={{ width: '15px', height: '15px', accentColor: '#ea580c', cursor: 'pointer' }}
-                                          />
-                                          Chargeable
-                                        </label>
-                                        <span style={{ fontSize: '0.68rem', color: '#9a3412', marginTop: '0.15rem' }}>
-                                          {fee.chargeable !== false
-                                            ? `Added to the client total, ${chargedLabel}.`
-                                            : 'Shown for reference only, excluded from the total.'}
-                                        </span>
-                                      </div>
-                                    </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginTop: '0.45rem', flexWrap: 'wrap' }}>
-                                      <span style={{ fontSize: '0.7rem', color: '#9a3412' }}>
-                                        Fee details are shared across seasons; this amount applies to {activeGroup.seasonName || 'this season'} only.
-                                      </span>
-                                      <button
-                                        type="button"
-                                        className="secondary-btn"
-                                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.74rem', color: '#b91c1c', borderColor: '#fca5a5' }}
-                                        onClick={() => handleRemoveLinkedFee(item.tempId, fee.key)}
-                                      >
-                                        Remove fee
-                                      </button>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-
-                              {dbFeatures.surchargeFees && dbFeatures.feeType && (item.linkedFees || []).length === 0 && (
-                                <div style={{ marginTop: '0.7rem', fontSize: '0.74rem', color: '#9a3412' }}>
-                                  No park fee or conservation levy on this property. Add one only if the supplier bills it on top of the room rate.
-                                </div>
-                              )}
-                            </div>
-                          )}
 
                           {/* Fee Inputs (per season). Only a Fees & Tickets item has these; the
                               unit basis decides which single figure is collected. */}
@@ -8522,7 +8896,8 @@ export const LibraryItems = () => {
                                   tiers={season.crewTiers || []}
                                   tone="amber"
                                   moneyStep={moneyStep}
-                                  onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'crewTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1))}
+                                  onAdd={(basis) => handleTierAdd(item.tempId, seasonIdx, 'crewTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1), basis)}
+                                  onBasisChange={(basis) => handleTierBasisChange(item.tempId, seasonIdx, 'crewTiers', basis)}
                                   onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'crewTiers', tierIdx, field, value)}
                                   onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'crewTiers', tierIdx)}
                                 />
@@ -8557,7 +8932,8 @@ export const LibraryItems = () => {
                                   currency={item.currency}
                                   tiers={season.tourLeaderTiers || []}
                                   moneyStep={moneyStep}
-                                  onAdd={() => handleTierAdd(item.tempId, seasonIdx, 'tourLeaderTiers', item.tourLeaderMinRooms || 1)}
+                                  onAdd={(basis) => handleTierAdd(item.tempId, seasonIdx, 'tourLeaderTiers', item.tourLeaderMinRooms || 1, basis)}
+                                  onBasisChange={(basis) => handleTierBasisChange(item.tempId, seasonIdx, 'tourLeaderTiers', basis)}
                                   onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'tourLeaderTiers', tierIdx, field, value)}
                                   onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'tourLeaderTiers', tierIdx)}
                                 />
@@ -8568,6 +8944,14 @@ export const LibraryItems = () => {
                         </div>
                       );
                     })}
+
+                    {item.category === 'Accommodation' && accommodationSeasonGroupsFor(item.seasons, activeRoomKeyFor(item)).length === 0 && (
+                      <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.75rem 0.9rem', marginBottom: '0.75rem', fontSize: '0.8rem', color: '#92400e', lineHeight: 1.5 }}>
+                        <strong>No seasons are priced for {activeRoomFor(item)?.name || 'this room'} yet.</strong>{' '}
+                        Each room type carries its own seasons and validity dates &mdash; another room&rsquo;s seasons never price this one.
+                        Use <strong>Add Season</strong> below to load this room&rsquo;s first season, then set its prices in the matrix.
+                      </div>
+                    )}
 
                     <button
                       type="button"
@@ -8584,6 +8968,452 @@ export const LibraryItems = () => {
                       <Plus size={13} /> Add Season
                     </button>
                   </div>
+                  )}
+
+                  {/* Stay X Pay Y offers. The offer decides which room-nights
+                      are billed; the seasons above still decide what a billed
+                      night costs. A free night waives the whole room-night,
+                      including single supplement and child figures, while any
+                      linked park fee or levy stays on its own line. */}
+                  {item.category === 'Accommodation' && (
+                    <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '10px', padding: '0.85rem 1rem', marginBottom: '1.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <div>
+                          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#5b21b6', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <Sparkles size={16} color="#7c3aed" /> Stay X Pay Y promotions
+                          </span>
+                          <span style={{ fontSize: '0.74rem', color: '#5b21b6', display: 'block', marginTop: '0.2rem', lineHeight: 1.45 }}>
+                            {dbFeatures.stayPay
+                              ? 'The offer applies when the check-in date falls inside its validity window. A free night waives the whole room-night — sharing, single supplement and child figures alike — while linked park fees, levies and porterage are still charged. Only the best saving applies; promotions never stack.'
+                              : 'Stay X Pay Y promotions aren’t available in this workspace yet.'}
+                          </span>
+                        </div>
+                        {dbFeatures.stayPay && (
+                          <button
+                            type="button"
+                            className="secondary-btn"
+                            style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap' }}
+                            onClick={() => handleAddStayPayPromotion(item.tempId)}
+                          >
+                            <Plus size={13} /> Add promotion
+                          </button>
+                        )}
+                      </div>
+
+                      {dbFeatures.stayPay && (item.stayPayPromotions || []).map((rule) => {
+                        const freeNights = Math.max(0, (parseInt(rule.stayNights, 10) || 0) - (parseInt(rule.payNights, 10) || 0));
+                        const roomChoices = item.roomTypes || [];
+                        return (
+                          <div key={rule.id} style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid #ddd6fe' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.6rem' }}>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Promotion name</label>
+                                <input
+                                  type="text"
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  placeholder="e.g. Stay 7 Pay 5"
+                                  value={rule.name || ''}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'name', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Stay nights</label>
+                                <input
+                                  type="number"
+                                  min="2"
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={rule.stayNights}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'stayNights', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Pay nights</label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max={Math.max(0, (parseInt(rule.stayNights, 10) || 2) - 1)}
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={rule.payNights}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'payNights', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Free night rule</label>
+                                <SearchableSelect
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={rule.freeNightRule || 'cheapest'}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'freeNightRule', e.target.value)}
+                                >
+                                  {STAY_PAY_FREE_NIGHT_RULES.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                </SearchableSelect>
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Valid from (check-in)</label>
+                                <input
+                                  type="date"
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={rule.validFrom || ''}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'validFrom', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Valid to (check-in)</label>
+                                <input
+                                  type="date"
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={rule.validTo || ''}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'validTo', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', display: 'block', marginBottom: '0.25rem' }}>Max free nights (0 = no cap)</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={rule.maxFreeNights ?? 0}
+                                  onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'maxFreeNights', e.target.value)}
+                                />
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', gap: '0.2rem', paddingBottom: '0.2rem' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.76rem', fontWeight: 600, color: '#5b21b6', cursor: 'pointer' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={rule.repeat !== false}
+                                    onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'repeat', e.target.checked)}
+                                    style={{ width: '15px', height: '15px', accentColor: '#7c3aed', cursor: 'pointer' }}
+                                  />
+                                  Repeat every cycle
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.76rem', fontWeight: 600, color: '#5b21b6', cursor: 'pointer' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={rule.active !== false}
+                                    onChange={(e) => handleStayPayPromotionChange(item.tempId, rule.id, 'active', e.target.checked)}
+                                    style={{ width: '15px', height: '15px', accentColor: '#7c3aed', cursor: 'pointer' }}
+                                  />
+                                  Active
+                                </label>
+                              </div>
+                            </div>
+
+                            <div style={{ marginTop: '0.6rem' }}>
+                              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#5b21b6', marginBottom: '0.35rem' }}>
+                                Applies to rooms &mdash; leave all unticked for every room
+                              </div>
+                              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                {roomChoices.map((room) => (
+                                  <label key={room.key || room.id} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.76rem', color: '#4c1d95', background: '#ede9fe', border: '1px solid #ddd6fe', borderRadius: '999px', padding: '0.25rem 0.6rem', cursor: 'pointer' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={(rule.roomKeys || []).includes(room.key)}
+                                      onChange={() => handleStayPayRoomToggle(item.tempId, rule.id, room.key)}
+                                      style={{ width: '13px', height: '13px', accentColor: '#7c3aed', cursor: 'pointer' }}
+                                    />
+                                    {room.name || 'Untitled room'}
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginTop: '0.55rem' }}>
+                              <span style={{ fontSize: '0.72rem', color: '#6d28d9', lineHeight: 1.45 }}>
+                                {freeNights > 0
+                                  ? `${freeNights} free night${freeNights === 1 ? '' : 's'} per cycle · ${stayPayRuleScopeLabel(rule, roomChoices)} · ${stayPayRuleSummary(rule)}`
+                                  : 'Paying for every night is not an offer — reduce the pay nights.'}
+                              </span>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem', color: '#b91c1c', borderColor: '#fecaca' }}
+                                onClick={() => handleRemoveStayPayPromotion(item.tempId, rule.id)}
+                              >
+                                <Trash2 size={12} /> Remove
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Park fees and conservation levies. A fee keeps its own
+                      validity dates: a levy runs on the park authority's year
+                      while a room season can straddle it, so each night is
+                      charged the figure valid on that night. */}
+                  {item.category === 'Accommodation' && (
+                    <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '0.85rem 1rem', marginBottom: '1.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <div>
+                          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#9a3412', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <Receipt size={16} color="#ea580c" /> Park fees, levies &amp; porterage
+                          </span>
+                          <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.2rem', lineHeight: 1.45 }}>
+                            {dbFeatures.surchargeFees && dbFeatures.feeType
+                              ? 'Each fee keeps its own validity dates, independent of the room seasons above. A night is charged the figure valid on that night, so a levy that changes on 1 January bills correctly inside a room season that straddles the year. Porterage is optional, charged once per stay per person (guide and driver excluded), and travels with the property.'
+                              : 'Park fees, conservation levies and porterage aren’t available in this workspace yet.'}
+                          </span>
+                        </div>
+                        {dbFeatures.surchargeFees && dbFeatures.feeType && (
+                          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap' }}
+                              onClick={() => handleAddLinkedFee(item.tempId)}
+                            >
+                              <Plus size={13} /> Add fee
+                            </button>
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap' }}
+                              onClick={() => handleAddPorterage(item.tempId)}
+                            >
+                              <Plus size={13} /> Add porterage
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {dbFeatures.surchargeFees && dbFeatures.feeType && (item.linkedFees || []).map((fee) => {
+                        const feeType = fee.type || 'entrance_fee';
+                        const chargedLabel = (fee.chargeBasis === 'per_night') ? 'per night' : 'once for the whole stay';
+                        const unitBasis = fee.unitBasis || 'per_person';
+                        /* Only "per person" bills both ages, so it is the
+                           one basis with a child figure to record. */
+                        const showChildAmount = dbFeatures.feeChildRate && unitBasis === 'per_person';
+                        const windows = fee.windows || [];
+                        const overlap = feeWindowOverlapError(windows);
+                        return (
+                          <div key={fee.key} style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid #fed7aa' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.6rem' }}>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Fee name</label>
+                                <input
+                                  type="text"
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  placeholder={surchargeTypeLabel(feeType)}
+                                  value={fee.name}
+                                  onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'name', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Fee type</label>
+                                <SearchableSelect
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={feeType}
+                                  onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'type', e.target.value)}
+                                >
+                                  {SURCHARGE_TYPES.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                </SearchableSelect>
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Charged</label>
+                                <SearchableSelect
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={fee.chargeBasis || 'once_off'}
+                                  onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'chargeBasis', e.target.value)}
+                                >
+                                  {(feeType === 'porterage' ? CHARGE_BASIS.filter((opt) => opt.id === 'once_off') : CHARGE_BASIS)
+                                    .map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                </SearchableSelect>
+                              </div>
+                              <div>
+                                <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Rate is per</label>
+                                <SearchableSelect
+                                  className="pricing-select"
+                                  style={{ padding: '0.4rem 0.55rem', width: '100%' }}
+                                  value={fee.unitBasis || 'per_person'}
+                                  onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'unitBasis', e.target.value)}
+                                >
+                                  {unitBasesFor({
+                                    surcharge_type: feeType,
+                                    surcharge_unit_basis: fee.unitBasis
+                                  }).map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                                </SearchableSelect>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: '0.2rem' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.76rem', fontWeight: 600, color: '#7c2d12', cursor: 'pointer' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={fee.chargeable !== false}
+                                    onChange={(e) => handleLinkedFeeChange(item.tempId, fee.key, 'chargeable', e.target.checked)}
+                                    style={{ width: '15px', height: '15px', accentColor: '#ea580c', cursor: 'pointer' }}
+                                  />
+                                  Chargeable
+                                </label>
+                                <span style={{ fontSize: '0.68rem', color: '#9a3412', marginTop: '0.15rem' }}>
+                                  {fee.chargeable !== false
+                                    ? `Added to the client total, ${chargedLabel}.`
+                                    : 'Shown for reference only, excluded from the total.'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {feeType === 'porterage' && (
+                              <div style={{ marginTop: '0.5rem', fontSize: '0.72rem', color: '#9a3412', lineHeight: 1.45 }}>
+                                Charged once for the whole stay, per person. The guide and driver are not billed. When this property is dropped on an itinerary or package, porterage is added once on the first day.
+                              </div>
+                            )}
+
+                            <div style={{ marginTop: '0.7rem' }}>
+                              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', marginBottom: '0.4rem' }}>
+                                Validity &amp; amount &mdash; one row per period this fee is charged
+                              </div>
+                              {windows.map((window) => {
+                                const windowKey = feeWindowKey(window);
+                                const amount = fee.amounts && Object.prototype.hasOwnProperty.call(fee.amounts, windowKey)
+                                  ? fee.amounts[windowKey]
+                                  : '';
+                                const childAmount = fee.childAmounts && Object.prototype.hasOwnProperty.call(fee.childAmounts, windowKey)
+                                  ? fee.childAmounts[windowKey]
+                                  : '';
+                                return (
+                                  <div
+                                    key={window.id}
+                                    style={{
+                                      display: 'grid',
+                                      gridTemplateColumns: `minmax(120px, 1.2fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(110px, 1fr)${showChildAmount ? ' minmax(110px, 1fr)' : ''} auto`,
+                                      gap: '0.5rem',
+                                      alignItems: 'end',
+                                      marginBottom: '0.5rem'
+                                    }}
+                                  >
+                                    <div>
+                                      <label style={{ fontSize: '0.68rem', fontWeight: 600, color: '#7c2d12', display: 'block', marginBottom: '0.2rem' }}>Period name</label>
+                                      <input
+                                        type="text"
+                                        className="pricing-select"
+                                        style={{ padding: '0.35rem 0.5rem', width: '100%' }}
+                                        placeholder="e.g. 2026 levy"
+                                        value={window.seasonName || ''}
+                                        onChange={(e) => handleFeeWindowChange(item.tempId, fee.key, window.id, 'seasonName', e.target.value)}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: '0.68rem', fontWeight: 600, color: '#7c2d12', display: 'block', marginBottom: '0.2rem' }}>Valid from</label>
+                                      <input
+                                        type="date"
+                                        className="pricing-select"
+                                        style={{ padding: '0.35rem 0.5rem', width: '100%' }}
+                                        value={window.validFrom || ''}
+                                        onChange={(e) => handleFeeWindowChange(item.tempId, fee.key, window.id, 'validFrom', e.target.value)}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: '0.68rem', fontWeight: 600, color: '#7c2d12', display: 'block', marginBottom: '0.2rem' }}>Valid to</label>
+                                      <input
+                                        type="date"
+                                        className="pricing-select"
+                                        style={{ padding: '0.35rem 0.5rem', width: '100%' }}
+                                        value={window.validTo || ''}
+                                        onChange={(e) => handleFeeWindowChange(item.tempId, fee.key, window.id, 'validTo', e.target.value)}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label style={{ fontSize: '0.68rem', fontWeight: 600, color: '#7c2d12', display: 'block', marginBottom: '0.2rem' }}>Amount ({item.currency})</label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        className="pricing-select"
+                                        style={{ padding: '0.35rem 0.5rem', width: '100%', fontWeight: 700 }}
+                                        placeholder="Blank = not charged"
+                                        value={amount}
+                                        onChange={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, windowKey, e.target.value)}
+                                        step={moneyStep}
+                                        onBlur={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, windowKey, applyInputRounding(e.target.value, amountSettings.inputRounding))}
+                                      />
+                                    </div>
+                                    {showChildAmount && (
+                                      <div>
+                                        <label style={{ fontSize: '0.68rem', fontWeight: 600, color: '#7c2d12', display: 'block', marginBottom: '0.2rem' }}>Child amount ({item.currency})</label>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          className="pricing-select"
+                                          style={{ padding: '0.35rem 0.5rem', width: '100%', fontWeight: 700 }}
+                                          placeholder="Blank = adult amount"
+                                          value={childAmount}
+                                          onChange={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, windowKey, e.target.value, 'childAmounts')}
+                                          step={moneyStep}
+                                          onBlur={(e) => handleLinkedFeeAmountChange(item.tempId, fee.key, windowKey, applyInputRounding(e.target.value, amountSettings.inputRounding), 'childAmounts')}
+                                        />
+                                      </div>
+                                    )}
+                                    <button
+                                      type="button"
+                                      className="secondary-btn"
+                                      disabled={windows.length <= 1}
+                                      style={{ padding: '0.35rem 0.6rem', fontSize: '0.72rem', color: '#b91c1c', borderColor: '#fca5a5' }}
+                                      onClick={() => handleRemoveFeeWindow(item.tempId, fee.key, window.id)}
+                                    >
+                                      Remove
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                              {overlap && (
+                                <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '8px', padding: '0.5rem 0.7rem', fontSize: '0.74rem', color: '#b91c1c', marginBottom: '0.5rem' }}>
+                                  This fee&apos;s {overlap}. Give each period its own dates so a night has one price.
+                                </div>
+                              )}
+                              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                                <button
+                                  type="button"
+                                  className="secondary-btn"
+                                  style={{ padding: '0.35rem 0.7rem', fontSize: '0.74rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
+                                  onClick={() => handleAddFeeWindow(item.tempId, fee.key)}
+                                >
+                                  <Plus size={12} /> Add validity period
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary-btn"
+                                  style={{ padding: '0.35rem 0.7rem', fontSize: '0.74rem' }}
+                                  onClick={() => handleFeeWindowsFromProperty(item.tempId, fee.key)}
+                                >
+                                  Use the property&apos;s seasons
+                                </button>
+                                <span style={{ fontSize: '0.68rem', color: '#9a3412' }}>
+                                  A blank amount is a period the fee is not charged. Both dates open means the figure never changes.
+                                </span>
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginTop: '0.55rem', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.7rem', color: '#9a3412' }}>
+                                Fee details are shared across the property; each period above carries its own figure.
+                              </span>
+                              <button
+                                type="button"
+                                className="secondary-btn"
+                                style={{ padding: '0.3rem 0.6rem', fontSize: '0.74rem', color: '#b91c1c', borderColor: '#fca5a5' }}
+                                onClick={() => handleRemoveLinkedFee(item.tempId, fee.key)}
+                              >
+                                Remove fee
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {dbFeatures.surchargeFees && dbFeatures.feeType && (item.linkedFees || []).length === 0 && (
+                        <div style={{ marginTop: '0.7rem', fontSize: '0.74rem', color: '#9a3412' }}>
+                          No park fee, conservation levy or porterage on this property. Add one only if the supplier bills it on top of the room rate.
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {/* Description Field */}
@@ -9030,7 +9860,9 @@ export const LibraryItems = () => {
                         <div style={{ fontWeight: 600, color: isExtrasCategory(item.category) ? '#db2777' : (isCarRentalCategory(item.category) ? '#0e7490' : '#0f766e') }}>
                           {(isCarRentalCategory(item.category))
                             ? 'Per Vehicle'
-                            : (isExtrasCategory(item.category) && item.pricing_model === 'per_unit' ? 'Service Only' : 'Per Person')}
+                            : (isExtrasCategory(item.category)
+                              ? (item.pricing_model === 'per_unit' ? 'Service Only' : item.pricing_model === 'per_vehicle' ? 'Per Vehicle' : 'Per Person')
+                              : 'Per Person')}
                         </div>
                       ) : (
                         <>
@@ -9094,7 +9926,7 @@ export const LibraryItems = () => {
                         </span>
                       ) : isExtrasCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#db2777', background: '#fdf2f8', border: '1px solid #f9a8d4', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
-                          ✨ {item.pricing_model === 'per_unit' ? 'Service only (per unit)' : 'Per Person'}
+                          ✨ {item.pricing_model === 'per_unit' ? 'Service only (per unit)' : item.pricing_model === 'per_vehicle' ? 'Per Vehicle' : 'Per Person'}
                         </span>
                       ) : isCarRentalCategory(item.category) ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#0e7490', background: '#ecfeff', border: '1px solid #67e8f9', borderRadius: '5px', padding: '0.15rem 0.45rem', marginBottom: '0.2rem', width: 'fit-content' }}>
@@ -9114,6 +9946,7 @@ export const LibraryItems = () => {
                           /* One season at a time, stepped with the arrows below. */
                           if (rIdx !== activeListSeasonIndex(item.id, item.item_rates)) return null;
                           const isFlat = item.pricing_model === 'per_room' || rate.rate_basis === 'per_room';
+                          const extrasBasis = rate.rate_basis || item.pricing_model || 'per_person';
                           const flatRate = parseFloat(rate.unit_price) || parseFloat(rate.price_1_adult) || 0;
                           const p1 = parseFloat(rate.price_1_adult || rate.single_room_rate) || 0;
                           const p2 = parseFloat(rate.price_2_adults || rate.double_twin_rate) || 0;
@@ -9237,9 +10070,9 @@ export const LibraryItems = () => {
                               ) : isExtrasCategory(item.category) ? (
                                 <>
                                   <div style={{ color: '#db2777', fontWeight: 600 }}>
-                                    <strong>{item.pricing_model === 'per_unit' ? 'Service:' : 'Adult:'}</strong> {item.currency} {transferAdultRate.toLocaleString()}{item.pricing_model === 'per_unit' ? ' / service' : ' / person'}
+                                    <strong>{extrasBasis === 'per_unit' ? 'Service:' : extrasBasis === 'per_vehicle' ? 'Vehicle:' : 'Adult:'}</strong> {item.currency} {transferAdultRate.toLocaleString()}{extrasBasis === 'per_unit' ? ' / service' : extrasBasis === 'per_vehicle' ? ' / vehicle' : ' / person'}
                                   </div>
-                                  {item.pricing_model !== 'per_unit' && transferChildRate > 0 && (
+                                  {extrasBasis === 'per_person' && transferChildRate > 0 && (
                                     <div style={{ color: '#64748b', fontSize: '0.74rem', marginTop: '0.15rem' }}>
                                       <strong>Child:</strong> {item.currency} {transferChildRate.toLocaleString()} / child
                                     </div>

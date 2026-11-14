@@ -160,6 +160,9 @@ export const carRentalGroups = (item) => {
         windowLabel: rentalSeasonLabel(window[0], window[1]),
         currency: rate.currency || item?.currency || '',
         boundedEnds: (window[0] ? 1 : 0) + (window[1] ? 1 : 0),
+        /* Whether this tariff's day price already covers fuel is a contract fact
+           per season, so it rides the season the band was answered from. */
+        fuelIncluded: rate.fuel_included === true ? true : rate.fuel_included === false ? false : null,
         bands: []
       };
       season.spanDays = seasonSpanDays(season);
@@ -604,6 +607,7 @@ export const buildRentalDetails = ({ item, group, season, band, days, pickupAt, 
     seasonCount: asNumber((group.seasons || []).length),
     rateId: band?.id || null,
     validityFrom: tariff ? tariff.validFrom : '',
-    validityTo: tariff ? tariff.validTo : ''
+    validityTo: tariff ? tariff.validTo : '',
+    fuelIncluded: tariff?.fuelIncluded ?? null
   };
 };

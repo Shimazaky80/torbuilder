@@ -9,6 +9,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { packageBandLabel } from '../lib/packagePricing';
 import { VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { scopeCompanyId } from '../lib/tenantScope';
+import { isVehicleExtra } from '../lib/extrasChargeTypes';
 
 const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false, vehicleColumns: [] });
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
@@ -29,7 +30,7 @@ const estimatePackage = (pkg) => {
       const total = services.filter((item) => (item.currency_code || 'ZAR') === currency).reduce((sum, item) => {
         const quantity = Number(item.quantity) || 1;
         const unitPrice = Number(item.unit_price) || 0;
-        if (String(item.rate_basis || '').toLowerCase() === 'per_vehicle') {
+        if (String(item.rate_basis || '').toLowerCase() === 'per_vehicle' && !isVehicleExtra(item)) {
           const capacity = Math.max(1, Number(item.vehicle_capacity) || 0);
           const vehicleCount = capacity >= pax ? 1 : Math.ceil(pax / capacity);
           return sum + unitPrice * quantity * vehicleCount / pax;
@@ -97,7 +98,7 @@ export const Packages = () => {
       if (daysRes.error) throw daysRes.error;
       const dayIds = (daysRes.data || []).map((day) => day.id);
       const itemsRes = dayIds.length
-        ? await supabase.from('package_day_items').select('package_day_id, unit_price, quantity, currency_code, rate_basis, vehicle_capacity, is_included').in('package_day_id', dayIds)
+        ? await supabase.from('package_day_items').select('package_day_id, category, unit_price, quantity, currency_code, rate_basis, vehicle_capacity, is_included').in('package_day_id', dayIds)
         : { data: [], error: null };
       if (itemsRes.error) throw itemsRes.error;
 

@@ -4,7 +4,8 @@ import { rateCoversNights } from './accommodationOptions';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
 import { chargesChildRate, contractPaxRate } from './servicePricing';
 import { buildShareContext } from './staffPricing';
-import { chargeNameOf, ratesForCharge } from './extrasChargeTypes';
+import { chargeNameOf, isExtrasItem, isVehicleExtra, ratesForCharge } from './extrasChargeTypes';
+import { ratesForServiceRoom, roomTypesOf, serviceRoomIdentity } from './roomTypes';
 import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal, crewShareOn } from './guidePricing';
 import { hireOfferRateSnapshot, resolveHireOfferForDetails } from './packageBundlePricing';
 import {
@@ -69,6 +70,7 @@ const isAccommodation = (item, service) =>
   && /accommodation/i.test(String(item?.category || service?.category || ''));
 const isVehicle = (item, service, rate) => {
   const category = String(item?.category || service?.category || '');
+  if (isExtrasItem({ category })) return false;
   const basis = String(rate?.rate_basis || service?.rate_basis || item?.pricing_model || '').toLowerCase();
   if (basis === 'per_vehicle' || /transfers?|transport|flights?\s*\/?\s*charter/i.test(category)) return true;
   return capacityFor(item, service) > 0 && /activities?|tours?|excursions?/i.test(category);
@@ -123,11 +125,12 @@ const rateCoverageCount = (rate, windows) =>
   windows.reduce((total, window) => total + (rateCoversWindow(rate, window) ? 1 : 0), 0);
 
 /* The seasons a line could still be priced from: every row of the item that sells the
-   SAME charge. A line bought as one charge must never be swapped onto another by a
-   coverage suggestion, and a blank charge — every row a legacy item carries — leaves
-   the whole matrix in play exactly as before. */
+   SAME charge and the SAME room. A line bought as one charge must never be swapped
+   onto another by a coverage suggestion, and a villa must never be offered its
+   sibling villa's seasons just because the two share a season name; a blank charge —
+   every row a legacy item carries — leaves the whole matrix in play exactly as before. */
 const uniqueRates = (item, rate) => {
-  const rows = [rate, ...ratesForCharge(item, chargeNameOf(rate))].filter(Boolean);
+  const rows = [rate, ...ratesForServiceRoom(ratesForCharge(item, chargeNameOf(rate)), rate, roomTypesOf(item))].filter(Boolean);
   return [...new Map(rows.map((row) => [row.id ?? `${row.currency || ''}:${seasonLabel(row)}:${seasonWindowText(row)}`, row])).values()];
 };
 
@@ -451,6 +454,7 @@ const tierKeyOf = (service) => (service?.tier_key ? String(service.tier_key) : '
    would be nonsense, so capacity-limited activities are left to explicit band items. */
 const isTransport = (item, service) => {
   const category = String(item?.category || service?.category || '');
+  if (isExtrasItem({ category })) return false;
   const basis = String(rateFor(service, item)?.rate_basis || service?.rate_basis || item?.pricing_model || '').toLowerCase();
   if (/transfers?|transport|flights?\s*\/?\s*charter/i.test(category)) return capacityFor(item, service) > 0;
   return (basis === 'per_vehicle' || basis === 'per_trip') && capacityFor(item, service) > 0;
@@ -819,6 +823,7 @@ const unitContractContribution = (service, item, pax, vehicleTypes = [], shareCo
   const unitCost = amount(rate.price_1_adult, rate.unit_price, rate.unit_cost, service.unit_cost);
   const basis = String(rate.rate_basis || service.rate_basis || item?.pricing_model || '').toLowerCase();
   const quantity = Math.max(1, numberOf(service.quantity) || 1);
+  if (isVehicleExtra(item || service, basis)) return unitCost * quantity / pax;
   if (basis === 'per_vehicle') {
     /* The column price comes off the rate's vector when one exists: resolve the vehicle
        type this party takes (smallest global type that seats them) and read its cell. A
@@ -1018,6 +1023,12 @@ const accommodationPricing = (service, item, { pax, childRange, singleRoomsOverr
       : rooms.filter((room) => room.occupants === 1).length;
   const ladder = normaliseSingleSupplementLadder(terms.rate);
 
+  /* A stay-pay free night waives the whole room-night: sharing, supplement and
+     child figures alike. The line keeps what the night was worth so a package
+     can still show the saving, but it contributes nothing to the band total. */
+  const stayPayFree = service?.stay_pay_free === true || service?.stayPayFree === true;
+  const stayPayValue = Number(service?.stay_pay_value ?? service?.stayPayValue) || 0;
+
   /* These are all per-traveller figures, so the room count must not be applied a
      second time on top of it. adultTotal is already the sum over the allocated
      rooms, so dividing by pax gives the per-traveller share; multiplying that by
@@ -1028,10 +1039,10 @@ const accommodationPricing = (service, item, { pax, childRange, singleRoomsOverr
     capacity,
     pax,
     roomCount: Math.max(1, rooms.length),
-    sharingPerAdult: round2(adultTotal / pax),
+    sharingPerAdult: stayPayFree ? 0 : round2(adultTotal / pax),
     singleRooms,
-    forcedSingleSupplement: round2(totalSingleSupplement(ladder, terms.supplement, singleRooms)),
-    singleSupplement: round2(terms.supplement),
+    forcedSingleSupplement: stayPayFree ? 0 : round2(totalSingleSupplement(ladder, terms.supplement, singleRooms)),
+    singleSupplement: stayPayFree ? 0 : round2(terms.supplement),
     /* A party this room is not sold at: the band stops below the number of heads
        that have to sleep here. The quote must be refused, not filled in at the
        nearest price the ladder happens to publish. */
@@ -1039,7 +1050,14 @@ const accommodationPricing = (service, item, { pax, childRange, singleRoomsOverr
     occupancyBlockReason: costs.blocked
       ? occupancyBlockReason(terms, rooms, service?.item_name || item?.name || 'Accommodation')
       : '',
-    ...childAccommodationFor(service, item, childRange, pax)
+    ...(stayPayFree ? {
+      stayPayFree: true,
+      stayPayValue,
+      childAllowed: childRange ? childAccommodationFor(service, item, childRange, pax).childAllowed : null,
+      childAccommodation: 0,
+      childBasis: 'Stay-pay free night',
+      childBandName: childAccommodationFor(service, item, childRange, pax).childBandName
+    } : childAccommodationFor(service, item, childRange, pax))
   };
 };
 
@@ -1340,7 +1358,7 @@ export const vehicleColumnPools = ({ days = [], library = [], vehicleTypes = [] 
         perPersonFixed += amount(rate.price_1_adult, rate.unit_price, rate.unit_cost, service.unit_cost) * quantity;
         return;
       }
-      if (basis === 'per_vehicle' && rate?.prices_by_vehicle
+      if (basis === 'per_vehicle' && !isVehicleExtra(item || service, basis) && rate?.prices_by_vehicle
         && typeof rate.prices_by_vehicle === 'object' && Object.keys(rate.prices_by_vehicle).length) {
         codes.forEach((code) => {
           const cell = vehicleVectorPrice(rate.prices_by_vehicle, code);
@@ -1416,7 +1434,16 @@ export const accommodationRatesForTrip = (service, item, tripFrom, tripTo, night
      the booking will actually be charged at. Without a stay length every row
      stays in the contest, exactly as before. */
   const stayNights = Math.floor(Number(nights) || 0);
-  const allRows = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  /* Only this line's room contests the preview: a sibling villa sharing the
+     season name and dates would otherwise enter with its own (often dearer)
+     ladder and win the highest-overlap pick. The room identity rides on the
+     line, or on its locked snapshot for a line saved before the room columns. */
+  const identitySource = serviceRoomIdentity(service) ? service : (service?.rate_snapshot || service);
+  const allRows = ratesForServiceRoom(
+    Array.isArray(item?.item_rates) ? item.item_rates : [],
+    identitySource,
+    roomTypesOf(item)
+  );
   const bandedRows = stayNights > 0 ? allRows.filter((rate) => rateCoversNights(rate, stayNights)) : allRows;
   const rows = bandedRows.length ? bandedRows : allRows;
   const rates = rows
@@ -1460,9 +1487,16 @@ export const accommodationPerPersonForSeason = ({ days = [], library = [], from 
   includedServices(days).forEach((service) => {
     const item = libraryEntryFor(service, library);
     if (!isAccommodation(item, service)) return;
+    const name = service.item_name || item?.name || 'Accommodation';
+    /* A stay-pay free night costs nothing, so it contributes zero to the season's
+       per-person figure rather than its contract rate. */
+    if (service.stay_pay_free === true || service.stayPayFree === true) {
+      rows.push({ name, sharing: 0, from: null, to: null, stayPayFree: true });
+      return;
+    }
     const chosen = accommodationRatesForTrip(service, item, from, to).chosen;
     rows.push({
-      name: service.item_name || item?.name || 'Accommodation',
+      name,
       sharing: chosen ? chosen.sharing : null,
       from: chosen?.from || null,
       to: chosen?.to || null
@@ -1490,9 +1524,16 @@ export const singleSupplementForSeason = ({ days = [], library = [], from = null
   includedServices(days).forEach((service) => {
     const item = libraryEntryFor(service, library);
     if (!isAccommodation(item, service)) return;
+    const name = service.item_name || item?.name || 'Accommodation';
+    /* A free night waives the whole room-night, supplement included, so it
+       contributes no supplement to the season. */
+    if (service.stay_pay_free === true || service.stayPayFree === true) {
+      rows.push({ name, supplement: 0, ladder: [], from: null, to: null, stayPayFree: true });
+      return;
+    }
     const chosen = accommodationRatesForTrip(service, item, from, to).chosen;
     rows.push({
-      name: service.item_name || item?.name || 'Accommodation',
+      name,
       supplement: chosen ? chosen.supplement : null,
       ladder: chosen?.ladder || [],
       from: chosen?.from || null,

@@ -20,7 +20,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Plane,
-  ShieldCheck
+  ShieldCheck,
+  CalendarRange
 } from 'lucide-react';
 import tLogo from '../assets/t_logo.png';
 import fullLogo from '../assets/full_logo.png';
@@ -37,6 +38,7 @@ const navItems = [
   { id: 'library-items', module: 'library', label: 'Library Items', icon: Package, path: '/library-items' },
   { id: 'packages', module: 'packages', label: 'Packages', icon: Backpack, path: '/packages' },
   { id: 'itineraries', module: 'itineraries', label: 'Itineraries', icon: Map, path: '/itineraries' },
+  { id: 'series-departures', module: 'series', label: 'Series Departures', icon: CalendarRange, path: '/series-departures' },
   { id: 'finance', module: 'finance', label: 'Finance', icon: Receipt, path: '/finance' },
   { id: 'tariffs', module: 'tariffs', label: 'Tariffs', icon: Tag, path: '/tariffs' },
   { id: 'analytics', module: 'analytics', label: 'Analytics', icon: BarChart3, path: '/analytics' },

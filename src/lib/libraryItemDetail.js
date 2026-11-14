@@ -27,10 +27,12 @@ import {
 } from './surchargeFees';
 import { normaliseSingleSupplementLadder, stripWaiverNote, waiverFromLadder } from './singleSupplement';
 import { collapseOccupancyLadder, isOccupancyBasis, isOccupancyTiered } from './occupancyPricing';
-import { nightBandLabel, weekendDaysLabel, weekendPriceOf } from './accommodationOptions';
-import { crewLadderTiers, normaliseStaffTiers, staffTierBands } from './staffRoomTiers';
+import { nightBandLabel, weekendDaysLabel, weekendPriceOf, weekendRatesOf, stripWeekendRatesNote } from './accommodationOptions';
+import { normalizeStayPayPromotions, stayPayRuleScopeLabel, stayPayRuleSummary } from './stayPay';
+import { crewLadderTiers, normaliseStaffTiers, staffCountWord, staffLadderBasis, staffTierBands } from './staffRoomTiers';
 import { starGlyphs } from './starGrading';
 import { carRentalGroups } from './carRentalPricing';
+import { fuelIncludedOf, fuelIncludedLabel } from './fuelAllowance';
 
 /* The destination an item is picked by: the region (for a property, the city its
    supplier is in) narrowed by its area. `location` is the older single field and
@@ -299,7 +301,7 @@ const childRows = ({ map, bands, money, kind, legacy }) => {
   return [];
 };
 
-const priceRows = ({ item, rate, kind, money, vehicleName }) => {
+const priceRows = ({ item, rate, kind, money, vehicleName, bands = [] }) => {
   const rows = [];
   const push = (label, value) => rows.push({ label, value });
   const basis = basisOf(rate, item);
@@ -373,8 +375,33 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
        nights the contract names - not a second charge type. */
     const weekendNights = weekendDaysLabel(rate);
     const weekendPrice = weekendPriceOf(rate);
-    if (weekendNights && priced(weekendPrice)) {
-      push(`Weekend rate (${weekendNights})`, `${money(weekendPrice)} / ${noun.toLowerCase()} / night`);
+    const wr = weekendRatesOf(rate);
+    if (weekendNights) {
+      if (basis === 'per_room' && priced(weekendPrice)) {
+        push(`Weekend rate (${weekendNights})`, `${money(weekendPrice)} / ${noun.toLowerCase()} / night`);
+      } else if (basis !== 'per_room') {
+        if (wr && (priced(wr.price_1_adult) || priced(wr.price_2_adults) || priced(wr.price_3_plus_adults))) {
+          if (priced(wr.price_1_adult)) {
+            push(`Weekend rate (${weekendNights}) — 1 adult (single)`, `${money(wr.price_1_adult)} / person / night`);
+          }
+          if (priced(wr.price_2_adults)) {
+            push(`Weekend rate (${weekendNights}) — 2 adults sharing (PPS)`, `${money(wr.price_2_adults)} / person / night`);
+          }
+          if (priced(wr.price_3_plus_adults)) {
+            push(`Weekend rate (${weekendNights}) — 3+ adults`, `${money(wr.price_3_plus_adults)} / person / night`);
+          }
+        } else if (!wr && priced(weekendPrice)) {
+          push(`Weekend rate (${weekendNights})`, `${money(weekendPrice)} / person / night`);
+        }
+        /* The weekend card can quote children alone (adults unchanged): those
+           bands print beside the adult weekend figures, named like the normal
+           child rows so the operator reads the same contract shape. */
+        if (wr && wr.child_rates) {
+          childRows({ map: wr.child_rates, bands, money, kind }).forEach((row) => {
+            push(`Weekend rate (${weekendNights}) — ${row.label}`, `${row.value} / person / night`);
+          });
+        }
+      }
     }
   }
 
@@ -428,11 +455,19 @@ const priceRows = ({ item, rate, kind, money, vehicleName }) => {
     if (kind === 'activities' && priced(rate.guide_rate)) {
       push("Guide's place", `${money(rate.guide_rate)} / person`);
     }
+
+    /* Whether the vehicle's price already covers fuel is a contract fact the
+       operator needs before adding a fuel allowance on top. Only a vehicle
+       provider states it; a tariff that never answered prints nothing. */
+    if (kind === 'transfers' || kind === 'transport') {
+      const fuel = fuelIncludedLabel(fuelIncludedOf(rate));
+      if (fuel) push('Fuel', fuel);
+    }
   }
 
   if (kind === 'meals' || kind === 'extras') {
     const adult = firstPriced([rate.price_1_adult, rate.unit_price, rate.adult_rate]);
-    if (priced(adult)) push(basis === 'per_unit' ? 'Per unit (whole service)' : 'Per person', money(adult));
+    if (priced(adult)) push(basis === 'per_unit' ? 'Per unit (whole service)' : kind === 'extras' && basis === 'per_vehicle' ? 'Per vehicle' : 'Per person', money(adult));
   }
 
   if (kind === 'tickets') {
@@ -514,7 +549,7 @@ const ladderRows = ({ label, ladder, roomLabel, meals, money }) => staffTierBand
   const range = band.maxRooms === null ? `${band.minRooms}+` : `${band.minRooms}\u2013${band.maxRooms}`;
   const rooms = `${band.rooms} ${roomLabel}${band.rooms === 1 ? '' : 's'}${band.added > 0 && band.rooms > band.added ? ` (${band.added} more)` : ''}`;
   return {
-    label: `${label} (${range} client rooms)`,
+    label: `${label} (${range} ${staffCountWord(staffLadderBasis(ladder))})`,
     value: `${rooms} @ ${money(band.rate)}${meals ? ` \u00b7 ${meals}` : ''}`
   };
 });
@@ -535,7 +570,7 @@ const crewRows = ({ tiers, meals, money }) => ladderRows({
 const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
   const sections = [];
 
-  const prices = priceRows({ item, rate, kind, money, vehicleName });
+  const prices = priceRows({ item, rate, kind, money, vehicleName, bands });
   if (prices.length) {
     sections.push({
       key: 'prices',
@@ -553,8 +588,9 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
   } else if (kind !== 'guide' && kind !== 'surcharge') {
     /* A service charged once for itself bills no head at all, so a child figure
        against it is a rate-card number nothing will ever invoice. */
-    const perUnit = basisOf(rate, item) === 'per_unit';
-    const standard = perUnit ? [] : childRows({ map: rate.child_rates_breakdown, bands, money, kind, legacy: rate.child_rate });
+    const basis = basisOf(rate, item);
+    const flat = basis === 'per_unit' || (kind === 'extras' && basis === 'per_vehicle');
+    const standard = flat ? [] : childRows({ map: rate.child_rates_breakdown, bands, money, kind, legacy: rate.child_rate });
     if (standard.length) sections.push({ key: 'child', title: 'Child rate', rows: standard });
     if (kind === 'tickets') {
       const fastTrack = childRows({ map: rate.fast_track_child_rates_breakdown, bands, money, kind, legacy: rate.fast_track_child_rate });
@@ -661,7 +697,9 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
     title: rate.season_name || rate.option_name || `Season ${index + 1}`,
     chips,
     sections,
-    notes: stripWaiverNote(rate.notes)
+    /* The weekend card travels in the notes until the weekend_rates column is
+       applied; the card prints it as price rows, so the marker is not prose. */
+    notes: stripWeekendRatesNote(stripWaiverNote(rate.notes)) || null
   };
 };
 
@@ -672,16 +710,22 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
    weeks each one speaks for. */
 const carRentalCard = (group, index, money) => {
   const many = group.seasons.length > 1;
+  /* Fuel inclusion is stated per season, so it rides the season's own window
+     label: a chip when the group has one tariff, beside each window when it has
+     several. A season that never answered adds nothing. */
+  const seasonLabel = (season) => season
+    ? [season.windowLabel, fuelIncludedLabel(season.fuelIncluded)].filter(Boolean).join(' \u00b7 ')
+    : '';
   return {
     key: group.key || `car-${index}`,
     title: [group.vehicleGroup, group.vehicleName].filter(Boolean).join(' \u00b7 ') || 'Vehicle',
     chips: [
       group.rateCode,
       group.kmsUnlimited !== false ? 'Unlimited km' : `${group.kmsIncluded || 0} km included`,
-      many ? `${group.seasons.length} rental price seasons` : group.seasons[0]?.windowLabel
+      many ? `${group.seasons.length} rental price seasons` : seasonLabel(group.seasons[0])
     ].filter(Boolean),
     rows: group.seasons.flatMap((season) => season.bands.map((band) => ({
-      label: `${many ? `${season.windowLabel} \u00b7 ` : ''}${band.minDays}\u2013${band.maxDays === null ? '\u221e' : band.maxDays} days`,
+      label: `${many ? `${seasonLabel(season)} \u00b7 ` : ''}${band.minDays}\u2013${band.maxDays === null ? '\u221e' : band.maxDays} days`,
       value: `${money(band.price)} / vehicle`
     })))
   };
@@ -693,8 +737,23 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
   const money = makeMoney(currency);
   const bands = Array.isArray(item.child_age_ranges) ? item.child_age_ranges : [];
   const rates = Array.isArray(item.item_rates) ? item.item_rates : [];
-  const vehicleName = (code) =>
-    vehicleTypes.find((type) => String(type.id ?? type.code) === String(code))?.name || code;
+  const vehicleName = (code) => {
+    const key = String(code);
+    /* Price maps are keyed on the stable vehicle code; a caller may still hand
+       over an id. Match either, so the seat count appears whichever was used. */
+    const type = vehicleTypes.find((entry) => (
+      (entry?.code !== undefined && entry?.code !== null && String(entry.code) === key)
+      || (entry?.id !== undefined && entry?.id !== null && String(entry.id) === key)
+    ));
+    if (!type) return code;
+    const name = type.name || type.code || code;
+    /* A per-vehicle price is only useful to a consultant if the row says how
+       many people the vehicle seats, not just which vehicle it is. */
+    const seats = Number(type.max_capacity ?? type.capacity ?? type.seats);
+    return Number.isFinite(seats) && seats > 0
+      ? `${name} \u00b7 ${seats} ${seats === 1 ? 'seat' : 'seats'}`
+      : name;
+  };
 
   /* Folded by the same engine that prices a hire, so the card and the drop dialog
      describe the same contract: groups, the seasons each group is sold across, and
@@ -717,6 +776,19 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
     kind === 'surcharge' ? null : BASIS_LABELS[basis] ? { kind: 'basis', text: BASIS_LABELS[basis] } : null
   ].filter(Boolean);
 
+  /* Stay X Pay Y is a property-level offer, so it prints once above the seasons
+     rather than inside one season's card. The rooms list is the library's own,
+     so a scoped offer names the rooms the operator chose. */
+  const rooms = Array.isArray(item.room_types) ? item.room_types : [];
+  const stayPay = normalizeStayPayPromotions(item.stay_pay_promotions)
+    .filter((rule) => rule.active)
+    .map((rule) => ({
+      key: rule.id,
+      name: rule.name || `Stay ${rule.stayNights} Pay ${rule.payNights}`,
+      summary: stayPayRuleSummary(rule),
+      scope: stayPayRuleScopeLabel(rule, rooms)
+    }));
+
   return {
     kind,
     name: item.name || 'Untitled item',
@@ -725,6 +797,7 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
     chips,
     facts: factsFor({ kind, item, bands, rates }),
     seasons,
+    stayPay,
     carRental: carGroups.map((group, index) => carRentalCard(group, index, money)),
     empty: seasons.length === 0 && carGroups.length === 0
   };
@@ -767,6 +840,15 @@ export const detailDocumentHtml = (model) => {
       ${season.notes ? `<p class="note">${escapeMultiline(season.notes)}</p>` : ''}
     </section>`)
     .join('');
+
+  const stayPayMarkup = model.stayPay && model.stayPay.length
+    ? `<section class="card"><h2>Stay X Pay Y promotions</h2>${model.stayPay
+      .map((rule) => `
+      <h3>${escapeHtml(rule.name)}</h3>
+      <p class="chips">${escapeHtml(rule.scope)}</p>
+      <p class="note">${escapeHtml(rule.summary)}</p>`)
+      .join('')}</section>`
+    : '';
 
   const carMarkup = model.carRental.length
     ? `<section class="card"><h2>Car rental rates</h2>${model.carRental
@@ -813,6 +895,7 @@ export const detailDocumentHtml = (model) => {
 <div class="meta">${model.chips.map((chip) => escapeHtml(chip.text)).join(' \u00b7 ')}</div>
 ${facts}
 ${empty}
+${stayPayMarkup}
 ${seasonMarkup}
 ${carMarkup}
 </body>

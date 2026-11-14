@@ -113,6 +113,36 @@ check('the single-supplement card is the sharing price plus the supplement',
 check('child price uses the contracted child rate on the same unit share', price.childTotal, 680);
 check('accommodation indicates the required room count', price.accommodationRows[0].roomCount, 2);
 
+/* A stay-pay free night bills nothing: the row keeps the waived figure so the
+   saving stays readable, but every total treats the room-night as zero. */
+const freeNightDays = [{
+  services: [
+    packageDays[0].services[0],
+    {
+      ...packageDays[0].services[1],
+      stay_pay_free: true, stay_pay_rule: 'Stay 7 Pay 5', stay_pay_value: 810,
+      unit_cost: 0, unit_price: 0
+    }
+  ]
+}];
+const freeNight = calculatePackageTravellerBreakdown({
+  days: freeNightDays,
+  pattern: { pax: 4 },
+  library: [transfer, accommodation],
+  childRange
+});
+check('a free night adds no room money', freeNight.accommodationSharing, 0);
+check('a free night adds no single supplement', freeNight.singleSupplement, 0);
+check('a free night adds no forced supplement', freeNight.forcedSingleSupplement, 0);
+check('a free night adds no child accommodation', freeNight.childAccommodation, 0);
+check('the rest of the party still prices', freeNight.adultSharingTotal, 350);
+check('the row is marked free', freeNight.accommodationRows[0].stayPayFree, true);
+check('the waived figure stays readable', freeNight.accommodationRows[0].stayPayValue, 810);
+check('the season figure treats a free night as zero',
+  accommodationPerPersonForSeason({ days: freeNightDays, library: [transfer, accommodation] }).total, 0);
+check('the season supplement treats a free night as zero',
+  singleSupplementForSeason({ days: freeNightDays, library: [transfer, accommodation] }).total, 0);
+
 /* Every column has to carry a figure: a blank reads as "not worked out yet". */
 check('a unit row reports a real zero for the accommodation columns',
   [price.unitRows[0].sharingPerAdult, price.unitRows[0].singleSupplement, price.unitRows[0].childAccommodation].join(','), '0,0,0');

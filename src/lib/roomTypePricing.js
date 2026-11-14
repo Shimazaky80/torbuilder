@@ -124,3 +124,28 @@ export const rateForAllocatedRoom = (soldRate, room) => {
 };
 
 export const allocationRoomTypeName = allocationTypeName;
+
+/* The one room type a confirmed allocation names, when every typed bed agrees
+   on it. Role markers (staff/crew) and untyped legacy beds price on the line's
+   own row and are ignored here. A night mixing two guest room types has no
+   single identity - the line keeps the room it was sold at and each bed prices
+   from its own sibling row. Used to move a line's identity onto the room the
+   operator actually allocated, so a later re-price scopes to that room's
+   contract instead of the sibling the drop happened to resolve first. */
+export const homogeneousRoomIdentity = (roomAllocations) => {
+  const list = Array.isArray(roomAllocations) ? roomAllocations : [];
+  let first = null;
+  for (const room of list) {
+    const named = allocationTypeName(room);
+    if (!named) continue;
+    const id = String(room?.roomTypeId ?? room?.room_type_id ?? '') || null;
+    if (!first) {
+      first = { roomTypeId: id, roomType: named, key: named.toLowerCase() };
+    } else if (first.key !== named.toLowerCase()) {
+      return null;
+    } else if (!first.roomTypeId && id) {
+      first.roomTypeId = id;
+    }
+  }
+  return first ? { roomTypeId: first.roomTypeId, roomType: first.roomType } : null;
+};

@@ -167,6 +167,18 @@ const LibraryItemDetailModal = ({ item, vehicleTypes = [], onClose }) => {
             </div>
           ))}
 
+          {detail.stayPay && detail.stayPay.length > 0 && (
+            <Section title="Stay X Pay Y promotions">
+              {detail.stayPay.map((rule) => (
+                <div key={rule.key} style={{ marginTop: '0.35rem', border: '1px solid #ddd6fe', background: '#f5f3ff', borderRadius: '9px', padding: '0.55rem 0.7rem' }}>
+                  <div style={{ fontWeight: 800, color: '#5b21b6', fontSize: '0.86rem' }}>{rule.name}</div>
+                  <div style={{ fontSize: '0.74rem', color: '#6d28d9' }}>{rule.scope}</div>
+                  <div style={{ fontSize: '0.74rem', color: '#64748b', marginTop: '0.1rem' }}>{rule.summary}</div>
+                </div>
+              ))}
+            </Section>
+          )}
+
           {detail.carRental.length > 0 && (
             <Section title="Car rental rates">
               {detail.carRental.map((group) => (

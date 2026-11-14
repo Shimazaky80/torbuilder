@@ -108,13 +108,16 @@ const built = buildItineraryPackage({
 
 check('package name', built.name, 'Kruger Safari Package');
 check('package currency', built.currency_code, 'ZAR');
-check('band is the paying party (2 adult clients)', built.pax_options[0].pax, 2);
+check('band is the paying party (3 clients: 2 adults, 1 child)', built.pax_options[0].pax, 3);
 check('band adults mirror', built.pax_options[0].adults, 2);
+check('band children mirror', built.pax_options[0].children, 1);
 check('band is not auto generated', built.pax_options[0].is_auto_generated, false);
 check('children accepted', built.accepts_children, true);
 check('child range', JSON.stringify(built.child_age_ranges), JSON.stringify([{ name: 'Children', ageFrom: 10, ageTo: 10 }]));
 check('validity from', built.validity_periods[0].valid_from, '2026-11-01');
-check('validity to', built.validity_periods[0].valid_to, '2026-11-05');
+check('validity to', built.validity_periods[0].valid_to, '2026-11-30');
+check('season name is month and year', built.validity_periods[0].name, 'November 2026');
+check('vehicle capacity retained', built.vehicle_capacity, 8);
 check('days copied including empty day', built.days.length, 2);
 check('day notes', built.days[0].notes, 'Arrival and transfer');
 check('day numbering', built.days[1].day_number, 2);
@@ -236,3 +239,27 @@ check('line carries no markup field', Object.prototype.hasOwnProperty.call(marke
 check('line carries no sell price field', Object.prototype.hasOwnProperty.call(markedLodge, 'sellPP'), false);
 check('snapshot stays at the contract rate', markedLodge.rate_snapshot.price_1_adult, 800);
 check('guide flat cost ignores marked sell', markedGuide.unit_cost, 300);
+
+/* A stay-pay free night crosses over still waived. The package prices its rooms
+   from the library, so a stamp that did not travel would quietly charge the night
+   again; the waived figure rides beside it so the saving stays readable. */
+const freeNightPackage = buildItineraryPackage({
+  meta: { ...meta, travellers: meta.travellers.filter((traveller) => traveller.role === 'client') },
+  days: [{
+    services: [{
+      itemId: 'hotel', name: 'Lodge', category: 'Accommodation',
+      currencyCode: 'ZAR', basis: 'per_person_sharing',
+      buyPP: 0, sellPP: 0, quantity: 2,
+      stayPayFree: true, stayPayRule: 'Stay 7 Pay 5', stayPayValue: 800
+    }]
+  }],
+  libraryItems: [hotel],
+  fallbackPax: 3,
+  travelWindow,
+  currencyCode: 'ZAR'
+});
+const freeLodge = freeNightPackage.days[0].items[0];
+check('a free night crosses over as free', freeLodge.stay_pay_free, true);
+check('the waived figure crosses over', freeLodge.stay_pay_value, 800);
+check('the winning rule crosses over', freeLodge.stay_pay_rule, 'Stay 7 Pay 5');
+check('a free night carries no cost into the package', freeLodge.unit_cost, 0);

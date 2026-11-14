@@ -6,9 +6,18 @@ import {
   tourGuideCount,
   travellersPlusTlCount,
   clientRoomsBooked,
+  payingGuestsBooked,
   buildShareContext,
   calculateRoomCharges
 } from '../src/lib/roomAllocationHelper';
+import {
+  normaliseStaffTiers,
+  staffLadderBasis,
+  staffCountWord,
+  staffRoomRates,
+  staffTierSummary,
+  staffLadderStoppedReason
+} from '../src/lib/staffRoomTiers';
 import {
   guideChargeTotal,
   guideRoomRate,
@@ -492,5 +501,150 @@ const gappedEight = calculateRoomCharges(gappedItem, staffAllocations(8), 'ZAR',
 assert.equal(bandRoom(gappedEight, 101).buyCost, 1200, 'A crew bed inside a gap pays the single rate');
 assert.match(bandRoom(gappedEight, 101).rateDescription, /no crew band covers 8 client rooms/, 'The line says the count sits between the bands');
 log('Example 15: a tier can stop at a client-room ceiling, and a bed outside every band pays the single rate');
+
+// Test Example 16: a ladder can count paying guests instead of client rooms.
+// `basis` rides on the tier rows; a legacy row never says it and keeps counting
+// rooms. One ladder is one contract, so any row saying guests makes the whole
+// ladder guest-based.
+const guestTier = { minClientRooms: 15, rooms: 1, rate: 0, basis: 'guests' };
+assert.equal(normaliseStaffTiers([guestTier])[0].basis, 'guests', 'Normalisation keeps a guests basis');
+assert.equal(normaliseStaffTiers([{ minClientRooms: 5, rooms: 1, rate: 0 }])[0].basis, 'rooms', 'A legacy row normalises to rooms');
+assert.equal(staffLadderBasis([guestTier]), 'guests', 'A guests row makes the ladder guest-based');
+assert.equal(staffLadderBasis([{ minClientRooms: 5, rooms: 1, rate: 0 }]), 'rooms', 'A legacy ladder stays room-based');
+assert.equal(staffLadderBasis([{ minClientRooms: 5, rooms: 1, rate: 0 }, guestTier]), 'guests', 'One ladder is one contract: any guests row wins');
+assert.equal(staffLadderBasis([]), 'rooms', 'No ladder reads as rooms');
+assert.equal(staffCountWord('guests'), 'paying guests');
+assert.equal(staffCountWord('rooms'), 'client rooms');
+const guestPairLadder = normaliseStaffTiers([guestTier, { minClientRooms: 30, rooms: 2, rate: 300, basis: 'guests' }]);
+assert.deepEqual(staffRoomRates(guestPairLadder, 30), [0, 300], 'Thirty paying guests reach the two-room tier');
+assert.deepEqual(staffRoomRates(guestPairLadder, 14), [], 'Fourteen paying guests reach nothing');
+log('Example 16: the basis lives on the rows, legacy ladders keep counting rooms, and the count is just a number to the bands');
+
+// Test Example 17: paying guests are the client-role occupants — children
+// included, every staff role excluded, a missing role still a client.
+const guestCountAllocations = [
+  { roomType: 'client', allocatedTravellers: [{ role: 'client' }, { role: 'client' }] },
+  { roomType: 'client', allocatedTravellers: [{ role: 'client', age: 8 }] },
+  { roomType: 'client', allocatedTravellers: [{ role: 'client' }, { role: 'tour_leader' }] },
+  { roomType: 'staff', staffRole: 'tour_guide', allocatedTravellers: [{ role: 'tour_guide' }] },
+  { roomType: 'client', allocatedTravellers: [{ name: 'Legacy' }] }
+];
+assert.equal(payingGuestsBooked(guestCountAllocations), 5, 'Two adults, a child, one client sharing with a TL, and a legacy occupant');
+assert.equal(clientRoomsBooked(guestCountAllocations), 4, 'The same allocation books four rooms — the counts really can differ');
+assert.equal(payingGuestsBooked([]), 0, 'No allocation houses no guests');
+log('Example 17: payingGuestsBooked counts client-role heads, never staff, and children pay');
+
+// Test Example 18: a guests ladder on the tour leader deal judges the head
+// count, not the rooms. Three rooms of three meet a 9-guest threshold that five
+// single rooms never reach.
+const guestTlItem = {
+  ...hotelItem,
+  item_rates: [{
+    ...hotelItem.item_rates[0],
+    tour_leader_rate: null,
+    tour_leader_tiers: [
+      { minClientRooms: 9, rooms: 1, rate: 0, basis: 'guests' },
+      { minClientRooms: 12, rooms: 2, rate: 500, basis: 'guests' }
+    ]
+  }]
+};
+const guestRooms = (counts, staff = []) => [
+  ...counts.map((n, i) => ({
+    roomId: i + 1,
+    roomType: 'client',
+    allocatedTravellers: Array.from({ length: n }, (_, j) => ({ name: `Guest ${i + 1}-${j + 1}`, role: 'client' }))
+  })),
+  ...staff
+];
+const tlStaffRoom = (roomId) => ({ roomId, roomType: 'staff', staffRole: 'tour_leader', allocatedTravellers: [travellers[10]] });
+
+const threeTriples = guestRooms([3, 3, 3], [tlStaffRoom(91)]);
+assert.equal(clientRoomsBooked(threeTriples), 3, 'Three rooms would miss the legacy five-room minimum');
+const nineGuestTl = calculateRoomCharges(guestTlItem, threeTriples, 'ZAR', 0).rooms.find(r => r.roomId === 91);
+assert.equal(nineGuestTl.buyCost, 0, 'Nine paying guests release the free TL room even in three rooms');
+assert.match(nineGuestTl.rateDescription, /Threshold of 9 paying guests met/, 'The line names the guest threshold');
+
+const fiveSingles = guestRooms([1, 1, 1, 1, 1], [tlStaffRoom(91)]);
+const fiveGuestTl = calculateRoomCharges(guestTlItem, fiveSingles, 'ZAR', 0).rooms.find(r => r.roomId === 91);
+assert.equal(fiveGuestTl.buyCost, 1200, 'Five single rooms are only five guests: below the 9-guest threshold the TL pays single');
+assert.match(fiveGuestTl.rateDescription, /Threshold of 9 paying guests not met: 5 booked/, 'The missed threshold is counted in guests');
+
+const twelveGuestTl = calculateRoomCharges(guestTlItem, guestRooms([3, 3, 3, 3], [tlStaffRoom(91), tlStaffRoom(92)]), 'ZAR', 0);
+assert.equal(twelveGuestTl.rooms.find(r => r.roomId === 91).buyCost, 0, 'Twelve guests keep the first TL room free');
+const secondTl = twelveGuestTl.rooms.find(r => r.roomId === 92);
+assert.equal(secondTl.buyCost, 500, 'The 12-guest tier adds a second TL room at 500');
+assert.match(secondTl.rateDescription, /TL room 2 of 2 included: 12 paying guests booked/, 'The allowance note counts guests');
+log('Example 18: a guests TL ladder releases rooms by the head count, in either direction');
+
+// Test Example 19: the crew pool reads the same guest basis, one pool shared by
+// the guide and driver beds.
+const guestCrewItem = {
+  ...hotelItem,
+  guide_driver_room_offered: true,
+  item_rates: [{
+    ...hotelItem.item_rates[0],
+    guide_rate: null,
+    driver_rate: null,
+    guide_tiers: [
+      { minClientRooms: 8, rooms: 1, rate: 0, basis: 'guests' },
+      { minClientRooms: 12, rooms: 2, rate: 300, basis: 'guests' }
+    ]
+  }]
+};
+const crewStaffRooms = [
+  { roomId: 101, roomType: 'staff', staffRole: 'tour_guide', allocatedTravellers: [travellers[11]] },
+  { roomId: 102, roomType: 'staff', staffRole: 'driver', allocatedTravellers: [driverTraveller] }
+];
+const sixGuestCrew = calculateRoomCharges(guestCrewItem, guestRooms([3, 3], crewStaffRooms), 'ZAR', 0);
+assert.equal(roomCost(sixGuestCrew, 101), 1200, 'Six guests are below the 8-guest crew threshold');
+assert.match(bandRoom(sixGuestCrew, 101).rateDescription, /Threshold of 8 paying guests not met: 6 booked/, 'The crew note counts guests');
+assert.equal(roomCost(sixGuestCrew, 102), 1200, 'The driver bed waits on the same threshold');
+
+const nineGuestCrew = calculateRoomCharges(guestCrewItem, guestRooms([3, 3, 3], crewStaffRooms), 'ZAR', 0);
+assert.equal(roomCost(nineGuestCrew, 101), 0, 'Nine guests release the free pooled crew room');
+assert.match(bandRoom(nineGuestCrew, 101).rateDescription, /Threshold of 8 paying guests met/, 'The crew threshold note counts guests');
+assert.equal(roomCost(nineGuestCrew, 102), 1200, 'The second crew bed is outside the one-room pool');
+assert.match(bandRoom(nineGuestCrew, 102).rateDescription, /crew allowance of 1 room\(s\) used: 9 paying guests booked/, 'The allowance note counts guests');
+
+const twelveGuestCrew = calculateRoomCharges(guestCrewItem, guestRooms([3, 3, 3, 3], crewStaffRooms), 'ZAR', 0);
+assert.equal(roomCost(twelveGuestCrew, 101), 0, 'Twelve guests keep the first crew room free');
+assert.equal(roomCost(twelveGuestCrew, 102), 300, 'The 12-guest tier prices the second crew bed at 300');
+log('Example 19: the crew pool releases bed by bed on the paying-guest count');
+
+// Test Example 20: the guide dialog's rate helpers take the same guest count,
+// and an unknown count keeps the legacy threshold-met reading for package quotes.
+const guestCrewRate = guestCrewItem.item_rates[0];
+assert.equal(crewPoolRooms(guestCrewRate, { clientRooms: 100, payingGuests: 7 }), 0, 'A guests ladder ignores the room count');
+assert.equal(crewPoolRooms(guestCrewRate, { clientRooms: 0, payingGuests: 8 }), 1, 'Eight guests release the pool even with no rooms known');
+assert.equal(crewPoolRooms(guestCrewRate, { payingGuests: 12 }), 2, 'Twelve guests open the second crew room');
+assert.equal(guideTravelRate(guestCrewRate, true, { payingGuests: 8 }), 0, 'The guide bed is free at eight paying guests');
+assert.equal(guideTravelRate(guestCrewRate, true, { payingGuests: 7 }), 1200, 'Below the threshold the guide bed pays single');
+assert.equal(driverTravelRate(guestCrewRate, true, { payingGuests: 12, crewBed: 1 }), 300, 'The second bed takes the tier rate');
+assert.equal(overnightRiderRate(guestCrewRate, 'both', true, { payingGuests: 12 }), 300, 'Both beds at twelve guests: free plus the 300 tier room');
+assert.equal(overnightRiderRate(guestCrewRate, 'both', true, { payingGuests: 8 }), 1200, 'Both beds at eight guests: free plus a single-rate second bed');
+assert.equal(guideTravelRate(guestCrewRate, true, {}), 0, 'An unknown guest count keeps the threshold-met reading');
+assert.equal(crewPoolRooms(tieredStaffRate, { clientRooms: 5, payingGuests: 1 }), 1, 'A rooms ladder ignores the guest count');
+log('Example 20: guide, driver and pool helpers judge a guests ladder on payingGuests alone');
+
+// Test Example 21: the notes and previews name the thing the ladder counts.
+const guestBands = [
+  { minClientRooms: 8, maxClientRooms: 11, rooms: 1, rate: 0, basis: 'guests' },
+  { minClientRooms: 15, rooms: 2, rate: 300, basis: 'guests' }
+];
+assert.equal(staffLadderStoppedReason(guestBands, 12), 'no crew band covers 12 paying guests');
+assert.equal(staffLadderStoppedReason(guestBands, 12, 'tour leader'), 'no tour leader band covers 12 paying guests');
+assert.equal(staffLadderStoppedReason([guestBands[0]], 12), 'crew deal stops at 11 paying guests: 12 booked');
+const summaryMoney = (v) => `ZAR ${v}`;
+assert.equal(
+  staffTierSummary(guestBands, summaryMoney, 'crew room'),
+  '8–11 paying guests: 1 crew room @ ZAR 0 · 15+ paying guests: 2 crew rooms (1 more) @ ZAR 300',
+  'A guests ladder prints its ranges in paying guests'
+);
+assert.equal(
+  staffTierSummary(bandLadder, summaryMoney),
+  '1–10 client rooms: 1 room @ ZAR 800 · 11+ client rooms: 1 room @ ZAR 650',
+  'A legacy ladder still prints client rooms'
+);
+log('Example 21: stopped reasons and tier summaries say paying guests only when the ladder counts them');
 
 console.log('\nAll Tour Leader and Tour Guide verification examples PASSED successfully!\n');

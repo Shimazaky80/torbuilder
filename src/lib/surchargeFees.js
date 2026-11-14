@@ -28,6 +28,8 @@
  *    prices a booking that bills children alone.
  */
 
+import { resolveSeasonForTravel, applyProtectionToRate, protectionForSeason } from './priceValidity';
+
 export const SURCHARGE_CATEGORY = 'Fees & Tickets';
 
 /* Rows saved before the rename still read as fees, so a database that has not
@@ -37,6 +39,7 @@ export const LEGACY_SURCHARGE_CATEGORY = 'Surcharge Fees';
 export const SURCHARGE_TYPES = [
   { id: 'entrance_fee', label: 'Park / Entrance Fees' },
   { id: 'conservation_levy', label: 'Conservation Levy' },
+  { id: 'porterage', label: 'Porterage' },
   { id: 'ticket', label: 'Ticket' }
 ];
 
@@ -67,6 +70,10 @@ export const UNIT_BASES = [
 export const unitBasesFor = (item) => {
   const type = surchargeTypeOf(item);
   const stored = surchargeUnitBasisOf(item);
+  /* Porterage bills every traveller per head - guide and driver excepted - so
+     per person is the only basis it offers. A figure stored on another basis
+     stays listed so the row still reads honestly until it is re-saved. */
+  if (type === 'porterage') return UNIT_BASES.filter((u) => u.id === 'per_person' || u.id === stored);
   return UNIT_BASES.filter((u) => {
     if (u.conservationOnly && type !== 'conservation_levy') return false;
     if (u.legacyOnly && stored !== u.id) return false;
@@ -79,8 +86,10 @@ export const unitBasesFor = (item) => {
    prices on every type, so it stays valid even though the dropdown lists it
    only while it is the stored answer; "per child" belongs to a levy alone,
    because no other type stores a child-only figure. */
-export const isValidUnitBasis = (item, basis) =>
-  basis !== 'per_child' || surchargeTypeOf(item) === 'conservation_levy';
+export const isValidUnitBasis = (item, basis) => {
+  if (surchargeTypeOf(item) === 'porterage') return basis === 'per_person';
+  return basis !== 'per_child' || surchargeTypeOf(item) === 'conservation_levy';
+};
 
 export const isSurchargeItem = (item) => {
   const category = String(item?.category || '').trim();
@@ -90,6 +99,7 @@ export const isSurchargeItem = (item) => {
 export const surchargeTypeOf = (item) => {
   const raw = String(item?.surcharge_type || item?.fee_type || '').toLowerCase();
   if (raw.includes('conservation')) return 'conservation_levy';
+  if (raw.includes('porterage')) return 'porterage';
   if (raw.includes('ticket')) return 'ticket';
   if (raw.includes('entrance')) return 'entrance_fee';
   return 'entrance_fee';
@@ -101,8 +111,12 @@ export const surchargeTypeOf = (item) => {
    adult/child ladder. */
 export const feeUsesLevyColumns = (item) => surchargeTypeOf(item) === 'conservation_levy';
 
-export const surchargeBasisOf = (item) =>
-  String(item?.surcharge_charge_basis || '') === 'per_night' ? 'per_night' : 'once_off';
+/* Porterage is a once-per-stay service charged outside the season calendar, so
+   it is always once-off even if a row stored another answer. */
+export const surchargeBasisOf = (item) => {
+  if (surchargeTypeOf(item) === 'porterage') return 'once_off';
+  return String(item?.surcharge_charge_basis || '') === 'per_night' ? 'per_night' : 'once_off';
+};
 
 export const surchargeUnitBasisOf = (item) => {
   const raw = String(item?.surcharge_unit_basis || 'per_person').toLowerCase();
@@ -183,6 +197,9 @@ export const surchargeRateColumns = ({
   } else if (type === 'conservation_levy') {
     if (unitBasis === 'per_child') columns.conservation_levy_per_child = value;
     else columns.conservation_levy_per_adult = value;
+  } else if (type === 'porterage') {
+    columns.entrance_fee_per_person = value;
+    columns.unit_price = value;
   } else {
     columns.entrance_fee_per_person = value;
   }
@@ -291,13 +308,97 @@ export const moveFeeAmount = (amounts, oldKey, newKey) => {
   return moved;
 };
 
+/* A fee's own validity windows. A levy runs on the park authority's calendar,
+   not the property's: a room season of 20 Dec - 7 Jan straddles two levy years,
+   so the fee cannot borrow the room's window without billing one figure for
+   both. Each window is a name plus both date bounds; the amount maps stay keyed
+   by feeSeasonKey so a renamed or re-dated window carries its figure with it. */
+export const feeWindowId = () => `win_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+export const feeWindowKey = (window) => feeSeasonKey(window?.seasonName, window?.validFrom, window?.validTo);
+
+export const emptyFeeWindow = (seasonName = '') => ({
+  id: feeWindowId(),
+  seasonName: String(seasonName || '').trim(),
+  validFrom: '',
+  validTo: ''
+});
+
+/* The windows a saved fee actually carries, read straight off its own rate rows
+   in stored order. Rows written before fees owned their calendar borrowed the
+   property's seasons, and those windows are still the fee's own contract. */
+export const feeWindowsFromRecord = (feeItem) => {
+  const rates = Array.isArray(feeItem?.item_rates) ? feeItem.item_rates : [];
+  const seen = new Set();
+  const windows = [];
+  rates.forEach((rate) => {
+    const window = {
+      seasonName: feeSeasonName(rate?.season_name || rate?.option_name),
+      validFrom: seasonDateKey(rate?.valid_from),
+      validTo: seasonDateKey(rate?.valid_to)
+    };
+    const key = feeWindowKey(window);
+    if (seen.has(key)) return;
+    seen.add(key);
+    windows.push({ ...window, id: feeWindowId() });
+  });
+  return windows;
+};
+
+/* Seed a fee's calendar from the property's seasons: the common case where the
+   gate price does follow the room contract. Deduped across rooms, because one
+   season window priced for three rooms is still one window to the fee. */
+export const feeWindowsFromSeasons = (seasons = []) => {
+  const seen = new Set();
+  const windows = [];
+  (Array.isArray(seasons) ? seasons : []).filter(Boolean).forEach((season) => {
+    const window = {
+      seasonName: feeSeasonName(season.seasonName),
+      validFrom: seasonDateKey(season.validFrom),
+      validTo: seasonDateKey(season.validTo)
+    };
+    const key = feeWindowKey(window);
+    if (seen.has(key)) return;
+    seen.add(key);
+    windows.push({ ...window, id: feeWindowId() });
+  });
+  return windows;
+};
+
+/* Two windows of one fee may not overlap: a night inside both would have two
+   contracted figures and the resolver would pick whichever row came first.
+   Open bounds overlap everything on their open side. */
+export const feeWindowsOverlap = (a, b) => {
+  const aFrom = seasonDateKey(a?.validFrom);
+  const aTo = seasonDateKey(a?.validTo);
+  const bFrom = seasonDateKey(b?.validFrom);
+  const bTo = seasonDateKey(b?.validTo);
+  const startsBeforeOtherEnds = (from, to) => !from || !to || from <= to;
+  return startsBeforeOtherEnds(aFrom, bTo) && startsBeforeOtherEnds(bFrom, aTo);
+};
+
+export const feeWindowOverlapError = (windows = []) => {
+  const list = (Array.isArray(windows) ? windows : []).filter(Boolean);
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i + 1; j < list.length; j += 1) {
+      if (!feeWindowsOverlap(list[i], list[j])) continue;
+      const label = (w) => `${w.seasonName || 'Unnamed'} (${w.validFrom || 'open'} to ${w.validTo || 'open'})`;
+      return `validity windows "${label(list[i])}" and "${label(list[j])}" overlap, so a night between them would have two prices`;
+    }
+  }
+  return '';
+};
+
 /* A linked fee read back into the property editor. The fee's terms are shared
-   across the property; `amounts` holds one figure per season, and `amount`
-   keeps the first priced figure for callers that still expect a single row. */
-export const feeEditorRowFromRecord = (feeItem, seasons = []) => {
+   across the property; `windows` is its own calendar and `amounts` holds one
+   figure per window. `amount` keeps the first priced figure for callers that
+   still expect a single row. */
+export const feeEditorRowFromRecord = (feeItem, windows = null) => {
   const rates = Array.isArray(feeItem?.item_rates) ? feeItem.item_rates : [];
   const pricedRate = rates.find((rate) => surchargeRateAmount(rate, feeItem) !== null) || rates[0];
   const amount = surchargeRateAmount(pricedRate, feeItem);
+  const calendar = (Array.isArray(windows) ? windows : feeWindowsFromRecord(feeItem))
+    .map((window) => ({ ...window, id: window.id || feeWindowId() }));
   return {
     key: `fee_${feeItem?.id || ''}`,
     dbId: feeItem?.id || null,
@@ -307,8 +408,9 @@ export const feeEditorRowFromRecord = (feeItem, seasons = []) => {
     unitBasis: surchargeUnitBasisOf(feeItem),
     chargeable: feeItem?.surcharge_chargeable !== false,
     amount: amount === null ? '' : String(amount),
-    amounts: feeAmountsBySeason(feeItem, seasons),
-    childAmounts: feeAmountsBySeason(feeItem, seasons, surchargeChildAmount)
+    windows: calendar,
+    amounts: feeAmountsBySeason(feeItem, calendar),
+    childAmounts: feeAmountsBySeason(feeItem, calendar, surchargeChildAmount)
   };
 };
 
@@ -393,6 +495,76 @@ export const surchargeRepeats = ({ item, nights = 1 } = {}) => {
 export const needsRepeatPrompt = (item) =>
   surchargeBasisOf(item) === 'per_night' && !surchargeLinkId(item);
 
+const addNightDays = (iso, n) => {
+  const [y, m, d] = String(iso || '').slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return '';
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+
+/* The buy for a fee line night by night. A levy runs on the park authority's
+   calendar, not the property's: a room season of 20 Dec - 7 Jan straddles two
+   levy years, so each night resolves the fee window covering THAT night and
+   the line sums the nights instead of multiplying one season by the count.
+   An undated (month-timed) line falls back to the trip window for every night,
+   which is the single resolution it always had. A night no season can price
+   is returned unpriced - the caller leaves it off and says so, never bills it
+   at a guess. */
+export const surchargeNightsBuy = ({
+  item,
+  currencyCode,
+  firstDate = '',
+  fallbackStart = '',
+  fallbackEnd = '',
+  nights = 1,
+  protectionPercent = 0,
+  allowFuture = false,
+  allowPartial = false,
+  paxCount = 1,
+  childCount = 0,
+  guideCount = 0
+} = {}) => {
+  const count = Math.max(1, parseInt(nights, 10) || 1);
+  const rates = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  const nightRows = [];
+  let total = 0;
+  let unitBasis = surchargeUnitBasisOf(item);
+  for (let n = 0; n < count; n += 1) {
+    const date = firstDate ? addNightDays(firstDate, n) : '';
+    const season = resolveSeasonForTravel({
+      rates,
+      currencyCode,
+      startDate: date || fallbackStart,
+      endDate: date || fallbackEnd,
+      protectionPercent,
+      allowFuture,
+      allowPartial
+    });
+    if (!season.rate || !season.canAdd) {
+      nightRows.push({ date, season, total: 0, perRepeat: 0, priced: false, protectionPercent: 0 });
+      continue;
+    }
+    const pct = protectionForSeason(season, protectionPercent);
+    const night = surchargeBuyTotal({
+      rate: applyProtectionToRate(season.rate, pct),
+      item,
+      paxCount,
+      childCount,
+      guideCount,
+      nights: 1
+    });
+    unitBasis = night.unitBasis;
+    total += night.total;
+    nightRows.push({ date, season, total: night.total, perRepeat: night.perRepeat, priced: true, protectionPercent: pct });
+  }
+  return {
+    total,
+    unitBasis,
+    nights: nightRows,
+    pricedNights: nightRows.filter((row) => row.priced).length,
+    firstSeason: nightRows[0]?.season || null
+  };
+};
+
 /**
  * The buy total for one surcharge line, before markup.
  *
@@ -404,10 +576,11 @@ export const needsRepeatPrompt = (item) =>
 export const surchargeBuyTotal = ({ rate, item, paxCount = 1, childCount = 0, guideCount = 0, nights = 1 } = {}) => {
   const unitBasis = surchargeUnitBasisOf(item);
   const type = surchargeTypeOf(item);
-  const repeats = surchargeRepeats({ item, nights });
+  const isPorterage = type === 'porterage';
+  const repeats = isPorterage ? 1 : surchargeRepeats({ item, nights });
   const adults = Math.max(0, (parseInt(paxCount, 10) || 0) - (parseInt(childCount, 10) || 0));
   const children = Math.max(0, parseInt(childCount, 10) || 0);
-  const guides = Math.max(0, parseInt(guideCount, 10) || 0);
+  const guides = isPorterage ? 0 : Math.max(0, parseInt(guideCount, 10) || 0);
 
   const num = (v) => {
     const n = parseFloat(v);
@@ -473,9 +646,9 @@ export const surchargeBuyTotal = ({ rate, item, paxCount = 1, childCount = 0, gu
       break;
   }
 
-  const guideFigure = surchargeGuideAmount(rate, item);
+  const guideFigure = isPorterage ? null : surchargeGuideAmount(rate, item);
   const guideHead = guideFigure === null ? adultHead : guideFigure;
-  if (guides > 0 && guideHead) perRepeat += guideHead * guides;
+  if (!isPorterage && guides > 0 && guideHead) perRepeat += guideHead * guides;
 
   return {
     unitBasis,

@@ -7,7 +7,10 @@ import {
   weekendDaysLabel,
   weekendDaysOf,
   weekendNightOf,
-  weekendPriceOf
+  weekendPriceOf,
+  weekendRatesOf,
+  withWeekendRatesNote,
+  stripWeekendRatesNote
 } from '../src/lib/accommodationOptions.js';
 import { applyProtectionToRate } from '../src/lib/priceValidity.js';
 import { libraryItemDetail } from '../src/lib/libraryItemDetail.js';
@@ -112,6 +115,151 @@ const detail = libraryItemDetail({
 const priceRows = (detail.seasons[0].sections.find((section) => section.key === 'prices') || {}).rows || [];
 const weekendRow = priceRows.find((row) => row.label === 'Weekend rate (Fri, Sat)');
 check('the rate card prints the weekend row', weekendRow?.value, 'ZAR 3,200.00 / room / night');
+
+/* ── Per-person weekend card ──────────────────────────────────────────────
+   A room priced per person sharing contracts a whole weekend card: the single,
+   sharing, extra-adult and child-band figures those nights carry. Each blank
+   column means "not quoted for the weekend", so the normal figure for that same
+   column stands. */
+const ppsCard = {
+  id: 'pps-wr',
+  rate_basis: 'per_person_sharing',
+  price_1_adult: 2600,
+  single_room_rate: 2600,
+  effective_single_rate: 2600,
+  price_2_adults: 1800,
+  double_twin_rate: 1800,
+  unit_price: 1800,
+  price_3_plus_adults: 1500,
+  child_rates_breakdown: { infant: 0, child: 900 },
+  weekend_days: [5, 6],
+  weekend_price: null,
+  weekend_rates: {
+    price_1_adult: 3000,
+    price_2_adults: 2200,
+    price_3_plus_adults: 1800,
+    child_rates: { child: 1100 }
+  }
+};
+
+check('a per-person card makes Friday a weekend night with no flat price', weekendNightOf(ppsCard, FRIDAY), true);
+check('the representative weekend figure is the sharing rate', weekendPriceOf(ppsCard), 2200);
+const cardFriday = rateForNight(ppsCard, FRIDAY);
+check('the weekend single replaces the normal single', cardFriday.price_1_adult, 3000);
+check('the weekend single fills the single-room columns', cardFriday.single_room_rate, 3000);
+check('the weekend sharing replaces PPS', cardFriday.price_2_adults, 2200);
+check('the weekend sharing fills unit and double/twin', cardFriday.unit_price, 2200);
+check('the weekend extra adult replaces the third-adult rate', cardFriday.price_3_plus_adults, 1800);
+checkJson('the weekend child band overrides while the unquoted band stands', cardFriday.child_rates_breakdown, { infant: 0, child: 1100 });
+check('the per-person weekend copy is marked', cardFriday.weekend_night, true);
+check('a weekday keeps the per-person card row untouched', rateForNight(ppsCard, MONDAY), ppsCard);
+check('the original card row is not mutated', ppsCard.price_2_adults, 1800);
+
+/* A blank weekend single keeps a separately contracted normal single; a blank
+   weekend extra keeps a separately contracted normal extra. */
+const sharingOnly = rateForNight({ ...ppsCard, weekend_rates: { price_2_adults: 2200 } }, FRIDAY);
+check('a blank weekend single keeps the contracted single', sharingOnly.price_1_adult, 2600);
+check('a blank weekend single keeps the single-room column', sharingOnly.single_room_rate, 2600);
+check('the quoted weekend sharing still applies', sharingOnly.price_2_adults, 2200);
+check('a blank weekend extra keeps the contracted extra', sharingOnly.price_3_plus_adults, 1500);
+checkJson('no weekend child map leaves the normal child bands', sharingOnly.child_rates_breakdown, { infant: 0, child: 900 });
+
+/* A room that never had a separate single follows the weekend sharing solo,
+   and an extra that equals the sharing rate is not a separate contract. */
+const noSeparate = rateForNight({
+  ...ppsCard,
+  price_1_adult: 1800, single_room_rate: 1800, effective_single_rate: 1800,
+  price_3_plus_adults: 1800,
+  weekend_rates: { price_2_adults: 2200 }
+}, FRIDAY);
+check('no separate single: the weekend sharing applies solo', noSeparate.price_1_adult, 2200);
+check('no separate extra: the weekend sharing applies to the third adult', noSeparate.price_3_plus_adults, 2200);
+
+/* A child-only card still prices the weekend: adults unchanged, children quoted. */
+const childOnly = { ...ppsCard, weekend_rates: { child_rates: { child: 1100 } } };
+check('a child-only card is a weekend contract', weekendNightOf(childOnly, FRIDAY), true);
+check('a child-only card has no representative adult figure', weekendPriceOf(childOnly), null);
+const childOnlyFriday = rateForNight(childOnly, FRIDAY);
+check('a child-only card leaves the adult single alone', childOnlyFriday.price_1_adult, 2600);
+check('a child-only card leaves the adult sharing alone', childOnlyFriday.price_2_adults, 1800);
+checkJson('a child-only card overrides the quoted child band', childOnlyFriday.child_rates_breakdown, { infant: 0, child: 1100 });
+check('an explicit free weekend child is honoured', rateForNight({ ...ppsCard, weekend_rates: { child_rates: { child: 0 } } }, FRIDAY).child_rates_breakdown.child, 0);
+
+/* An empty card and an occupancy ladder both refuse the weekend swap. */
+check('an empty weekend card is not weekend pricing', weekendNightOf({ ...ppsCard, weekend_rates: {} }, FRIDAY), false);
+check('an empty card returns the same row', rateForNight({ ...ppsCard, weekend_rates: {} }, FRIDAY).price_2_adults, 1800);
+const ladderWeekend = { rate_basis: 'per_person_occupancy', occupancy_rates: [{ min_pax: 2, max_pax: 6, rate: 8187 }], weekend_days: [5, 6], weekend_rates: { price_2_adults: 2200 } };
+check('an occupancy ladder ignores the weekend card', rateForNight(ladderWeekend, FRIDAY), ladderWeekend);
+
+/* Protection uplifts every figure on the weekend card with the rest of the row. */
+const protectedCard = applyProtectionToRate(ppsCard, 10);
+check('protection uplifts the weekend single', protectedCard.weekend_rates.price_1_adult, 3300);
+check('protection uplifts the weekend sharing', protectedCard.weekend_rates.price_2_adults, 2420);
+check('protection uplifts the weekend extra', protectedCard.weekend_rates.price_3_plus_adults, 1980);
+check('protection uplifts the weekend child band', protectedCard.weekend_rates.child_rates.child, 1210);
+check('protection keeps the weekend child map to its quoted bands', protectedCard.weekend_rates.child_rates.infant, undefined);
+
+/* Before the weekend_rates column exists the card travels in the rate notes,
+   beside the waiver marker; the column wins once it is present. */
+const noted = { ...ppsCard, weekend_rates: undefined, notes: withWeekendRatesNote('[[waiver:1]]', ppsCard.weekend_rates) };
+checkJson('the weekend card round-trips through the notes marker', weekendRatesOf(noted), ppsCard.weekend_rates);
+check('a notes-encoded card prices the weekend night', rateForNight(noted, FRIDAY).price_2_adults, 2200);
+check('stripping the weekend note leaves the waiver marker', stripWeekendRatesNote(noted.notes), '[[waiver:1]]');
+check('the column wins over the notes marker', weekendRatesOf({ ...noted, weekend_rates: { price_2_adults: 9999 } }).price_2_adults, 9999);
+check('no weekend note reads as null', weekendRatesOf({ notes: '[[waiver:1]]' }), null);
+
+/* The rate card prints the per-person weekend figures and the child bands. */
+const ppsDetail = libraryItemDetail({
+  item: {
+    category: 'Accommodation',
+    currency: 'ZAR',
+    pricing_model: 'per_person_sharing',
+    name: 'Sharing Lodge',
+    child_age_ranges: [
+      { id: 'infant', name: 'Infants', ageFrom: 0, ageTo: 2 },
+      { id: 'child', name: 'Children', ageFrom: 3, ageTo: 11 }
+    ],
+    item_rates: [ppsCard]
+  }
+});
+const ppsRows = (ppsDetail.seasons[0].sections.find((section) => section.key === 'prices') || {}).rows || [];
+const ppsRow = (label) => (ppsRows.find((row) => row.label === label) || {}).value;
+check('the card prints the weekend single', ppsRow('Weekend rate (Fri, Sat) — 1 adult (single)'), 'ZAR 3,000.00 / person / night');
+check('the card prints the weekend sharing', ppsRow('Weekend rate (Fri, Sat) — 2 adults sharing (PPS)'), 'ZAR 2,200.00 / person / night');
+check('the card prints the weekend extra adult', ppsRow('Weekend rate (Fri, Sat) — 3+ adults'), 'ZAR 1,800.00 / person / night');
+check('the card prints the weekend child band by name', ppsRow('Weekend rate (Fri, Sat) — Children (3–11 yrs)'), 'ZAR 1,100.00 / person / night');
+
+/* The editor's save passes its own season state, which holds the days as
+   camelCase weekendDays. Reading only the stored snake_case key wiped the
+   weekend contract on every save, so no weekend price ever reached a builder
+   or the rate card. */
+checkJson('the days read from the editor state the save passes', weekendDaysOf({ weekendDays: [6, 5, 5] }), [5, 6]);
+checkJson('the stored key still wins over the editor shape', weekendDaysOf({ weekend_days: [7], weekendDays: [5] }), [7]);
+checkJson('string days from a form are normalised', weekendDaysOf({ weekendDays: ['5', '6', '9', '0'] }), [5, 6]);
+
+/* A notes-encoded weekend card prints as price rows, and the raw marker never
+   leaks into the card's Notes section as if it were operator prose. */
+const notedDetail = libraryItemDetail({
+  item: {
+    category: 'Accommodation',
+    currency: 'ZAR',
+    pricing_model: 'per_person_sharing',
+    name: 'Noted Lodge',
+    item_rates: [noted]
+  }
+});
+const notedRows = (notedDetail.seasons[0].sections.find((section) => section.key === 'prices') || {}).rows || [];
+check('a notes-encoded card still prints the weekend sharing row',
+  (notedRows.find((row) => row.label === 'Weekend rate (Fri, Sat) — 2 adults sharing (PPS)') || {}).value,
+  'ZAR 2,200.00 / person / night');
+check('the card notes hide the weekend marker', notedDetail.seasons[0].notes, null);
+const proseDetail = libraryItemDetail({
+  item: {
+    category: 'Accommodation', currency: 'ZAR', pricing_model: 'per_person_sharing', name: 'Prose Lodge',
+    item_rates: [{ ...noted, notes: withWeekendRatesNote('Children under 2 stay free.', ppsCard.weekend_rates) }]
+  }
+});
+check('real notes survive beside the hidden marker', proseDetail.seasons[0].notes, 'Children under 2 stay free.');
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

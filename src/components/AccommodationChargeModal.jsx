@@ -8,9 +8,11 @@ import {
   rateOptionLabel,
   seasonChoiceLabel,
   weekendDaysLabel,
-  weekendPriceOf
+  weekendPriceOf,
+  weekendRatesOf
 } from '../lib/accommodationOptions';
 import { chargeNameOf, extrasChargeGroups } from '../lib/extrasChargeTypes';
+import { normalizeStayPayPromotions, stayPayRuleSummary } from '../lib/stayPay';
 import { collapseOccupancyLadder, isOccupancyTiered } from '../lib/occupancyPricing';
 import {
   roomCapacityOf,
@@ -112,15 +114,32 @@ export default function AccommodationChargeModal({
      than offered as another charge type. */
   const weekendNote = (rate) => {
     const days = weekendDaysLabel(rate);
+    if (!days) return '';
     const price = weekendPriceOf(rate);
-    return days && price !== null ? ` \u00b7 weekend ${days} ${money(price, currency)}` : '';
+    if (price !== null) {
+      const perRoom = String(rate?.rate_basis || '') === 'per_room';
+      return ` \u00b7 weekend ${days} ${money(price, currency)}${perRoom ? ' / room' : ' pp'}`;
+    }
+    /* A card that quotes only the children still prices the weekend differently,
+       so the picker says so even though there is no adult figure to show. */
+    const wr = weekendRatesOf(rate);
+    const childOnly = wr && wr.child_rates && typeof wr.child_rates === 'object'
+      && Object.values(wr.child_rates).some((value) => Number.isFinite(parseFloat(value)));
+    return childOnly ? ` \u00b7 weekend ${days} (child rates)` : '';
   };
   const hasWeekendRates = (item?.item_rates || []).some((rate) => weekendNote(rate) !== '');
+  /* Stay X Pay Y is a property-level offer, so it is stated once in the dialog
+     rather than repeated on every charge row. The builders apply it to the
+     nights they place; the dialog only has to say the offer exists. */
+  const stayPayRules = normalizeStayPayPromotions(item?.stay_pay_promotions || item?.stayPayPromotions)
+    .filter((rule) => rule.active);
+  const hasStayPay = stayPayRules.length > 0;
   /* An extra sells either the service or the seat on it, and the figure on the
      row means different money in each case — the dialog has to say which. */
-  const extrasBasisNote = (rate) => (String(rate?.rate_basis || item?.pricing_model || '') === 'per_unit'
-    ? 'per service'
-    : 'per person');
+  const extrasBasisNote = (rate) => {
+    const basis = String(rate?.rate_basis || item?.pricing_model || '');
+    return basis === 'per_unit' ? 'per service' : basis === 'per_vehicle' ? 'per vehicle' : 'per person';
+  };
 
   /* Prefer the row the builder already resolved for these dates, when it belongs
      to the room being priced. When there is none, prefer a covering priced row,
@@ -227,6 +246,24 @@ export default function AccommodationChargeModal({
         )}
 
         <div className="accom-charge-list">
+          {!seasons.length && (
+            <div
+              style={{
+                background: '#fffbeb',
+                border: '1px solid #fde68a',
+                borderRadius: '8px',
+                padding: '0.65rem 0.75rem',
+                color: '#92400e',
+                fontSize: '0.82rem',
+                lineHeight: 1.5
+              }}
+            >
+              <strong>No seasons are priced for {selectedRoom ? roomTypeNameOf(selectedRoom) || 'this room' : 'this item'} yet.</strong>{' '}
+              {rooms.length > 1
+                ? 'Each room type carries its own seasons and validity dates — another room’s seasons do not price this one. Load seasons for this room in the Library, or pick a room type that is priced.'
+                : 'Load its seasons in the Library before this item can be placed on a trip.'}
+            </div>
+          )}
           {seasons.map((season) => {
             const seasonCoverage = coverageOf(season.options?.[0]?.rateId);
             const seasonEstimate = isEstimateWindow(seasonCoverage);
@@ -305,6 +342,14 @@ export default function AccommodationChargeModal({
             This room charges its contracted weekend price on the nights the property treats as weekend.
             The itinerary applies it to those dates automatically; a package quotes the standard nightly
             price because its travel dates are not fixed yet.
+          </p>
+        )}
+
+        {hasStayPay && (
+          <p className="accom-night-band-note">
+            {stayPayRules.map((rule) => stayPayRuleSummary(rule)).join(' · ')}.
+            A free night waives the whole room-night, including single supplement and child figures;
+            linked park fees, levies and porterage are still charged on it.
           </p>
         )}
 

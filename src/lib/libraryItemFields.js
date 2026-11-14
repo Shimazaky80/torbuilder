@@ -45,6 +45,10 @@ export const LIBRARY_ITEM_LIGHT_FIELDS = [
      group, so the drop dialog needs it to build the line total; a workspace that
      has not applied that migration yet still loads its library. */
   'rental_contract_fee',
+  /* Stay X Pay Y offers. The builder needs them to stamp free nights on the
+     lines it creates; a workspace without the column falls back to the base
+     list and simply has no promotions to apply. */
+  'stay_pay_promotions',
   LIBRARY_ITEM_BASE_FIELDS
 ].join(',');
 
@@ -64,7 +68,9 @@ export const LIBRARY_ITEM_PACKAGE_FIELDS = [
   'guide_meal_offered', 'driver_meal_offered', 'guide_flight_offered',
   /* The hire contract fee, so a rent-a-car dropped into a package can be priced
      with the fee folded into its line. */
-  'rental_contract_fee'
+  'rental_contract_fee',
+  /* Stay X Pay Y offers, so a package can stamp its free nights. */
+  'stay_pay_promotions'
 ].join(',');
 
 export const LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK = LIBRARY_ITEM_PACKAGE_COLUMNS.join(',');

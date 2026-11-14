@@ -18,7 +18,13 @@
 
    Without a ladder the legacy contract still applies: one room from the item's
    minimum client rooms at the flat guide/driver rate (a blank flat rate means
-   the property charges its normal single rate). */
+   the property charges its normal single rate).
+
+   A ladder counts one thing for its whole contract: paying client ROOMS, or
+   paying GUESTS. Some properties never count rooms — they release the crew bed
+   from a head count ("1 free guide room from 15 paying guests"). `basis` on a
+   tier says which; absent means rooms, so every ladder saved before the choice
+   existed keeps its meaning. The editor stamps the choice on every row. */
 
 export const hasStaffRate = (value) => value !== null && value !== undefined && value !== '';
 
@@ -46,10 +52,21 @@ export const normaliseStaffTiers = (tiers) => (Array.isArray(tiers) ? tiers : []
       minRooms,
       maxRooms: ceiling === null ? null : Math.max(minRooms, ceiling),
       rooms: Math.max(1, Math.floor(Number(tier.rooms) || 1)),
-      rate: Number(tier.rate)
+      rate: Number(tier.rate),
+      basis: tier.basis === 'guests' ? 'guests' : 'rooms'
     };
   })
   .sort((a, b) => a.minRooms - b.minRooms);
+
+/* What the ladder's thresholds count. One ladder is one contract, so any row
+   saying guests makes the whole ladder guest-based; the editor stamps every
+   row, and a legacy row never says it. */
+export const staffLadderBasis = (ladder) => (
+  normaliseStaffTiers(ladder).some((tier) => tier.basis === 'guests') ? 'guests' : 'rooms'
+);
+
+/* The counted thing in words, for notes and rate cards. */
+export const staffCountWord = (basis) => (basis === 'guests' ? 'paying guests' : 'client rooms');
 
 /* The ladder actually used for pricing: the stored tiers when present,
    otherwise the legacy single room included from the item's threshold. When
@@ -126,10 +143,11 @@ export const staffLadderStoppedReason = (ladder, clientRooms, label = 'crew') =>
   if (!tiers.length || !Number.isFinite(rooms)) return null;
   if (rooms < (tiers[0].minRooms || 0)) return null;
   if (tiers.some((tier) => staffTierCovers(tier, rooms))) return null;
+  const word = staffCountWord(staffLadderBasis(tiers));
   const ceiling = staffLadderCeiling(tiers);
   return ceiling === null || tiers.some((tier) => tier.minRooms > rooms)
-    ? `no ${label} band covers ${rooms} client rooms`
-    : `${label} deal stops at ${ceiling} client rooms: ${rooms} booked`;
+    ? `no ${label} band covers ${rooms} ${word}`
+    : `${label} deal stops at ${ceiling} ${word}: ${rooms} booked`;
 };
 
 /* A property contracts ONE pool of crew rooms, not one per party: its rate card
@@ -176,9 +194,13 @@ export const staffTierBands = (ladder) => {
 };
 
 /* One-line summary of a ladder for previews, e.g.
-   "1–10 client rooms: 1 room @ ZAR 800 · 11+ client rooms: 1 room @ ZAR 650". */
-export const staffTierSummary = (ladder, money, roomLabel = 'room') => staffTierBands(ladder).map((band) => {
-  const range = band.maxRooms === null ? `${band.minRooms}+` : `${band.minRooms}\u2013${band.maxRooms}`;
-  const rooms = `${band.rooms} ${roomLabel}${band.rooms === 1 ? '' : 's'}${band.added > 0 && band.rooms > band.added ? ` (${band.added} more)` : ''}`;
-  return `${range} client rooms: ${rooms} @ ${money(band.rate)}`;
-}).join(' \u00b7 ');
+   "1–10 client rooms: 1 room @ ZAR 800 · 11+ client rooms: 1 room @ ZAR 650".
+   A guest-based ladder prints its ranges in paying guests instead. */
+export const staffTierSummary = (ladder, money, roomLabel = 'room') => {
+  const word = staffCountWord(staffLadderBasis(ladder));
+  return staffTierBands(ladder).map((band) => {
+    const range = band.maxRooms === null ? `${band.minRooms}+` : `${band.minRooms}\u2013${band.maxRooms}`;
+    const rooms = `${band.rooms} ${roomLabel}${band.rooms === 1 ? '' : 's'}${band.added > 0 && band.rooms > band.added ? ` (${band.added} more)` : ''}`;
+    return `${range} ${word}: ${rooms} @ ${money(band.rate)}`;
+  }).join(' \u00b7 ');
+};

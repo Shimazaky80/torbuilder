@@ -32,6 +32,7 @@ export const MODULES = [
   { id: 'library', label: 'Library Items', nav: 'library-items', route: '/library-items', summary: 'The contracted catalogue and its rates' },
   { id: 'packages', label: 'Packages', nav: 'packages', route: '/packages', summary: 'Fixed offers and what they contain' },
   { id: 'itineraries', label: 'Itineraries', nav: 'itineraries', route: '/itineraries', summary: 'Trip plans, quotes and vouchers' },
+  { id: 'series', label: 'Series Departures', nav: 'series-departures', route: '/series-departures', summary: 'Fixed dates sold seat by seat from a supplier allocation' },
   { id: 'tariffs', label: 'Tariffs', nav: 'tariffs', route: '/tariffs', summary: 'Published rates and the partner portal' },
   { id: 'finance', label: 'Finance', nav: 'finance', route: '/finance', summary: 'Invoices, receipts and payments' },
   { id: 'analytics', label: 'Analytics', nav: 'analytics', route: '/analytics', summary: 'Sales, margin and destination reports' },
@@ -51,7 +52,10 @@ export const FLAGS = [
 
 const fullAccess = (level) => MODULE_IDS.reduce((map, id) => ({ ...map, [id]: level }), {});
 
-/* Seeded into `roles` by supabase/migrations/20261257_role_based_access_control.sql. */
+/* Seeded into `roles` by supabase/migrations/20261257_role_based_access_control.sql.
+   A module added later is granted by its own migration rather than a re-seed:
+   20261259_series_departures.sql hands `series` to every built-in job below, and
+   scripts/rbac.test.mjs reads the seed plus those grants before comparing. */
 export const BUILT_IN_ROLES = [
   {
     key: 'admin',
@@ -65,7 +69,7 @@ export const BUILT_IN_ROLES = [
     key: 'consultant',
     name: 'Consultant',
     description: 'Sells the trip: clients, itineraries and packages. Quotes are priced for the client, not for the margin.',
-    access: { ...fullAccess('none'), dashboard: 'read', clients: 'write', suppliers: 'read', guide_team: 'read', library: 'read', packages: 'write', itineraries: 'write', tariffs: 'read' },
+    access: { ...fullAccess('none'), dashboard: 'read', clients: 'write', suppliers: 'read', guide_team: 'read', library: 'read', packages: 'write', itineraries: 'write', series: 'write', tariffs: 'read' },
     flags: { view_costs: false },
     sortOrder: 20
   },
@@ -73,7 +77,7 @@ export const BUILT_IN_ROLES = [
     key: 'operations',
     name: 'Operations',
     description: 'Runs the trip once it is sold: suppliers, guide team, hire and the confirmations on every service.',
-    access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'write', guide_team: 'write', library: 'read', packages: 'read', itineraries: 'write', tariffs: 'write', finance: 'read', analytics: 'read' },
+    access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'write', guide_team: 'write', library: 'read', packages: 'read', itineraries: 'write', series: 'write', tariffs: 'write', finance: 'read', analytics: 'read' },
     flags: { view_costs: true },
     sortOrder: 30
   },
@@ -81,7 +85,7 @@ export const BUILT_IN_ROLES = [
     key: 'finance',
     name: 'Finance',
     description: 'Bills and collects: invoices, receipts, payments and the margin reports that go with them.',
-    access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'read', itineraries: 'read', tariffs: 'read', finance: 'write', analytics: 'write' },
+    access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'read', itineraries: 'read', series: 'read', tariffs: 'read', finance: 'write', analytics: 'write' },
     flags: { view_costs: true },
     sortOrder: 40
   },
@@ -89,7 +93,7 @@ export const BUILT_IN_ROLES = [
     key: 'guide',
     name: 'Guide / Field Staff',
     description: 'Reads the trip they are on the day before: the itinerary, the crew roster and nothing else.',
-    access: { ...fullAccess('none'), dashboard: 'read', guide_team: 'read', itineraries: 'read' },
+    access: { ...fullAccess('none'), dashboard: 'read', guide_team: 'read', itineraries: 'read', series: 'read' },
     flags: { view_costs: false },
     sortOrder: 50
   },

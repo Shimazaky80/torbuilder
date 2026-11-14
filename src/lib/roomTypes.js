@@ -78,13 +78,18 @@ export const roomMatchesRate = (room, rate) => {
   return !!name && String(rate.room_type || '').trim().toLowerCase() === name;
 };
 
-/* Every rate for one room, falling back to the whole pool when the room cannot
-   be identified (legacy rows, or a caller that never had a room). */
+/* Every rate for one room. A pool where no row names a room is the item's
+   legacy matrix: every room keeps pricing on it. But once rows name rooms, a
+   room with none of its own has no price — falling back to the pool would
+   offer a villa the Luxury Room's seasons and validity on a drop. A null room
+   (a caller that never had one) still reads the whole pool. */
 export const ratesForRoom = (rates, room) => {
   const list = Array.isArray(rates) ? rates : [];
   if (!room) return list;
   const scoped = list.filter((rate) => roomMatchesRate(room, rate));
-  return scoped.length ? scoped : list;
+  if (scoped.length) return scoped;
+  const roomScopedPool = list.some((rate) => String(rate?.room_type_id || '') || String(rate?.room_type || '').trim());
+  return roomScopedPool ? [] : list;
 };
 
 /* Rooms derived from rate rows alone. Used where only the rate snapshot is at
@@ -196,3 +201,32 @@ export const allocatedRoomTypeLabel = (service) => {
 };
 
 export const serviceRoomId = (service) => service?.roomTypeId || service?.room_type_id || null;
+
+/* The room a service line was sold as, from whichever casing the caller holds
+   it in. A null answer means the line never named a room (a legacy row, or a
+   non-accommodation line), and every room-scoped resolution then reads the
+   whole pool exactly as before. A rate row passed in place of a service also
+   answers here, because it carries the same room columns. */
+export const serviceRoomIdentity = (service) => {
+  const id = String(service?.roomTypeId ?? service?.room_type_id ?? '').trim();
+  const name = String(service?.roomType ?? service?.room_type ?? '').trim();
+  return id || name ? { id, name } : null;
+};
+
+/* The pool of rate rows a service line is allowed to resolve seasons from.
+   A line that sold a room must only ever see that room's seasons: two villas
+   on the same property can share a season name, validity dates and board, so
+   resolving over the whole matrix lets the other villa's occupancy ladder
+   win the tie and reprice the line at the wrong figure. The room record is
+   preferred for the match, but an identity-only room still scopes by the
+   columns the rate rows carry. No identity -> the whole pool (legacy). */
+export const ratesForServiceRoom = (rates, service, rooms = []) => {
+  const identity = serviceRoomIdentity(service);
+  const list = Array.isArray(rates) ? rates : [];
+  if (!identity) return list;
+  const room = (Array.isArray(rooms) ? rooms : []).find((candidate) => (
+    (identity.id && String(candidate?.id ?? candidate?.key ?? '') === identity.id)
+    || (identity.name && roomTypeNameOf(candidate).toLowerCase() === identity.name.toLowerCase())
+  )) || { id: identity.id || null, key: identity.id, name: identity.name };
+  return ratesForRoom(list, room);
+};

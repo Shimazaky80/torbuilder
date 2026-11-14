@@ -1,0 +1,253 @@
+/* The day workspace keeps a one-line destination summary; the picker itself
+   opens in a modal so the drop zone below it keeps its height. */
+.day-destination-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 0.45rem;
+  min-width: 0;
+  margin: 0.55rem 0 0.2rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #dbe7e8;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.day-destination-bar-icon {
+  flex: 0 0 auto;
+  color: #0d7478;
+}
+
+.day-destination-bar-text {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.day-destination-bar-text strong {
+  color: #0d7478;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.day-destination-bar-text strong.unset {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.day-destination-bar-mode {
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: #e0f2f1;
+  color: #0d7478;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.day-destination-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid #b7d4d5;
+  border-radius: 7px;
+  background: #fff;
+  color: #0d7478;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.day-destination-bar-btn:hover {
+  background: #f0fdfa;
+}
+
+.day-destination-bar-btn:focus-visible {
+  outline: 2px solid #0d7478;
+  outline-offset: 2px;
+}
+
+/* The popup reuses the app's tall modal so the header stays put and the form
+   scrolls on a short screen. */
+.modal-content.day-destination-modal {
+  max-width: 680px;
+}
+
+.day-destination-modal:focus {
+  outline: none;
+}
+
+.day-destination-modal .modal-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 1.2rem;
+}
+
+.day-destination-modal-sub {
+  margin: 0.3rem 0 0;
+  color: #64748b;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.day-destination-modal p {
+  margin: 0.5rem 0;
+}
+
+.day-destination-fields,
+.day-destination-targets {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.day-destination-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 0.65rem;
+  margin: 0.65rem 0;
+}
+
+.day-destination-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.day-destination-modal .day-destination-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  font-weight: 400;
+  text-overflow: ellipsis;
+}
+
+.day-destination-modal .searchable-select-menu {
+  max-height: min(240px, 40vh);
+  font-weight: 400;
+}
+
+.day-destination-modal .searchable-select-option span {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.day-destination-button {
+  max-width: 100%;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid #b7d4d5;
+  border-radius: 7px;
+  background: #fff;
+  color: #0d7478;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: normal;
+}
+
+.day-destination-button:hover:not(:disabled) {
+  background: #f0fdfa;
+}
+
+.day-destination-modal :focus-visible {
+  outline: 2px solid #0d7478;
+  outline-offset: 2px;
+}
+
+.day-destination-modal :disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.day-destination-actions {
+  display: grid;
+  justify-items: start;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.day-destination-bulk {
+  width: 100%;
+  min-width: 0;
+}
+
+.day-destination-bulk-panel {
+  margin-top: 0.6rem;
+  padding-top: 0.2rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.day-destination-targets {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 12rem;
+  overflow-y: auto;
+  margin: 0.6rem 0;
+}
+
+.day-destination-target {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.day-destination-target input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: #0d7478;
+}
+
+.day-destination-apply {
+  background: #0d7478;
+  color: #fff;
+}
+
+.day-destination-apply:hover:not(:disabled) {
+  background: #095b5e;
+}
+
+.day-destination-status,
+.day-destination-review {
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
+.day-destination-status:empty {
+  display: none;
+}
+
+.day-destination-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid #e2e8f0;
+}

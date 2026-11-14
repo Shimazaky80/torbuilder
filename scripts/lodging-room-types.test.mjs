@@ -102,7 +102,13 @@ check('a room does not match another room\'s rate', roomMatchesRate(rooms[1], ra
 
 check('a room scopes the rate pool', ratesForRoom(rates, rooms[1]).length, 2);
 check('no room keeps the whole pool', ratesForRoom(rates, null).length, 3);
-check('an unrecognised room keeps the whole pool', ratesForRoom(rates, { name: 'Unknown' }).length, 3);
+/* Once rows name rooms, a room with none of its own has no price: borrowing the
+   pool would quote a villa at the Luxury Room's figures and validity. */
+check('an unrecognised room gets no rows once the pool names rooms', ratesForRoom(rates, { name: 'Unknown' }).length, 0);
+check('a room is scoped by name when its id is gone', ratesForRoom(rates, { name: 'safari cabin' }).length, 2);
+/* A pool where no row names a room is the legacy matrix: every room keeps it. */
+const legacyRates = [{ id: 'rate-old', season_name: 'High season', currency: 'ZAR', price_2_adults: 1200 }];
+check('a legacy null-room pool stays shared by every room', ratesForRoom(legacyRates, rooms[0]).length, 1);
 checkJson('rooms can be rebuilt from rate rows alone', roomsFromRates(rates).map((room) => `${room.name}:${room.maxOccupancy}`), ['Safari Cabin:2', 'Family Suite:4']);
 
 /* --- Seasons never mix rooms -------------------------------------------- */
@@ -125,6 +131,18 @@ check('the cabin season never prices the suite', cabinSeasons[0].options.every((
 const familySeasons = accommodationSeasonGroups(item, rooms[0]);
 check('the suite season offers only its own charge type', familySeasons[0].options.length, 1);
 check('the suite is priced from the suite rate', familySeasons[0].options[0].rateId, 'rate-family-bb');
+
+/* A property loaded with several room types at once: the villa exists but its
+   seasons are not loaded yet. The drop must say it has no seasons, not offer the
+   cabin's season and window as if they priced the villa. */
+const villa = normalizeRoomTypes([{ id: 'room-villa', name: 'Luxury Villa', max_occupancy: 8 }])[0];
+const threeRoomItem = { ...item, roomTypes: [...rooms, villa] };
+check('a room with no rows offers no seasons', accommodationSeasonChoices(threeRoomItem, villa).length, 0);
+check('the priced rooms keep their own seasons', accommodationSeasonChoices(threeRoomItem, rooms[1]).length, 1);
+check('an unpriced room still makes the drop ask', accommodationHasChoices(threeRoomItem), true);
+check('a one-room property whose rows name another room offers nothing', accommodationSeasonGroups({
+  ...item, roomTypes: [villa], item_rates: rates
+}, villa).length, 0);
 
 /* --- Packages size rooms from the room that was sold -------------------- */
 const stay = (snapshot, capacity) => ({

@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { withStarGrade } from '../lib/starGrading';
 import { supplierColumns } from '../lib/supplierStarColumn';
+import { dayDestinationHeading, dayRoute, dayEndLabel } from '../lib/dayDestination';
 
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 
@@ -112,7 +113,12 @@ export const PackageView = () => {
         {(pkg.gallery_image_urls || []).length > 0 && <div className="package-view-gallery">{pkg.gallery_image_urls.map((url, index) => <img key={`${url}-${index}`} src={url} alt={`${pkg.name} gallery ${index + 1}`} />)}</div>}
       </section>
       {days.map((day, index) => <section className="package-view-day" key={day.id}>
-        <header><h2>Day {index + 1}</h2>{day.notes && <p>{day.notes}</p>}</header>
+        <header>
+          <h2>{dayDestinationHeading(day, index + 1)}</h2>
+          {dayRoute(day, days[index - 1]) && <p>{dayRoute(day, days[index - 1])}</p>}
+          {dayEndLabel(day) && <p>{dayEndLabel(day)}</p>}
+          {day.notes && <p>{day.notes}</p>}
+        </header>
         {day.services.length ? <div className="package-view-services">
           {day.services.map((service) => <div className="package-view-service" key={service.id}>
             <div><strong>{service.item_name}</strong><span>{service.category || 'Service'}{service.supplier_name ? ` · ${/accommodation/i.test(String(service.category || '')) ? withStarGrade(service.supplier_name, service.supplier_star_rating) : service.supplier_name}` : ''}{/accommodation/i.test(String(service.category || '')) && service.room_type ? ` · ${service.room_type}` : ''}{service.is_included === false ? ' · Optional' : ''}</span>{service.notes && <small>{service.notes}</small>}</div>

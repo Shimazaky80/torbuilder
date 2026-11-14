@@ -9,6 +9,7 @@ import { Clients } from './pages/Clients';
 import { GuideTeam } from './pages/GuideTeam';
 import { Itineraries } from './pages/Itineraries';
 import { ItineraryBuilder } from './pages/ItineraryBuilder';
+import { SeriesDepartures } from './pages/SeriesDepartures';
 import { Finance } from './pages/Finance';
 import { Settings } from './pages/Settings';
 import { LibraryItems } from './pages/LibraryItems';
@@ -69,6 +70,7 @@ const AppPages = () => {
         <Route path="packages/builder/:packageId" element={<RequireAccess module="packages"><PackageBuilder /></RequireAccess>} />
         <Route path="itineraries" element={<RequireAccess module="itineraries"><Itineraries /></RequireAccess>} />
         <Route path="itineraries/builder" element={<RequireAccess module="itineraries"><ItineraryBuilder /></RequireAccess>} />
+        <Route path="series-departures" element={<RequireAccess module="series"><SeriesDepartures /></RequireAccess>} />
         <Route path="finance" element={<RequireAccess module="finance"><Finance /></RequireAccess>} />
         {/* The module was renamed Invoices -> Finance; keep old links working. */}
         <Route path="invoices" element={<Navigate to="/finance" replace />} />

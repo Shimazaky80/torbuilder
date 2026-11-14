@@ -5,12 +5,14 @@ import {
   singleSupplementForOrdinal
 } from './singleSupplement';
 import { roomTypesOf, soldRoomCapacity } from './roomTypes';
-import { rateForAllocatedRoom } from './roomTypePricing';
+import { homogeneousRoomIdentity, rateForAllocatedRoom } from './roomTypePricing';
 import { isOccupancyTiered, occupancyRateForPax } from './occupancyPricing';
 import {
   crewLadderTiers,
   hasStaffRate,
   normaliseStaffTiers,
+  staffCountWord,
+  staffLadderBasis,
   staffLadderStoppedReason,
   staffRateValue,
   staffRoomLadder,
@@ -81,6 +83,12 @@ export const clientRoomsBooked = (allocations = []) => {
     return true;
   }).length;
 };
+
+/* The paying heads the allocation houses: every client-role occupant, adults
+   and children alike. A property that counts people rather than rooms releases
+   its crew/TL deal from this count; staff roles never pay and never count. */
+export const payingGuestsBooked = (allocations = []) => (Array.isArray(allocations) ? allocations : [])
+  .reduce((sum, rm) => sum + payingClientCount(rm?.allocatedTravellers || []), 0);
 
 /* True when any room houses staff rather than paying guests only — a staff
    room, a named staff role, or an occupant with a staff role. Those beds are
@@ -207,6 +215,38 @@ export const withRoomCapacity = (service, libraryItems = []) => {
     maxOccupancy: capacity.maxOccupancy,
     maxAdults: capacity.maxAdults,
     maxChildren: capacity.maxChildren
+  };
+};
+
+/* The room identity a confirmed allocation moves the line onto. A drop resolves
+   one room's row (whichever won the season tie), but the operator types every
+   bed in the allocation dialog and can house the whole party in a different
+   room. When every typed bed agrees on one room other than the sold one, the
+   line's identity follows the allocation - otherwise a later re-price scopes to
+   the sibling villa's contract and charges its ladder again. A mixed night keeps
+   the sold identity and prices each bed from its own sibling row. The capacity
+   figures ride along when the room record is loaded, so the line and the dialog
+   header read the same beds. Returns null when nothing should change. */
+export const allocationIdentityPatch = (service, roomAllocations, item = null) => {
+  const identity = homogeneousRoomIdentity(roomAllocations);
+  if (!identity) return null;
+  const soldId = String(service?.roomTypeId || service?.room_type_id || '');
+  const soldName = String(service?.roomType || service?.room_type || '').trim().toLowerCase();
+  const sameId = !!identity.roomTypeId && soldId === String(identity.roomTypeId);
+  const sameName = soldName === identity.roomType.trim().toLowerCase();
+  if (sameId || sameName) return null;
+  const record = roomTypesOf(item).find((room) => (
+    (identity.roomTypeId && String(room.id || room.key) === String(identity.roomTypeId))
+    || String(room.name || '').trim().toLowerCase() === identity.roomType.trim().toLowerCase()
+  )) || null;
+  return {
+    roomTypeId: identity.roomTypeId,
+    roomType: identity.roomType,
+    ...(record ? {
+      maxOccupancy: record.maxOccupancy,
+      maxAdults: record.maxAdults,
+      maxChildren: record.maxChildren
+    } : {})
   };
 };
 
@@ -393,6 +433,7 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   // add rooms at a different rate (first free, second discounted). Without a
   // ladder the legacy single threshold on the item still opens one TL room.
   const clientRooms = clientRoomsBooked(roomAllocations);
+  const payingGuests = payingGuestsBooked(roomAllocations);
   const tlOffered = item?.tour_leader_room_offered === true || item?.tourLeaderRoomOffered === true;
   const tlMinRooms = Math.max(1, Number(item?.tour_leader_min_rooms || item?.tourLeaderMinRooms) || 1);
   /* A rate the operator never entered falls back to the single rate; a typed 0
@@ -402,10 +443,15 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   const tlRate = tlRateConfigured ? (parseFloat(tlRateRaw) || 0) : singlePrice;
   const tlLadder = tlOffered ? normaliseStaffTiers(rate?.tour_leader_tiers) : [];
   const tlTiers = tlOffered ? (tlLadder.length ? tlLadder : [{ minRooms: tlMinRooms, maxRooms: null, rooms: 1, rate: tlRate }]) : [];
+  /* A ladder counts rooms or paying guests for its whole contract; the legacy
+     single threshold always counts rooms. */
+  const tlBasis = staffLadderBasis(tlTiers);
+  const tlCount = tlBasis === 'guests' ? payingGuests : clientRooms;
+  const tlWord = staffCountWord(tlBasis);
   /* Rate for each included TL room, in room order. Rooms a threshold adds keep
      that threshold's rate; a tier that adds no room is a rate band over the
      rooms already included (1–10 client rooms @ 800, 11+ @ 650). */
-  const tlIncludedRates = staffRoomRates(tlTiers, clientRooms);
+  const tlIncludedRates = staffRoomRates(tlTiers, tlCount);
   const tlFirstThreshold = tlTiers[0]?.minRooms ?? tlMinRooms;
   let tlRoomsCharged = 0;
   /* The crew rooms are one pool, not one per party: a property states "1
@@ -433,7 +479,10 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
     minRooms: staffMinRooms,
     rate: staffRateValue(crewFlatRaw, singlePrice)
   });
-  const crewIncludedRates = staffRoomRates(crewLadder, clientRooms);
+  const crewBasis = staffLadderBasis(crewLadder);
+  const crewCount = crewBasis === 'guests' ? payingGuests : clientRooms;
+  const crewWord = staffCountWord(crewBasis);
+  const crewIncludedRates = staffRoomRates(crewLadder, crewCount);
   let crewRoomsCharged = 0;
 
   /* Single-supplement ladder for this night. Ordinals count the paying-client
@@ -476,16 +525,16 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
         roomBuy = includedRate;
         const included = tlIncludedRates.length;
         rateDescription = included > 1
-          ? `Tour Leader Room Rate: ${round2(includedRate).toFixed(2)} (TL room ${tlRoomsCharged} of ${included} included: ${clientRooms} client rooms booked)`
-          : `Tour Leader Room Rate: ${round2(includedRate).toFixed(2)} (Threshold of ${tlFirstThreshold} client rooms met)`;
+          ? `Tour Leader Room Rate: ${round2(includedRate).toFixed(2)} (TL room ${tlRoomsCharged} of ${included} included: ${tlCount} ${tlWord} booked)`
+          : `Tour Leader Room Rate: ${round2(includedRate).toFixed(2)} (Threshold of ${tlFirstThreshold} ${tlWord} met)`;
       } else {
-        const stopped = staffLadderStoppedReason(tlLadder, clientRooms, 'tour leader');
+        const stopped = staffLadderStoppedReason(tlLadder, tlCount, 'tour leader');
         roomBuy = singlePrice;
         rateDescription = tlIncludedRates.length
-          ? `Tour Leader Single Rate: ${singlePrice.toFixed(2)} (TL allowance of ${tlIncludedRates.length} room(s) used: ${clientRooms} client rooms booked)`
+          ? `Tour Leader Single Rate: ${singlePrice.toFixed(2)} (TL allowance of ${tlIncludedRates.length} room(s) used: ${tlCount} ${tlWord} booked)`
           : stopped
             ? `Tour Leader Single Rate: ${singlePrice.toFixed(2)} (${stopped})`
-            : `Tour Leader Single Rate: ${singlePrice.toFixed(2)}${tlOffered ? ` (Threshold of ${tlFirstThreshold} client rooms not met: ${clientRooms} booked)` : ''}`;
+            : `Tour Leader Single Rate: ${singlePrice.toFixed(2)}${tlOffered ? ` (Threshold of ${tlFirstThreshold} ${tlWord} not met: ${tlCount} booked)` : ''}`;
       }
     } else if (isTourDriver || isTourGuide || isStaffRoom) {
       const staffNames = occupants.map((t) => t.name).filter(Boolean).join(', ') || 'Staff';
@@ -499,16 +548,16 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
         crewRoomsCharged += 1;
         roomBuy = includedRate;
         rateDescription = crewIncludedRates.length > 1
-          ? `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (crew room ${crewRoomsCharged} of ${crewIncludedRates.length} included: ${clientRooms} client rooms booked)`
-          : `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (Threshold of ${crewLadder[0]?.minRooms} client rooms met)`;
+          ? `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (crew room ${crewRoomsCharged} of ${crewIncludedRates.length} included: ${crewCount} ${crewWord} booked)`
+          : `${label} Room Rate (${staffNames}): ${round2(includedRate).toFixed(2)} (Threshold of ${crewLadder[0]?.minRooms} ${crewWord} met)`;
       } else {
-        const stopped = staffLadderStoppedReason(crewLadder, clientRooms);
+        const stopped = staffLadderStoppedReason(crewLadder, crewCount);
         const why = crewIncludedRates.length
-          ? `crew allowance of ${crewIncludedRates.length} room(s) used: ${clientRooms} client rooms booked`
+          ? `crew allowance of ${crewIncludedRates.length} room(s) used: ${crewCount} ${crewWord} booked`
           : stopped
             ? stopped
             : crewLadder.length
-              ? `Threshold of ${crewLadder[0]?.minRooms} client rooms not met: ${clientRooms} booked`
+              ? `Threshold of ${crewLadder[0]?.minRooms} ${crewWord} not met: ${crewCount} booked`
               : '';
         roomBuy = singlePrice;
         rateDescription = why

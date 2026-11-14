@@ -337,4 +337,44 @@ check('an ordinary line documents no crew',
   voucherDetailLines({ category: 'Flights / Charter', currencyCode: 'ZAR' }),
   ['Confirmation Status: OK']);
 
+/* -- A ladder that counts people --------------------------------------------
+   Some properties release the crew/TL room from a head count, not a room
+   count. The card names the thing its bands count, and a legacy ladder saved
+   before the choice existed keeps saying client rooms. */
+const headcountCard = libraryItemDetail({
+  item: {
+    name: 'Headcount Lodge', category: 'Accommodation', currency: 'ZAR',
+    guide_driver_room_offered: true, tour_leader_room_offered: true,
+    item_rates: [{
+      id: 'g1', season_name: 'All year', price_1_adult: 1200, price_2_adults: 600,
+      guide_tiers: [
+        { minClientRooms: 8, maxClientRooms: 11, rooms: 1, rate: 0, basis: 'guests' },
+        { minClientRooms: 15, rooms: 2, rate: 300, basis: 'guests' }
+      ],
+      tour_leader_tiers: [{ minClientRooms: 10, rooms: 1, rate: 500, basis: 'guests' }]
+    }]
+  }
+}).seasons[0];
+check('a guests ladder prints its bands in paying guests',
+  rowsOf(headcountCard, 'guide-driver'),
+  [
+    ['Driver-Guide (8–11 paying guests)', `1 crew room @ ${money(0)}`],
+    ['Driver-Guide (15+ paying guests)', `2 crew rooms (1 more) @ ${money(300)}`],
+    ['Tour Leader (10+ paying guests)', `1 TL room @ ${money(500)}`]
+  ]);
+
+const legacyCard = libraryItemDetail({
+  item: {
+    name: 'Roomcount Lodge', category: 'Accommodation', currency: 'ZAR',
+    guide_driver_room_offered: true,
+    item_rates: [{
+      id: 'g2', season_name: 'All year', price_1_adult: 1200, price_2_adults: 600,
+      guide_tiers: [{ minClientRooms: 5, rooms: 1, rate: 0 }]
+    }]
+  }
+}).seasons[0];
+check('a legacy ladder keeps counting client rooms',
+  rowsOf(legacyCard, 'guide-driver'),
+  [['Driver-Guide (5+ client rooms)', `1 crew room @ ${money(0)}`]]);
+
 console.log('\n--- Crew meals & guide flight options suite complete ---\n');

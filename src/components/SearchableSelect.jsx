@@ -141,7 +141,16 @@ export default function SearchableSelect({
               const exact = filtered.find((option) => option.text.toLocaleLowerCase() === query.trim().toLocaleLowerCase() || option.value.toLocaleLowerCase() === query.trim().toLocaleLowerCase());
               const option = exact || filtered[activeIndex] || filtered.find((entry) => !entry.disabled);
               if (option && !option.disabled) emitChange(option.value);
-            } else if (event.key === 'Escape') { setOpen(false); setQuery(''); }
+            } else if (event.key === 'Escape') {
+              /* Closing the list must not also close a dialog that contains it;
+                 when the list is already closed, Escape still reaches the dialog. */
+              if (open) {
+                event.preventDefault();
+                event.stopPropagation();
+              }
+              setOpen(false);
+              setQuery('');
+            }
           }}
         />
         <ChevronDown className={`searchable-select-chevron${open ? ' is-open' : ''}`} size={17} aria-hidden="true" />

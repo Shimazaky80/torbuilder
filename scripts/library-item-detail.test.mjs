@@ -63,6 +63,36 @@ check('per-vehicle transfer prints per unit', rowsOf(vehicleDetail.seasons[0], '
 ]);
 check('per-vehicle transfer never says "1 adult"', labelsOf(vehicleDetail.seasons[0]).includes('1 adult (single)'), false);
 
+/* The vehicle's capacity belongs on the row: a consultant choosing between two
+   vehicles needs to know which one seats the party, not only what it is called. */
+const seatedVehicleDetail = libraryItemDetail({
+  item: perVehicleTransfer,
+  vehicleTypes: [
+    { id: 'vt-sedan', code: 'sedan', name: 'Sedan', max_capacity: 4 },
+    { id: 'vt-van', code: 'van', name: 'Van', max_capacity: 8 }
+  ]
+});
+check('a per-vehicle row names the seats beside the vehicle', rowsOf(seatedVehicleDetail.seasons[0], 'prices'), [
+  ['Sedan \u00b7 4 seats', `${money(1400)} / unit`],
+  ['Van \u00b7 8 seats', `${money(2100)} / unit`]
+]);
+check('a vehicle type matched by id still carries its seats', rowsOf(libraryItemDetail({
+  item: { ...perVehicleTransfer, item_rates: [{ ...perVehicleTransfer.item_rates[0], prices_by_vehicle: { 'type-1': 1400 } }] },
+  vehicleTypes: [{ id: 'type-1', name: 'MPV', max_capacity: 7 }]
+}).seasons[0], 'prices'), [['MPV \u00b7 7 seats', `${money(1400)} / unit`]]);
+check('a vehicle type with no capacity prints its name alone', rowsOf(libraryItemDetail({
+  item: perVehicleTransfer,
+  vehicleTypes: [{ code: 'sedan', name: 'Sedan' }]
+}).seasons[0], 'prices')[0], ['Sedan', `${money(1400)} / unit`]);
+check('an unknown vehicle code prints the code alone', rowsOf(libraryItemDetail({
+  item: perVehicleTransfer,
+  vehicleTypes: []
+}).seasons[0], 'prices')[0], ['sedan', `${money(1400)} / unit`]);
+check('a one-seat vehicle is singular', rowsOf(libraryItemDetail({
+  item: { ...perVehicleTransfer, item_rates: [{ ...perVehicleTransfer.item_rates[0], prices_by_vehicle: { solo: 500 } }] },
+  vehicleTypes: [{ code: 'solo', name: 'Solo', max_capacity: 1 }]
+}).seasons[0], 'prices'), [['Solo \u00b7 1 seat', `${money(500)} / unit`]]);
+
 const flaggedTransfer = {
   category: 'Transfers',
   currency: 'ZAR',
@@ -212,6 +242,35 @@ const unitExtras = {
 const unitExtrasDetail = libraryItemDetail({ item: unitExtras });
 check('a per-unit extra prints the whole service price', rowsOf(unitExtrasDetail.seasons[0], 'prices'), [['Per unit (whole service)', money(3500)]]);
 check('a per-unit extra prints no child rate', rowsOf(unitExtrasDetail.seasons[0], 'child'), []);
+
+const vehicleExtras = {
+  category: 'Extras',
+  name: 'Tolls',
+  currency: 'ZAR',
+  pricing_model: 'per_vehicle',
+  child_age_ranges: [transferChildBand],
+  item_rates: [{
+    id: 'e3', season_name: 'Annual tolls', meal_plan: 'Coach toll', rate_basis: 'per_vehicle',
+    price_1_adult: 250, unit_price: 250, child_rate: 50, child_rates_breakdown: { child: 75 }
+  }]
+};
+const vehicleExtrasDetail = libraryItemDetail({ item: vehicleExtras });
+check('a vehicle extra prints its per-vehicle amount', rowsOf(vehicleExtrasDetail.seasons[0], 'prices'), [['Per vehicle', money(250)]]);
+check('a vehicle extra hides stale child figures', sectionOf(vehicleExtrasDetail.seasons[0], 'child'), null);
+check('a vehicle extra hides child age facts', vehicleExtrasDetail.facts, []);
+check('a vehicle extra preserves the named charge', vehicleExtrasDetail.seasons[0].chips.includes('Coach toll'), true);
+check('a vehicle extra preserves its season name', vehicleExtrasDetail.seasons[0].title, 'Annual tolls');
+const fallbackVehicleExtrasDetail = libraryItemDetail({
+  item: { ...vehicleExtras, item_rates: [{ ...vehicleExtras.item_rates[0], rate_basis: null, price_1_adult: null }] }
+});
+check('a vehicle extra falls back to the item basis and unit price', rowsOf(fallbackVehicleExtrasDetail.seasons[0], 'prices'), [['Per vehicle', money(250)]]);
+check('an item-basis vehicle extra hides child figures too', sectionOf(fallbackVehicleExtrasDetail.seasons[0], 'child'), null);
+const rowVehicleExtrasDetail = libraryItemDetail({ item: { ...vehicleExtras, pricing_model: 'per_person' } });
+check('a vehicle extra rate basis overrides the item basis', rowsOf(rowVehicleExtrasDetail.seasons[0], 'prices'), [['Per vehicle', money(250)]]);
+check('a vehicle extra rate basis suppresses child figures', sectionOf(rowVehicleExtrasDetail.seasons[0], 'child'), null);
+const vehicleExtrasDocument = detailDocumentHtml(vehicleExtrasDetail);
+check('the exported vehicle extra keeps its amount and named charge', vehicleExtrasDocument.includes('Per vehicle') && vehicleExtrasDocument.includes(money(250)) && vehicleExtrasDocument.includes('Coach toll'), true);
+check('the exported vehicle extra has no child rate', vehicleExtrasDocument.includes('Child rate'), false);
 
 /* Accommodation keeps its room facts and sharing labels */
 const accommodation = {

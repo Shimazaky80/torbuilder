@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -56,6 +56,30 @@ const seeded = [...migration.matchAll(
 }));
 
 check('the migration seeds as many roles as the app mirrors', seeded.length, BUILT_IN_ROLES.length);
+
+/* A module added after the seed is granted by its own migration, not by editing
+   the seed: the INSERT is ON CONFLICT DO NOTHING, so a re-run would not reach a
+   row an operator has already tuned. Those `access || '{...}'` grants are part
+   of what the database holds, so they are folded in before the comparison —
+   otherwise every new module reads as drift. */
+const migrationsDir = join(here, '..', 'supabase', 'migrations');
+const grantPattern = /UPDATE\s+public\.roles\s+SET\s+access\s*=\s*access\s*\|\|\s*'(\{[^']*\})'::jsonb\s+WHERE\s+is_builtin\s+AND\s+key\s+IN\s*\(([^)]*)\)/g;
+readdirSync(migrationsDir).filter((file) => file.endsWith('.sql')).sort().forEach((file) => {
+  const sql = readFileSync(join(migrationsDir, file), 'utf8');
+  [...sql.matchAll(grantPattern)].forEach(([, delta, keyList]) => {
+    const keys = [...keyList.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
+    seeded.forEach((row) => {
+      if (keys.includes(row.key)) Object.assign(row.access, JSON.parse(delta));
+    });
+  });
+});
+
+/* The reason the fold above matters: a module the mirror grants but no migration
+   hands out is a menu item the app draws and the database answers 'none' to. */
+check('every seeded role states every module the app knows', seeded.map((row) => ({
+  key: row.key,
+  missing: MODULE_IDS.filter((id) => !ACCESS_LEVELS.includes(row.access[id]))
+})).filter((row) => row.missing.length > 0), []);
 
 const drift = seeded.filter((row) => {
   const mirror = BUILT_IN_ROLES.find((role) => role.key === row.key);
@@ -243,6 +267,32 @@ const commandCentre = readFileSync(join(here, '..', 'src', 'pages', 'SuperAdmin.
 check('the command centre takes the session scope', /useSession\(\)/.test(commandCentre), true);
 check('a company row moves the picker onto it', /setViewingCompany\(company\.id\)/.test(commandCentre), true);
 check('and opens that tenant rather than staying on the list', /navigate\('\/dashboard'\)/.test(commandCentre), true);
+
+/* 14. A module is three things at once: a level on every job, a menu entry and a
+        guarded address. Series Departures is the thirteenth, and the checks here
+        are written against the whole catalogue so the fourteenth cannot be half
+        registered either. */
+const sidebar = readFileSync(join(here, '..', 'src', 'components', 'Sidebar.jsx'), 'utf8');
+const routes = readFileSync(join(here, '..', 'src', 'App.jsx'), 'utf8');
+const navEntries = [...sidebar.matchAll(/module: '([a-z_]+)'[^}]*path: '([^']+)'/g)]
+  .map(([, module, path]) => ({ module, path }));
+
+check('every module has a menu entry on its own route', MODULES.filter((module) => (
+  !navEntries.some((entry) => entry.module === module.id && entry.path === module.route)
+)).map((module) => module.id), []);
+check('every module page stands behind its own gate', MODULES.filter((module) => (
+  !routes.includes(`<RequireAccess module="${module.id}"`)
+)).map((module) => module.id), []);
+
+check('series is the departure module, not part of the quote engine', MODULES.find((module) => module.id === 'series')?.route, '/series-departures');
+check('a consultant sells seats', can(consultant, 'series', 'write'), true);
+check('operations runs the departure', can(resolveAccess({ roleKey: 'operations' }), 'series', 'write'), true);
+check('finance reads the departure it bills', can(resolveAccess({ roleKey: 'finance' }), 'series', 'write'), false);
+check('finance still reaches it', can(resolveAccess({ roleKey: 'finance' }), 'series'), true);
+check('field staff read the running they are on', can(guide, 'series'), true);
+check('field staff cannot close a departure', can(guide, 'series', 'write'), false);
+check('a view-only account changes no seats', can(resolveAccess({ roleKey: 'viewer' }), 'series', 'write'), false);
+check('jobs that run a departure', rolesHolding('series', 'write'), ['Admin', 'Consultant', 'Operations']);
 
 console.log(failures
   ? `\n${failures} rbac example(s) FAILED\n`

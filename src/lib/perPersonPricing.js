@@ -100,7 +100,7 @@ const roomProfileOf = (rate) => {
 const nonAccommodationChildSplit = ({ sv, pp, list, rateBy, T }) => {
   const children = list.filter((t) => !isAdultTraveller(t));
   if (!children.length) return null;
-  const rate = rateBy(sv.itemId, sv.item_rates, sv.dayDate);
+  const rate = rateBy(sv.itemId, sv.item_rates, sv.dayDate, sv);
   if (!rate) return null;
 
   let adultBuy;
@@ -185,9 +185,11 @@ const nonAccommodationChildSplit = ({ sv, pp, list, rateBy, T }) => {
    figure and a flat room is charged once, as the engine charges them.
 
    `services` are normalized entries:
-     { category, currencyCode, sellPP, taxRate, itemId, roomAllocations, markup }
-   `rateBy(itemId)` resolves the rate ROW the line is priced from, for
-   accommodation and for the per-head categories that carry a child figure.
+     { category, currencyCode, sellPP, taxRate, itemId, roomType, roomTypeId, roomAllocations, markup }
+   `rateBy(itemId, svcRates, dayDate, sv)` resolves the rate ROW the line is
+   priced from, for accommodation and for the per-head categories that carry a
+   child figure. The service entry rides along so the resolver can narrow the
+   season pool to the room the line sold.
    The selling figures are Library-derived: each BUY rate is scaled by the
    service's markup (or by the contracted room-buy total when markup is
    unknown), so Per person sharing / Single supplement / Per child remain the
@@ -241,7 +243,7 @@ export const computePerPersonRows = ({ services = [], travellers = [], rateBy = 
       return;
     }
 
-    const rate = sv.itemId ? rateBy(sv.itemId, sv.item_rates, sv.dayDate) : null;
+    const rate = sv.itemId ? rateBy(sv.itemId, sv.item_rates, sv.dayDate, sv) : null;
     const ageRanges = Array.isArray(rate?._ageRanges) ? rate._ageRanges : [];
     const lineProfile = roomProfileOf(rate);
     const { sharingBuy } = lineProfile;

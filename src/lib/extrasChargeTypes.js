@@ -24,6 +24,9 @@ export const EXTRAS_CATEGORY = 'Extras';
 
 export const isExtrasItem = (item) => String(item?.category || '').trim().toLowerCase() === EXTRAS_CATEGORY.toLowerCase();
 
+export const isVehicleExtra = (item, basis = item?.rate_basis || item?.basis || item?.pricing_model || item?.rate_snapshot?.rate_basis) =>
+  isExtrasItem(item) && String(basis || '').trim().toLowerCase() === 'per_vehicle';
+
 /* The names the editor offers before the operator types their own. Fuel is the
    charge the tenants ask for most, and a fuel contract is split by what goes in
    the tank rather than by the item. */

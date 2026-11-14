@@ -570,6 +570,17 @@ export const applyProtectionToRate = (rate, percent) => {
       out[f] = scaleMoneyMap(rate[f], factor);
     }
   });
+  if (rate.weekend_rates && typeof rate.weekend_rates === 'object') {
+    const wr = { ...rate.weekend_rates };
+    ['price_1_adult', 'price_2_adults', 'price_3_plus_adults'].forEach((f) => {
+      const v = parseFloat(wr[f]);
+      if (Number.isFinite(v) && v > 0) wr[f] = round2(v * factor);
+    });
+    if (wr.child_rates && typeof wr.child_rates === 'object') {
+      wr.child_rates = scaleMoneyMap(wr.child_rates, factor);
+    }
+    out.weekend_rates = wr;
+  }
   /* Tiered pricing carries its own amounts per band. Leaving these behind is
      how a stale season could still quote the old band price. */
   if (Array.isArray(rate.tiered_pricing)) {

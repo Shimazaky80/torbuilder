@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 
 const COMMON_COUNTRIES = [
-  'Botswana', 'France', 'Germany', 'Kenya', 'Namibia', 'Netherlands',
-  'South Africa', 'Tanzania', 'United Kingdom', 'United States'
+  'Botswana', 'France', 'Germany', 'Kenya', 'Mozambique', 'Namibia', 'Netherlands',
+  'South Africa', 'Tanzania', 'United Kingdom', 'United States', 'Zambia', 'Zimbabwe'
 ];
 
 export const useCountries = () => {

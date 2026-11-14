@@ -1650,6 +1650,350 @@ aside.sidebar:not(.collapsed) .logo-full {
   color: var(--primary-color);
 }
 
+/* Day rail: compact chips that wrap onto rows so every day stays in view on a
+   long trip instead of scrolling off to the right. Replaces the old day-strip. */
+.day-rail-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.day-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.6rem;
+  padding: 0.45rem 0.3rem 0.6rem;
+}
+
+.day-chip-cell {
+  position: relative;
+}
+
+.day-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 96px;
+  max-width: 148px;
+  padding: 0.45rem 0.6rem;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.day-chip:hover {
+  border-color: #94a3b8;
+  transform: translateY(-1px);
+}
+
+.day-chip:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.day-chip.active {
+  border-color: var(--primary-color);
+  background: #f0fdfa;
+  box-shadow: 0 4px 12px -2px rgba(13, 116, 120, 0.2);
+}
+
+.day-chip-cell.marked .day-chip {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.day-chip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.day-chip-num {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #1a202c;
+}
+
+/* The day's destination is the first thing a consultant reads on the chip, so
+   it gets weight and colour; the date and value stay quiet underneath. */
+.day-chip-destination {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #0d7478;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.day-chip-date {
+  font-size: 0.7rem;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.day-chip-value {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #475569;
+}
+
+.day-chip-mark {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  z-index: 3;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary-color);
+  cursor: pointer;
+  background: #fff;
+  border-radius: 4px;
+}
+
+.day-chip-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  align-self: center;
+  padding: 0.5rem 0.8rem;
+  border-radius: 10px;
+  border: 1px dashed #94a3b8;
+  background: transparent;
+  color: #475569;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.day-chip-action:hover:not(:disabled) {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.day-chip-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.day-chip-action.board {
+  border-style: solid;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.day-chip-action.board:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+  background: #f0fdfa;
+}
+
+/* Honest per-day status dots, reused on the rail chips and the board tiles. */
+.day-status-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.day-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.day-dot.estimate {
+  background: #f59e0b;
+}
+
+.day-dot.guide {
+  background: #3b82f6;
+}
+
+.day-dot.empty {
+  background: transparent;
+  border: 1.5px solid #cbd5e1;
+}
+
+/* Prev / next stepper in the day workspace header. */
+.day-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.day-step-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.day-step-btn:hover:not(:disabled) {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+  background: #f0fdfa;
+}
+
+.day-step-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.day-stepper .day-step-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #1a202c;
+  white-space: nowrap;
+}
+
+.day-stepper .day-step-of {
+  color: #64748b;
+  font-weight: 600;
+}
+
+/* All-days board: a calendar-style overview grid in the standard tall modal. */
+.day-board {
+  max-width: 860px;
+}
+
+.day-board-sub {
+  font-size: 0.82rem;
+  color: #64748b;
+  margin-top: 0.3rem;
+}
+
+.day-board-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.6rem;
+}
+
+.day-board-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.day-board-tile:hover {
+  border-color: #94a3b8;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px -6px rgba(15, 23, 42, 0.18);
+}
+
+.day-board-tile:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.day-board-tile.active {
+  border-color: var(--primary-color);
+  background: #f0fdfa;
+  box-shadow: 0 4px 12px -2px rgba(13, 116, 120, 0.2);
+}
+
+.day-board-tile.marked {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.day-board-tile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.day-board-num {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #1a202c;
+}
+
+.day-board-destination {
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: #0d7478;
+  min-height: 1em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.day-board-date {
+  font-size: 0.74rem;
+  color: #64748b;
+  min-height: 1em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.day-board-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.day-board-count {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.day-board-value {
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #0f766e;
+}
+
+.day-board-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.9rem;
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid #e2e8f0;
+  font-size: 0.74rem;
+  color: #64748b;
+}
+
+.day-board-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.day-board-hint {
+  margin-left: auto;
+  color: #94a3b8;
+}
+
 /* Day workspace */
 .day-workspace {
   flex: 1;
@@ -1889,6 +2233,47 @@ aside.sidebar:not(.collapsed) .logo-full {
 
 .svc-price-input.buy {
   color: #b45309;
+}
+
+.svc-buy-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.svc-buy-card {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #b45309;
+  text-align: right;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.svc-buy-card:hover {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(13, 116, 120, 0.12);
+}
+
+.svc-buy-edit {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0.15rem;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.svc-buy-edit:hover {
+  color: var(--primary-color);
 }
 
 .svc-price-input.markup {

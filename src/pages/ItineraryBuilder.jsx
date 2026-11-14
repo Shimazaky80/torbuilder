@@ -56,7 +56,15 @@ import GuidePersonModal from '../components/GuidePersonModal';
 import AccommodationChargeModal from '../components/AccommodationChargeModal';
 import GuideDetailsModal from '../components/GuideDetailsModal';
 import CarRentalDropModal from '../components/CarRentalDropModal';
+import FuelVehicleModal from '../components/FuelVehicleModal';
+import FuelForVehicleModal from '../components/FuelForVehicleModal';
 import CarSpecGrid from '../components/CarSpecGrid';
+import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
+import { DayRail, DayBoardModal, DayStepper } from '../components/DayNavigator';
+import DayDestinationEditor from '../components/DayDestinationEditor';
+import { DAY_DESTINATION_COLUMNS, destinationFields, destinationLabel, dayDestinationHeading, dayRoute, dayEndLabel, applyDayDestination } from '../lib/dayDestination';
+import { VEHICLE_TYPES, activeVehicleTypes, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { columnExists } from '../lib/schemaColumnProbe';
 import {
   guideChargeTotal,
   guideLabel,
@@ -78,12 +86,22 @@ import {
   priceGuideLine
 } from '../lib/guideRoster';
 import { accommodationHasChoices, ratesForOption, rateById, rateForNights, rateForNight, nightBandLabel, seasonForRate, weekendDaysLabel, weekendNightOf } from '../lib/accommodationOptions';
-import { extrasHasChargeChoices, isExtrasItem, lineChargeLabel } from '../lib/extrasChargeTypes';
-import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount, clientRoomsBooked, withRoomCapacity, tourGuideCount } from '../lib/roomAllocationHelper';
-import { roomTypesOf, soldRoomCapacity, allocatedRoomTypeLabel, serviceRoomName } from '../lib/roomTypes';
+import { normalizeStayPayPromotions, planStayPay, roomKeyForService, stayPayExcludedService } from '../lib/stayPay';
+import { chargeLabelOf, extrasHasChargeChoices, isExtrasItem, isVehicleExtra, lineChargeLabel, ratesForCharge } from '../lib/extrasChargeTypes';
+import {
+  fuelIncludedOf,
+  fuelVehiclesFromItinerary,
+  fuelVehicleOptions,
+  isFuelAllowanceLine,
+  isFuelChargeName,
+  isVehicleProviderLine,
+  itemHasFuelCharge
+} from '../lib/fuelAllowance';
+import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount, payingGuestsBooked, clientRoomsBooked, withRoomCapacity, tourGuideCount, allocationIdentityPatch } from '../lib/roomAllocationHelper';
+import { roomTypesOf, ratesForServiceRoom, soldRoomCapacity, allocatedRoomTypeLabel, serviceRoomName } from '../lib/roomTypes';
 import { withRoomTypeRates } from '../lib/roomTypePricing';
 import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus, ESTIMATE_SEASON_STATUSES, CONSENT_SEASON_STATUSES, PROTECTABLE_SEASON_STATUSES, protectionForSeason, itemHasPricedRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
-import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
+import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargeNightsBuy, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
 import { computePerPersonRows, breakdownSnapshot, perPersonPrintRows } from '../lib/perPersonPricing';
 import {
   carRentalBuyTotal,
@@ -211,6 +229,129 @@ const addDaysToDate = (iso, n) => {
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 };
 
+/* An undated itinerary (month-timed) still has nights to waive; the synthetic
+ * dates only give the engine a consecutive order, never a validity window. */
+const STAY_PAY_ORDER_EPOCH = '1970-01-01';
+
+/* Recompute the stay-pay stamp on every accommodation line.
+ *
+ * The builders price one line per night, so a promotion is applied by stamping
+ * the free nights: buyPP/sellPP go to zero and the waived figure moves to
+ * stayPayValue, where it stays readable. Recomputing from the original value
+ * (not from the zeroed line) is what lets a stay be lengthened, shortened or
+ * lose its promotion and come back to its real price.
+ *
+ * Grouping is per property AND room: two rooms on a 7-for-5 offer each earn
+ * their own free nights. Optional alternatives and crew beds are excluded
+ * before the group is built, so they neither earn nor consume a free night. */
+const applyStayPayStamps = ({ days, libraryItems, paxCount, shareContext }) => {
+  const libraryById = new Map((libraryItems || []).map((item) => [item.id, item]));
+  const groups = new Map();
+  /* A line that was free and has since become an optional alternative or a crew
+     bed is no longer a client room-night, so its real price has to come back
+     rather than staying at zero with no promotion behind it. */
+  const excluded = [];
+  (days || []).forEach((day, dayIndex) => {
+    (day.services || []).forEach((service, serviceIndex) => {
+      if (!/accommodation/i.test(service.category || '')) return;
+      if (stayPayExcludedService(service)) {
+        if (service.stayPayFree === true) excluded.push({ dayIndex, serviceIndex });
+        return;
+      }
+      const item = libraryById.get(service.itemId);
+      if (!item) return;
+      const promotions = normalizeStayPayPromotions(
+        item.stay_pay_promotions ?? item.stayPayPromotions
+      );
+      const roomKey = roomKeyForService(service, item);
+      const groupKey = `${service.itemId || service.name || 'accommodation'}|${roomKey}`;
+      const realDate = toISODate(day.date);
+      const original = service.stayPayFree === true
+        ? Number(service.stayPayValue) || 0
+        : Number(service.buyPP) || 0;
+      const value = original * paxForService(service, paxCount, shareContext);
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, { promotions, roomKey, entries: [], hasRealDates: false });
+      }
+      const group = groups.get(groupKey);
+      group.hasRealDates = group.hasRealDates || !!realDate;
+      group.entries.push({
+        dayIndex,
+        serviceIndex,
+        date: realDate || addDaysToDate(STAY_PAY_ORDER_EPOCH, dayIndex),
+        value
+      });
+    });
+  });
+  if (!groups.size && !excluded.length) return days;
+
+  let changed = false;
+  const nextDays = days.map((day) => ({ ...day, services: [...(day.services || [])] }));
+
+  /* Put a waived night's real price back from the value the stamp kept. */
+  const unstamp = (entry) => {
+    const day = nextDays[entry.dayIndex];
+    const service = day.services[entry.serviceIndex];
+    if (service.stayPayFree !== true) return;
+    const original = Number(service.stayPayValue) || 0;
+    const markup = Number(service.markup) || 0;
+    day.services[entry.serviceIndex] = {
+      ...service,
+      stayPayFree: false,
+      stayPayRule: '',
+      stayPayValue: null,
+      buyPP: original,
+      sellPP: round2(original * (1 + markup / 100))
+    };
+    changed = true;
+  };
+
+  const stamp = (entry, free, rule) => {
+    if (!free) {
+      unstamp(entry);
+      return;
+    }
+    const day = nextDays[entry.dayIndex];
+    const service = day.services[entry.serviceIndex];
+    const wasFree = service.stayPayFree === true;
+    const original = wasFree ? Number(service.stayPayValue) || 0 : Number(service.buyPP) || 0;
+    const ruleName = rule?.name || '';
+    if (!wasFree || Number(service.buyPP) !== 0 || service.stayPayRule !== ruleName) {
+      day.services[entry.serviceIndex] = {
+        ...service,
+        stayPayFree: true,
+        stayPayRule: ruleName,
+        stayPayValue: original,
+        buyPP: 0,
+        sellPP: 0
+      };
+      changed = true;
+    }
+  };
+
+  excluded.forEach(unstamp);
+
+  groups.forEach((group) => {
+    /* A month-timed itinerary has no check-in to test against a validity
+       window, so only an open-ended offer may apply there. */
+    const promotions = group.hasRealDates
+      ? group.promotions
+      : group.promotions.filter((rule) => !rule.validFrom && !rule.validTo);
+    const plan = promotions.length
+      ? planStayPay({
+        nights: group.entries.map((entry) => ({ date: entry.date, value: entry.value })),
+        promotions,
+        roomKey: group.roomKey
+      })
+      : { freeIndexes: new Set(), rule: null };
+    group.entries.forEach((entry, index) => {
+      stamp(entry, plan.freeIndexes.has(index), plan.ruleByDate?.get(entry.date) || plan.rule);
+    });
+  });
+
+  return changed ? nextDays : days;
+};
+
 const daysInRange = (start, end) => {
   const s = toISODate(start);
   const e = toISODate(end);
@@ -245,6 +386,15 @@ const formatDateShort = (iso) => {
   const [y, m, d] = s.split('-').map(Number);
   if (!y || !m || !d) return s;
   return `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
+};
+
+/* Compact "12 Nov" for the day-rail chip, where the full weekday date is too wide. */
+const formatDateChip = (iso) => {
+  const s = toISODate(iso);
+  if (!s) return '';
+  const [y, m, d] = s.split('-').map(Number);
+  if (!y || !m || !d) return '';
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
 
 const numOr = (v, fallback) => {
@@ -395,6 +545,9 @@ const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) =
         sellPP: Number(sv.sellPP) || 0,
         taxRate: numOr(sv.taxRate, defaults.defaultTaxRate),
         itemId: sv.itemId || null,
+        roomType: sv.roomType || sv.room_type || '',
+        roomTypeId: sv.roomTypeId || sv.room_type_id || null,
+        mealPlan: sv.mealPlan || '',
         roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
         markup: Number(sv.markup) || 0,
         /* The season this line was actually priced with, when it is in scope.
@@ -407,7 +560,7 @@ const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) =
       });
     });
   });
-  const rateBy = (itemId, svcRates, dayDate = '') => {
+  const rateBy = (itemId, svcRates, dayDate = '', sv = null) => {
     const item = libraryItems.find((x) => String(x.id) === String(itemId)) || null;
     const forNight = (rate) => (rate ? rateForNight(rate, dayDate) : rate);
     /* One row prices the line, but the night can mix this property's room types
@@ -422,12 +575,23 @@ const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) =
         nightDate: dayDate
       })
       : null);
+    /* The season resolves over the charge and room this line sold, never the
+       whole matrix: a sibling villa sharing the season name must not win the
+       tie and price these beds off its own occupancy ladder. */
+    const chargeLabel = lineChargeLabel(sv);
     if (Array.isArray(svcRates) && svcRates.length) {
-      const own = rateForTravel({ item_rates: svcRates }, code, defaults.travelWindow, defaults.protectionPercent, defaults.allowPartial === true);
+      const ownRates = ratesForServiceRoom(ratesForCharge({ item_rates: svcRates }, chargeLabel), sv, roomTypesOf(item));
+      const own = ownRates.length
+        ? rateForTravel({ item_rates: ownRates }, code, defaults.travelWindow, defaults.protectionPercent, defaults.allowPartial === true)
+        : null;
       if (own) return stamp(forNight(own));
     }
     if (!itemId || !item) return null;
-    return stamp(forNight(rateForTravel(item, code, defaults.travelWindow, defaults.protectionPercent, defaults.allowPartial === true)));
+    const roomItem = {
+      ...item,
+      item_rates: ratesForServiceRoom(ratesForCharge(item, chargeLabel), sv, roomTypesOf(item))
+    };
+    return stamp(forNight(rateForTravel(roomItem, code, defaults.travelWindow, defaults.protectionPercent, defaults.allowPartial === true)));
   };
   const list = Array.isArray(travellers) ? travellers : [];
   const pax = Math.max(list.length, Number(defaults.paxCount) || 0, 1);
@@ -1508,6 +1672,7 @@ export const ItineraryBuilder = () => {
 
   const [companyId, setCompanyId] = useState(null);
   const [libraryItems, setLibraryItems] = useState([]);
+  const [vehicleTypes, setVehicleTypes] = useState([]);
   const [taxRates, setTaxRates] = useState([]);
   const [companyDepositPct, setCompanyDepositPct] = useState(DEPOSIT_PCT);
   const [billing, setBilling] = useState(null);
@@ -1571,6 +1736,14 @@ export const ItineraryBuilder = () => {
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [kebabFor, setKebabFor] = useState(null);
   const [dragOverKey, setDragOverKey] = useState(null);
+  const [dayBoardOpen, setDayBoardOpen] = useState(false);
+  const [dayDestinationsReady, setDayDestinationsReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    columnExists('itinerary_days', DAY_DESTINATION_COLUMNS.join(', '))
+      .then((ready) => { if (active) setDayDestinationsReady(ready); });
+    return () => { active = false; };
+  }, []);
   const [exportDialog, setExportDialog] = useState(false);
   const [exportFormat, setExportFormat] = useState('pdf');
   /* What goes into the exported document. Every box starts on the way the
@@ -1665,6 +1838,11 @@ export const ItineraryBuilder = () => {
   const [guideRosterReady, setGuideRosterReady] = useState(false);
   /* The pending "who is guiding?" question for a line already on a day. */
   const [guidePersonModal, setGuidePersonModal] = useState(null);
+  /* The buy price opens the item's read-only rate card so the contract can be
+     confirmed without leaving the itinerary. The pencil keeps the direct
+     negotiation edit one click away. */
+  const [rateCardItem, setRateCardItem] = useState(null);
+  const [editingBuyKey, setEditingBuyKey] = useState(null);
 
   /* Accommodation charge detour: the pending drop held while the operator says
      which charge type (and which season window) this property is priced from,
@@ -1674,6 +1852,11 @@ export const ItineraryBuilder = () => {
      car collected and a car returned — so the drop is held while the operator
      says where and when, and which vehicle group from the contract fills it. */
   const [carRentalModal, setCarRentalModal] = useState(null);
+  /* Fuel allowance detour: dropping a fuel charge asks which vehicle it fuels,
+     and dropping a fuel-excluded vehicle offers to add an allowance. Both hold
+     the add while the operator answers; neither types a figure. */
+  const [fuelPickerModal, setFuelPickerModal] = useState(null);
+  const [fuelForVehicleModal, setFuelForVehicleModal] = useState(null);
   /* The line storing its own hire copy needs the rental_details column; until
      that migration is applied the rest of the itinerary still saves. */
   const [rentalColumnReady, setRentalColumnReady] = useState(false);
@@ -1681,6 +1864,9 @@ export const ItineraryBuilder = () => {
      its own column: until 20261250 is applied the line still prices the open
      builder, it simply is not written to the row. */
   const [crewShareColumnReady, setCrewShareColumnReady] = useState(false);
+  /* The stay-pay stamp arrives with 20261262. Until then a free night still
+     prices to zero on screen, but the row has nowhere to record why. */
+  const [stayPayColumnReady, setStayPayColumnReady] = useState(false);
   /* A season that starts after the trip can still price a line, but the
      operator has to say so. The prompt holds the exact add that will run once
      they accept, including any repeat days the placement prompt had selected. */
@@ -1746,21 +1932,27 @@ export const ItineraryBuilder = () => {
     const focusRates = ratesForOption(item, options.optionLabel);
     const pinnedRate = options.rateId ? rateById(item, options.rateId) : null;
     const allowEstimate = options.allowEstimate === true;
+    /* A fee bills the night it sits on, not the whole trip: a levy that changes
+       on 1 Jan has two prices inside one 20 Dec - 7 Jan room season, and the
+       night being charged is the window its season must cover. */
+    const pricingDate = String(options.pricingDate || '').slice(0, 10);
+    const startDate = pricingDate || travelWindow.start;
+    const endDate = pricingDate || travelWindow.end;
     const agreedPct = options.protectionPercent === undefined || options.protectionPercent === null
       ? null
       : Math.max(0, Number(options.protectionPercent) || 0);
     const protectionPercent = agreedPct === null ? priceProtectionPercent : agreedPct;
     const season = pinnedRate
       ? seasonForRate(pinnedRate, {
-        startDate: travelWindow.start,
-        endDate: travelWindow.end,
+        startDate,
+        endDate,
         allowEstimate
       })
       : resolveSeasonForTravel({
         rates: focusRates.length ? focusRates : (item.item_rates || []),
         currencyCode,
-        startDate: travelWindow.start,
-        endDate: travelWindow.end,
+        startDate,
+        endDate,
         protectionPercent,
         allowFuture: allowEstimate,
         /* Month-only timing cannot be covered "exactly" by one season when
@@ -1828,6 +2020,21 @@ export const ItineraryBuilder = () => {
   const isReadOnly = isProvisional || isConfirmed || isInProgress || isCompleted || isCancelled || !mayEditItinerary;
   const editLockedRef = useRef(isReadOnly);
   const hydrateRef = useRef(false);
+
+  /* Stay-pay stamps are derived from the stay, not typed by the operator. The
+     effect runs whenever the nights or the property's promotions change, so
+     lengthening, shortening or re-dropping a stay re-picks the free nights
+     instead of leaving the old ones stamped. A locked booking keeps the stamps
+     it was saved with. Without the stamp columns the builder must not zero a
+     line, because it would have nowhere to keep the waived figure. */
+  useEffect(() => {
+    if (!bootedState || !stayPayColumnReady) return;
+    if (editLockedRef.current && !hydrateRef.current) return;
+    setDaysRaw((prev) => {
+      const next = applyStayPayStamps({ days: prev, libraryItems, paxCount, shareContext });
+      return next === prev ? prev : next;
+    });
+  }, [bootedState, days, libraryItems, paxCount, shareContext, stayPayColumnReady]);
 
   useEffect(() => {
     editLockedRef.current = isReadOnly;
@@ -2068,6 +2275,26 @@ export const ItineraryBuilder = () => {
   }, [stage, isProvisional, isConfirmed, isInProgress, isCompleted, isCancelled]);
   const tab = visibleTabIds.includes(activeTab) ? activeTab : 'itinerary';
 
+  /* Left / right arrows step between days on the day tab. Guarded so typing in a
+     field, holding a modifier, or working inside any dialog never moves the day
+     out from under the consultant. */
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (dayBoardOpen || tab !== 'itinerary') return;
+      const el = document.activeElement;
+      const tag = el ? el.tagName : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el && el.isContentEditable)) return;
+      if (document.querySelector('.modal-overlay')) return;
+      event.preventDefault();
+      setDragOverKey(null);
+      setSelectedDayIndex((prev) => Math.max(0, Math.min(days.length - 1, prev + (event.key === 'ArrowLeft' ? -1 : 1))));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dayBoardOpen, tab, days.length, setSelectedDayIndex, setDragOverKey]);
+
   // Navigation-guard dirty tracking: compare the current serialised working
   // state against the last state that was persisted (boot / save), so ANY
   // edit to days or meta automatically marks the workspace as dirty.
@@ -2137,6 +2364,15 @@ export const ItineraryBuilder = () => {
     setGuideMembers(roster.members);
     setRentalColumnReady(await rentalDetailsColumn('itinerary_day_items'));
     setCrewShareColumnReady(await crewShareColumn('itinerary_day_items'));
+    try {
+      const { error } = await supabase
+        .from('itinerary_day_items')
+        .select('stay_pay_free')
+        .limit(1);
+      setStayPayColumnReady(!error);
+    } catch {
+      setStayPayColumnReady(false);
+    }
   }, []);
 
   const fetchItineraryItemIds = useCallback(async (iid) => {
@@ -2213,6 +2449,28 @@ export const ItineraryBuilder = () => {
       showToast('Failed to load saved library items', 'error');
     }
   }, [selectLibraryItems, showToast]);
+
+  /* A per-vehicle rate card names each vehicle and how many people it seats.
+     The library item stores the price against a vehicle code, so the card needs
+     the company's merged vehicle list to turn that code into a name and a
+     capacity. A failure here only costs the seat line; the card still opens. */
+  const loadVehicleTypes = useCallback(async (cid) => {
+    if (!cid) {
+      setVehicleTypes([]);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from(VEHICLE_TYPES.table)
+        .select(VEHICLE_TYPES.columns)
+        .or(vocabularyReadFilter(cid))
+        .order(...VEHICLE_TYPES.orderBy);
+      if (error) throw error;
+      setVehicleTypes(activeVehicleTypes(mergeVocabulary(data || [], VEHICLE_TYPES.keyColumn)));
+    } catch {
+      setVehicleTypes([]);
+    }
+  }, []);
 
   // Sidebar picker: on-demand server-side search. Bounded to a page of results
   // so the biggest cost (all rates for a whole company catalogue) never runs.
@@ -2330,7 +2588,7 @@ export const ItineraryBuilder = () => {
       const packages = data || [];
       const packageIds = packages.map((pkg) => pkg.id);
       const { data: packageDays, error: daysError } = packageIds.length
-        ? await supabase.from('package_days').select(`id, package_id, day_number, notes${canReadTranslations ? ', text_i18n' : ''}`).in('package_id', packageIds).order('day_number')
+        ? await supabase.from('package_days').select('*').in('package_id', packageIds).order('day_number')
         : { data: [], error: null };
       if (daysError) throw daysError;
       const dayIds = (packageDays || []).map((day) => day.id);
@@ -2342,7 +2600,7 @@ export const ItineraryBuilder = () => {
       (packageServices || []).forEach((service) => servicesByDay.set(service.package_day_id, [...(servicesByDay.get(service.package_day_id) || []), service]));
       const daysByPackage = new Map();
       (packageDays || []).forEach((day) => daysByPackage.set(day.package_id, [...(daysByPackage.get(day.package_id) || []), {
-        day_number: day.day_number, notes: day.notes, text_i18n: day.text_i18n || null, services: servicesByDay.get(day.id) || []
+        ...destinationFields(day), day_number: day.day_number, notes: day.notes, text_i18n: day.text_i18n || null, services: servicesByDay.get(day.id) || []
       }]));
       setPickerPackages(packages.map((pkg) => ({
         ...pkg,
@@ -2455,6 +2713,7 @@ export const ItineraryBuilder = () => {
           dayNumber: rd.day_number || di + 1,
           date: toISODate(rd.day_date) || (storedMonthTiming ? '' : addDaysToDate(storedTravelStart, di)),
           notes: rd.notes || '',
+          ...destinationFields(rd),
           textI18n: translationsOf(rd),
           services: (rd.itinerary_day_items || []).map((ii) => {
             const mRaw = Number(ii.markup_percentage);
@@ -2494,6 +2753,13 @@ export const ItineraryBuilder = () => {
               markup: m,
               sellPP: pricing.sellPP,
               pax: pricing.pax,
+              /* A free night bills nothing but remembers what it was worth, so
+                 a later stay edit can put the real price back. */
+              stayPayFree: ii.stay_pay_free === true,
+              stayPayRule: ii.stay_pay_rule || '',
+              stayPayValue: ii.stay_pay_value === null || ii.stay_pay_value === undefined
+                ? null
+                : Number(ii.stay_pay_value),
               quantity: Number(ii.quantity) || 1,
               descOverride: ii.description_override || '',
               taxRate: taxed ? (Number(ii.tax_rate) > 0 ? numOr(ii.tax_rate, defaultTaxRate) : defaultTaxRate) : 0,
@@ -2603,6 +2869,7 @@ repeatGroupId: ii.repeat_group_id || null,
       booted.current = true;
       const cid = await fetchCompanyId();
       await loadCompanyMeta(cid);
+      await loadVehicleTypes(cid);
       let foundSaved = false;
       if (cid && data?.itineraryId) {
         const savedItemIds = await fetchItineraryItemIds(data.itineraryId);
@@ -2613,7 +2880,7 @@ repeatGroupId: ii.repeat_group_id || null,
       setBootedState(true);
     };
     boot();
-  }, [data, fetchCompanyId, loadCompanyMeta, fetchItineraryItemIds, loadLibraryItemsByIds, loadExistingDays, initDaysFromRange]);
+  }, [data, fetchCompanyId, loadCompanyMeta, loadVehicleTypes, fetchItineraryItemIds, loadLibraryItemsByIds, loadExistingDays, initDaysFromRange]);
 
   /* Safety net for the day skeleton. The boot pass above runs exactly once and
      builds the days from the travel range, but it is async — if the user sets
@@ -2776,6 +3043,7 @@ repeatGroupId: ii.repeat_group_id || null,
             mealPlan: sv.mealPlan || '',
             itemId: sv.itemId || null,
             roomType: sv.roomType || sv.room_type || '',
+            roomTypeId: sv.roomTypeId || sv.room_type_id || null,
             roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
             markup: Number(sv.markup) || 0,
             taxRate: numOr(sv.taxRate, defaultTaxRate),
@@ -2801,6 +3069,7 @@ repeatGroupId: ii.repeat_group_id || null,
           mealPlan: sv.mealPlan || '',
           itemId: sv.itemId || null,
           roomType: sv.roomType || sv.room_type || '',
+          roomTypeId: sv.roomTypeId || sv.room_type_id || null,
           roomAllocations: Array.isArray(sv.roomAllocations) ? sv.roomAllocations : [],
           markup: Number(sv.markup) || 0,
           taxRate: numOr(sv.taxRate, defaultTaxRate),
@@ -2868,6 +3137,11 @@ repeatGroupId: ii.repeat_group_id || null,
   }, [days, paxCount, currencies, defaultTaxRate, shareContext]);
 
   /* -- Day / pricing helpers (called from handlers, not render) ----------- */
+
+  const updateDayDestinations = useCallback((indexes, patch) => {
+    if (isReadOnly || !dayDestinationsReady) return;
+    setDays((previous) => applyDayDestination(previous, indexes, patch));
+  }, [isReadOnly, dayDestinationsReady, setDays]);
 
   const normalizeDays = useCallback((arr) => {
     const monthMode = isMonthTiming(meta);
@@ -2943,6 +3217,12 @@ repeatGroupId: ii.repeat_group_id || null,
        pinned is the money. The tariff's own validity window is carried in the
        season columns, because that is exactly what it describes. */
     const rentalDetails = isCarRentalItem(item) ? (options.rentalDetails || null) : null;
+    /* A fee is priced against the night it lands on unless the caller named a
+       date, so the line, the consent gate and the toast all describe the same
+       night's figure. */
+    const seasonOptions = isSurchargeItem(item) && !options.pricingDate
+      ? { ...options, pricingDate: days[dayIndex]?.date || '' }
+      : options;
     const season = rentalDetails
       ? {
         status: 'matched',
@@ -2954,7 +3234,7 @@ repeatGroupId: ii.repeat_group_id || null,
         validFrom: rentalDetails.validityFrom || '',
         validTo: rentalDetails.validityTo || ''
       }
-      : resolveAddSeason(item, options);
+      : resolveAddSeason(item, seasonOptions);
     if (CONSENT_SEASON_STATUSES.has(season.status) && options.allowEstimate !== true) {
       showToast(`"${item.name}" — ${seasonMismatchNote(season, travelWindow)}`, 'warning');
       return;
@@ -3141,7 +3421,7 @@ repeatGroupId: ii.repeat_group_id || null,
       checkOutTime: item.checkOutTime || item.check_out_time || '',
       startTime: item.startTime || item.start_time || '',
       endTime: item.endTime || item.end_time || '',
-      notes: '',
+      notes: options.lineNote || '',
       textI18n: null,
       /* Only the season this trip is priced from. Storing the whole matrix here
          means every later reader (the room-allocation dialog, the per-room
@@ -3157,6 +3437,10 @@ repeatGroupId: ii.repeat_group_id || null,
       guideOnly: options.guideOnly === true,
       guideForKey: options.guideForKey || null,
       guideChargeType: options.guideChargeType || null,
+      /* A fuel allowance points at the vehicle it fuels (its library item id), so
+         it is removed with the vehicle and never copied onto another day. Fees
+         set their own link in the surcharge branch below. */
+      linkedItemId: options.linkedItemId || null,
       /* The person guiding, and the identity plus figures frozen with the price.
          Only a guide FEE line names anyone — a guide's lunch or bed is the
          property's crew charge and has nothing to do with who is driving the
@@ -3293,11 +3577,22 @@ repeatGroupId: ii.repeat_group_id || null,
        the database returned first — a drop quoted Winter while the sidebar and
        the allocate button both quoted Summer. */
     if (accomCat && !options.suppressRoomModal && !options.isOptional) {
+      /* The drop sells one room's row, but the allocation dialog types every bed
+         and a night can mix the property's rooms. Stamp the sibling rows here
+         exactly as openRoomAllocationModal does, so picking the 3-bedroom villa
+         prices its own ladder instead of falling back to the 4-bedroom row the
+         drop happened to resolve. Without the stamp rateForAllocatedRoom has no
+         sibling to read and quietly charges the sold room's figure. */
+      const typedRates = seasonalRates.map((row) => withRoomTypeRates(row, {
+        item,
+        rates: item.item_rates || [],
+        nightDate: days[dayIndex]?.date || ''
+      }));
       setRoomModalState({
         isOpen: true,
         dayIndex,
         serviceKey: svc.key,
-        item: buildRoomModalItem({ base: item, service: svc, modalRates: seasonalRates, season }),
+        item: buildRoomModalItem({ base: item, service: svc, modalRates: typedRates, season }),
         service: svc,
         /* The line exists as soon as it is dropped, so cancelling the
            allocation dialog has to take it back out again — otherwise the
@@ -3338,24 +3633,41 @@ repeatGroupId: ii.repeat_group_id || null,
     if (!target) return;
 
     const item = libraryItems.find((li) => li.id === prompt.item.id) || prompt.item;
-    const season = resolveSeasonForTravel({
-      rates: item.item_rates || [],
-      currencyCode,
-      startDate: travelWindow.start,
-      endDate: travelWindow.end,
-      protectionPercent: priceProtectionPercent
-    });
-    const markup = Number(markupPct) || 0;
-    const chargeable = isSurchargeChargeable(item);
-    const { total: buyTotal } = surchargeBuyTotal({
-      rate: applyProtectionToRate(season.rate, season.protectionPercent || 0),
+    /* Each night bills the figure valid on that night: a levy that changes on
+       1 Jan has two prices inside one answer of "18 nights", so the line sums
+       the nights individually instead of multiplying one season by the count. */
+    const nightBuy = surchargeNightsBuy({
       item,
+      currencyCode,
+      firstDate: day.date || '',
+      fallbackStart: travelWindow.start,
+      fallbackEnd: travelWindow.end,
+      nights: repeats,
+      protectionPercent: priceProtectionPercent,
       paxCount,
       childCount: Number(meta.numChildren) || 0,
-      guideCount: tourGuideCount(meta.travellers),
-      nights: repeats
+      guideCount: tourGuideCount(meta.travellers)
     });
-    const priced = surchargePricing({ buyTotal, markupPercent: markup, chargeable });
+    if (!nightBuy.pricedNights) {
+      showToast(`"${item.name}" has no fee validity covering ${repeats === 1 ? 'that night' : `those ${repeats} nights`}, so the line keeps its original price. Check the fee's validity dates in Library Items.`, 'warning');
+      return;
+    }
+    const markup = Number(markupPct) || 0;
+    const chargeable = isSurchargeChargeable(item);
+    const priced = surchargePricing({ buyTotal: nightBuy.total, markupPercent: markup, chargeable });
+    const pricedRows = nightBuy.nights.filter((row) => row.priced);
+    /* The stamp names the first night's window. A line whose nights span more
+       than one season status is an estimate as a whole: no single season
+       describes every night it bills. */
+    const firstRow = pricedRows[0];
+    const statuses = new Set(pricedRows.map((row) => seasonLineStatus(row.season, row.protectionPercent)));
+    const lineStatus = statuses.size === 1 ? [...statuses][0] : 'estimate';
+    const figures = new Map();
+    pricedRows.forEach((row) => figures.set(row.perRepeat, (figures.get(row.perRepeat) || 0) + 1));
+    const breakdown = figures.size > 1
+      ? [...figures.entries()].map(([figure, nights]) => `${nights} x ${fmtMoney(figure, `${currencyCode} `)}`).join(' + ')
+      : '';
+    const unpriced = nightBuy.nights.length - nightBuy.pricedNights;
 
     setDays((prev) => prev.map((d, i) => (
       i === dayIndex
@@ -3364,19 +3676,29 @@ repeatGroupId: ii.repeat_group_id || null,
           services: d.services.map((s) => (s.key === target.key
             ? {
               ...s,
-              quantity: repeats,
+              quantity: nightBuy.pricedNights,
               buyPP: paxCount > 0 ? round2(priced.buy / paxCount) : round2(priced.buy),
               sellPP: paxCount > 0 ? round2(priced.sell / paxCount) : round2(priced.sell),
-              surchargeRepeats: repeats,
-              surchargePassedThrough: priced.passedThrough
+              surchargeRepeats: nightBuy.pricedNights,
+              surchargePassedThrough: priced.passedThrough,
+              surchargeReference: round2(priced.reference || 0),
+              seasonName: firstRow.season.seasonName || '',
+              seasonValidFrom: firstRow.season.validFrom || '',
+              seasonValidTo: firstRow.season.validTo || '',
+              priceProtectionPercent: firstRow.protectionPercent,
+              protectedSeasonName: firstRow.protectionPercent ? firstRow.season.seasonName || '' : '',
+              rateSeasonStatus: lineStatus,
+              ...(breakdown && chargeable
+                ? { notes: `${nightBuy.pricedNights} nights: ${breakdown} — each night charged at the figure valid on that night.` }
+                : {})
             }
             : s))
         }
         : d
     )));
     showToast(
-      `"${item.name}" priced for ${repeats} night${repeats === 1 ? '' : 's'}${priced.passedThrough ? ' — not chargeable, excluded from the total' : ''}.`,
-      'success'
+      `"${item.name}" priced for ${nightBuy.pricedNights} night${nightBuy.pricedNights === 1 ? '' : 's'}${breakdown ? ` — ${breakdown}, each night at its own validity figure` : ''}${unpriced ? `; ${unpriced} night${unpriced === 1 ? '' : 's'} outside the fee's validity not charged` : ''}${priced.passedThrough ? ' — not chargeable, excluded from the total' : ''}.`,
+      unpriced ? 'warning' : 'success'
     );
   }, [surchargeRepeatPrompt, surchargeRepeatCount, days, libraryItems, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, markupPct, paxCount, meta.numChildren, meta.travellers, setDays, showToast]);
 
@@ -3385,7 +3707,9 @@ repeatGroupId: ii.repeat_group_id || null,
      occurrences is what decides the total:
        - a once-off fee appears once, on the first night the property is booked,
          because the supplier charges it once for the whole booking;
-       - a per-night fee appears on every night, one charge each.
+       - a per-night fee appears on every night, one charge each, priced from
+         the fee window covering that night - a levy that changes on 1 Jan
+         bills its two figures across a room season that straddles the year.
      Carrying the full night count on every one of the nights instead would bill
      N nights twice over (N lines x N charges), and adding the once-off fee to
      each night would bill it N times. */
@@ -3423,19 +3747,33 @@ repeatGroupId: ii.repeat_group_id || null,
       // No fee columns on this database, or the lookup failed: keep what we have.
     }
     if (options.generation !== undefined && options.generation !== feeAddGenerationRef.current) return;
-    /* A fee only exists in the seasons its property priced it in. If none of
-       its rows covers this trip, there is nothing to add: createService would
-       block it with an error for every drop. Skip it quietly instead. */
-    linked = linked.filter((feeItem) => {
-      const feeSeason = resolveAddSeason(feeItem, { allowEstimate: options.allowEstimate === true });
-      return feeSeason.canAdd && !!feeSeason.rate;
-    });
-    if (!linked.length) return;
+    /* Each occurrence bills the figure valid on its own night: a levy that
+       changes on 1 Jan has two prices inside one 20 Dec - 7 Jan room season,
+       and resolving the whole trip at once would bill every night one of them.
+       A night no fee window prices is left off and named in the summary rather
+       than charged a guess; a fee that cannot price any night is skipped
+       quietly, as before. */
     const summary = [];
     linked.forEach((feeItem) => {
       const perNight = surchargeBasisOf(feeItem) === 'per_night';
       const occurrenceDays = perNight ? dayIndices : [dayIndices[0]];
+      let added = 0;
+      let skipped = 0;
       occurrenceDays.forEach((dayIndex) => {
+        const feeOptions = {
+          /* The accommodation's estimate consent covers the fees that travel
+             with it, and the percentage agreed there is the one a fee night
+             that needs standing in is uplifted at - not today's Settings. */
+          allowEstimate: options.allowEstimate === true,
+          protectionPercent: options.protectionPercent,
+          pricingDate: days[dayIndex]?.date || ''
+        };
+        const feeSeason = resolveAddSeason(feeItem, feeOptions);
+        const needsConsent = CONSENT_SEASON_STATUSES.has(feeSeason.status) && options.allowEstimate !== true;
+        if (!feeSeason.canAdd || !feeSeason.rate || needsConsent) {
+          skipped += 1;
+          return;
+        }
         createService(dayIndex, feeItem, 'copy', {
           suppressRoomModal: true,
           suppressSurchargeFollowUps: true,
@@ -3444,12 +3782,12 @@ repeatGroupId: ii.repeat_group_id || null,
              The operator is never prompted: a linked fee knows its own count. */
           surchargeRepeats: 1,
           surchargeNights: 1,
-          /* The accommodation's estimate consent covers the fees that travel
-             with it, so they do not ask a second time for the same season. */
-          allowEstimate: options.allowEstimate === true
+          ...feeOptions
         });
+        added += 1;
       });
-      summary.push(`${feeItem.name}${perNight ? ` x${occurrenceDays.length}` : ''}`);
+      if (!added) return;
+      summary.push(`${feeItem.name}${perNight ? ` x${added}` : ''}${skipped ? ` (${skipped} night${skipped === 1 ? '' : 's'} outside its validity, not added)` : ''}`);
     });
     if (summary.length) {
       showToast(
@@ -3457,7 +3795,7 @@ repeatGroupId: ii.repeat_group_id || null,
         'success'
       );
     }
-  }, [libraryItems, createService, showToast, resolveAddSeason]);
+  }, [libraryItems, days, createService, showToast, resolveAddSeason]);
 
   const openPlacementPrompt = useCallback((dayIndex, item, via, chargeChoice = null) => {
     setPlacementDraft({ dayIndex, item, via, chargeChoice });
@@ -3526,7 +3864,55 @@ repeatGroupId: ii.repeat_group_id || null,
     setVehicleDraft({ dayIndex, item, via, options: vehicleOptionsFor(item) });
   }, [vehicleOptionsFor]);
 
-  const addService = useCallback((dayIndex, item, via) => {
+  /* Land a fuel allowance. With a vehicle chosen it is ONE line on that vehicle's
+     day, linked to the vehicle's library item; without one it falls back to the
+     normal placement so the operator still chooses the day. The price is the
+     Extras item's own library charge — nothing is typed here. */
+  const placeFuelAllowance = useCallback((dayIndex, item, via, chargeChoice, vehicle) => {
+    const options = { ...chargeChoice };
+    let targetDay = dayIndex;
+    if (vehicle) {
+      targetDay = vehicle.dayIndex;
+      options.linkedItemId = vehicle.itemId;
+      options.lineNote = `Fuel allowance for ${vehicle.name}.`;
+    }
+    const finish = (extra) => {
+      if (!vehicle && (via === 'drop' || via === 'double-click')) {
+        openPlacementPrompt(targetDay, item, via, { ...options, ...extra });
+      } else {
+        createService(targetDay, item, via, { ...options, ...extra });
+      }
+    };
+    const season = resolveAddSeason(item, options);
+    if (CONSENT_SEASON_STATUSES.has(season.status)) {
+      requestEstimate(item, season, (pct) => finish({ allowEstimate: true, protectionPercent: pct }));
+      return;
+    }
+    finish({});
+  }, [createService, openPlacementPrompt, resolveAddSeason, requestEstimate]);
+
+  /* The allowance drop asks which vehicle it fuels. A vehicle whose tariff
+     includes fuel, or one already carrying an allowance, is refused inline by
+     the picker; the operator can still add the line without a vehicle. */
+  const openFuelPicker = useCallback((dayIndex, item, via, chargeChoice = {}) => {
+    const vehicles = fuelVehiclesFromItinerary(days, libraryItems);
+    const covered = days.flatMap((d) => d.services || [])
+      .filter((s) => isFuelAllowanceLine(s) && s.linkedItemId)
+      .map((s) => s.linkedItemId);
+    setFuelPickerModal({ dayIndex, item, via, chargeChoice, options: fuelVehicleOptions(vehicles, covered) });
+  }, [days, libraryItems, setFuelPickerModal]);
+
+  const confirmFuelVehicle = useCallback((selection) => {
+    const pending = fuelPickerModal;
+    if (!pending) return;
+    setFuelPickerModal(null);
+    placeFuelAllowance(pending.dayIndex, pending.item, pending.via, pending.chargeChoice, selection);
+  }, [fuelPickerModal, placeFuelAllowance, setFuelPickerModal]);
+
+  /* The tenant's own fuel charges, offered when a fuel-excluded vehicle lands. */
+  const fuelExtrasItems = useMemo(() => libraryItems.filter(itemHasFuelCharge), [libraryItems]);
+
+  const addService = useCallback((dayIndex, item, via, preset = {}) => {
     if (completedRef.current) return;
     /* A guide is charged per the service it accompanies, so the operator is asked
        which of the five flat per-trip amounts this line is priced from before it
@@ -3553,9 +3939,34 @@ repeatGroupId: ii.repeat_group_id || null,
     /* An extra contracted at several charges — a fuel contract that sells 5 litres,
        a full tank and a different fuel again — cannot be costed until the operator
        says which of them this line is bought as. One charge, or none named at all,
-       drops straight in. */
+       drops straight in. A fuel link chosen from a vehicle prompt rides along so
+       the charge picker lands the line on that vehicle without asking again. */
     if (isExtrasItem(item) && extrasHasChargeChoices(item)) {
-      setAccomChargeModal({ dayIndex, item, via, variant: 'extras' });
+      setAccomChargeModal({
+        dayIndex, item, via, variant: 'extras',
+        fuelForItemId: preset.fuelForItemId || null,
+        fuelVehicleName: preset.fuelVehicleName || ''
+      });
+      return;
+    }
+    /* A fuel allowance dropped from the sidebar asks which vehicle it fuels before
+       it lands. The charge the season resolves to decides: an extra that also sells
+       a non-fuel charge drops normally when that is the one priced. */
+    if (!preset.fuelForItemId && isExtrasItem(item) && itemHasFuelCharge(item)) {
+      const fuelSeason = resolveAddSeason(item, {});
+      if (isFuelChargeName(chargeLabelOf(fuelSeason.rate, item))) {
+        openFuelPicker(dayIndex, item, via, {});
+        return;
+      }
+    }
+    /* A fuel-excluded vehicle offered an allowance and the operator picked one:
+       land it as a single line linked to that vehicle, on the vehicle's day. */
+    if (preset.fuelForItemId) {
+      placeFuelAllowance(dayIndex, item, via, {}, {
+        itemId: preset.fuelForItemId,
+        name: preset.fuelVehicleName || 'the vehicle',
+        dayIndex
+      });
       return;
     }
     if (via === 'drop' || via === 'double-click') {
@@ -3566,8 +3977,11 @@ repeatGroupId: ii.repeat_group_id || null,
     /* A direct add still asks before a season that does not exist for this trip
        is used, and the ask carries the percentage the line will be charged at.
        Placement goes through confirmPlacement, which asks at the point the
-       operator confirms the days. */
-    const season = resolveAddSeason(item);
+       operator confirms the days. A fee asks about the night it lands on, the
+       same window createService prices it from. */
+    const season = resolveAddSeason(item, {
+      pricingDate: isSurchargeItem(item) ? (days[dayIndex]?.date || '') : ''
+    });
     if (CONSENT_SEASON_STATUSES.has(season.status)) {
       requestEstimate(item, season, (pct) => createService(dayIndex, item, via, {
         allowEstimate: true,
@@ -3576,7 +3990,7 @@ repeatGroupId: ii.repeat_group_id || null,
       return;
     }
     createService(dayIndex, item, via);
-  }, [createService, isVehicleServiceItem, openPlacementPrompt, openVehiclePrompt, resolveAddSeason, requestEstimate]);
+  }, [createService, days, isVehicleServiceItem, openPlacementPrompt, openVehiclePrompt, openFuelPicker, placeFuelAllowance, resolveAddSeason, requestEstimate]);
 
   /* The accommodation charge picker answered: re-enter the add with the chosen
      rate row pinned, so placement (and every repeated day) prices from exactly
@@ -3598,6 +4012,20 @@ repeatGroupId: ii.repeat_group_id || null,
       roomMaxAdults: choice.roomMaxAdults,
       roomMaxChildren: choice.roomMaxChildren
     };
+    /* A fuel charge picked from a multi-charge Extras item still has to say which
+       vehicle it fuels — the picker answers the money question, not the link. */
+    if (isExtrasItem(item) && isFuelChargeName(choice.optionLabel || chargeLabelOf(rateById(item, choice.rateId), item))) {
+      if (pending.fuelForItemId) {
+        placeFuelAllowance(dayIndex, item, via, chargeChoice, {
+          itemId: pending.fuelForItemId,
+          name: pending.fuelVehicleName,
+          dayIndex
+        });
+      } else {
+        openFuelPicker(dayIndex, item, via, chargeChoice);
+      }
+      return;
+    }
     const proceed = (options) => {
       if (via === 'drop' || via === 'double-click') openPlacementPrompt(dayIndex, item, via, options);
       else createService(dayIndex, item, via, options);
@@ -3616,9 +4044,21 @@ repeatGroupId: ii.repeat_group_id || null,
       return;
     }
     proceed(chargeChoice);
-  }, [accomChargeModal, openPlacementPrompt, createService, resolveAddSeason, requestEstimate]);
+  }, [accomChargeModal, openPlacementPrompt, createService, resolveAddSeason, requestEstimate, openFuelPicker, placeFuelAllowance]);
 
-  /* The guide service-type picker answered: re-enter the add with the choice, so
+  /* The vehicle drop said fuel is excluded and the operator named an allowance
+     item: add it pre-linked to the vehicle that just landed. */
+  const confirmFuelForVehicle = useCallback((chosenItem) => {
+    const pending = fuelForVehicleModal;
+    if (!pending) return;
+    setFuelForVehicleModal(null);
+    if (!chosenItem) return;
+    addService(pending.dayIndex, chosenItem, 'drop', {
+      fuelForItemId: pending.vehicleItemId,
+      fuelVehicleName: pending.vehicleName
+    });
+  }, [fuelForVehicleModal, addService, setFuelForVehicleModal]);
+
   /* The guide service-type picker answered: re-enter the add with the choice, so
      the line is built from the selected flat per-trip amounts. A season that does
      not exist for this trip yet still asks first. */
@@ -3823,6 +4263,13 @@ repeatGroupId: ii.repeat_group_id || null,
       clientRooms: accommodationServices.reduce(
         (sum, s) => sum + clientRoomsBooked(s.roomAllocations),
         0
+      ),
+      payingGuestsByAccommodation: Object.fromEntries(
+        accommodationServices.map((s) => [s.itemId, payingGuestsBooked(s.roomAllocations)])
+      ),
+      payingGuests: accommodationServices.reduce(
+        (sum, s) => sum + payingGuestsBooked(s.roomAllocations),
+        0
       )
     };
   }, [days, guideDetailsModal]);
@@ -3845,7 +4292,7 @@ repeatGroupId: ii.repeat_group_id || null,
         const qty = Number(service.quantity) || 1;
         const cost = Number(service.unit_cost) || 0;
         const basis = String(service.rate_basis || '').toLowerCase();
-        const vehicles = basis === 'per_vehicle'
+        const vehicles = basis === 'per_vehicle' && !isVehicleExtra(service, basis)
           ? Math.ceil(Math.max(1, paxCount) / Math.max(1, Number(service.vehicle_capacity) || paxCount || 1))
           : 1;
         return sum + (isFlatBasis(basis) ? cost * qty * vehicles / Math.max(1, paxCount) : cost * qty);
@@ -4120,13 +4567,27 @@ repeatGroupId: ii.repeat_group_id || null,
         generation
       });
     }
+    /* A transfer or transport whose tariff excludes fuel needs an allowance. Ask
+       now, on the day it landed, while the hire is fresh — the allowance links
+       back to this vehicle and is removed with it. Only ask when the library
+       actually has a fuel allowance to offer. */
+    if (/transfers?|transport/i.test(placementItem?.category || '') && fuelExtrasItems.length) {
+      const vehicleRate = pinnedRate || resolveAddSeason(placementItem, { allowEstimate: estimateAllowed }).rate;
+      if (fuelIncludedOf(vehicleRate) === false) {
+        setFuelForVehicleModal({
+          dayIndex: baseDay,
+          vehicleItemId: placementItem.id,
+          vehicleName: placementItem.name
+        });
+      }
+    }
     setPlacementDraft(null);
     setPlacementError('');
     setPlacementCopyDays([]);
     setPlacementSplit(false);
     setPlacementDestinationSplit(false);
     setPlacementOptional(false);
-  }, [placementDraft, placementOptional, placementSplit, placementDestinationSplit, placementSelectedDays, days, libraryItems, meta.travellers, paxCount, accommodationPaxOnDay, showToast, setDays, nextId, createService, addLinkedSurcharges, resolveAddSeason]);
+  }, [placementDraft, placementOptional, placementSplit, placementDestinationSplit, placementSelectedDays, days, libraryItems, meta.travellers, paxCount, accommodationPaxOnDay, showToast, setDays, nextId, createService, addLinkedSurcharges, resolveAddSeason, fuelExtrasItems, setFuelForVehicleModal]);
 
   /* Ask once, before any day is written, so a repeated placement never lands
      some days and then stops on the season. Accepting commits the same placement
@@ -4143,14 +4604,17 @@ repeatGroupId: ii.repeat_group_id || null,
     }
     const addSeason = resolveAddSeason(placementDraft.item, {
       rateId: chargeChoice.rateId || null,
-      optionLabel: chargeChoice.optionLabel || ''
+      optionLabel: chargeChoice.optionLabel || '',
+      /* A fee asks about the night it was dropped on, the same window each
+       placed line prices from, so the dialog and the lines agree. */
+      pricingDate: isSurchargeItem(placementDraft.item) ? (days[placementDraft.dayIndex]?.date || '') : ''
     });
     if (CONSENT_SEASON_STATUSES.has(addSeason.status)) {
       requestEstimate(placementDraft.item, addSeason, (pct) => applyPlacement(true, pct));
       return;
     }
     applyPlacement(false);
-  }, [placementDraft, resolveAddSeason, requestEstimate, applyPlacement]);
+  }, [placementDraft, days, resolveAddSeason, requestEstimate, applyPlacement]);
 
   const openRoomAllocationModal = useCallback((dayIndex, sv) => {
     const libraryItem = libraryItems.find((it) => it.id === sv.itemId) || {};
@@ -4168,6 +4632,12 @@ repeatGroupId: ii.repeat_group_id || null,
     const sourceRates = (Array.isArray(libraryItem.item_rates) && libraryItem.item_rates.length)
       ? libraryItem.item_rates
       : (Array.isArray(sv.item_rates) ? sv.item_rates : []);
+    /* The season is resolved over THIS line's room alone. Two villas on one
+       property can share a season name, validity dates and board, so a
+       room-blind resolve lets the sibling villa's row win the tie and the
+       beds then price on an occupancy ladder this line never contracted.
+       The full matrix still rides along for the sibling-room rows below. */
+    const roomRates = ratesForServiceRoom(sourceRates, sv, roomTypesOf(libraryItem));
     /* A line already carrying Pricing Protection keeps its own percentage: it
        was priced with it and the dialog's figures overwrite buyPP/sellPP on
        confirm, so re-deriving it from the tenant's current setting would
@@ -4176,7 +4646,7 @@ repeatGroupId: ii.repeat_group_id || null,
       ? Number(sv.priceProtectionPercent)
       : priceProtectionPercent;
     const season = resolveSeasonForTravel({
-      rates: sourceRates,
+      rates: roomRates,
       currencyCode,
       startDate: travelWindow.start,
       endDate: travelWindow.end,
@@ -4187,9 +4657,13 @@ repeatGroupId: ii.repeat_group_id || null,
        of the booking: a 4+ night stay must not re-open on the 1-3 night price
        just because that is the row the matrix returns first. When the line
        carries the same season it was priced from, that exact row (and its
-       already-applied protection) wins. */
+       already-applied protection) wins. The row must also belong to the room
+       this line sold - a sibling villa's row stamped with the same season
+       name is not this line's price. */
     const lineRate = Array.isArray(sv.item_rates) && sv.item_rates.length ? sv.item_rates[0] : null;
-    const lineMatchesSeason = lineRate && season.rate
+    const lineRateIsThisRoom = !!lineRate
+      && ratesForServiceRoom([lineRate], sv, roomTypesOf(libraryItem)).length > 0;
+    const lineMatchesSeason = lineRate && lineRateIsThisRoom && season.rate
       && String(lineRate.season_name || '') === String(season.rate.season_name || '')
       && String(lineRate.valid_from || '') === String(season.rate.valid_from || '')
       && String(lineRate.valid_to || '') === String(season.rate.valid_to || '');
@@ -4212,7 +4686,7 @@ repeatGroupId: ii.repeat_group_id || null,
          whole matrix is what let getRateRow() quote a season the trip is not
          priced from — a multi-season array must never reach this dialog. */
       : [resolveRateForTravel({
-        rates: sourceRates,
+        rates: roomRates,
         currencyCode,
         startDate: travelWindow.start,
         endDate: travelWindow.end,
@@ -4282,6 +4756,15 @@ repeatGroupId: ii.repeat_group_id || null,
     const newBuyPP = round2(calculatedBuy / currentPax);
     const newSellPP = round2(calculatedSell / currentPax);
 
+    /* The beds just confirmed are the room this line now sells. A drop resolves
+       one villa's row, but the operator can house the whole party in another of
+       the property's rooms; when every typed bed agrees on that room, the line's
+       identity follows the allocation so a later re-price scopes to its contract
+       rather than the sibling the drop happened to win. A mixed night keeps the
+       sold identity and prices each bed from its own sibling row. */
+    const originalService = days[dayIdx]?.services?.find((service) => service.key === svKey) || null;
+    const identityPatch = allocationIdentityPatch(originalService, roomAllocations, roomModalState.item);
+
     /* When a partial allocation starts or continues a split, link all included
        properties on this night. Older or interrupted split flows may have
        assigned a group id only to the newly-added property. */
@@ -4301,6 +4784,7 @@ repeatGroupId: ii.repeat_group_id || null,
         s.key === svKey
           ? {
               ...s,
+              ...(identityPatch || {}),
               roomAllocations,
               buyPP: newBuyPP,
               sellPP: newSellPP,
@@ -4322,7 +4806,7 @@ repeatGroupId: ii.repeat_group_id || null,
         .map((service) => ({ dayIndex: index, service })))
       : [];
     if (related.length) {
-      setRoomApplyPrompt({ roomAllocations, calculatedBuy, calculatedSell, numRooms, related });
+      setRoomApplyPrompt({ roomAllocations, calculatedBuy, calculatedSell, numRooms, related, identityPatch });
     } else {
       showToast('Room allocation & rates updated', 'success');
     }
@@ -4408,7 +4892,7 @@ repeatGroupId: ii.repeat_group_id || null,
       setDays((prev) => prev.map((day) => ({
         ...day,
         services: day.services.map((service) => roomApplyPrompt.related.some((entry) => entry.service.key === service.key)
-          ? { ...service, roomAllocations: roomApplyPrompt.roomAllocations, buyPP, sellPP, pax: currentPax, numRooms: roomApplyPrompt.numRooms }
+          ? { ...service, ...(roomApplyPrompt.identityPatch || {}), roomAllocations: roomApplyPrompt.roomAllocations, buyPP, sellPP, pax: currentPax, numRooms: roomApplyPrompt.numRooms }
           : service)
       })));
     }
@@ -4687,7 +5171,16 @@ repeatGroupId: ii.repeat_group_id || null,
       `Hire placed — ${rentalSummaryLabel(details)}: ${dayWords} on the itinerary at ${fmtMoney(details.dailyRate, `${currency} `)} a day${feeWords}.${overrun}`,
       'success'
     );
-  }, [carRentalModal, createService, currencyCode, days, markupPct, meta.travelStart, nextId, paxCount, placeCarRentalDays, setDaysRaw, showToast, terminalRef]);
+    /* A hire whose tariff excludes fuel needs an allowance, asked once for the
+       whole engagement on the day the car is collected. */
+    if (details.fuelIncluded === false && fuelExtrasItems.length) {
+      setFuelForVehicleModal({
+        dayIndex: lines[0].dayIndex,
+        vehicleItemId: pending.item.id,
+        vehicleName: pending.item.name
+      });
+    }
+  }, [carRentalModal, createService, currencyCode, days, markupPct, meta.travelStart, nextId, paxCount, placeCarRentalDays, setDaysRaw, showToast, terminalRef, fuelExtrasItems, setFuelForVehicleModal]);
 
   /* Re-opening a hire that is already on a day. The dialog is given the library
      item rather than the line's own copy, because it prices from the contract as
@@ -4770,8 +5263,19 @@ return !!sv.time; /* activities / meals / other */
       const keepsAccommodationElsewhere = feeLinkId
         ? prev.some((d, i) => i !== dayIdx && (d.services || []).some((s) => s.itemId === feeLinkId))
         : false;
+      /* A fuel allowance belongs to its vehicle, so removing the vehicle takes
+         the allowance with it — but only once the vehicle's last line is gone,
+         since a hire lays a line per day and a transfer can repeat. */
+      const fuelLinkId = isVehicleProviderLine(target) ? target?.itemId : null;
+      const keepsVehicle = fuelLinkId
+        ? prev.some((d, i) => (d.services || []).some((s) => (
+          s.itemId === fuelLinkId && !(i === dayIdx && s.key === svcKey)
+        )))
+        : false;
       return prev.map((d, i) => {
-        if (i !== dayIdx && !(feeLinkId && !keepsAccommodationElsewhere)) return d;
+        if (i !== dayIdx
+          && !(feeLinkId && !keepsAccommodationElsewhere)
+          && !(fuelLinkId && !keepsVehicle)) return d;
         return {
           ...d,
           services: d.services.filter((s) => {
@@ -4781,6 +5285,7 @@ return !!sv.time; /* activities / meals / other */
                and beds. */
             if (i === dayIdx && target && s.guideForKey && s.guideForKey === target.itemId) return false;
             if (feeLinkId && s.linkedItemId === feeLinkId) return false;
+            if (fuelLinkId && !keepsVehicle && s.linkedItemId === fuelLinkId && isFuelAllowanceLine(s)) return false;
             return true;
           })
         };
@@ -4807,11 +5312,27 @@ return !!sv.time; /* activities / meals / other */
             const m = value;
             return { ...s, markup: m, sellPP: round2((Number(s.buyPP) || 0) * (1 + m / 100)) };
           }
+          if (field === 'quantity' && isVehicleExtra(s)) {
+            const quantity = Math.max(1, Math.floor(value));
+            const ratio = quantity / Math.max(1, Number(s.quantity) || 1);
+            return { ...s, quantity, buyPP: round2((Number(s.buyPP) || 0) * ratio), sellPP: round2((Number(s.sellPP) || 0) * ratio) };
+          }
           return s;
         })
       };
     }));
   }, [setDays]);
+
+  const openLibraryRateCard = useCallback((service) => {
+    const item = service?.itemId
+      ? libraryItems.find((it) => String(it.id) === String(service.itemId))
+      : null;
+    if (!item) {
+      showToast(`${service?.name || 'This line'} is no longer in the library, so there is no rate card to confirm against.`, 'warning');
+      return;
+    }
+    setRateCardItem(item);
+  }, [libraryItems, showToast, setRateCardItem]);
 
   const moveService = useCallback((dayIdx, fromKey, toKey) => {
     if (completedRef.current) return;
@@ -4980,6 +5501,7 @@ return !!sv.time; /* activities / meals / other */
         dayNumber: 0,
         date: '',
         notes: rd.notes || '',
+        ...destinationFields(rd),
         textI18n: translationsOf(rd),
         services: (rd.itinerary_day_items || []).map((ii) => {
           const mRaw = Number(ii.markup_percentage);
@@ -5000,6 +5522,11 @@ return !!sv.time; /* activities / meals / other */
             basis: ii.rate_basis || 'per_person',
             sellPP: pricing.sellPP,
             pax: pricing.pax,
+            stayPayFree: ii.stay_pay_free === true,
+            stayPayRule: ii.stay_pay_rule || '',
+            stayPayValue: ii.stay_pay_value === null || ii.stay_pay_value === undefined
+              ? null
+              : Number(ii.stay_pay_value),
             quantity: Number(ii.quantity) || 1,
             descOverride: ii.description_override || '',
             taxRate: taxed ? (Number(ii.tax_rate) > 0 ? numOr(ii.tax_rate, defaultTaxRate) : defaultTaxRate) : 0,
@@ -5160,7 +5687,7 @@ return !!sv.time; /* activities / meals / other */
       if (/^tax$/i.test(text)) return L('doc.tax');
       return text;
     };
-    const dayHeading = (n) => L('doc.day', { n, count: n });
+    const dayHeading = (n) => dayDestinationHeading(days.find((day) => day.dayNumber === n), n, lang);
     /* The grade beside a hotel name is this app's wording, not part of the
        property's name, so a translated document counts it in the reader's
        language ("Kruger Park Lodge (4 estrelas)"). */
@@ -5219,8 +5746,15 @@ return !!sv.time; /* activities / meals / other */
           const line = Number(sv.sell) || 0;
           const taxRate = numOr(sv.taxRate, defaultTaxRate);
           const item = sv.itemId ? libraryItems.find((x) => String(x.id) === String(sv.itemId)) : null;
-          const baseRate = item && item.item_rates && item.item_rates.length
-            ? rateForTravel(item, grp.code, travelWindow, priceProtectionPercent, monthTimed)
+          /* The row is resolved over the charge and room this line sold: a
+             sibling villa sharing the season name must not price this night's
+             expanded rows off its own ladder. */
+          const roomItem = item ? {
+            ...item,
+            item_rates: ratesForServiceRoom(ratesForCharge(item, lineChargeLabel(sv)), sv, roomTypesOf(item))
+          } : null;
+          const baseRate = roomItem && roomItem.item_rates.length
+            ? rateForTravel(roomItem, grp.code, travelWindow, priceProtectionPercent, monthTimed)
             : null;
           /* The room breakdown attributes the billed line to sharing and single
              figures, so it reads the row as this night's date prices it. Each of
@@ -5489,7 +6023,9 @@ return !!sv.time; /* activities / meals / other */
           return `<strong>${esc(category || L('doc.service'))}</strong>: ${esc(name)}${badge}${specs}`;
         }).filter(Boolean);
         return `<div style="margin:0 0 14px;">
-          <div style="background:#eee;font-weight:700;color:#0d7478;padding:6px 10px;">${esc(dayHeading(num))}${date ? ` &mdash; ${esc(date)}` : ''}</div>
+          <div style="background:#eee;font-weight:700;color:#0d7478;padding:6px 10px;">${esc(dayDestinationHeading(d, num, lang))}${date ? ` &mdash; ${esc(date)}` : ''}</div>
+          ${dayRoute(d, days[i - 1], lang) ? `<p>${esc(dayRoute(d, days[i - 1], lang))}</p>` : ''}
+          ${dayEndLabel(d, lang) ? `<p>${esc(dayEndLabel(d, lang))}</p>` : ''}
           ${desc ? `<div style="margin:4px 0;padding:0 2px;">${esc(desc).replace(/\n/g, '<br>')}</div>` : ''}
           ${itemLines.length ? `<ul style="margin:4px 0;padding:0 2px 0 20px;list-style-type:disc;">${itemLines.map((l) => `<li style="margin:0 0 2px;">${l}</li>`).join('')}</ul>` : ''}
         </div>`;
@@ -5669,7 +6205,7 @@ return !!sv.time; /* activities / meals / other */
       if (include.itinerary && !include.pricing) {
         lines.push([L('doc.thDay'), L('doc.thDate'), L('doc.thDescription')].map(csvEscape).join(','));
         (days || []).forEach((d) => {
-          lines.push([dayHeading(d.dayNumber), d.date || '', localizedText(d, 'notes', lang).trim()].map(csvEscape).join(','));
+          lines.push([dayDestinationHeading(d, d.dayNumber, lang), d.date || '', [dayEndLabel(d, lang), localizedText(d, 'notes', lang).trim()].filter(Boolean).join(' · ')].map(csvEscape).join(','));
           (d.services || []).forEach((sv) => {
             lines.push(['', '', rowDesc({
               name: sv.name || L('doc.service'),
@@ -5817,6 +6353,10 @@ return !!sv.time; /* activities / meals / other */
       showToast('Company not found', 'error');
       return false;
     }
+    if (!dayDestinationsReady && days.some((day) => DAY_DESTINATION_COLUMNS.some((key) => day[key]))) {
+      showToast('Day destinations cannot be stored yet. Apply migration 20261264 and reload before saving.', 'error');
+      return false;
+    }
     /* Saving rewrites the days wholesale (delete + re-insert), so an empty
        in-memory `days` is never something to persist:
          - on an itinerary that already has days stored it would destroy them;
@@ -5940,6 +6480,7 @@ return !!sv.time; /* activities / meals / other */
             day_number: day.dayNumber,
             day_date: isMonthTiming(meta) ? null : (day.date || null),
             notes: day.notes || null,
+            ...(dayDestinationsReady ? destinationFields(day) : {}),
             ...textI18nPayload(canStoreTranslations, day.textI18n)
           }])
           .select()
@@ -6010,6 +6551,17 @@ return !!sv.time; /* activities / meals / other */
              the party shared it over, so a reload neither loses the money nor
              re-derives it from a guide fare that has moved since. */
           ...(crewShareColumnReady && s.crewShare ? { crew_share: s.crewShare } : {}),
+          /* The stay-pay stamp: which free night this line is, and what the
+             waived room-night was worth. Only written once the column exists. */
+          ...(stayPayColumnReady && s.stayPayFree ? {
+            stay_pay_free: true,
+            stay_pay_rule: s.stayPayRule || null,
+            stay_pay_value: Number(s.stayPayValue) || 0
+          } : (stayPayColumnReady ? {
+            stay_pay_free: false,
+            stay_pay_rule: null,
+            stay_pay_value: null
+          } : {})),
           /* Surcharge attributes, so a reloaded line still knows what kind of
              fee it is, whether it was chargeable, how many times it repeated
              and which accommodation it belongs to - all of which change what
@@ -6087,7 +6639,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, mayEditItinerary, EDIT_LOCK_MESSAGE, setDaysRaw, rentalColumnReady, crewShareColumnReady, canStoreTranslations]);
+  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, mayEditItinerary, EDIT_LOCK_MESSAGE, setDaysRaw, rentalColumnReady, crewShareColumnReady, stayPayColumnReady, canStoreTranslations, dayDestinationsReady]);
 
   const applyStatusChange = useCallback(async (nextStatus) => {
     setUpdatingStatus(true);
@@ -6188,20 +6740,32 @@ return !!sv.time; /* activities / meals / other */
     }
     setCreatingPackage(true);
     try {
+      const packageDestinationsReady = await columnExists('package_days', DAY_DESTINATION_COLUMNS.join(', '));
+      if (!packageDestinationsReady && days.some((day) => DAY_DESTINATION_COLUMNS.some((key) => day[key]))) {
+        throw new Error('Apply migration 20261264 before copying day destinations into a package.');
+      }
+      let vTypes = [];
+      try {
+        const { data: vData } = await supabase
+          .from('company_vehicle_types')
+          .select('code, name, max_capacity, is_active')
+          .or(companyId ? `company_id.eq.${companyId},company_id.is.null` : 'company_id.is.null');
+        vTypes = vData || [];
+      } catch {
+        // fallback to empty if vocabulary not available
+      }
       const payload = buildItineraryPackage({
         meta,
         days,
         libraryItems,
         shareContext,
         fallbackPax: paxCount,
-        /* A month-timed quotation has no confirmed departure to pin the
-           package's validity period to, so the package is created without one
-           rather than asserting dates the client has not chosen. */
-        travelWindow: isMonthTiming(meta) ? {} : {
+        travelWindow: {
           start: toISODate(meta.travelStart) || travelWindow.start,
           end: toISODate(meta.travelEnd) || travelWindow.end
         },
-        currencyCode
+        currencyCode,
+        vehicleTypes: vTypes
       });
       /* The package starts client-agnostic at contract cost: no client is assigned and
          no quote markup is carried. A partner assignment in Package Builder is what
@@ -6215,6 +6779,7 @@ return !!sv.time; /* activities / meals / other */
           currency_code: payload.currency_code,
           accepts_children: payload.accepts_children,
           child_age_ranges: payload.child_age_ranges,
+          ...(payload.vehicle_columns?.length ? { vehicle_columns: payload.vehicle_columns } : {}),
           default_markup_percentage: 0,
           is_available_in_library: false
         })
@@ -6231,6 +6796,7 @@ return !!sv.time; /* activities / meals / other */
               company_id: companyId,
               day_number: day.day_number,
               notes: day.notes,
+              ...(packageDestinationsReady ? destinationFields(day) : {}),
               ...textI18nPayload(canStoreTranslations, day.text_i18n)
             })
             .select('id')
@@ -7250,6 +7816,13 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
         'warning');
       return;
     }
+    /* A fuel allowance is priced once for the vehicle it fuels, not once per day.
+       It is added with the vehicle and removed with it, so a lone copy would sell
+       the same allowance again on a day the vehicle may not even be on. */
+    if (isFuelAllowanceLine(source) && source.linkedItemId) {
+      showToast('A fuel allowance is charged once for the vehicle it fuels, not per day — it travels with the vehicle, not with a copy. Change the vehicle or its allowance instead.', 'warning');
+      return;
+    }
     /* Lines that belong to another line on this day travel with it or not at all.
        A crew meal is answered by the guide line's own details dialog and a
        property's levy is re-answered by the property, so a lone copy of either
@@ -7300,6 +7873,7 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
     ));
     let copied = 0;
     let ownedCopied = 0;
+    let feeNightsSkipped = 0;
     setDays((prev) => prev.map((d, i) => {
       if (!valid.includes(i)) return d;
       const family = source.repeatGroupId
@@ -7307,26 +7881,80 @@ const openServiceEditor = useCallback((dayIdx, sv) => {
         : [source];
       const targetIds = new Set((d.services || []).map((s) => s.itemId));
       if (family.some((s) => s.itemId && targetIds.has(s.itemId))) return d;
-      const cloneOf = (line) => ({
-        ...line,
-        key: nextId(),
-        roomAllocations: Array.isArray(line.roomAllocations) ? JSON.parse(JSON.stringify(line.roomAllocations)) : [],
-        item_rates: Array.isArray(line.item_rates) ? line.item_rates : [],
-        repeatGroupId: source.repeatGroupId || null
-      });
+      const cloneOf = (line, targetDate) => {
+        const clone = {
+          ...line,
+          key: nextId(),
+          roomAllocations: Array.isArray(line.roomAllocations) ? JSON.parse(JSON.stringify(line.roomAllocations)) : [],
+          item_rates: Array.isArray(line.item_rates) ? line.item_rates : [],
+          repeatGroupId: source.repeatGroupId || null
+        };
+        const item = line.itemId ? libraryItems.find((it) => it.id === line.itemId) : null;
+        if (!item || !isSurchargeItem(item)) return clone;
+        /* A fee bills the night it lands on, so the copy is re-answered by the
+           target night's own fee window rather than carrying the source
+           night's figure across a levy year boundary. A night no window prices
+           is left off and counted for the toast, never cloned at a guess. */
+        const nightBuy = surchargeNightsBuy({
+          item,
+          currencyCode,
+          firstDate: targetDate,
+          fallbackStart: travelWindow.start,
+          fallbackEnd: travelWindow.end,
+          nights: Math.max(1, Number(line.quantity) || 1),
+          protectionPercent: Number(line.priceProtectionPercent) || priceProtectionPercent,
+          allowFuture: line.rateSeasonStatus === 'estimate',
+          paxCount: Number(line.pax) || paxCount,
+          childCount: Number(meta.numChildren) || 0,
+          guideCount: tourGuideCount(meta.travellers)
+        });
+        feeNightsSkipped += nightBuy.nights.length - nightBuy.pricedNights;
+        if (!nightBuy.pricedNights) return null;
+        const pricedRows = nightBuy.nights.filter((row) => row.priced);
+        const first = pricedRows[0];
+        const statuses = new Set(pricedRows.map((row) => seasonLineStatus(row.season, row.protectionPercent)));
+        const heads = Number(line.pax) || paxCount;
+        const priced = surchargePricing({
+          buyTotal: nightBuy.total,
+          markupPercent: Number(line.markup) || 0,
+          chargeable: typeof line.surchargeChargeable === 'boolean' ? line.surchargeChargeable : isSurchargeChargeable(item)
+        });
+        return {
+          ...clone,
+          quantity: nightBuy.pricedNights,
+          surchargeRepeats: nightBuy.pricedNights,
+          buyPP: heads > 0 ? round2(priced.buy / heads) : round2(priced.buy),
+          sellPP: heads > 0 ? round2(priced.sell / heads) : round2(priced.sell),
+          surchargePassedThrough: priced.passedThrough,
+          surchargeReference: round2(priced.reference || 0),
+          seasonName: first.season.seasonName || '',
+          seasonValidFrom: first.season.validFrom || '',
+          seasonValidTo: first.season.validTo || '',
+          priceProtectionPercent: first.protectionPercent,
+          protectedSeasonName: first.protectionPercent ? first.season.seasonName || '' : '',
+          rateSeasonStatus: statuses.size === 1 ? [...statuses][0] : 'estimate',
+          item_rates: [applyProtectionToRate(first.season.rate, first.protectionPercent)]
+        };
+      };
       const additions = [source, ...attached].filter((line) => line === source || !targetIds.has(line.itemId));
+      const clones = additions.map((line) => cloneOf(line, d.date || '')).filter(Boolean);
+      if (!clones.length) return d;
       copied += 1;
-      ownedCopied += additions.length - 1;
-      return { ...d, services: [...(d.services || []), ...additions.map(cloneOf)] };
+      ownedCopied += clones.length - 1;
+      return { ...d, services: [...(d.services || []), ...clones] };
     }));
     setSaved(false);
     setEditSvc(null);
     setCopyDays([]);
     setCopyAllDays(false);
-    showToast(ownedCopied
+    const feeNote = feeNightsSkipped
+      ? ` — ${feeNightsSkipped} fee night${feeNightsSkipped === 1 ? '' : 's'} outside the fee's validity not copied`
+      : '';
+    showToast((ownedCopied
       ? `Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}, with the ${ownedCopied} line${ownedCopied === 1 ? '' : 's'} that belong to it`
-      : `Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`, 'success');
-  }, [days, editSvc, libraryItems, nextId, showToast, setDays ]);
+      : `Copied "${source.name}" to ${copied} other day${copied === 1 ? '' : 's'}`) + feeNote,
+    feeNightsSkipped ? 'warning' : 'success');
+  }, [days, editSvc, libraryItems, nextId, showToast, setDays, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, paxCount, meta.numChildren, meta.travellers]);
 
   /* ── Supplier payment confirmation (Operations, in progress) ────────────────
      One checkbox per service, because suppliers are paid per booking. Ticking
@@ -8140,7 +8768,7 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                 const isFlat = isFlatBasis(basis) || isFlatRoomRate(sidebarRate);
                 let priceUnit;
                 if (isFlat) {
-                  priceUnit = basisLabelOf(basis);
+                  priceUnit = isVehicleExtra(item, basis) ? 'per vehicle' : basisLabelOf(basis);
                 } else if (isAccomBasis) {
                   /* Show the tier that paxCount resolves to, so the label matches
                      the number shown: single when 1 pax, sharing when 2+. */
@@ -8241,7 +8869,7 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                     </div>
                     <div className="draggable-item-supplier">
                       {item.supplier?.name || ''}
-                      {isFlatBasis(basis) ? <span className="basis-tag">{basisLabelOf(basis)}</span> : null}
+                      {isFlatBasis(basis) ? <span className="basis-tag">{isVehicleExtra(item, basis) ? 'Per vehicle' : basisLabelOf(basis)}</span> : null}
                       {nightBandLabel(sidebarRate) && (
                         <span
                           className="basis-tag"
@@ -8484,68 +9112,62 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
           {/* Day-by-day */}
           {tab === 'itinerary' && (
             <>
-              <div className="day-strip-wrap" style={{ flexShrink: 0 }}>
-                <div className="day-strip">
-                  {days.map((d, i) => {
-                    const t = dayTotals(d);
-                    const marked = markedDayKeys.includes(d.key);
-                    return (
-                      <div key={d.key} className={`day-strip-cell${marked ? ' marked' : ''}`}>
-                        {!isReadOnly && days.length > 1 && (
-                          <input
-                            type="checkbox"
-                            className="day-strip-mark"
-                            checked={marked}
-                            onChange={() => toggleDayMark(d.key)}
-                            title={`Tick Day ${d.dayNumber} to delete it together with the other ticked days`}
-                            aria-label={`Tick Day ${d.dayNumber} for bulk delete`}
-                          />
-                        )}
-                        <button
-                          type="button"
-                          className={`day-strip-card ${selectedDayIndex === i ? 'active' : ''}`}
-                          onClick={() => { setSelectedDayIndex(i); setDragOverKey(null); }}
-                        >
-                          <div className="day-strip-card-title">Day {d.dayNumber}</div>
-                          <div className="day-strip-card-date">{formatDateLong(d.date) || ''}</div>
-                          <div className="day-strip-card-summary">
-                            <span>{t.count} item{t.count === 1 ? '' : 's'}</span>
-                            <span>{fmtMoney(t.sell, currencySymbol)}</span>
-                          </div>
-                        </button>
-                      </div>
-                    );
-                  })}
-                  <button type="button" className="day-add-chip" onClick={addDay} disabled={isReadOnly} title={isReadOnly ? 'Locked itinerary is read-only' : 'Add Day'}>
-                    <Plus size={15} /> Add Day
-                  </button>
-                </div>
-                {(() => {
-                  const marked = days.filter((d) => markedDayKeys.includes(d.key));
-                  if (!marked.length || isReadOnly) return null;
-                  const lines = marked.reduce((count, day) => count + (day.services || []).length, 0);
-                  return (
-                    <div className="day-bulk-bar">
-                      <span className="day-bulk-count">
-                        {marked.length} day{marked.length === 1 ? '' : 's'} ticked
-                        {lines ? ` · ${lines} service line${lines === 1 ? '' : 's'} on them` : ''}
-                      </span>
-                      <button
-                        type="button"
-                        className={`action-btn danger${bulkDeleteArmed ? ' armed' : ''}`}
-                        onClick={deleteMarkedDays}
-                        title="Deleting a day takes every service line worked on it"
-                      >
-                        <Trash2 size={15} />
-                        {bulkDeleteArmed
-                          ? `Click again to delete ${marked.length} day${marked.length === 1 ? '' : 's'}`
-                          : `Delete ${marked.length} day${marked.length === 1 ? '' : 's'}`}
-                      </button>
-                      <button type="button" className="action-btn" onClick={clearDayMarks}>Clear</button>
-                    </div>
-                  );
-                })()}
-              </div>
+              {(() => {
+                const dayDescriptors = days.map((d, i) => {
+                  const t = dayTotals(d);
+                  const services = d.services || [];
+                  return {
+                    key: d.key,
+                    index: i,
+                    dayNumber: d.dayNumber,
+                    destinationName: d.destination_name || '',
+                    destinationLabel: destinationLabel(d),
+                    dateLabel: formatDateChip(d.date),
+                    fullLabel: formatDateLong(d.date),
+                    count: t.count,
+                    valueLabel: fmtMoney(t.sell, currencySymbol),
+                    marked: markedDayKeys.includes(d.key),
+                    status: {
+                      empty: services.length === 0,
+                      estimate: services.some((s) => s.rateSeasonStatus === 'estimate'),
+                      guideUnnamed: !isTerminal && guideRosterReady && services.some((s) => isGuideFeeLine(s) && !s.guideMemberId),
+                    },
+                  };
+                });
+                const jumpToDay = (i) => { setSelectedDayIndex(i); setDragOverKey(null); };
+                const markedDays = dayDescriptors.filter((d) => d.marked);
+                const markedLines = markedDays.reduce((n, d) => n + d.count, 0);
+                return (
+                  <>
+                    <DayRail
+                      days={dayDescriptors}
+                      activeIndex={selectedDayIndex}
+                      onSelect={jumpToDay}
+                      canMark={!isReadOnly && days.length > 1}
+                      onToggleMark={(i) => toggleDayMark(days[i].key)}
+                      onAddDay={addDay}
+                      addDisabled={isReadOnly}
+                      onOpenBoard={() => setDayBoardOpen(true)}
+                      markedCount={markedDays.length}
+                      markedLines={markedLines}
+                      bulkArmed={bulkDeleteArmed}
+                      onBulkDelete={deleteMarkedDays}
+                      onClearMarks={clearDayMarks}
+                      showBulk={!isReadOnly}
+                      variant="itinerary"
+                    />
+                    <DayBoardModal
+                      open={dayBoardOpen}
+                      days={dayDescriptors}
+                      activeIndex={selectedDayIndex}
+                      onSelect={(i) => { jumpToDay(i); setDayBoardOpen(false); }}
+                      onClose={() => setDayBoardOpen(false)}
+                      title="All days"
+                      subtitle={`${days.length} day${days.length === 1 ? '' : 's'} · click a day to jump to it`}
+                    />
+                  </>
+                );
+              })()}
 
               {currentDay && (
                 <div
@@ -8556,11 +9178,17 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                 >
                   <div className="day-workspace-header">
                     <div className="day-workspace-title">
-                      <h3>Day {currentDay.dayNumber}</h3>
+                      <h3>{dayDestinationHeading(currentDay, currentDay.dayNumber)}</h3>
                       <span className="day-date">{formatDateLong(currentDay.date) || ''}</span>
                       <span className="selected-chip"><Check size={12} /> Selected</span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <DayStepper
+                        index={selectedDayIndex}
+                        count={days.length}
+                        onPrev={() => { setSelectedDayIndex((i) => Math.max(0, i - 1)); setDragOverKey(null); }}
+                        onNext={() => { setSelectedDayIndex((i) => Math.min(days.length - 1, i + 1)); setDragOverKey(null); }}
+                      />
                       <div className="day-totals">
                         {(() => {
                           const t = dayTotals(currentDay);
@@ -8602,6 +9230,18 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                       </div>
                     </div>
                   </div>
+                  <DayDestinationEditor
+                    key={currentDay.key}
+                    day={currentDay}
+                    previousDay={days[selectedDayIndex - 1]}
+                    days={days}
+                    dayIndex={selectedDayIndex}
+                    defaultCountry={billing?.operating_country || ''}
+                    disabled={isReadOnly}
+                    available={dayDestinationsReady}
+                    onChange={(patch) => updateDayDestinations([selectedDayIndex], patch)}
+                    onApply={updateDayDestinations}
+                  />
 
                   <div className="day-services">
                     {(currentDay.services && currentDay.services.length > 0) && (
@@ -8648,11 +9288,27 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                               {/accommodation/i.test(sv.category || '') && starLabel(sv.supplierStar) ? ` · ${starLabel(sv.supplierStar)}` : ''}
                               {/accommodation/i.test(sv.category || '') && String(sv.roomType || '').trim() ? ` · ${sv.roomType}` : ''}
                               {/extras?/i.test(sv.category || '') && lineChargeLabel(sv) ? ` · ${lineChargeLabel(sv)}` : ''}
+                              {sv.stayPayFree ? ` · free night${sv.stayPayRule ? ` (${sv.stayPayRule})` : ''}` : ''}
                               {servicePax > 0 ? ` · ${servicePax} pax` : ''}
                               {sv.currencyCode ? ` · ${sv.currencyCode}` : ''}
                               <span className={`basis-tag ${isFlatBasis(sv.basis) ? 'flat' : ''}`}>
-                                {basisLabelOf(sv.basis)}
+                                {isVehicleExtra(sv) ? 'Per vehicle' : basisLabelOf(sv.basis)}
                               </span>
+                              {isVehicleExtra(sv) && (
+                                <label className="basis-tag" title="Number of vehicles charged on this line, not the number of travellers">
+                                  Vehicles
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    aria-label={`Vehicles for ${sv.name}`}
+                                    style={{ width: '3.5rem', marginLeft: '.35rem' }}
+                                    value={sv.quantity || 1}
+                                    disabled={isReadOnly}
+                                    onChange={(event) => updateServicePricing(selectedDayIndex, sv.key, 'quantity', event.target.value)}
+                                  />
+                                </label>
+                              )}
                               {(() => {
                                 const stamp = seasonStampOf(sv, travelWindow);
                                 return stamp ? (
@@ -8832,17 +9488,52 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                               </div>
                             )}
                           </div>
-                          <div className="svc-cell">
-                            <input
-                              className="svc-price-input buy"
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={sv.buyPP}
-                              disabled={isReadOnly}
-                              onChange={isReadOnly ? undefined : (e) => updateServicePricing(selectedDayIndex, sv.key, 'buyPP', e.target.value)}
-                              title="Buy price — the supplier rate per person. Edit it directly to negotiate."
-                            />
+                          <div className="svc-cell svc-buy-cell">
+                            {(() => {
+                              const hasCard = !!sv.itemId && libraryItems.some((it) => String(it.id) === String(sv.itemId));
+                              const editing = !isReadOnly && editingBuyKey === sv.key;
+                              /* A line with no library item has no card to confirm
+                                 against, so its price stays a plain editable field. */
+                              if (!hasCard || editing) {
+                                return (
+                                  <input
+                                    className="svc-price-input buy"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={sv.buyPP}
+                                    disabled={isReadOnly}
+                                    autoFocus={editing}
+                                    onChange={isReadOnly ? undefined : (e) => updateServicePricing(selectedDayIndex, sv.key, 'buyPP', e.target.value)}
+                                    onBlur={editing ? () => setEditingBuyKey(null) : undefined}
+                                    onKeyDown={editing ? (e) => { if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur(); } : undefined}
+                                    title="Buy price — the supplier rate per person. Edit it directly to negotiate."
+                                  />
+                                );
+                              }
+                              return (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="svc-buy-card"
+                                    onClick={() => openLibraryRateCard(sv)}
+                                    title="Buy price — click to confirm it against the library rate card (read-only)"
+                                  >
+                                    {sv.buyPP}
+                                  </button>
+                                  {!isReadOnly && (
+                                    <button
+                                      type="button"
+                                      className="svc-buy-edit"
+                                      onClick={() => setEditingBuyKey(sv.key)}
+                                      title="Edit the buy price — negotiate directly"
+                                    >
+                                      <Pencil size={12} />
+                                    </button>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                           <div className="svc-cell svc-markup-cell">
                             <input
@@ -10792,6 +11483,13 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
             markupPct={markupPct}
           />
           )}
+          {rateCardItem && (
+            <LibraryItemDetailModal
+              item={rateCardItem}
+              vehicleTypes={vehicleTypes}
+              onClose={() => setRateCardItem(null)}
+            />
+          )}
           {guideModal && (
             <GuideServiceTypeModal
               item={guideModal.item}
@@ -10858,6 +11556,22 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
               }).rate?.id) || ''}
               onConfirm={confirmAccommodationCharge}
               onCancel={() => setAccomChargeModal(null)}
+            />
+          )}
+          {fuelPickerModal && (
+            <FuelVehicleModal
+              itemName={fuelPickerModal.item?.name}
+              options={fuelPickerModal.options}
+              onConfirm={confirmFuelVehicle}
+              onCancel={() => setFuelPickerModal(null)}
+            />
+          )}
+          {fuelForVehicleModal && (
+            <FuelForVehicleModal
+              vehicleName={fuelForVehicleModal.vehicleName}
+              items={fuelExtrasItems}
+              onConfirm={confirmFuelForVehicle}
+              onCancel={() => setFuelForVehicleModal(null)}
             />
           )}
           {/* No season prices this trip, so the line is not a quote - it is a
@@ -10954,6 +11668,11 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                   <div>
                     <h2>Export itinerary</h2>
                     <p>The format, the language, and which parts of this itinerary go into the document.</p>
+                    {days.some((day) => !destinationLabel(day)) && (
+                      <p role="status" style={{ color: '#92400e' }}>
+                        Destination not set on {days.filter((day) => !destinationLabel(day)).length} day(s). Review these before sharing the final document.
+                      </p>
+                    )}
                   </div>
                   <button className="close-btn" onClick={() => setExportDialog(false)}><X size={20} /></button>
                 </div>
@@ -11070,6 +11789,8 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
               currentAccommodationIds={guideModalRooms.currentAccommodationIds}
               clientRoomsByAccommodation={guideModalRooms.clientRoomsByAccommodation}
               clientRooms={guideModalRooms.clientRooms}
+              payingGuestsByAccommodation={guideModalRooms.payingGuestsByAccommodation}
+              payingGuests={guideModalRooms.payingGuests}
               defaultValues={guideDetailsModal.defaultValues || {}}
               onConfirm={(plan) => {
                 applyGuideDetails(guideDetailsModal.dayIndex, guideDetailsModal.guideKey, plan);

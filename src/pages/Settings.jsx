@@ -28,13 +28,27 @@ import {
   Truck,
   Undo2,
   AlertTriangle,
-  Globe
+  Globe,
+  MapPin
 } from 'lucide-react';
 import LanguageText from '../components/LanguageText';
 import { LANGUAGES, SOURCE_LANGUAGE, enabledLanguageCodes, textI18nPayload, translationsOf } from '../lib/i18n';
 import { documentLanguagesColumn, textI18nColumn } from '../lib/i18n/textI18nColumn';
 import { refreshTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { TOUR_TYPES, VEHICLE_TYPES, mergeVocabulary, vocabularyKey, vocabularyOverridePayload, vocabularyReadFilter } from '../lib/companyVocabulary';
+import {
+  PLACE_COLUMNS,
+  PLACE_PAGE_SIZE,
+  filterPlaces,
+  isSharedPlace,
+  mergePlaces,
+  placeClash,
+  placeFormFrom,
+  placePayload,
+  placeReadFilter,
+  placeText
+} from '../lib/placeCatalog';
+import { useCountries } from '../hooks/useCountries';
 import { scopeCompanyId } from '../lib/tenantScope';
 
 /* The stable key written into a rate row's price map. Derived once when a vehicle type
@@ -59,6 +73,39 @@ const VocabularyTag = ({ shared }) => (
     {shared ? 'Standard' : 'Yours'}
   </span>
 );
+
+/* A destination's scope reads differently from a vocabulary type: a standard
+   place is read-only here, and a company's own place is private rather than an
+   override of the standard row. */
+const PlaceTag = ({ shared }) => (
+  <span
+    title={shared
+      ? 'A standard place every operator can choose. It cannot be edited from this company.'
+      : 'Your company\'s own destination. Only your company sees it.'}
+    style={{ display: 'inline-block', padding: '0.12rem 0.45rem', borderRadius: '999px', fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.02em', verticalAlign: 'middle', background: shared ? '#f1f5f9' : '#ecfdf5', color: shared ? '#64748b' : '#047857' }}
+  >
+    {shared ? 'Standard' : 'Yours'}
+  </span>
+);
+
+const emptyPlaceForm = () => ({
+  country: '',
+  province: '',
+  place: '',
+  altName: '',
+  isHub: false,
+  isActive: true
+});
+
+/* The card lists the company's own rows by default; the standard half can run
+   into the hundreds of towns per country, so the table renders a bounded page
+   of matches and asks the person to narrow the search for the rest. */
+const PLACE_RENDER_LIMIT = 250;
+const PLACE_SCOPES = [
+  { id: 'mine', label: 'Yours' },
+  { id: 'standard', label: 'Standard' },
+  { id: 'all', label: 'All' }
+];
 
 const emptyBank = () => ({
   label: '',
@@ -251,6 +298,16 @@ export const Settings = () => {
   const [vehicleTypes, setVehicleTypes] = useState([]);
   const [vehicleForm, setVehicleForm] = useState({ name: '', capacity: '' });
   const [editingVehicleType, setEditingVehicleType] = useState(null);
+  const [places, setPlaces] = useState([]);
+  const [placesLoading, setPlacesLoading] = useState(false);
+  const [placesError, setPlacesError] = useState('');
+  const [placeForm, setPlaceForm] = useState(emptyPlaceForm());
+  const [editingPlace, setEditingPlace] = useState(null);
+  const [placeFormOpen, setPlaceFormOpen] = useState(false);
+  const [placeCountry, setPlaceCountry] = useState('');
+  const [placeScope, setPlaceScope] = useState('mine');
+  const [placeQuery, setPlaceQuery] = useState('');
+  const countries = useCountries();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -410,6 +467,39 @@ export const Settings = () => {
     setVehicleTypes(mergeVocabulary(data, VEHICLE_TYPES.keyColumn));
   }, []);
 
+  /* The destination catalogue is the standard list plus this company's own
+     rows. It is read in pages because a country can carry more towns than
+     PostgREST returns in one response. A failure here is reported on the card
+     rather than thrown: the rest of Settings must keep working on a database
+     where the destinations migration has not run yet. */
+  const fetchPlaces = useCallback(async (cid) => {
+    if (!cid) return;
+    setPlacesLoading(true);
+    setPlacesError('');
+    try {
+      const rows = [];
+      for (let offset = 0; ; offset += PLACE_PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from('app_places')
+          .select(PLACE_COLUMNS)
+          .or(placeReadFilter(cid))
+          .order('country', { ascending: true })
+          .order('place', { ascending: true })
+          .order('id', { ascending: true })
+          .range(offset, offset + PLACE_PAGE_SIZE - 1);
+        if (error) throw error;
+        rows.push(...(data || []));
+        if ((data || []).length < PLACE_PAGE_SIZE) break;
+      }
+      setPlaces(mergePlaces(rows));
+    } catch (error) {
+      setPlaces([]);
+      setPlacesError(error.message || 'Could not load destinations.');
+    } finally {
+      setPlacesLoading(false);
+    }
+  }, []);
+
   /* The one write a company makes against a standard row is never an edit of it.
      The first change creates a row in the company's own name under the same key -
      a vehicle keeps its code, so the price maps already saved against it still
@@ -440,7 +530,7 @@ export const Settings = () => {
         const cid = await fetchCompanyId();
         if (cancelled) return;
         setCompanyId(cid);
-        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchTourTypes(cid), fetchVehicleTypes(cid)]);
+        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchTourTypes(cid), fetchVehicleTypes(cid), fetchPlaces(cid)]);
       } catch (err) {
         if (!cancelled) showToast(err.message || 'Failed to load settings', 'error');
       } finally {
@@ -448,7 +538,7 @@ export const Settings = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchTourTypes, fetchVehicleTypes, showToast]);
+  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchTourTypes, fetchVehicleTypes, fetchPlaces, showToast]);
 
   const handleTourTypeSubmit = async (event) => {
     event.preventDefault();
@@ -678,6 +768,121 @@ export const Settings = () => {
     setEditingId(null);
     setForm(emptyForm());
     setModalOpen(true);
+  };
+
+  /* ── Destinations ─────────────────────────────────────────────────────────
+     A destination is either a standard place the platform seeds or a row this
+     company owns. Only the company's own rows reach these handlers: a standard
+     place belongs to every tenant, so the UI never offers an edit for one. */
+
+  const openAddPlace = () => {
+    setEditingPlace(null);
+    setPlaceForm({ ...emptyPlaceForm(), country: placeCountry || '' });
+    setPlaceFormOpen(true);
+  };
+
+  const openEditPlace = (place) => {
+    if (isSharedPlace(place)) return;
+    setEditingPlace(place);
+    setPlaceForm(placeFormFrom(place));
+    setPlaceFormOpen(true);
+  };
+
+  const closePlaceForm = () => {
+    setEditingPlace(null);
+    setPlaceForm(emptyPlaceForm());
+    setPlaceFormOpen(false);
+  };
+
+  const handlePlaceSubmit = async (event) => {
+    event.preventDefault();
+    if (!companyId) {
+      showToast('No active company found', 'error');
+      return;
+    }
+    const payload = placePayload(placeForm, companyId);
+    if (!payload.country || !payload.province || !payload.place) {
+      showToast('Country, region and place are required', 'warning');
+      return;
+    }
+    const clash = placeClash(places, payload, editingPlace?.id);
+    if (clash) {
+      showToast(`"${clash.place}" is already on the list for ${clash.province}, ${clash.country}${isSharedPlace(clash) ? ' (a standard place)' : ''}.`, 'warning');
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editingPlace) {
+        const { error } = await supabase
+          .from('app_places')
+          .update({ ...payload, updated_at: new Date().toISOString() })
+          .eq('id', editingPlace.id)
+          .eq('company_id', companyId);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('app_places')
+          .insert([payload]);
+        if (error) {
+          if (error.code === '23505') throw new Error('That destination is already on your list.');
+          throw error;
+        }
+      }
+      await fetchPlaces(companyId);
+      closePlaceForm();
+      showToast(editingPlace ? 'Destination updated' : 'Destination added', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not save destination', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handlePlaceToggle = async (place) => {
+    if (!companyId || isSharedPlace(place)) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('app_places')
+        .update({ is_active: !place.is_active, updated_at: new Date().toISOString() })
+        .eq('id', place.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      await fetchPlaces(companyId);
+      showToast(place.is_active ? 'Destination deactivated' : 'Destination activated', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not update destination', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handlePlaceDelete = async (place) => {
+    if (!companyId || isSharedPlace(place)) return;
+    const ok = await confirm({
+      title: 'Delete destination?',
+      message: `"${place.place}" (${place.province}, ${place.country}) will be removed from your destination list.`,
+      detail: 'Saved days and documents keep the destination name and region they already recorded. Use Deactivate instead to hide it from new day pickers without removing it.',
+      confirmLabel: 'Delete destination',
+      destructive: true
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('app_places')
+        .delete()
+        .eq('id', place.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      if (editingPlace && editingPlace.id === place.id) closePlaceForm();
+      await fetchPlaces(companyId);
+      showToast('Destination deleted', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not delete destination', 'error');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const openEdit = (t) => {
@@ -1195,6 +1400,25 @@ const handleSavePriceProtection = async () => {
     }
   };
 
+  const destinationCountries = useMemo(() => {
+    const names = new Set([...countries, ...places.map((place) => placeText(place.country))].filter(Boolean));
+    return [...names].sort((a, b) => a.localeCompare(b, 'en'));
+  }, [countries, places]);
+
+  const placeFilterCountries = useMemo(() => {
+    const names = new Set(places.map((place) => placeText(place.country)).filter(Boolean));
+    return [...names].sort((a, b) => a.localeCompare(b, 'en'));
+  }, [places]);
+
+  const visiblePlaces = useMemo(() => filterPlaces(places, {
+    country: placeCountry,
+    scope: placeScope,
+    query: placeQuery
+  }), [places, placeCountry, placeScope, placeQuery]);
+
+  const shownPlaces = visiblePlaces.slice(0, PLACE_RENDER_LIMIT);
+  const minePlaceCount = places.filter((place) => !isSharedPlace(place)).length;
+
   return (
     <div className="page-container">
       <div className="page-header">
@@ -1402,6 +1626,213 @@ const handleSavePriceProtection = async () => {
               ))}
             </tbody>
           </table>
+        )}
+      </div>
+
+      {/* Destinations - the standard place catalogue plus this company's own */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <MapPin size={18} color="#0d7478" /> Destinations
+            </h2>
+            <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem', maxWidth: '62rem' }}>
+              The towns and places a day can visit. Standard places are shared with every operator on the platform and cannot be edited here. Add a destination your company needs and it appears in your day picker, car-hire picker and destination search only. Deactivating a place hides it from new selections but keeps it on saved days, which store their own copy of the name and region.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="primary-btn"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', width: 'auto', padding: '0.6rem 0.9rem', fontSize: '0.9rem' }}
+            disabled={!companyId || saving}
+            onClick={placeFormOpen ? closePlaceForm : openAddPlace}
+          >
+            {placeFormOpen ? <X size={16} /> : <Plus size={16} />} {placeFormOpen ? 'Close form' : 'Add destination'}
+          </button>
+        </div>
+
+        {placeFormOpen && (
+          <form onSubmit={handlePlaceSubmit} style={{ marginBottom: '1rem', padding: '0.9rem', border: '1px solid #e2e8f0', borderRadius: '10px', background: '#f8fafc' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 14rem), 1fr))', gap: '0.75rem' }}>
+              <div className="sidebar-field">
+                <label>Country *</label>
+                <SearchableSelect
+                  className="sidebar-select"
+                  style={fieldStyle}
+                  value={placeForm.country}
+                  onChange={(event) => setPlaceForm((previous) => ({ ...previous, country: event.target.value }))}
+                  aria-label="Destination country"
+                  placeholder="Choose a country"
+                >
+                  <option value="" disabled>Choose a country</option>
+                  {destinationCountries.map((name) => <option key={name} value={name}>{name}</option>)}
+                </SearchableSelect>
+              </div>
+              <div className="sidebar-field">
+                <label>Region / province *</label>
+                <input
+                  className="sidebar-select"
+                  style={fieldStyle}
+                  value={placeForm.province}
+                  onChange={(event) => setPlaceForm((previous) => ({ ...previous, province: event.target.value }))}
+                  placeholder="e.g. Khomas"
+                  maxLength={120}
+                />
+              </div>
+              <div className="sidebar-field">
+                <label>Place *</label>
+                <input
+                  className="sidebar-select"
+                  style={fieldStyle}
+                  value={placeForm.place}
+                  onChange={(event) => setPlaceForm((previous) => ({ ...previous, place: event.target.value }))}
+                  placeholder="e.g. Windhoek"
+                  maxLength={120}
+                />
+              </div>
+              <div className="sidebar-field">
+                <label>Other names</label>
+                <input
+                  className="sidebar-select"
+                  style={fieldStyle}
+                  value={placeForm.altName}
+                  onChange={(event) => setPlaceForm((previous) => ({ ...previous, altName: event.target.value }))}
+                  placeholder="e.g. Windhuk; Windhoek Stadt"
+                  maxLength={400}
+                />
+                <small style={{ display: 'block', marginTop: '0.3rem', color: '#94a3b8', fontSize: '0.75rem' }}>Separate alternative spellings with a semicolon. The picker searches them too.</small>
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.85rem', color: '#334155' }}>
+                <input type="checkbox" checked={placeForm.isHub} onChange={(event) => setPlaceForm((previous) => ({ ...previous, isHub: event.target.checked }))} />
+                Hub - list this place first
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.85rem', color: '#334155' }}>
+                <input type="checkbox" checked={placeForm.isActive} onChange={(event) => setPlaceForm((previous) => ({ ...previous, isActive: event.target.checked }))} />
+                Active
+              </label>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', marginTop: '0.9rem' }}>
+              <button type="button" className="secondary-btn" style={{ flex: '0 0 auto', width: 'auto', padding: '0.55rem 1rem' }} disabled={saving} onClick={closePlaceForm}>Cancel</button>
+              <button type="submit" className="primary-btn" style={{ flex: '0 0 auto', width: 'auto', padding: '0.55rem 1rem', fontSize: '0.9rem' }} disabled={saving || !companyId}>
+                <Check size={15} /> {saving ? 'Saving...' : editingPlace ? 'Save destination' : 'Add destination'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
+          <SearchableSelect
+            className="sidebar-select"
+            style={{ ...fieldStyle, width: 'min(100%, 14rem)' }}
+            value={placeCountry}
+            onChange={(event) => setPlaceCountry(event.target.value)}
+            aria-label="Filter destinations by country"
+          >
+            <option value="">All countries</option>
+            {placeFilterCountries.map((name) => <option key={name} value={name}>{name}</option>)}
+          </SearchableSelect>
+          <input
+            className="sidebar-select"
+            style={{ ...fieldStyle, width: 'min(100%, 18rem)' }}
+            value={placeQuery}
+            onChange={(event) => setPlaceQuery(event.target.value)}
+            placeholder="Search place, region or other name"
+            aria-label="Search destinations"
+          />
+          <div role="group" aria-label="Destination scope" style={{ display: 'inline-flex', border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden' }}>
+            {PLACE_SCOPES.map((scope) => (
+              <button
+                key={scope.id}
+                type="button"
+                aria-pressed={placeScope === scope.id}
+                onClick={() => setPlaceScope(scope.id)}
+                style={{
+                  padding: '0.5rem 0.7rem',
+                  border: 0,
+                  background: placeScope === scope.id ? '#0d7478' : '#fff',
+                  color: placeScope === scope.id ? '#fff' : '#475569',
+                  font: 'inherit',
+                  fontSize: '0.8rem',
+                  fontWeight: 700,
+                  cursor: 'pointer'
+                }}
+              >
+                {scope.label}
+              </button>
+            ))}
+          </div>
+          <span style={{ color: '#64748b', fontSize: '0.8rem' }}>
+            {minePlaceCount} own {minePlaceCount === 1 ? 'destination' : 'destinations'}
+          </span>
+        </div>
+
+        {placesError ? (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', padding: '0.75rem 0.9rem', border: '1px solid #fecaca', borderRadius: '10px', background: '#fef2f2', color: '#7f1d1d', fontSize: '0.85rem', lineHeight: 1.5 }}>
+            <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <span>Destinations could not be loaded: {placesError} If this database has not had the tenant destinations migration applied, apply it and reload.</span>
+          </div>
+        ) : placesLoading ? (
+          <div style={{ padding: '1rem 0', color: '#94a3b8' }}>Loading destinations...</div>
+        ) : visiblePlaces.length === 0 ? (
+          <div style={{ padding: '1rem 0', color: '#64748b' }}>
+            {placeScope === 'mine' && !placeQuery && !placeCountry
+              ? 'No destinations of your own yet. Add one above and it becomes available to your company in the day and car-hire pickers.'
+              : 'No destinations match this filter.'}
+          </div>
+        ) : (
+          <>
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Place</th>
+                  <th>Region</th>
+                  <th>Country</th>
+                  <th>Other names</th>
+                  <th>Hub</th>
+                  <th>Scope</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: 'right' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownPlaces.map((place) => (
+                  <tr key={place.id} style={place.is_active ? undefined : { opacity: 0.65, background: '#f8fafc' }}>
+                    <td style={{ fontWeight: 700 }}>{place.place}</td>
+                    <td>{place.province}</td>
+                    <td>{place.country}</td>
+                    <td style={{ maxWidth: '18rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={place.alt_name || ''}>{place.alt_name || '—'}</td>
+                    <td>{place.is_hub ? 'Yes' : '—'}</td>
+                    <td><PlaceTag shared={isSharedPlace(place)} /></td>
+                    <td>{place.is_active ? 'Active' : 'Inactive'}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      {isSharedPlace(place) ? (
+                        <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>Read only</span>
+                      ) : (
+                        <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
+                          <button type="button" className="icon-btn outline" title="Edit destination" disabled={saving} onClick={() => openEditPlace(place)}>
+                            <Edit3 size={15} />
+                          </button>
+                          <button type="button" className="icon-btn outline" title={place.is_active ? 'Deactivate destination' : 'Activate destination'} disabled={saving} onClick={() => handlePlaceToggle(place)}>
+                            <Power size={15} />
+                          </button>
+                          <button type="button" className="icon-btn danger" title="Delete destination" disabled={saving} onClick={() => handlePlaceDelete(place)}>
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {visiblePlaces.length > shownPlaces.length && (
+              <p style={{ margin: '0.75rem 0 0', color: '#64748b', fontSize: '0.8rem' }}>
+                Showing the first {shownPlaces.length} of {visiblePlaces.length} matches. Narrow the country or search to see the rest.
+              </p>
+            )}
+          </>
         )}
       </div>
 

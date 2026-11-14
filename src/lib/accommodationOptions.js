@@ -94,8 +94,43 @@ export const WEEKEND_DAY_OPTIONS = [
   { value: 7, short: 'Sun', label: 'Sunday' }
 ];
 
+export const WEEKEND_RATES_NOTE = /\[\[\s*weekend_rates\s*:\s*(\{.*?\})\s*\]\]/i;
+
+export const weekendRatesFromNote = (notes) => {
+  const match = String(notes ?? '').match(WEEKEND_RATES_NOTE);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+};
+
+export const stripWeekendRatesNote = (notes) =>
+  String(notes ?? '').replace(WEEKEND_RATES_NOTE, '').replace(/\s+/g, ' ').trim();
+
+export const withWeekendRatesNote = (notes, ratesObj) => {
+  const cleaned = stripWeekendRatesNote(notes);
+  if (!ratesObj || typeof ratesObj !== 'object' || !Object.keys(ratesObj).length) {
+    return cleaned || null;
+  }
+  const serialized = JSON.stringify(ratesObj);
+  return `${cleaned ? `${cleaned} ` : ''}[[weekend_rates:${serialized}]]`;
+};
+
+export const weekendRatesOf = (rate) => {
+  if (rate?.weekend_rates && typeof rate.weekend_rates === 'object') {
+    return rate.weekend_rates;
+  }
+  return weekendRatesFromNote(rate?.notes);
+};
+
 export const weekendDaysOf = (rate) => {
-  const raw = Array.isArray(rate?.weekend_days) ? rate.weekend_days : [];
+  /* The library editor's save passes its own season state, which holds the days
+     as camelCase weekendDays; a stored rate row carries weekend_days. Reading
+     only the stored key silently wiped the contract on every save. */
+  const raw = Array.isArray(rate?.weekend_days) ? rate.weekend_days
+    : Array.isArray(rate?.weekendDays) ? rate.weekendDays : [];
   const days = raw
     .map((value) => parseInt(value, 10))
     .filter((value) => value >= 1 && value <= 7);
@@ -104,7 +139,10 @@ export const weekendDaysOf = (rate) => {
 
 export const weekendPriceOf = (rate) => {
   const value = parseFloat(rate?.weekend_price);
-  return Number.isFinite(value) ? value : null;
+  if (Number.isFinite(value)) return value;
+  const wr = weekendRatesOf(rate);
+  const wrVal = parseFloat(wr?.price_2_adults ?? wr?.price_1_adult);
+  return Number.isFinite(wrVal) ? wrVal : null;
 };
 
 export const weekendDaysLabel = (rate) => weekendDaysOf(rate)
@@ -119,9 +157,22 @@ const isoWeekdayOf = (iso) => {
   return day === 0 ? 7 : day;
 };
 
+/* A weekend card prices the night only when at least one of its columns carries
+   a figure. A child-only card (adults unchanged, children quoted) still counts:
+   the weekend child rate is money the contract asks for on those nights. */
+const weekendRatesHaveFigures = (wr) => {
+  if (!wr || typeof wr !== 'object') return false;
+  if (['price_1_adult', 'price_2_adults', 'price_3_plus_adults']
+    .some((field) => Number.isFinite(parseFloat(wr[field])))) return true;
+  const children = wr.child_rates;
+  return !!children && typeof children === 'object'
+    && Object.values(children).some((value) => Number.isFinite(parseFloat(value)));
+};
+
 export const weekendNightOf = (rate, isoDate) => {
   const days = weekendDaysOf(rate);
-  if (!days.length || weekendPriceOf(rate) === null) return false;
+  if (!days.length) return false;
+  if (weekendPriceOf(rate) === null && !weekendRatesHaveFigures(weekendRatesOf(rate))) return false;
   return days.includes(isoWeekdayOf(isoDate));
 };
 
@@ -134,9 +185,15 @@ const sameFigure = (a, b) => {
 /* The row as it prices ONE night: on a weekend night the normal nightly figure
    is replaced by the weekend price. It is still the same row, season and charge
    type - only the date decides - so the returned copy keeps every other column
-   (supplements, tiers, guide rates) exactly as contracted. A distinct single
-   room rate is left alone: the weekend price is the shared room's figure, and a
-   property that quoted a separate single price did not quote a weekend one. */
+   (supplements, tiers, guide rates) exactly as contracted.
+
+   A per-person row carries a whole weekend card (single, sharing, extra adult,
+   child bands). Each blank column on that card means "not quoted for the
+   weekend", so the normal figure for that same column stands: a property that
+   quoted a separate single rate keeps charging it on a weekend night unless the
+   card names a weekend single. Only a room that never had a separate single
+   follows the weekend sharing figure solo, the same rule the single-figure
+   weekend price has always applied. */
 export const rateForNight = (rate, isoDate) => {
   if (!rate || !weekendNightOf(rate, isoDate)) return rate;
   /* A villa on an occupancy ladder has no single nightly figure to swap: each
@@ -145,6 +202,47 @@ export const rateForNight = (rate, isoDate) => {
   if (isOccupancyTiered(rate)) return rate;
   const price = weekendPriceOf(rate);
   const flat = String(rate.rate_basis || '') === 'per_room';
+  const weekendRates = weekendRatesOf(rate);
+
+  if (!flat && weekendRatesHaveFigures(weekendRates)) {
+    const p1 = parseFloat(weekendRates.price_1_adult);
+    const p2 = parseFloat(weekendRates.price_2_adults);
+    const p3 = parseFloat(weekendRates.price_3_plus_adults);
+    const childRates = weekendRates.child_rates && typeof weekendRates.child_rates === 'object'
+      ? weekendRates.child_rates
+      : null;
+
+    const normalSharing = parseFloat(rate.price_2_adults)
+      || parseFloat(rate.double_twin_rate) || parseFloat(rate.unit_price) || 0;
+    const sharingPrice = Number.isFinite(p2) ? p2 : normalSharing;
+    const normalSingle = parseFloat(rate.single_room_rate)
+      || parseFloat(rate.effective_single_rate) || parseFloat(rate.price_1_adult) || 0;
+    const separateSingle = normalSingle > 0 && !sameFigure(normalSingle, normalSharing);
+    const singlePrice = Number.isFinite(p1) ? p1 : (separateSingle ? normalSingle : sharingPrice);
+    const normalExtra = parseFloat(rate.price_3_plus_adults);
+    const separateExtra = normalExtra > 0 && !sameFigure(normalExtra, normalSharing);
+    const extraAdultPrice = Number.isFinite(p3) ? p3 : (separateExtra ? normalExtra : sharingPrice);
+
+    const out = {
+      ...rate,
+      weekend_night: true,
+      unit_price: sharingPrice,
+      price_2_adults: sharingPrice,
+      double_twin_rate: sharingPrice,
+      price_1_adult: singlePrice,
+      single_room_rate: singlePrice,
+      effective_single_rate: singlePrice,
+      price_3_plus_adults: extraAdultPrice
+    };
+    if (childRates) {
+      out.child_rates_breakdown = {
+        ...(rate.child_rates_breakdown || {}),
+        ...childRates
+      };
+    }
+    return out;
+  }
+
   const standard = parseFloat(flat ? rate.unit_price : rate.price_2_adults)
     || parseFloat(rate.unit_price) || 0;
   const single = parseFloat(rate.single_room_rate)

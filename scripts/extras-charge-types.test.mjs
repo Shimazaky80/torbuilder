@@ -16,8 +16,10 @@ import {
   lineChargeLabel,
   ratesForCharge
 } from '../src/lib/extrasChargeTypes';
-import { repriceServicesForPax } from '../src/lib/servicePricing';
-import { packageSeasonCoverage } from '../src/lib/packagePricing';
+import { chargesChildRate, contractPaxRate, repriceServicesForPax, revalidateServicesForWindow, sidebarLibraryRate } from '../src/lib/servicePricing';
+import { calculatePackageTravellerBreakdown, packageBandCapacityError, packageIsTransport, packageItemCapacitySetupError, packageSeasonCoverage, packageServicesForTier, packageVehicleCapacity, vehicleColumnPools } from '../src/lib/packagePricing';
+import { buildItineraryPackage, vehicleCapacityFromItinerary } from '../src/lib/itineraryToPackage';
+import { computePerPersonRows } from '../src/lib/perPersonPricing';
 import { abbrevMealPlan, showMealPlanOn } from '../src/lib/invoiceDoc';
 import { voucherDetailLines } from '../src/lib/voucherDetails';
 
@@ -111,6 +113,84 @@ check('the invoice prints an extra\'s charge', showMealPlanOn({ category: 'Extra
 check('the invoice still ignores a category that sells no charges', showMealPlanOn({ category: 'Meals', meal_plan: 'Dinner' }, {}), false);
 check('a written charge is not squashed into a board abbreviation', abbrevMealPlan('Fuel charge'), 'Fuel charge');
 check('a board still abbreviates', abbrevMealPlan('Half Board'), 'HB');
+
+const tollRate = {
+  id: 'toll-rate', currency: 'ZAR', meal_plan: 'Toll crossing', season_name: 'Annual',
+  rate_basis: 'per_vehicle', unit_price: 120, price_1_adult: 120,
+  valid_from: '2026-01-01', valid_to: '2026-12-31', child_rates_breakdown: { child: 5 }
+};
+const toll = {
+  id: 'toll', name: 'Road toll', category: 'Extras', pricing_model: 'per_vehicle',
+  currency: 'ZAR', max_occupancy: 2, item_rates: [tollRate]
+};
+const tollLine = {
+  key: 'toll-line', itemId: toll.id, name: toll.name, category: 'Extras', basis: 'per_vehicle',
+  currencyCode: 'ZAR', mealPlan: 'Toll crossing', quantity: 2, pax: 2, buyPP: 120, sellPP: 144, markup: 20
+};
+check('one toll is shared over four travellers, not billed to four vehicles', contractPaxRate(toll, 'ZAR', 4), 30);
+check('two vehicles pay two tolls even when six travellers go', contractPaxRate(toll, 'ZAR', 6, { quantity: 2, childCount: 1 }), 40);
+check('vehicle Extras never charge a child rate', chargesChildRate(toll), false);
+check('the sidebar shows the price of one vehicle', sidebarLibraryRate(toll, 'ZAR', 6), 120);
+check('service-only Extras keep their existing flat price', contractPaxRate(oneCharge, 'ZAR', 5), 100);
+check('per-person Extras still charge each guest', contractPaxRate(fuel, 'ZAR', 5), 200);
+
+const repricedToll = repriceServicesForPax({
+  days: [{ services: [tollLine] }], libraryItems: [toll], paxCount: 6,
+  travelWindow: { start: '2026-11-01', end: '2026-11-03' }
+}).days[0].services[0];
+check('pax repricing retains two vehicles and charges the same toll total',
+  [repricedToll.quantity, repricedToll.buyPP, repricedToll.sellPP, repricedToll.buyPP * repricedToll.pax], [2, 40, 48, 240]);
+const updatedToll = { ...toll, item_rates: [{ ...tollRate, id: 'toll-2027', season_name: 'Next year', price_1_adult: 150, unit_price: 150, valid_from: '2027-01-01', valid_to: '2027-12-31' }] };
+const revalidatedToll = revalidateServicesForWindow({
+  days: [{ services: [repricedToll] }], libraryItems: [updatedToll], paxCount: 6,
+  travelWindow: { start: '2027-02-01', end: '2027-02-03' }
+}).days[0].services[0];
+check('date repricing retains the vehicle count on the selected charge',
+  [revalidatedToll.quantity, revalidatedToll.buyPP, revalidatedToll.mealPlan], [2, 50, 'Toll crossing']);
+
+const packageToll = {
+  item_key: 'package-toll', item_id: toll.id, item_name: toll.name, category: 'Extras', currency_code: 'ZAR',
+  rate_basis: 'per_vehicle', rate_id: tollRate.id, rate_snapshot: tollRate, unit_cost: 120, unit_price: 120,
+  quantity: 2, is_included: true, vehicle_capacity: 2
+};
+const tollDays = [{ services: [packageToll] }];
+check('a toll needs no passenger capacity to be added', packageItemCapacitySetupError({ ...toll, max_occupancy: null }, tollRate), '');
+check('a toll is not alternative transport even with inherited occupancy', packageIsTransport(packageToll, [toll]), false);
+check('a toll supplies no vehicle capacity', packageVehicleCapacity(toll, tollRate), 0);
+check('a toll never refuses a larger traveller band', packageBandCapacityError(tollDays, [toll], { pax: 12 }), '');
+for (const pax of [1, 4, 6, 12]) {
+  const breakdown = calculatePackageTravellerBreakdown({ days: tollDays, library: [toll], pattern: { pax }, childRange: { from: 2, to: 12 } });
+  check(`${pax} pax still buy exactly two tolls`, [breakdown.partyTotal, breakdown.unitPerPerson, breakdown.unitChildPerPerson, breakdown.servable], [240, 240 / pax, 240 / pax, true]);
+}
+const noLibraryToll = calculatePackageTravellerBreakdown({ days: tollDays, pattern: { pax: 6 } });
+check('a saved toll snapshot prices without the live library', noLibraryToll.partyTotal, 240);
+const singleVehicleToll = calculatePackageTravellerBreakdown({ days: [{ services: [{ ...packageToll, quantity: undefined }] }], library: [toll], pattern: { pax: 6 } });
+check('an unspecified vehicle count defaults to one', singleVehicleToll.partyTotal, 120);
+const types = [{ code: 'car', max_capacity: 4 }, { code: 'van', max_capacity: 12 }];
+const pools = vehicleColumnPools({ days: tollDays, library: [toll], vehicleTypes: types });
+check('every package vehicle column includes the explicit toll quantity', [pools.pools.car, pools.pools.van, pools.perPersonFixed], [240, 240, 0]);
+const staleVector = { ...packageToll, rate_snapshot: { ...tollRate, prices_by_vehicle: { car: 999 } } };
+check('a vehicle Extra ignores stale seat-price vectors', calculatePackageTravellerBreakdown({ days: [{ services: [staleVector] }], library: [toll], pattern: { pax: 6 }, vehicleTypes: types }).partyTotal, 240);
+check('the pool also ignores stale seat-price vectors', vehicleColumnPools({ days: [{ services: [staleVector] }], library: [toll], vehicleTypes: types }).pools, { car: 240, van: 240 });
+const van = { ...packageToll, item_id: 'van', item_key: 'van', category: 'Transfers', vehicle_capacity: 12, quantity: 1, rate_snapshot: { ...tollRate, unit_price: 600, price_1_adult: 600 } };
+const combinedDay = { services: [packageToll, van] };
+check('a passenger vehicle cannot replace the toll line', packageServicesForTier(combinedDay, { pax: 6 }, [toll]).map((s) => s.item_key), ['package-toll', 'van']);
+check('the package adds tolls to the vehicle rather than replacing it', calculatePackageTravellerBreakdown({ days: [combinedDay], library: [toll], pattern: { pax: 6 } }).partyTotal, 840);
+const freeToll = { ...packageToll, unit_cost: 0, unit_price: 0, rate_snapshot: { ...tollRate, unit_price: 0, price_1_adult: 0 } };
+check('an explicitly free vehicle Extra stays free', calculatePackageTravellerBreakdown({ days: [{ services: [freeToll] }], library: [toll], pattern: { pax: 6 } }).partyTotal, 0);
+
+const converted = buildItineraryPackage({
+  meta: { numAdults: 5, numChildren: 1 }, days: [{ services: [repricedToll] }], libraryItems: [toll],
+  fallbackPax: 6, travelWindow: { start: '2026-11-01', end: '2026-11-03' }
+});
+const convertedLine = converted.days[0].items[0];
+check('conversion retains vehicle basis, count and one-vehicle unit cost', [convertedLine.rate_basis, convertedLine.quantity, convertedLine.unit_cost], ['per_vehicle', 2, 120]);
+check('conversion does not multiply the toll twice', calculatePackageTravellerBreakdown({ days: [{ services: [convertedLine] }], library: [toll], pattern: { pax: 6 } }).partyTotal, 240);
+check('legacy capacity on an Extra cannot set package vehicle size', vehicleCapacityFromItinerary([{ services: [{ ...repricedToll, vehicle_capacity: 50 }] }], { numAdults: 6 }), 6);
+const family = [{ age: 35 }, { age: 40 }, { age: 8 }];
+const familyPrice = computePerPersonRows({ services: [{ ...tollLine, pax: 3, buyPP: 80, sellPP: 96 }], travellers: family, rateBy: () => tollRate });
+check('the child shares the vehicle bill, not a separate toll child fare', [familyPrice.perPersonSharing.sell, familyPrice.perChild.sell], [96, 96]);
+check('adult and child shares reconcile to two marked-up tolls', familyPrice.perPersonSharing.sell * 2 + familyPrice.perChild.sell, 288);
 
 if (process.exitCode) {
   console.log('\nSome extras charge-type checks failed.');

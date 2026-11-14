@@ -14,8 +14,12 @@ import {
   feeSeasonKey,
   feeAmountsBySeason,
   feeRatePayload,
+  feeWindowsFromRecord,
+  feeWindowsFromSeasons,
+  feeWindowOverlapError,
   moveFeeAmount,
   surchargeBuyTotal,
+  surchargeNightsBuy,
   surchargeChildAmount,
   surchargeGuideAmount,
   feeBasisChargesHeads,
@@ -117,7 +121,8 @@ const savedLevy = {
     { id: 'r2', season_name: 'High season', conservation_levy_per_adult: 140 }
   ]
 };
-check('a saved fee reads back into one editor row', feeEditorRowFromRecord(savedLevy), {
+const legacyEditorRow = feeEditorRowFromRecord(savedLevy);
+check('a saved fee reads back into one editor row', { ...legacyEditorRow, windows: undefined }, {
   key: 'fee_fee-3',
   dbId: 'fee-3',
   name: 'Kruger conservation levy',
@@ -129,6 +134,10 @@ check('a saved fee reads back into one editor row', feeEditorRowFromRecord(saved
   amounts: { 'High season||': '140' },
   childAmounts: {}
 });
+check('a saved fee owns the windows its rows carry',
+  legacyEditorRow.windows.map((w) => [w.seasonName, w.validFrom, w.validTo]),
+  [['Low season', '', ''], ['High season', '', '']]);
+check('every window carries an editor id', legacyEditorRow.windows.every((w) => !!w.id), true);
 
 /* A fee is charged per season now: each priced rate row supplies that season's
    amount, and a season with no row (or a blank row) is not charged at all. */
@@ -335,7 +344,7 @@ check('a per-unit fee ignores a guide figure',
 const ticketItem = { category: SURCHARGE_CATEGORY, surcharge_type: 'ticket' };
 check('a ticket reads as a ticket', surchargeTypeOf({ surcharge_type: 'ticket' }), 'ticket');
 check('a ticket is offered in the editor',
-  SURCHARGE_TYPES.map((t) => t.id), ['entrance_fee', 'conservation_levy', 'ticket']);
+  SURCHARGE_TYPES.map((t) => t.id), ['entrance_fee', 'conservation_levy', 'porterage', 'ticket']);
 check('a ticket is named on the line', surchargeTypeLabel('ticket'), 'Ticket');
 check('a ticket writes the entrance columns',
   surchargeRateColumns({ type: 'ticket', unitBasis: 'per_person', amount: '850', childAmount: '430' }),
@@ -480,5 +489,147 @@ check('a levy quotes its child from the levy columns, like its adult figure',
     rateBy: () => levyRate,
     defaultTaxRate: 0
   }).perChild.sell, 60);
+
+/* (O) THE STRADDLING LEVY. The room's Peak Season runs 20 Dec 2026 - 7 Jan
+   2027, but the conservation levy runs on the park authority's calendar:
+   R335.00 for 2026, R365.00 for 2027. The fee owns its two windows, and each
+   night of the stay bills the figure valid on THAT night - never one season's
+   figure multiplied by the night count. */
+const straddleLevy = {
+  category: SURCHARGE_CATEGORY,
+  surcharge_type: 'conservation_levy',
+  surcharge_charge_basis: 'per_night',
+  surcharge_unit_basis: 'per_person',
+  item_rates: [
+    { id: 'levy-2026', season_name: '2026', valid_from: '2026-01-01', valid_to: '2026-12-31', currency: 'ZAR', conservation_levy_per_adult: 335 },
+    { id: 'levy-2027', season_name: '2027', valid_from: '2027-01-01', valid_to: '2027-12-31', currency: 'ZAR', conservation_levy_per_adult: 365 }
+  ]
+};
+const peakStay = surchargeNightsBuy({
+  item: straddleLevy, currencyCode: 'ZAR', firstDate: '2026-12-20', nights: 19, paxCount: 1
+});
+check('every night of the peak season is priced', peakStay.pricedNights, 19);
+check('the December nights bill the 2026 levy',
+  peakStay.nights.filter((n) => n.date < '2027-01-01').map((n) => n.perRepeat),
+  Array(12).fill(335));
+check('the January nights bill the 2027 levy',
+  peakStay.nights.filter((n) => n.date >= '2027-01-01').map((n) => n.perRepeat),
+  Array(7).fill(365));
+check('the line sums the nights, not one season times the count', peakStay.total, 12 * 335 + 7 * 365);
+check('the first night stamps the window that priced it',
+  [peakStay.firstSeason.seasonName, peakStay.firstSeason.validFrom, peakStay.firstSeason.validTo],
+  ['2026', '2026-01-01', '2026-12-31']);
+check('a matching night is never uplifted, even at a Settings percentage',
+  surchargeNightsBuy({
+    item: straddleLevy, currencyCode: 'ZAR', firstDate: '2026-12-20', nights: 19,
+    protectionPercent: 10, paxCount: 1
+  }).total, 12 * 335 + 7 * 365);
+check('the party size multiplies the summed nights',
+  surchargeNightsBuy({
+    item: straddleLevy, currencyCode: 'ZAR', firstDate: '2026-12-20', nights: 19, paxCount: 4
+  }).total, 4 * (12 * 335 + 7 * 365));
+
+/* A night no window covers is returned unpriced - the caller leaves it off and
+   says so, never bills it at a guess. 30-31 Dec 2025 sit before the fee's first
+   window; only New Year's Day 2026 is priced. */
+const gapStay = surchargeNightsBuy({
+  item: straddleLevy, currencyCode: 'ZAR', firstDate: '2025-12-30', nights: 3, paxCount: 1
+});
+check('nights before the first window are not priced', gapStay.pricedNights, 1);
+check('the unpriced nights carry no money', gapStay.nights.filter((n) => !n.priced).every((n) => n.total === 0), true);
+check('only the covered night is summed', gapStay.total, 335);
+
+/* A stale night (the fee's calendar has ended) keeps the stand-in rules: at 0%
+   it prices as a stale estimate, at an agreed percentage it is uplifted. */
+const staleStay = surchargeNightsBuy({
+  item: straddleLevy, currencyCode: 'ZAR', firstDate: '2028-01-01', nights: 1, paxCount: 1
+});
+check('a stale night prices at the last contracted figure without protection',
+  [staleStay.pricedNights, staleStay.total], [1, 365]);
+const protectedStay = surchargeNightsBuy({
+  item: straddleLevy, currencyCode: 'ZAR', firstDate: '2028-01-01', nights: 1,
+  protectionPercent: 10, paxCount: 1
+});
+check('an agreed percentage uplifts the stale night', protectedStay.total, 401.5);
+check('the uplift is stamped on the night', protectedStay.nights[0].protectionPercent, 10);
+
+/* An undated line (month-only timing, no day dates) falls back to the trip
+   window for every night - the single resolution it always had. */
+const undatedStay = surchargeNightsBuy({
+  item: {
+    ...straddleLevy,
+    item_rates: [{ id: 'levy-open', season_name: 'Standard', currency: 'ZAR', conservation_levy_per_adult: 335 }]
+  },
+  currencyCode: 'ZAR', fallbackStart: '2026-12-20', fallbackEnd: '2027-01-07', nights: 19, paxCount: 1
+});
+check('an undated fee prices every night at its one figure', [undatedStay.pricedNights, undatedStay.total], [19, 19 * 335]);
+
+/* (P) The fee's own calendar: windows seed from the property's seasons deduped
+   across rooms, read back from saved rows, and may never overlap - a night
+   inside two windows would have two contracted figures. */
+check('seeding from the property dedupes one window priced for three rooms',
+  feeWindowsFromSeasons([
+    { seasonName: 'Peak', validFrom: '2026-12-20', validTo: '2027-01-07', roomKey: 'luxury' },
+    { seasonName: 'Peak', validFrom: '2026-12-20', validTo: '2027-01-07', roomKey: 'villa4' },
+    { seasonName: 'Peak', validFrom: '2026-12-20T00:00:00', validTo: '2027-01-07', roomKey: 'villa3' }
+  ]).map((w) => [w.seasonName, w.validFrom, w.validTo]),
+  [['Peak', '2026-12-20', '2027-01-07']]);
+check('a saved fee reads its windows back in stored order',
+  feeWindowsFromRecord(straddleLevy).map((w) => [w.seasonName, w.validFrom, w.validTo]),
+  [['2026', '2026-01-01', '2026-12-31'], ['2027', '2027-01-01', '2027-12-31']]);
+check('adjacent levy years do not overlap', feeWindowOverlapError([
+  { seasonName: '2026', validFrom: '2026-01-01', validTo: '2026-12-31' },
+  { seasonName: '2027', validFrom: '2027-01-01', validTo: '2027-12-31' }
+]), '');
+check('overlapping windows are refused by name',
+  feeWindowOverlapError([
+    { seasonName: '2026', validFrom: '2026-01-01', validTo: '2026-12-31' },
+    { seasonName: 'Festive', validFrom: '2026-12-20', validTo: '2027-01-07' }
+  ]).includes('overlap'), true);
+check('an open-ended window overlaps everything after it',
+  feeWindowOverlapError([
+    { seasonName: 'Standard', validFrom: '2026-01-01', validTo: '' },
+    { seasonName: '2027', validFrom: '2027-01-01', validTo: '2027-12-31' }
+  ]).includes('overlap'), true);
+
+/* (Q) Porterage. A once-per-stay service charged outside the season calendar,
+   per person, guide and driver excepted. It reuses the linked-fee machinery, so
+   it owns its validity windows and travels with the property - but it never
+   repeats per night and never bills the crew. */
+const porterageItem = { category: SURCHARGE_CATEGORY, surcharge_type: 'porterage', surcharge_unit_basis: 'per_person' };
+check('porterage reads as its own type', surchargeTypeOf({ surcharge_type: 'porterage' }), 'porterage');
+check('porterage is named on the line', surchargeTypeLabel('porterage'), 'Porterage');
+check('porterage is offered in the editor', SURCHARGE_TYPES.some((t) => t.id === 'porterage'), true);
+check('porterage is once-off even if a row stored per-night',
+  surchargeBasisOf({ ...porterageItem, surcharge_charge_basis: 'per_night' }), 'once_off');
+check('porterage offers only the per-person basis',
+  unitBasesFor(porterageItem).map((u) => u.id), ['per_person']);
+check('porterage refuses a basis it does not sell',
+  [isValidUnitBasis(porterageItem, 'per_person'), isValidUnitBasis(porterageItem, 'per_adult'), isValidUnitBasis(porterageItem, 'per_vehicle')],
+  [true, false, false]);
+check('porterage writes the head column and the unit figure',
+  surchargeRateColumns({ type: 'porterage', unitBasis: 'per_person', amount: '120' }),
+  { entrance_fee_per_person: 120, unit_price: 120 });
+check('porterage reads its figure back',
+  surchargeRateAmount({ entrance_fee_per_person: 120, unit_price: 120 }, porterageItem), 120);
+check('porterage bills every traveller once for the whole stay',
+  surchargeBuyTotal({ rate: { entrance_fee_per_person: 120 }, item: porterageItem, paxCount: 4, childCount: 2, nights: 5 }).total, 480);
+check('porterage never repeats per night, whatever the row stored',
+  surchargeBuyTotal({
+    rate: { entrance_fee_per_person: 120 },
+    item: { ...porterageItem, surcharge_charge_basis: 'per_night' },
+    paxCount: 4,
+    nights: 5
+  }).repeats, 1);
+check('porterage excludes the guide even when a crew figure stands on the row',
+  surchargeBuyTotal({ rate: { entrance_fee_per_person: 120, guide_rate: 90 }, item: porterageItem, paxCount: 4, childCount: 2, guideCount: 2 }).total, 480);
+check('porterage splits by age when the property prices children separately',
+  surchargeBuyTotal({ rate: { entrance_fee_per_person: 120, entrance_fee_per_child: 60 }, item: porterageItem, paxCount: 4, childCount: 2 }).total, 360);
+check('porterage keeps its own validity window',
+  feeWindowsFromRecord({
+    ...porterageItem,
+    item_rates: [{ id: 'p1', season_name: '2026', valid_from: '2026-01-01', valid_to: '2026-12-31', entrance_fee_per_person: 120 }]
+  }).map((w) => [w.seasonName, w.validFrom, w.validTo]),
+  [['2026', '2026-01-01', '2026-12-31']]);
 
 if (!process.exitCode) console.log('\nAll Fees & Tickets checks passed');
