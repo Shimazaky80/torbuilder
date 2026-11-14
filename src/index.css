@@ -981,9 +981,10 @@ aside.sidebar:not(.collapsed) .logo-full {
   display: flex;
   gap: 1.25rem;
   align-items: stretch;
-  height: calc(100vh - 4.5rem);
-  min-height: 520px;
-  overflow: hidden;
+  /* The builder grows with the day's services instead of trapping them in a
+     fixed viewport box. The page scrolls; the day itself is never cut short. */
+  min-height: calc(100vh - 4.5rem);
+  overflow: visible;
 }
 
 /* Sidebar (mirrors the menu sidebar width) */
@@ -997,6 +998,12 @@ aside.sidebar:not(.collapsed) .logo-full {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* The main panel can now be taller than the viewport, so keep the picker in
+     view while the day is scrolled. */
+  position: sticky;
+  top: 1rem;
+  align-self: flex-start;
+  max-height: calc(100vh - 2rem);
 }
 
 .builder-sidebar-header {
@@ -1416,7 +1423,9 @@ aside.sidebar:not(.collapsed) .logo-full {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  overflow: hidden;
+  /* Let the day workspace grow with its services. The page scrolls instead of
+     each day holding its own cramped scrollbar. */
+  overflow: visible;
 }
 
 .builder-main-finance {
@@ -1996,15 +2005,19 @@ aside.sidebar:not(.collapsed) .logo-full {
 
 /* Day workspace */
 .day-workspace {
-  flex: 1;
-  min-height: 0;
+  /* Flexible by design: the day takes the height its services need and grows
+     as items are dropped. A modest floor keeps an empty day a usable drop
+     target; there is no fixed height and no inner scrollbar. */
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 320px;
   background: #fff;
   border: 1px solid #cbd5e1;
   border-radius: 16px;
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .day-workspace.dragging {
@@ -2093,8 +2106,8 @@ aside.sidebar:not(.collapsed) .logo-full {
 }
 
 .day-services {
-  flex: 1;
-  overflow-y: auto;
+  flex: 1 1 auto;
+  overflow: visible;
   padding: 1rem 1.5rem;
   display: flex;
   flex-direction: column;
@@ -3550,8 +3563,10 @@ aside.sidebar:not(.collapsed) .logo-full {
 }
 
 .package-itinerary-canvas .package-canvas-day.selected {
-  flex: 1;
-  min-height: 0;
+  /* The selected day grows with the services dropped into it. The floor is
+     only a drop target for an empty day, never a cap. */
+  height: auto;
+  min-height: 320px;
 }
 
 /* A package is priced in one currency, so the sidebar states that rather than offering

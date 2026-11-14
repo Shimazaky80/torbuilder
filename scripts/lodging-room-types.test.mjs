@@ -27,6 +27,16 @@ import {
 } from '../src/lib/packagePricing.js';
 import { libraryItemDetail, detailDocumentHtml } from '../src/lib/libraryItemDetail.js';
 import { buildItineraryPackage } from '../src/lib/itineraryToPackage.js';
+import {
+  seasonIdentityOf,
+  chargeTypeOf,
+  sharedSeasonSkeletonOf,
+  seasonForRoom,
+  sharedSeasonGroupsFor,
+  seasonRowsWithIdentity,
+  seasonChargeRows,
+  seasonSkeletonsFor
+} from '../src/lib/roomSeasons.js';
 
 let failures = 0;
 const check = (label, actual, expected) => {
@@ -289,6 +299,57 @@ const roomRows = accommodationBreakdown({
 check('the per-room breakdown puts each room on its own line', roomRows.length, 3);
 checkJson('the per-room breakdown prints each room own type',
   roomRows.map((r) => r.roomType), ['Family Suite', 'Standard Room', 'Standard Room']);
+
+/* --- A property's seasons are shared by its rooms ----------------------- */
+/* Two rooms, each with its own money for the same two seasons and the same two
+   charge types. The season is one structure; only the price belongs to a room. */
+const sharedRows = [
+  { seasonName: 'High season', validFrom: '2026-01-01', validTo: '2026-06-30', optionName: 'Bed & Breakfast', roomKey: 'room-cabin', minNights: 2, maxNights: 7, weekendDays: [5, 6], roomRate: '1000' },
+  { seasonName: 'High season', validFrom: '2026-01-01', validTo: '2026-06-30', optionName: 'Half Board', roomKey: 'room-cabin', minNights: 2, maxNights: 7, weekendDays: [5, 6], roomRate: '1400' },
+  { seasonName: 'High season', validFrom: '2026-01-01', validTo: '2026-06-30', optionName: 'Bed & Breakfast', roomKey: 'room-family', minNights: 2, maxNights: 7, weekendDays: [5, 6], roomRate: '1600' },
+  { seasonName: 'High season', validFrom: '2026-01-01', validTo: '2026-06-30', optionName: 'Half Board', roomKey: 'room-family', minNights: 2, maxNights: 7, weekendDays: [5, 6], roomRate: '2000' },
+  { seasonName: 'Low season', validFrom: '2026-07-01', validTo: '2026-12-31', optionName: 'Bed & Breakfast', roomKey: 'room-cabin', minNights: '', maxNights: '', weekendDays: [], roomRate: '800' },
+  { seasonName: 'Low season', validFrom: '2026-07-01', validTo: '2026-12-31', optionName: 'Bed & Breakfast', roomKey: 'room-family', minNights: '', maxNights: '', weekendDays: [], roomRate: '1200' }
+];
+const highIdentity = seasonIdentityOf(sharedRows[0]);
+check('the same season across rooms has one identity', seasonIdentityOf(sharedRows[2]), highIdentity);
+check('a different window is a different season', seasonIdentityOf(sharedRows[4]) === highIdentity, false);
+check('the charge type is read off the row', chargeTypeOf(sharedRows[1]), 'Half Board');
+
+const allGroups = sharedSeasonGroupsFor(sharedRows);
+check('shared seasons fold the rooms into one group each', allGroups.length, 2);
+check('the group carries every room\'s rows', allGroups[0].sharedMemberIndices.length, 4);
+checkJson('the group lists its charge types once each', allGroups[0].chargeNames, ['Bed & Breakfast', 'Half Board']);
+checkJson('the group names the rooms it prices', allGroups[0].roomKeys, ['room-cabin', 'room-family']);
+
+const cabinGroups = sharedSeasonGroupsFor(sharedRows, 'room-cabin');
+check('a room still sees both shared seasons', cabinGroups.length, 2);
+checkJson('the cabin matrix is scoped to the cabin rows', cabinGroups[0].memberIndices, [0, 1]);
+check('the cabin group still knows every room\'s rows', cabinGroups[0].sharedMemberIndices.length, 4);
+check('the scoped group names the room on screen', cabinGroups[0].roomKey, 'room-cabin');
+checkJson('the suite matrix is scoped to the suite rows', sharedSeasonGroupsFor(sharedRows, 'room-family')[0].memberIndices, [2, 3]);
+check('a room with no rows in a season is not shown it', sharedSeasonGroupsFor(sharedRows, 'room-villa').length, 0);
+
+checkJson('a season rename reaches every room',
+  seasonRowsWithIdentity(sharedRows, highIdentity).map((row) => row.index), [0, 1, 2, 3]);
+checkJson('a night band is shared across rooms but stays per charge type',
+  seasonChargeRows(sharedRows, highIdentity, 'Half Board').map((row) => row.index), [1, 3]);
+
+/* A new room clones the season skeleton: names, windows, bands and weekend
+   days come across; every money box starts blank. */
+const skeletons = seasonSkeletonsFor(sharedRows);
+check('one skeleton per shared season and charge type', skeletons.length, 3);
+const highBoard = skeletons.find((season) => season.optionName === 'Bed & Breakfast' && season.seasonName === 'High season');
+check('the skeleton keeps the season name', highBoard?.seasonName, 'High season');
+check('the skeleton keeps the night band', highBoard?.minNights, 2);
+checkJson('the skeleton keeps the weekend days', highBoard?.weekendDays, [5, 6]);
+check('the skeleton carries no room of its own', highBoard?.roomKey, undefined);
+check('the skeleton carries no money', highBoard?.roomRate, undefined);
+const clonedForVilla = { ...highBoard, roomKey: 'room-villa' };
+check('a cloned season prices the new room', seasonForRoom(clonedForVilla, 'room-villa').roomKey, 'room-villa');
+check('a cloned season keeps the shared window', seasonForRoom(clonedForVilla, 'room-villa').validFrom, '2026-01-01');
+check('the shared skeleton leaves money behind', sharedSeasonSkeletonOf(sharedRows[0]).roomRate, undefined);
+check('the shared skeleton leaves the charge type to its row', sharedSeasonSkeletonOf(sharedRows[0]).optionName, undefined);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

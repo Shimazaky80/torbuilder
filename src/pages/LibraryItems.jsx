@@ -21,6 +21,15 @@ import { crewLadderTiers, normaliseStaffTiers, staffCountWord, staffRoomLadder, 
 import { STAR_GRADES, starGlyphs, starLabel, starRatingOf } from '../lib/starGrading';
 import { supplierColumns, supplierStarColumn } from '../lib/supplierStarColumn';
 import { normalizeRoomTypes, roomForRate, roomsFromRates } from '../lib/roomTypes';
+import {
+  seasonIdentityOf,
+  chargeTypeOf,
+  seasonChargeRows,
+  seasonRowsWithIdentity,
+  seasonSkeletonsFor,
+  sharedSeasonGroupsFor,
+  sharedSeasonSkeletonOf
+} from '../lib/roomSeasons';
 import { OCCUPANCY_BASIS, normalizeOccupancyLadder, occupancyLadderError } from '../lib/occupancyPricing';
 import { fetchRoomTypesForItems, roomTypesReady as probeRoomTypesReady } from '../lib/roomTypeTable';
 import { itemDestinationLabel } from '../lib/libraryItemDetail';
@@ -1258,6 +1267,16 @@ export const LibraryItems = () => {
     let seq = rooms.length + 1;
     while (used.has(`room_${seq}`)) seq += 1;
     const room = newRoomTemplate('', `room_${seq}`);
+    /* A property's seasons are shared by its rooms, so a new room starts with
+       the same season skeleton and blank money: the operator only types the
+       room's own rates instead of rebuilding every season and charge type. */
+    const clonedSeasons = current?.category === 'Accommodation'
+      ? seasonSkeletonsFor(current.seasons || []).map((skeleton) => ({
+          ...emptySeasonMoney(),
+          ...skeleton,
+          roomKey: room.key
+        }))
+      : [];
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const newRooms = [...(item.roomTypes || []), room];
@@ -1266,6 +1285,7 @@ export const LibraryItems = () => {
       return {
         ...item,
         roomTypes: newRooms,
+        seasons: [...(item.seasons || []), ...clonedSeasons],
         sharingCapacityRules: newCeiling !== oldCeiling
           ? rebaseSharingRules(roomAdultsOf(newRooms), oldCeiling || 1, newCeiling, item.sharingCapacityRules)
           : item.sharingCapacityRules
@@ -1335,10 +1355,6 @@ export const LibraryItems = () => {
       showToast('A property needs at least one room type', 'warning');
       return;
     }
-    if ((item.seasons || []).some(season => season.roomKey === roomKey)) {
-      showToast('Remove this room type\'s seasons before deleting it', 'warning');
-      return;
-    }
     setItemsToSave(prev => prev.map(entry => {
       if (entry.tempId !== tempId) return entry;
       const oldCeiling = roomCeilingOf(entry.roomTypes);
@@ -1347,12 +1363,46 @@ export const LibraryItems = () => {
       return {
         ...entry,
         roomTypes: newRooms,
+        /* The room's rate rows go with it. The remaining rooms keep the shared
+           seasons and their own prices; the deleted room cannot leave rows that
+           point at a room type that no longer exists. */
+        seasons: (entry.seasons || []).filter(season => season.roomKey !== roomKey),
         sharingCapacityRules: newCeiling !== oldCeiling
           ? rebaseSharingRules(roomAdultsOf(newRooms), oldCeiling || 1, newCeiling || 1, entry.sharingCapacityRules)
           : entry.sharingCapacityRules
       };
     }));
     setActiveRoomByItem(prev => (prev[tempId] === roomKey ? { ...prev, [tempId]: '' } : prev));
+  };
+
+  /* An existing property can hold a room whose rows predate shared seasons.
+     Copy the property's season skeleton into that room with blank money so it
+     prices the same seasons as its siblings, without touching their prices. */
+  const handleSyncRoomSeasons = (tempId, roomKey) => {
+    const current = itemsToSave.find(entry => entry.tempId === tempId);
+    if (!current) return;
+    const room = (current.roomTypes || []).find(entry => entry.key === roomKey);
+    if (!room) return;
+    const existing = new Set(
+      (current.seasons || [])
+        .filter(season => season.roomKey === roomKey)
+        .map(season => `${seasonIdentityOf(season)}|${chargeTypeOf(season)}`)
+    );
+    const missing = seasonSkeletonsFor(current.seasons || [])
+      .filter(skeleton => !existing.has(`${seasonIdentityOf(skeleton)}|${chargeTypeOf(skeleton)}`))
+      .map(skeleton => ({
+        ...emptySeasonMoney(),
+        ...skeleton,
+        roomKey
+      }));
+    if (!missing.length) {
+      showToast('This room already prices every shared season', 'success');
+      return;
+    }
+    setItemsToSave(prev => prev.map(item => (
+      item.tempId === tempId ? { ...item, seasons: [...item.seasons, ...missing] } : item
+    )));
+    showToast(`${missing.length} shared season row${missing.length === 1 ? '' : 's'} copied to ${room.name || 'the room'}`, 'success');
   };
 
   /* The star grade belongs to the supplier (the hotel or lodge), not to one
@@ -2253,39 +2303,49 @@ export const LibraryItems = () => {
   const handleAddSeasonRow = (tempId, optionName = '', roomKey = '') => {
     const current = itemsToSave.find(entry => entry.tempId === tempId);
     if (!current) return;
+    const isAccommodationItem = current.category === 'Accommodation';
+    const rooms = isAccommodationItem ? (current.roomTypes || []) : [];
     const room = (current.roomTypes || []).find(entry => entry.key === roomKey) || current.roomTypes?.[0];
-    const seasonCount = room
-      ? current.seasons.filter(s => s.roomKey === room.key).length + 1
-      : current.seasons.length + 1;
-    const newSeason = {
+    const seasonCount = isAccommodationItem
+      ? sharedSeasonGroupsFor(current.seasons || []).length + 1
+      : (room ? current.seasons.filter(s => s.roomKey === room.key).length + 1 : current.seasons.length + 1);
+    const baseSeason = {
       seasonName: `Season ${seasonCount}`,
       /* The charge option this season belongs to. Empty means the
          item's default board; a named value makes it one option of a
          multi-price accommodation. */
       optionName: optionName || current.mealPlan || '',
-      /* A season is priced for one room type. The key is the room the
-         new row is entered under; a legacy one-room item leaves it on
-         its only room. */
-      roomKey: room?.key || '',
       validFrom: '',
       validTo: '',
       ...emptySeasonMoney()
     };
-    const newIndex = current.seasons.length;
+    /* A property's seasons are shared by its room types, so one new season
+       adds one row per room: every room prices the same season, and each keeps
+       its own money. */
+    const newSeasons = isAccommodationItem && rooms.length
+      ? rooms.map(entry => ({ ...baseSeason, roomKey: entry.key }))
+      : [{ ...baseSeason, roomKey: room?.key || '' }];
+    const startIndex = current.seasons.length;
+    const newIndices = newSeasons.map((_, offset) => startIndex + offset);
     setItemsToSave(prev => prev.map(item => (
-      item.tempId === tempId ? { ...item, seasons: [...item.seasons, newSeason] } : item
+      item.tempId === tempId ? { ...item, seasons: [...item.seasons, ...newSeasons] } : item
     )));
     /* Land on the row just added. The carousel remembers one index per item,
        so after a room switch it can still point at another room's season. */
     const grouped = hasChargeTypes(current.category);
     const navIndex = grouped
       ? accommodationSeasonGroupsFor(
-        [...current.seasons, newSeason],
-        current.category === 'Accommodation' ? (room?.key || '') : ''
-      ).findIndex(group => group.memberIndices.includes(newIndex))
-      : newIndex;
+        [...current.seasons, ...newSeasons],
+        isAccommodationItem ? (room?.key || '') : ''
+      ).findIndex(group => group.memberIndices.some(index => newIndices.includes(index)))
+      : startIndex;
+    /* The charge cursor is a row index, so point it at this room's clone rather
+       than at another room's row for the same season. */
+    const activeRoomOffset = isAccommodationItem && rooms.length
+      ? Math.max(0, rooms.findIndex(entry => entry.key === room?.key))
+      : 0;
     setActiveSeasonByItem(prev => ({ ...prev, [tempId]: Math.max(0, navIndex) }));
-    setActiveChargeByItem(prev => ({ ...prev, [tempId]: newIndex }));
+    setActiveChargeByItem(prev => ({ ...prev, [tempId]: startIndex + activeRoomOffset }));
   };
 
   /* A transfer names its vehicle from the company's own Settings list, and the
@@ -2411,15 +2471,9 @@ export const LibraryItems = () => {
     }));
   };
 
-  /* Some fields hold a list rather than a figure (the weekend weekdays), so they
-     are set as typed instead of going through the numeric clamp. */
-  const handleSeasonValueChange = (tempId, seasonIdx, field, value) => {
-    setItemsToSave(prev => prev.map(item => {
-      if (item.tempId !== tempId) return item;
-      const updatedSeasons = item.seasons.map((s, idx) => (idx === seasonIdx ? { ...s, [field]: value } : s));
-      return { ...item, seasons: updatedSeasons };
-    }));
-  };
+  /* Some fields hold a list rather than a figure (the weekend weekdays), so
+     handleSharedSeasonFieldChange sets them as typed instead of going through
+     the numeric clamp. */
 
   /* The villa ladder is typed one box per party size. A size with no figure is
      dropped from the ladder rather than stored at zero: a zero would quote the
@@ -2578,30 +2632,13 @@ export const LibraryItems = () => {
   };
 
   /* Accommodation is edited room-first, then season-first: a room carries
-     seasons, a season carries charge types. Passing a room key scopes the
-     groups to that room; the room key is part of the identity so two rooms
-     can use the same season name without merging. */
-  const accommodationSeasonGroupsFor = (seasons, roomKey = '') => {
-    const groups = [];
-    const byKey = new Map();
-    (seasons || []).forEach((season, index) => {
-      if (roomKey && season.roomKey !== roomKey) return;
-      const key = `${roomKey ? `${season.roomKey || ''}|` : ''}${season.seasonName || ''}|${season.validFrom || ''}|${season.validTo || ''}`;
-      if (!byKey.has(key)) {
-        byKey.set(key, {
-          key,
-          roomKey: season.roomKey || '',
-          seasonName: season.seasonName,
-          validFrom: season.validFrom,
-          validTo: season.validTo,
-          memberIndices: []
-        });
-        groups.push(byKey.get(key));
-      }
-      byKey.get(key).memberIndices.push(index);
-    });
-    return groups;
-  };
+     seasons, a season carries charge types. A season is a property-wide
+     structure, so the identity ignores the room and the same season across
+     rooms folds into one group. Passing a room key scopes the visible rows to
+     that room; sharedMemberIndices names every room's rows so an edit to the
+     season itself reaches them all. */
+  const accommodationSeasonGroupsFor = (seasons, roomKey = '') =>
+    sharedSeasonGroupsFor(seasons, roomKey);
 
   /* The charge type of a group currently being edited: the remembered one when
      it still belongs to that season, otherwise the season's first charge type. */
@@ -2612,7 +2649,9 @@ export const LibraryItems = () => {
   };
 
   /* Editing the season name / dates edits EVERY charge type of that season, so a
-     season is retyped or redated once rather than once per board basis. A linked
+     season is retyped or redated once rather than once per board basis. It also
+     edits every room's rows: the season is a property-wide structure, and the
+     caller passes sharedMemberIndices so the rename reaches all rooms. A linked
      fee keeps its own validity windows, so redating a room season here does not
      move the fee's calendar with it. */
   const handleSeasonGroupChange = (tempId, memberIndices, field, value) => {
@@ -2626,43 +2665,77 @@ export const LibraryItems = () => {
     }));
   };
 
-  /* Add a charge type to an EXISTING season: a fresh rate row that copies the
-     season's name and window and starts at zero, so the operator only types the
-     board basis and its prices. */
-  const handleAddChargeToSeason = (tempId, group, optionName = '') => {
-    if (!group) return;
+  /* A night band or weekend rule describes the season's charge type, not one
+     room. Editing it on the room on screen writes the same value to every
+     room's row for that season and charge type, so the rooms cannot drift into
+     different validity rules. Money is never touched here. */
+  const handleSharedSeasonFieldChange = (tempId, seasonIdx, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
+      const source = item.seasons[seasonIdx];
+      if (!source) return item;
+      const identity = seasonIdentityOf(source);
+      const targets = new Set(
+        seasonChargeRows(item.seasons, identity, source.optionName).map(row => row.index)
+      );
       return {
         ...item,
-        seasons: [
-          ...item.seasons,
-          {
-            seasonName: group.seasonName || 'Base Season',
-            optionName: (optionName || '').trim(),
-            roomKey: group.roomKey || '',
-            validFrom: group.validFrom || '',
-            validTo: group.validTo || '',
-            ...emptySeasonMoney()
-          }
-        ]
+        seasons: item.seasons.map((s, idx) => (targets.has(idx) ? { ...s, [field]: clampNonNegative(value) } : s))
       };
     }));
   };
 
-  /* Remove a whole season: every charge type it carries. */
-  const handleRemoveSeasonGroup = (tempId, group) => {
-    if (!group || group.memberIndices.length === 0) return;
-    const targets = new Set(group.memberIndices);
+  /* Add a charge type to an EXISTING season: a fresh rate row that copies the
+     season's name, window and shared rules and starts with blank money, so the
+     operator only types the board basis and its prices. A property's rooms all
+     carry the same charge type, so the row is created for every room. */
+  const handleAddChargeToSeason = (tempId, group, optionName = '') => {
+    if (!group) return;
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
+      const sourceIndex = group.memberIndices?.[0] ?? group.sharedMemberIndices?.[0];
+      const source = Number.isInteger(sourceIndex) ? item.seasons[sourceIndex] : null;
+      const base = {
+        ...emptySeasonMoney(),
+        ...(source ? sharedSeasonSkeletonOf(source) : {}),
+        seasonName: group.seasonName || source?.seasonName || 'Base Season',
+        optionName: (optionName || '').trim(),
+        validFrom: group.validFrom || '',
+        validTo: group.validTo || ''
+      };
+      const rooms = item.category === 'Accommodation' ? (item.roomTypes || []) : [];
+      const newRows = rooms.length
+        ? rooms.map(room => ({ ...base, roomKey: room.key }))
+        : [{ ...base, roomKey: group.roomKey || '' }];
+      return { ...item, seasons: [...item.seasons, ...newRows] };
+    }));
+    /* Land on the room's new charge row so its prices can be typed straight
+       away instead of the operator hunting for the charge chip. */
+    const current = itemsToSave.find(entry => entry.tempId === tempId);
+    const rooms = current?.category === 'Accommodation' ? (current.roomTypes || []) : [];
+    const startIndex = current?.seasons.length || 0;
+    const activeOffset = rooms.length
+      ? Math.max(0, rooms.findIndex(room => room.key === group.roomKey))
+      : 0;
+    setActiveChargeByItem(prev => ({ ...prev, [tempId]: startIndex + activeOffset }));
+  };
+
+  /* Remove a whole season: every charge type it carries, in every room. */
+  const handleRemoveSeasonGroup = (tempId, group) => {
+    if (!group) return;
+    const identity = group.key || seasonIdentityOf(group);
+    setItemsToSave(prev => prev.map(item => {
+      if (item.tempId !== tempId) return item;
+      const targets = new Set(seasonRowsWithIdentity(item.seasons, identity).map(row => row.index));
+      if (!targets.size) return item;
       const seasons = item.seasons.filter((_, idx) => !targets.has(idx));
       return { ...item, seasons: seasons.length ? seasons : item.seasons };
     }));
     setActiveSeasonByItem(prev => {
       const current = Number.isInteger(prev[tempId]) ? prev[tempId] : 0;
-      const remaining = itemsToSave.find(i => i.tempId === tempId)?.seasons.length || 0;
-      const total = Math.max(1, remaining - group.memberIndices.length);
+      const item = itemsToSave.find(entry => entry.tempId === tempId);
+      const hadSeason = item ? seasonRowsWithIdentity(item.seasons, identity).length > 0 : true;
+      const total = Math.max(1, sharedSeasonGroupsFor(item?.seasons).length - (hadSeason ? 1 : 0));
       return { ...prev, [tempId]: Math.max(0, Math.min(current, total - 1)) };
     });
   };
@@ -5950,8 +6023,9 @@ export const LibraryItems = () => {
                             <BedDouble size={18} color="#0369a1" /> Property, room types &amp; grading
                           </h4>
                           <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                            One supplier, one property, several room types. Each room carries its own seasons and rates below;
-                            the itinerary asks which room the travellers are in.
+                            One supplier, one property, several room types. Seasons and charge types are shared by
+                            every room; each room keeps its own prices below, and the itinerary asks which room the
+                            travellers are in.
                           </span>
                         </div>
 
@@ -6093,7 +6167,7 @@ export const LibraryItems = () => {
                                       color: room.key === activeKey ? '#0369a1' : '#475569'
                                     }}
                                   >
-                                    {room.key === activeKey ? 'Pricing below' : 'Price this room'}
+                                    {room.key === activeKey ? 'Editing rates' : 'Edit rates'}
                                   </button>
                                   <button
                                     type="button"
@@ -7366,7 +7440,7 @@ export const LibraryItems = () => {
                         <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '0.85rem 1rem', marginBottom: '1rem' }}>
                           {isAccomItem && rooms.length > 1 && (
                             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem', paddingBottom: '0.6rem', borderBottom: '1px solid #ede9fe' }}>
-                              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#5b21b6' }}>Pricing room:</span>
+                              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#5b21b6' }}>Rates for room:</span>
                               {rooms.map((room) => {
                                 const selected = room.key === activeRoomKey;
                                 return (
@@ -7390,7 +7464,7 @@ export const LibraryItems = () => {
                           <div style={{ fontWeight: 700, fontSize: '0.82rem', color: '#5b21b6', marginBottom: '0.2rem' }}>Charge types</div>
                           <div style={{ fontSize: '0.74rem', color: '#64748b', marginBottom: '0.6rem', lineHeight: 1.45 }}>
                             {isAccomItem
-                              ? <>One season is priced at several charge types (room only, half board, full board with activities). Add a charge type to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; below and set its prices in the matrix &mdash; on a drop the itinerary asks which season and charge type applies.
+                              ? <>Seasons and charge types (room only, half board, full board with activities) are shared by every room type; only the prices differ per room. Add a charge type to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; below and set its prices for the room selected above &mdash; on a drop the itinerary asks which season and charge type applies.
                                   {dbFeatures.nightBands && ' A charge type priced by the length of stay uses the same name again with its own night band, so it remains one charge type with an extra row.'}</>
                               : <>One Extras item can be priced at several charges instead of several library items: a fuel contract that sells 5 litres, a full tank and a different fuel again is three charge types on one item. Add one to &ldquo;{activeGroup?.seasonName || 'the current season'}&rdquo; and set its price below &mdash; on a drop the itinerary asks which charge the line is sold as.</>}
                           </div>
@@ -7544,7 +7618,7 @@ export const LibraryItems = () => {
                               </span>
                               {isAccom && (item.roomTypes || []).length > 1 && (
                                 <span
-                                  title="The room type these seasons and validity dates price"
+                                  title="Rates are entered for this room type; the seasons and validity dates are shared by every room"
                                   style={{ fontSize: '0.72rem', fontWeight: 600, color: '#0d7478', background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '999px', padding: '0.15rem 0.6rem', whiteSpace: 'nowrap' }}
                                 >
                                   {activeRoomFor(item, activeGroup?.roomKey)?.name || 'Untitled room'}
@@ -7585,7 +7659,7 @@ export const LibraryItems = () => {
                                 placeholder="e.g. Base / High Season"
                                 value={season.seasonName}
                                 onChange={(e) => (groupsSeasons
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'seasonName', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'seasonName', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'seasonName', e.target.value))} />
                             </div>
                             {groupsSeasons && (
@@ -7594,7 +7668,9 @@ export const LibraryItems = () => {
                                 <input type="text" className="pricing-select" list={`option-list-${item.tempId}`} style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                   placeholder={isAccom ? 'e.g. Half Board (blank = default)' : 'e.g. Fuel charge (blank = the item itself)'}
                                   value={season.optionName || ''}
-                                  onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'optionName', e.target.value)} />
+                                  onChange={(e) => (isAccom
+                                    ? handleSharedSeasonFieldChange(item.tempId, seasonIdx, 'optionName', e.target.value)
+                                    : handleSeasonChange(item.tempId, seasonIdx, 'optionName', e.target.value))} />
                               </div>
                             )}
                             {isAccom && dbFeatures.nightBands && (
@@ -7604,14 +7680,14 @@ export const LibraryItems = () => {
                                   <input type="number" min="1" step="1" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                     placeholder="every stay"
                                     value={season.minNights ?? ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'minNights', e.target.value)} />
+                                    onChange={(e) => handleSharedSeasonFieldChange(item.tempId, seasonIdx, 'minNights', e.target.value)} />
                                 </div>
                                 <div>
                                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.25rem' }}>Nights to</label>
                                   <input type="number" min="1" step="1" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                     placeholder="open ended"
                                     value={season.maxNights ?? ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'maxNights', e.target.value)} />
+                                    onChange={(e) => handleSharedSeasonFieldChange(item.tempId, seasonIdx, 'maxNights', e.target.value)} />
                                 </div>
                               </>
                             )}
@@ -7620,7 +7696,7 @@ export const LibraryItems = () => {
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validFrom}
                                 onChange={(e) => (groupsSeasons
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validFrom', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'validFrom', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validFrom', e.target.value))} />
                             </div>
                             <div>
@@ -7628,7 +7704,7 @@ export const LibraryItems = () => {
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validTo}
                                 onChange={(e) => (groupsSeasons
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validTo', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'validTo', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value))} />
                             </div>
                           </div>
@@ -8567,7 +8643,7 @@ export const LibraryItems = () => {
                               const next = days.includes(value)
                                 ? days.filter((day) => day !== value)
                                 : [...days, value].sort((a, b) => a - b);
-                              handleSeasonValueChange(item.tempId, seasonIdx, 'weekendDays', next);
+                              handleSharedSeasonFieldChange(item.tempId, seasonIdx, 'weekendDays', next);
                             };
                             /* Per-person weekend: the same three adult bands and the
                                child-age rows from the normal pricing section are reused,
@@ -8948,8 +9024,19 @@ export const LibraryItems = () => {
                     {item.category === 'Accommodation' && accommodationSeasonGroupsFor(item.seasons, activeRoomKeyFor(item)).length === 0 && (
                       <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.75rem 0.9rem', marginBottom: '0.75rem', fontSize: '0.8rem', color: '#92400e', lineHeight: 1.5 }}>
                         <strong>No seasons are priced for {activeRoomFor(item)?.name || 'this room'} yet.</strong>{' '}
-                        Each room type carries its own seasons and validity dates &mdash; another room&rsquo;s seasons never price this one.
-                        Use <strong>Add Season</strong> below to load this room&rsquo;s first season, then set its prices in the matrix.
+                        Seasons and charge types are shared by every room type; only the prices differ per room.
+                        Use <strong>Add Season</strong> below to create the property&rsquo;s next season for every room, then set this room&rsquo;s prices in the matrix.
+                        {accommodationSeasonGroupsFor(item.seasons, '').length > 0 && (
+                          <div style={{ marginTop: '0.55rem' }}>
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              onClick={() => handleSyncRoomSeasons(item.tempId, activeRoomKeyFor(item))}
+                            >
+                              Copy the shared seasons to this room
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
 
