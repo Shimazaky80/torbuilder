@@ -17,7 +17,11 @@
 
 export const TOUR_TYPES = {
   table: 'company_tour_types',
-  columns: 'id, company_id, name, is_active',
+  /* `rate_type` arrives with the tour-type contract migration. A database that
+     has not run it yet is retried against the long-standing columns, so the
+     builder keeps pricing off the tour type's name exactly as before. */
+  columns: 'id, company_id, name, is_active, rate_type',
+  baseColumns: 'id, company_id, name, is_active',
   keyColumn: 'name',
   label: 'tour type',
   orderBy: ['name', { ascending: true }]
@@ -98,6 +102,7 @@ export const vocabularyOverridePayload = (sharedRow, changes = {}, companyId, ke
   if (sharedRow.name) carried.name = sharedRow.name;
   if (sharedRow.max_capacity !== undefined && sharedRow.max_capacity !== null) carried.max_capacity = sharedRow.max_capacity;
   if (sharedRow.is_active !== undefined && sharedRow.is_active !== null) carried.is_active = sharedRow.is_active;
+  if (sharedRow.rate_type !== undefined) carried.rate_type = sharedRow.rate_type;
   if (sharedRow.sort_order !== undefined && sharedRow.sort_order !== null) carried.sort_order = sharedRow.sort_order;
   const payload = { company_id: companyId, ...carried, ...changes };
   if (keyColumn === 'name') payload.name = sharedRow.name;

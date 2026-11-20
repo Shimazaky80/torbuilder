@@ -36,6 +36,7 @@ import { LANGUAGES, SOURCE_LANGUAGE, enabledLanguageCodes, textI18nPayload, tran
 import { documentLanguagesColumn, textI18nColumn } from '../lib/i18n/textI18nColumn';
 import { refreshTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { TOUR_TYPES, VEHICLE_TYPES, mergeVocabulary, vocabularyKey, vocabularyOverridePayload, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { TOUR_TYPE_CONTRACTS } from '../lib/rateTypes';
 import {
   PLACE_COLUMNS,
   PLACE_PAGE_SIZE,
@@ -447,11 +448,15 @@ export const Settings = () => {
      two carry the same key. */
   const fetchTourTypes = useCallback(async (cid) => {
     if (!cid) return;
-    const { data, error } = await supabase
+    const read = (columns) => supabase
       .from(TOUR_TYPES.table)
-      .select(TOUR_TYPES.columns)
+      .select(columns)
       .or(vocabularyReadFilter(cid))
       .order(...TOUR_TYPES.orderBy);
+    let { data, error } = await read(TOUR_TYPES.columns);
+    /* The contract column ships with its own migration; an unmigrated database
+       answers the long-standing select instead of failing the whole card. */
+    if (error) ({ data, error } = await read(TOUR_TYPES.baseColumns));
     if (error) throw error;
     setTourTypes(mergeVocabulary(data, TOUR_TYPES.keyColumn));
   }, []);
@@ -602,8 +607,24 @@ export const Settings = () => {
     }
   };
 
-  const handleVehicleTypeSubmit = async (event) => {
-    event.preventDefault();
+  /* The contract a tour type's work is priced under. This is the mapping the
+     builders read instead of guessing from the name, so a tenant's own type
+     ("STO", "Private Series") prices the right rate rows. */
+  const handleTourTypeContract = async (tourType, value) => {
+    if (!companyId) return;
+    setSaving(true);
+    try {
+      await saveVocabularyRow(TOUR_TYPES, tourType, { rate_type: value || null });
+      await fetchTourTypes(companyId);
+      showToast('Contract updated', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not update contract', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleVehicleTypeSubmit = async (event) => {    event.preventDefault();
     const name = vehicleForm.name.trim();
     const capacity = Math.floor(Number(vehicleForm.capacity));
     if (!companyId) {
@@ -1202,7 +1223,8 @@ const handleSavePriceProtection = async () => {
     /* The translation column is only sent once the tenant has switched a second
        language on. An English-only tenant has nothing to store, so its saves
        stay exactly what they were before this column existed. */
-    const multiLanguage = (billing.document_languages || [SOURCE_LANGUAGE]).length > 1;
+    const hasTranslations = Boolean(billing.text_i18n && Object.keys(billing.text_i18n).length > 0);
+    const multiLanguage = ((billing.document_languages || [SOURCE_LANGUAGE]).length > 1) || hasTranslations;
     const ok = await saveBillingFields({
       itinerary_pricing_position: ['above', 'below'].includes(billing.itinerary_pricing_position) ? billing.itinerary_pricing_position : 'above',
       itinerary_terms: billing.itinerary_terms || '',
@@ -1438,7 +1460,7 @@ const handleSavePriceProtection = async () => {
             <Compass size={18} color="#0d7478" /> Tour Types
           </h2>
           <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-            Manage the options available when creating itineraries. The list is shared with every operator on the platform: add your own types, switch a standard one off for your company, and the names you gave your itineraries keep working. A standard type's name is shared too, so it cannot be renamed here - only switched off, or copied into a name of your own. Deactivated types remain on existing itineraries but are hidden from new selections.
+            Manage the options available when creating itineraries. The list is shared with every operator on the platform: add your own types, switch a standard one off for your company, and the names you gave your itineraries keep working. A standard type's name is shared too, so it cannot be renamed here - only switched off, or copied into a name of your own. Deactivated types remain on existing itineraries but are hidden from new selections. The Contract column tells the builders which supplier rate rows a trip of this type is priced from: FIT, Series, any contract, or Automatic, which reads the name as before.
           </p>
         </div>
         <form onSubmit={handleTourTypeSubmit} style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
@@ -1471,11 +1493,25 @@ const handleSavePriceProtection = async () => {
           <div style={{ padding: '1rem 0', color: '#64748b' }}>No tour types configured.</div>
         ) : (
           <table className="admin-table">
-            <thead><tr><th>Tour type</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+            <thead><tr><th>Tour type</th><th>Contract</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
             <tbody>
               {tourTypes.map((tourType) => (
                 <tr key={tourType.id} style={tourType.is_active ? undefined : { opacity: 0.65 }}>
                   <td style={{ fontWeight: 700 }}>{tourType.name}<VocabularyTag shared={tourType.shared} /></td>
+                  <td>
+                    <SearchableSelect
+                      className="sidebar-select"
+                      style={{ ...fieldStyle, minWidth: '13rem' }}
+                      value={tourType.rate_type ?? ''}
+                      disabled={saving}
+                      onChange={(event) => handleTourTypeContract(tourType, event.target.value)}
+                      aria-label={`Contract for ${tourType.name}`}
+                    >
+                      {TOUR_TYPE_CONTRACTS.map((contract) => (
+                        <option key={contract.id || 'auto'} value={contract.id}>{contract.label}</option>
+                      ))}
+                    </SearchableSelect>
+                  </td>
                   <td>{tourType.is_active ? 'Active' : 'Inactive'}</td>
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'inline-flex', gap: '0.4rem' }}>

@@ -96,6 +96,22 @@ export const isSurchargeItem = (item) => {
   return category === SURCHARGE_CATEGORY || category === LEGACY_SURCHARGE_CATEGORY || /surcharge/i.test(category);
 };
 
+/* Conservation levies, park fees, entrance fees, tickets, porterage, toll fees,
+   and any other surcharge fees are excluded from the day-by-day routing in export
+   documents and must only show under Inclusions. */
+export const isFeeLevyOrTollItem = (item) => {
+  if (!item) return false;
+  if (isSurchargeItem(item)) return true;
+  const cat = String(item.category || '').trim().toLowerCase();
+  const name = String(item.item_name || item.name || '').trim().toLowerCase();
+  const feeType = String(item.surcharge_type || item.fee_type || '').trim().toLowerCase();
+  if (['fees & tickets', 'surcharge fees', 'fees', 'levies', 'tickets', 'ticket'].includes(cat)) return true;
+  if (/fee|levy|levies|porterage|toll/.test(cat)) return true;
+  if (/fee|levy|levies|porterage|toll/.test(feeType)) return true;
+  if (/conservation\s*lev(y|ies)|park\s*fee|entrance\s*fee|porterage|toll\s*(fee)?/i.test(name)) return true;
+  return false;
+};
+
 export const surchargeTypeOf = (item) => {
   const raw = String(item?.surcharge_type || item?.fee_type || '').toLowerCase();
   if (raw.includes('conservation')) return 'conservation_levy';

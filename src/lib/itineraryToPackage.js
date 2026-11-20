@@ -299,15 +299,16 @@ const packageNameFor = (meta) => {
   return /package$/i.test(base) ? base : `${base} Package`;
 };
 
-const descriptionFor = (meta, start, end) => {
-  const reference = String(meta?.referenceNumber || '').trim();
-  const source = reference ? `Converted from itinerary ${reference}` : 'Converted from an itinerary';
-  const fromM = monthOf(start);
-  const toM = monthOf(end || start);
-  const seasonName = fromM ? monthRangeLabel(fromM, toM) : '';
-  const dates = seasonName ? ` (${seasonName})` : '';
-  return `${source}${dates}.`;
-};
+/* A package is its own product, not a footnote on the itinerary it came from.
+   The description therefore starts empty for the operator to write, and any
+   older package still carrying the conversion note has it stripped on load and
+   on export so a client never reads internal provenance. */
+const CONVERSION_NOTE = /^\s*Converted from (?:itinerary\s+\S+|an itinerary)(?:\s*\([^)]*\))?\.?\s*/i;
+
+export const stripConversionNote = (value) => String(value || '')
+  .replace(CONVERSION_NOTE, '')
+  .replace(/\bConverted from itinerary\s+\S+(?:\s*\([^)]*\))?\.?/gi, '')
+  .trim();
 
 export const buildItineraryPackage = ({
   meta = {},
@@ -317,7 +318,9 @@ export const buildItineraryPackage = ({
   fallbackPax = 0,
   travelWindow = {},
   currencyCode = 'ZAR',
-  vehicleTypes = []
+  vehicleTypes = [],
+  inclusions = '',
+  exclusions = ''
 } = {}) => {
   const currency = String(currencyCode || 'ZAR').trim().toUpperCase() || 'ZAR';
   const start = String(travelWindow?.start || '').trim();
@@ -372,7 +375,12 @@ export const buildItineraryPackage = ({
   const hasTravellers = Array.isArray(meta?.travellers) && meta.travellers.length > 0;
   return {
     name: packageNameFor(meta),
-    description: descriptionFor(meta, start, end),
+    description: '',
+    /* The itinerary's own inclusions and exclusions are part of what it sells,
+       so the package it becomes starts with the same promise rather than an
+       empty page the operator has to retype. */
+    inclusions: String(inclusions || '').trim(),
+    exclusions: String(exclusions || '').trim(),
     currency_code: currency,
     accepts_children: hasTravellers ? clientChildren(meta).length > 0 : (Number(meta?.numChildren) || 0) > 0,
     child_age_ranges: childRange ? [childRange] : [],

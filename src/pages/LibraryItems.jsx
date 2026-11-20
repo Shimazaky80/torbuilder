@@ -5,6 +5,7 @@ import { useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
+import { useSession } from '../hooks/useSession';
 import ConfirmDialog from '../components/ConfirmDialog';
 import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
@@ -24,6 +25,7 @@ import { normalizeRoomTypes, roomForRate, roomsFromRates } from '../lib/roomType
 import {
   seasonIdentityOf,
   chargeTypeOf,
+  contractRowsForSeason,
   seasonChargeRows,
   seasonRowsWithIdentity,
   seasonSkeletonsFor,
@@ -31,6 +33,7 @@ import {
   sharedSeasonSkeletonOf
 } from '../lib/roomSeasons';
 import { OCCUPANCY_BASIS, normalizeOccupancyLadder, occupancyLadderError } from '../lib/occupancyPricing';
+import { RATE_TYPES, normalizeRateType } from '../lib/rateTypes';
 import { fetchRoomTypesForItems, roomTypesReady as probeRoomTypesReady } from '../lib/roomTypeTable';
 import { itemDestinationLabel } from '../lib/libraryItemDetail';
 import {
@@ -625,6 +628,8 @@ const TierLadderEditor = ({
    render; a saved room uses its database id on the next load. */
 
 export const LibraryItems = () => {
+  const { can } = useSession();
+  const mayWrite = can('library', 'write');
   const [suppliers, setSuppliers] = useState([]);
   const [confirmDialog, confirm] = useConfirm();
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
@@ -693,7 +698,7 @@ export const LibraryItems = () => {
   const [saving, setSaving] = useState(false);
 
   // DB feature detection (columns may be missing until migrations are applied)
-  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, staffOptions: false, minPaxToRun: false, feeChildRate: false, rentalContractFee: false, textI18n: false, stayPay: false });
+  const [dbFeatures, setDbFeatures] = useState({ guideDriver: true, guideMinRooms: true, guideDriverTiers: true, contracts: true, tieredPricing: true, transferType: true, feeType: true, driverOption: true, tourType: true, transportType: true, surchargeFees: true, pricesByVehicle: false, tourLeaderTiers: true, singleSupplementTiers: false, nightBands: false, weekendRates: false, occupancyPricing: false, roomChargeBasis: false, roomChildContracts: false, rateTypes: false, staffOptions: false, minPaxToRun: false, feeChildRate: false, rentalContractFee: false, textI18n: false, stayPay: false });
 
   /* The languages this tenant writes content in. The tabs the editors show are
      this list narrowed by the column actually existing: a tenant that switched
@@ -996,6 +1001,18 @@ export const LibraryItems = () => {
     return result;
   }
 
+  function sharingRulesForRoom(room, currentRules = []) {
+    const occupancy = Math.max(1, parseInt(room?.maxOccupancy, 10) || 2);
+    const rules = ensureSharingRules(room?.maxAdults || occupancy, occupancy, currentRules);
+    const childCap = parseInt(room?.maxChildren, 10);
+    return rules.map((rule) => ({
+      ...rule,
+      maxChildren: Number.isFinite(childCap)
+        ? Math.min(rule.maxChildren, Math.max(0, childCap))
+        : rule.maxChildren
+    }));
+  }
+
   /* Rules seeded under an older ceiling keep their old auto-derived values
      after a room type starts sleeping more guests. A row still holding the old
      auto value (old ceiling minus adults) follows the new ceiling; a row the
@@ -1100,6 +1117,9 @@ export const LibraryItems = () => {
          how many sleep in it and only name a child limit when they have one, so
          the blank is the common contract rather than an unfilled box. */
       maxChildren: null,
+      childPolicy: 'standard',
+      childAgeRanges: [],
+      sharingCapacityRules: [],
       /* A villa is contracted on how many sleep in it; a standard room on its
          adult count. The room carries the choice so one property can hold both,
          and the smallest party the ladder sells - the price bands themselves are
@@ -1119,6 +1139,8 @@ export const LibraryItems = () => {
     const initialMaxOcc = 2;
     const initialMaxAdults = 2;
     const defaultRoom = newRoomTemplate('Standard Room');
+    defaultRoom.childAgeRanges = defaultAgeBands.map((band) => ({ ...band }));
+    defaultRoom.sharingCapacityRules = sharingRulesForRoom(defaultRoom);
 
     return {
       tempId: Date.now() + Math.random(),
@@ -1218,9 +1240,36 @@ export const LibraryItems = () => {
     };
   }
 
-  const handleSharingRuleChange = (tempId, adultCount, maxChildrenVal) => {
+  const handleSharingRuleChange = (tempId, adultCount, maxChildrenVal, roomKey = '') => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
+        if (roomKey && item.category === 'Accommodation' && dbFeatures.roomChildContracts) {
+          const room = (item.roomTypes || []).find((candidate) => candidate.key === roomKey);
+          if (!room) return item;
+          const roomOccupancy = Math.max(1, parseInt(room.maxOccupancy, 10) || 2);
+          const roomChildCap = parseInt(room.maxChildren, 10);
+          const rowMaxAllowed = Math.max(0, Math.min(
+            roomOccupancy - adultCount,
+            Number.isFinite(roomChildCap) ? roomChildCap : roomOccupancy
+          ));
+          const currentRules = room.sharingCapacityRules?.length
+            ? room.sharingCapacityRules
+            : sharingRulesForRoom(room);
+          const parsedVal = maxChildrenVal === ''
+            ? ''
+            : Math.max(0, Math.min(rowMaxAllowed, parseInt(maxChildrenVal, 10) || 0));
+          const sharingCapacityRules = currentRules.map((rule) => (
+            parseInt(rule.adults, 10) === parseInt(adultCount, 10) ? { ...rule, maxChildren: parsedVal } : rule
+          ));
+          return {
+            ...item,
+            roomTypes: (item.roomTypes || []).map((candidate) => (
+              candidate.key === roomKey
+                ? { ...candidate, sharingCapacityRules, hasSharingCapacityRules: true }
+                : candidate
+            ))
+          };
+        }
         const hasRooms = item.category === 'Accommodation' && Array.isArray(item.roomTypes) && item.roomTypes.length > 0 && roomsReady;
         const safeMaxOcc = hasRooms
           ? (roomCeilingOf(item.roomTypes) || 2)
@@ -1267,6 +1316,8 @@ export const LibraryItems = () => {
     let seq = rooms.length + 1;
     while (used.has(`room_${seq}`)) seq += 1;
     const room = newRoomTemplate('', `room_${seq}`);
+    room.childAgeRanges = (current?.childAgeRanges || []).map((band) => ({ ...band }));
+    room.sharingCapacityRules = sharingRulesForRoom(room);
     /* A property's seasons are shared by its rooms, so a new room starts with
        the same season skeleton and blank money: the operator only types the
        room's own rates instead of rebuilding every season and charge type. */
@@ -1311,28 +1362,56 @@ export const LibraryItems = () => {
         const number = Math.max(1, parseInt(value, 10) || 0);
         if (field === 'maxOccupancy') {
           const maxOccupancy = Math.min(30, number);
+          const maxAdults = Math.min(room.maxAdults || 1, maxOccupancy);
           const statedChildren = parseInt(room.maxChildren, 10);
+          const maxChildren = Number.isFinite(statedChildren)
+            ? Math.min(maxOccupancy, Math.max(0, statedChildren))
+            : null;
+          const sharingCapacityRules = sharingRulesForRoom(
+            { ...room, maxOccupancy, maxAdults, maxChildren },
+            rebaseSharingRules(maxAdults, room.maxOccupancy || 1, maxOccupancy, room.sharingCapacityRules)
+          );
           return {
             ...room,
             maxOccupancy,
-            maxAdults: Math.min(room.maxAdults || 1, maxOccupancy),
+            maxAdults,
             /* Fewer beds cannot mean more children. A room that never stated a
                child cap keeps it unstated - shrinking the room does not turn a
                property that does not split its guests into one that refuses
                them. */
-            maxChildren: Number.isFinite(statedChildren)
-              ? Math.min(maxOccupancy, Math.max(0, statedChildren))
-              : null
+            maxChildren,
+            sharingCapacityRules,
+            hasSharingCapacityRules: dbFeatures.roomChildContracts || room.hasSharingCapacityRules
           };
         }
         if (field === 'maxAdults') {
-          return { ...room, maxAdults: Math.min(number, room.maxOccupancy || number) };
+          const maxAdults = Math.min(number, room.maxOccupancy || number);
+          return {
+            ...room,
+            maxAdults,
+            sharingCapacityRules: sharingRulesForRoom(
+              { ...room, maxAdults },
+              rebaseSharingRules(maxAdults, room.maxOccupancy || 1, room.maxOccupancy || 1, room.sharingCapacityRules)
+            ),
+            hasSharingCapacityRules: dbFeatures.roomChildContracts || room.hasSharingCapacityRules
+          };
         }
         if (field === 'maxChildren') {
           const stated = parseInt(value, 10);
-          if (!Number.isFinite(stated)) return { ...room, maxChildren: null };
+          if (!Number.isFinite(stated)) return {
+            ...room,
+            maxChildren: null,
+            sharingCapacityRules: sharingRulesForRoom({ ...room, maxChildren: null }, room.sharingCapacityRules),
+            hasSharingCapacityRules: dbFeatures.roomChildContracts || room.hasSharingCapacityRules
+          };
           const ceiling = Math.max(1, parseInt(room.maxOccupancy, 10) || 2);
-          return { ...room, maxChildren: Math.min(ceiling, Math.max(0, stated)) };
+          const maxChildren = Math.min(ceiling, Math.max(0, stated));
+          return {
+            ...room,
+            maxChildren,
+            sharingCapacityRules: sharingRulesForRoom({ ...room, maxChildren }, room.sharingCapacityRules),
+            hasSharingCapacityRules: dbFeatures.roomChildContracts || room.hasSharingCapacityRules
+          };
         }
         return room;
       });
@@ -1445,9 +1524,12 @@ export const LibraryItems = () => {
     setSuppliers(prev => prev.map(s => (s.id === selectedSupplierId ? { ...s, star_rating: rating } : s)));
   };
 
-  const handleAddChildAgeBand = (tempId) => {    setItemsToSave(prev => prev.map(item => {
+  const handleAddChildAgeBand = (tempId, roomKey = '') => {    setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        const currentBands = item.childAgeRanges || [];
+        const room = roomKey && dbFeatures.roomChildContracts
+          ? (item.roomTypes || []).find((candidate) => candidate.key === roomKey)
+          : null;
+        const currentBands = room ? (room.childAgeRanges || []) : (item.childAgeRanges || []);
         const newBandId = 'band_' + Date.now();
         const lastBand = currentBands[currentBands.length - 1];
         const nextAgeFrom = lastBand ? (lastBand.ageTo + 1) : 0;
@@ -1457,6 +1539,16 @@ export const LibraryItems = () => {
           ageFrom: nextAgeFrom,
           ageTo: nextAgeFrom + 5
         };
+        if (room) {
+          return {
+            ...item,
+            roomTypes: item.roomTypes.map((candidate) => (
+              candidate.key === roomKey
+                ? { ...candidate, childAgeRanges: [...currentBands, newBand], hasChildAgeRanges: true }
+                : candidate
+            ))
+          };
+        }
         return {
           ...item,
           childAgeRanges: [...currentBands, newBand]
@@ -1466,10 +1558,14 @@ export const LibraryItems = () => {
     }));
   };
 
-  const handleUpdateChildAgeBand = (tempId, bandIdx, field, val) => {
+  const handleUpdateChildAgeBand = (tempId, bandIdx, field, val, roomKey = '') => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId === tempId) {
-        const updated = (item.childAgeRanges || []).map((b, idx) => {
+        const room = roomKey && dbFeatures.roomChildContracts
+          ? (item.roomTypes || []).find((candidate) => candidate.key === roomKey)
+          : null;
+        const currentBands = room ? (room.childAgeRanges || []) : (item.childAgeRanges || []);
+        const updated = currentBands.map((b, idx) => {
           if (idx === bandIdx) {
             const parsedVal = (field === 'ageFrom' || field === 'ageTo')
               ? Math.max(0, parseInt(val) || 0)
@@ -1478,18 +1574,47 @@ export const LibraryItems = () => {
           }
           return b;
         });
+        if (room) {
+          return {
+            ...item,
+            roomTypes: item.roomTypes.map((candidate) => (
+              candidate.key === roomKey
+                ? { ...candidate, childAgeRanges: updated, hasChildAgeRanges: true }
+                : candidate
+            ))
+          };
+        }
         return { ...item, childAgeRanges: updated };
       }
       return item;
     }));
   };
 
-  const handleRemoveChildAgeBand = (tempId, bandIdx) => {
+  const handleRemoveChildAgeBand = (tempId, bandIdx, roomKey = '') => {
     setItemsToSave(prev => prev.map(item => {
-      if (item.tempId === tempId && (item.childAgeRanges || []).length > 1) {
+      if (item.tempId === tempId) {
+        const room = roomKey && dbFeatures.roomChildContracts
+          ? (item.roomTypes || []).find((candidate) => candidate.key === roomKey)
+          : null;
+        const currentBands = room ? (room.childAgeRanges || []) : (item.childAgeRanges || []);
+        if (currentBands.length <= 1) return item;
+        if (room) {
+          return {
+            ...item,
+            roomTypes: item.roomTypes.map((candidate) => (
+              candidate.key === roomKey
+                ? {
+                    ...candidate,
+                    childAgeRanges: currentBands.filter((_, idx) => idx !== bandIdx),
+                    hasChildAgeRanges: true
+                  }
+                : candidate
+            ))
+          };
+        }
         return {
           ...item,
-          childAgeRanges: item.childAgeRanges.filter((_, idx) => idx !== bandIdx)
+          childAgeRanges: currentBands.filter((_, idx) => idx !== bandIdx)
         };
       }
       return item;
@@ -1610,8 +1735,9 @@ export const LibraryItems = () => {
           contracts, tieredPricing, transferType, tourType, transportType,
           feeTypeLib, feeTypeRates, driverOption, surchargeFees,
           pricesByVehicle, tourLeaderTiers, singleSupplementTiers, nightBands, weekendRates, weekendRatesPerPerson,
-          roomPricingModel, occupancyRatesColumn, staffOptions, minPaxToRun, entranceFeeChildRate,
-          rentalContractFee, textI18n, stayPay, fuelIncluded, carFuelIncluded
+          roomPricingModel, occupancyRatesColumn, roomChildContracts, staffOptions, minPaxToRun, entranceFeeChildRate,
+          rentalContractFee, textI18n, stayPay, fuelIncluded, carFuelIncluded,
+          rateTypes
         ] = await Promise.all([
           hasColumns('item_rates', ['guide_rate', 'driver_rate', 'guide_meal_plan', 'driver_meal_plan']),
           hasColumns('library_items', ['guide_min_rooms']),
@@ -1638,6 +1764,7 @@ export const LibraryItems = () => {
              exist before the editor offers the basis, or a save would write a
              column the database has not got. */
           hasColumns('library_item_room_types', ['pricing_model']),
+          hasColumns('library_item_room_types', ['child_policy', 'child_age_ranges', 'sharing_capacity_rules']),
           hasColumns('item_rates', ['occupancy_rates']),
           /* Which meals the crew eats and whether the supplier sells the guide a
              seat: three item-level flags that arrive on the same migration, so
@@ -1663,7 +1790,11 @@ export const LibraryItems = () => {
              on the rate table for transfers/transport and on the hire table for
              car rental. Until it lands the editors keep the question closed. */
           hasColumns('item_rates', ['fuel_included']),
-          hasColumns('car_rental_rates', ['fuel_included'])
+          hasColumns('car_rental_rates', ['fuel_included']),
+          /* FIT and Series contracts on one room arrive with 20261267. Until the
+             column lands the season editor keeps the contract unstated and every
+             row prices every booking, exactly as before. */
+          hasColumns('item_rates', ['rate_type'])
         ]);
         setDbFeatures({
           guideDriver: guideDriverRates,
@@ -1683,7 +1814,13 @@ export const LibraryItems = () => {
           nightBands,
           weekendRates,
           weekendRatesPerPerson,
+          /* The room's own basis needs only the room column; the occupancy
+             ladder needs the rate column too. Keeping them apart lets a room be
+             charged per room on a database without the villa ladder. */
+          roomChargeBasis: roomPricingModel,
           occupancyPricing: roomPricingModel && occupancyRatesColumn,
+          roomChildContracts,
+          rateTypes,
           staffOptions,
           minPaxToRun,
           feeChildRate: entranceFeeChildRate,
@@ -2346,6 +2483,51 @@ export const LibraryItems = () => {
       : 0;
     setActiveSeasonByItem(prev => ({ ...prev, [tempId]: Math.max(0, navIndex) }));
     setActiveChargeByItem(prev => ({ ...prev, [tempId]: startIndex + activeRoomOffset }));
+  };
+
+  const handleAddAccommodationContract = (tempId, group, rateType) => {
+    const current = itemsToSave.find((entry) => entry.tempId === tempId);
+    if (!current || current.category !== 'Accommodation' || !group) return;
+
+    const hasContract = (current.seasons || []).some((season) => (
+      String(season.seasonName || '').trim() === String(group.seasonName || '').trim()
+      && String(season.validFrom || '') === String(group.validFrom || '')
+      && String(season.validTo || '') === String(group.validTo || '')
+      && normalizeRateType(season.rateType) === rateType
+    ));
+    if (hasContract) {
+      showToast(`A ${rateType === 'fit' ? 'FIT' : 'Series'} rate already exists for this season.`, 'warning');
+      return;
+    }
+
+    const roomKeys = (current.roomTypes || []).map((room) => room.key).filter(Boolean);
+    const newRows = contractRowsForSeason({
+      seasons: current.seasons || [],
+      group,
+      rateType,
+      roomKeys,
+      emptyRate: emptySeasonMoney
+    });
+    if (!newRows.length) {
+      showToast('Could not add this contract rate because the season has no rows to copy.', 'error');
+      return;
+    }
+
+    const startIndex = current.seasons.length;
+    const nextSeasons = [...current.seasons, ...newRows];
+    setItemsToSave((previous) => previous.map((item) => (
+      item.tempId === tempId ? { ...item, seasons: nextSeasons } : item
+    )));
+
+    const roomKey = activeRoomKeyFor(current);
+    const groups = accommodationSeasonGroupsFor(nextSeasons, roomKey);
+    const newGroupIndex = groups.findIndex((seasonGroup) => seasonGroup.key === seasonIdentityOf(newRows[0]));
+    const roomRowOffset = newRows.findIndex((season) => season.roomKey === roomKey);
+    setActiveSeasonByItem((previous) => ({ ...previous, [tempId]: Math.max(0, newGroupIndex) }));
+    setActiveChargeByItem((previous) => ({
+      ...previous,
+      [tempId]: startIndex + Math.max(0, roomRowOffset)
+    }));
   };
 
   /* A transfer names its vehicle from the company's own Settings list, and the
@@ -3550,7 +3732,16 @@ export const LibraryItems = () => {
               max_occupancy: occupancy,
               max_adults: Math.min(occupancy, Math.max(1, parseInt(room.maxAdults) || occupancy)),
               max_children: childCapPayload(room, occupancy),
-              ...(dbFeatures.occupancyPricing
+              ...(dbFeatures.roomChildContracts
+                ? {
+                    child_policy: room.childPolicy || (parseInt(room.maxChildren, 10) === 0 ? 'adults_only' : 'standard'),
+                    child_age_ranges: Array.isArray(room.childAgeRanges) ? room.childAgeRanges : [],
+                    sharing_capacity_rules: Array.isArray(room.sharingCapacityRules) && room.sharingCapacityRules.length
+                      ? room.sharingCapacityRules
+                      : sharingRulesForRoom(room)
+                  }
+                : {}),
+              ...(dbFeatures.roomChargeBasis
                 ? { pricing_model: roomPricingModelOf(room, itemData) }
                 : {}),
               sort_order: roomIndex,
@@ -3991,7 +4182,14 @@ export const LibraryItems = () => {
                 ? surchargeRateFees(itemData, s)
                 : {})
             };
-          });
+          }).map((row, index) => (
+            /* FIT and Series are two prices for one season, so the contract is
+               written on the rate row it prices. A row the operator left unstated
+               is NULL and still prices every booking. */
+            dbFeatures.rateTypes
+              ? { ...row, rate_type: normalizeRateType(itemData.seasons[index]?.rateType) || null }
+              : row
+          ));
 
           const { error: ratesErr } = await supabase.from('item_rates').insert(ratesPayload);
           if (ratesErr) throw ratesErr;
@@ -4196,6 +4394,17 @@ export const LibraryItems = () => {
     const roomList = !isAccommodation
       ? []
       : (storedRooms.length ? storedRooms : (derivedRooms.length ? derivedRooms : [newRoomTemplate('Standard Room')]));
+    const storedSharingRules = Array.isArray(item.sharing_capacity_rules) && item.sharing_capacity_rules.length
+      ? item.sharing_capacity_rules
+      : ensureSharingRules(maxAdults, maxOcc, []);
+    const roomListWithContracts = roomList.map((room) => ({
+      ...room,
+      childAgeRanges: room.hasChildAgeRanges ? room.childAgeRanges : childBands,
+      sharingCapacityRules: sharingRulesForRoom(
+        room,
+        room.hasSharingCapacityRules ? room.sharingCapacityRules : storedSharingRules
+      )
+    }));
     const roomKeyForRate = (rate) => roomForRate(rate, roomList)?.key || roomList[0]?.key || '';
 
     /* The smallest party a villa sells to is the first band its own rate rows
@@ -4208,13 +4417,13 @@ export const LibraryItems = () => {
       if (!bands.length) return 2;
       return Math.max(1, Math.min(...bands.map((band) => band.minPax)));
     };
-    const roomListWithFloor = roomList.map((room) => (
+    const roomListWithFloor = roomListWithContracts.map((room) => (
       isOccupancyRoom(room, { pricingModel }) ? { ...room, occupancyFrom: occupancyFloorForRoom(room) } : room
     ));
 
     const defaultChildRates = {};
 
-    const seasons = rates.length > 0 ? rates.map(r => {
+    const seasons = (rates.length > 0 ? rates.map(r => {
       if (isGuideCategory(item.category)) {
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
@@ -4379,7 +4588,11 @@ export const LibraryItems = () => {
       validTo: '',
       ...(isAccommodation ? { roomKey: roomList[0]?.key || '' } : {}),
       ...emptySeasonMoney()
-    }];
+    }]).map((season, index) => (
+      /* The contract rides on the rate row, so a season loads with the one it
+         was priced under. Rows saved before the column existed load unstated. */
+      rates[index] ? { ...season, rateType: normalizeRateType(rates[index].rate_type) } : season
+    ));
 
     /* Rows come back one per (group × season × band), so fold them the same way the
        pricing engine does: a card per vehicle group, a season inside it per Rental
@@ -4634,20 +4847,20 @@ export const LibraryItems = () => {
             </div>
 
             {/* Toggle Add Library Item Inline Form */}
-            <button
+            {mayWrite && <button
               className="primary-btn"
               style={{ width: 'auto', padding: '0.625rem 1.25rem', height: '42px', background: '#0d7478' }}
               onClick={() => setShowInlineForm(!showInlineForm)}
             >
               <Plus size={18} /> {showInlineForm ? 'Close Form' : 'Add Library Item'}
-            </button>
+            </button>}
           </div>
 
         </div>
       </header>
 
       {/* FULL-WIDTH INLINE CREATION / EDIT FORM BLOCK (No Modals!) */}
-      {showInlineForm && (
+      {showInlineForm && mayWrite && (
         <div id="library-item-form" style={{
           background: '#fff',
           borderRadius: '16px',
@@ -5037,11 +5250,28 @@ export const LibraryItems = () => {
               {/* DYNAMIC LIBRARY ITEM CARDS */}
               {itemsToSave.map((item, itemIdx) => {
                 const isTourStyle = isTourStyleCategory(item.category);
+                const hasRoomChildContracts = item.category === 'Accommodation'
+                  && roomsReady
+                  && dbFeatures.roomChildContracts;
+                const childContractRoom = item.category === 'Accommodation' && roomsReady
+                  ? activeRoomFor(item)
+                  : null;
                 /* With room types, the widest room answers "how many in one
                    room"; without them the item's own ceiling still does. */
-                const roomCeiling = item.category === 'Accommodation' && roomsReady
-                  ? (Math.max(0, ...(item.roomTypes || []).map(room => parseInt(room.maxOccupancy) || 0)) || 2)
+                const roomCeiling = hasRoomChildContracts
+                  ? Math.max(1, parseInt(childContractRoom?.maxOccupancy, 10) || 2)
+                  : item.category === 'Accommodation' && roomsReady
+                    ? (Math.max(0, ...(item.roomTypes || []).map(room => parseInt(room.maxOccupancy) || 0)) || 2)
                   : (parseInt(item.maxOccupancy) || 2);
+                const roomChildCap = parseInt(childContractRoom?.maxChildren, 10);
+                const sharingRules = hasRoomChildContracts
+                  ? (childContractRoom?.sharingCapacityRules?.length
+                    ? childContractRoom.sharingCapacityRules
+                    : sharingRulesForRoom(childContractRoom))
+                  : (item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, item.maxOccupancy || 2, []));
+                const childAgeBands = hasRoomChildContracts
+                  ? (childContractRoom?.childAgeRanges || [])
+                  : (item.childAgeRanges || []);
                 return (
                 <div
                   key={item.tempId}
@@ -6123,7 +6353,7 @@ export const LibraryItems = () => {
                                 {numberCell(room.key, 'Sleeps', 'maxOccupancy', room.maxOccupancy, 1)}
                                 {numberCell(room.key, 'Max adults', 'maxAdults', room.maxAdults, 1)}
                                 {numberCell(room.key, 'Max children', 'maxChildren', room.maxChildren, 0, 'any')}
-                                {dbFeatures.occupancyPricing && (
+                                {dbFeatures.roomChargeBasis && (
                                 <div>
                                   <label style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', display: 'block', marginBottom: '0.2rem' }}>Charged by</label>
                                   <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
@@ -6135,7 +6365,9 @@ export const LibraryItems = () => {
                                     >
                                       <option value="per_person_sharing">Per person sharing</option>
                                       <option value="per_room">Whole room</option>
-                                      <option value={OCCUPANCY_BASIS}>Per person by occupancy</option>
+                                      {dbFeatures.occupancyPricing && (
+                                        <option value={OCCUPANCY_BASIS}>Per person by occupancy</option>
+                                      )}
                                     </select>
                                     {isOccupancyRoom(room, item) && (
                                       <label style={{ fontSize: '0.68rem', color: '#64748b', display: 'flex', alignItems: 'center', gap: '0.25rem', whiteSpace: 'nowrap' }}>
@@ -6167,7 +6399,7 @@ export const LibraryItems = () => {
                                       color: room.key === activeKey ? '#0369a1' : '#475569'
                                     }}
                                   >
-                                    {room.key === activeKey ? 'Editing rates' : 'Edit rates'}
+                                    {room.key === activeKey ? 'Editing room contract' : 'Edit room contract'}
                                   </button>
                                   <button
                                     type="button"
@@ -6288,7 +6520,9 @@ export const LibraryItems = () => {
                         <strong>Room ceilings come from the room types above.</strong> The property accepts up to{' '}
                         <strong>{Math.max(0, ...(item.roomTypes || []).map(room => parseInt(room.maxOccupancy) || 0)) || 2} guests</strong> in one room.
                         Each room&rsquo;s own sleeps / adults / children limits are set on its room type; the itinerary allocates travellers into
-                        the room they are priced in. The child sharing rules below stay property-wide because they follow the supplier contract.
+                        the room they are priced in. {hasRoomChildContracts
+                          ? <>Child sharing rules and age ranges below apply to <strong>{childContractRoom?.name || 'the selected room type'}</strong> only.</>
+                          : 'Child sharing rules and age ranges below still apply property-wide. Apply migration 20261275 to configure them separately for each room type.'}
                       </div>
                     ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.25rem' }}>
@@ -6374,13 +6608,18 @@ export const LibraryItems = () => {
                         <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
                           {isTrainCategory(item.category)
                             ? 'Specify how many children are permitted to share when the cabin has 1, 2, or 3 adults.'
-                            : 'Specify how many children are permitted to share when the room has 1, 2, or 3 adults.'}
+                            : hasRoomChildContracts
+                              ? `Specify how many children may share ${childContractRoom?.name ? `the ${childContractRoom.name}` : 'this room'} for each adult count.`
+                              : 'Specify how many children are permitted to share when the room has 1, 2, or 3 adults.'}
                         </span>
                       </div>
 
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        {(item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, item.maxOccupancy || 2, [])).map((rule) => {                          const currentAdults = rule.adults;
-                          const maxAllowedForThisRow = Math.max(0, roomCeiling - currentAdults);
+                        {sharingRules.map((rule) => {                          const currentAdults = rule.adults;
+                          const physicalChildLimit = Math.max(0, roomCeiling - currentAdults);
+                          const maxAllowedForThisRow = Number.isFinite(roomChildCap)
+                            ? Math.min(physicalChildLimit, Math.max(0, roomChildCap))
+                            : physicalChildLimit;
                           const childrenVal = Math.min(maxAllowedForThisRow, Math.max(0, parseInt(rule.maxChildren) || 0));
                           const effectiveTotal = currentAdults + childrenVal;
 
@@ -6420,7 +6659,12 @@ export const LibraryItems = () => {
                                     min="0"
                                     max={maxAllowedForThisRow}
                                     value={rule.maxChildren !== undefined ? rule.maxChildren : childrenVal}
-                                    onChange={(e) => handleSharingRuleChange(item.tempId, currentAdults, e.target.value)}
+                                    onChange={(e) => handleSharingRuleChange(
+                                      item.tempId,
+                                      currentAdults,
+                                      e.target.value,
+                                      hasRoomChildContracts ? childContractRoom?.key : ''
+                                    )}
                                     style={{ width: '60px', padding: '0.25rem 0.4rem', fontSize: '0.85rem', fontWeight: 700, textAlign: 'center', border: '1px solid #cbd5e1', borderRadius: '5px' }}
                                   />
                                 </div>
@@ -6481,7 +6725,7 @@ export const LibraryItems = () => {
                         💡 Capacity & Sharing Rules Summary:
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', marginLeft: '0.5rem' }}>
-                        {(item.sharingCapacityRules || ensureSharingRules(item.maxAdults || 2, item.maxOccupancy || 2, [])).map(r => {
+                        {sharingRules.map(r => {
                           const ch = Math.max(0, parseInt(r.maxChildren) || 0);
                           return (
                             <div key={r.adults}>
@@ -6499,23 +6743,32 @@ export const LibraryItems = () => {
                     <div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                         <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155' }}>
-                          Child Age Ranges (per supplier contract)
+                          Child Age Ranges (per supplier contract){hasRoomChildContracts && childContractRoom?.name ? ` — ${childContractRoom.name}` : ''}
                         </span>
                         <button
                           type="button"
-                          onClick={() => handleAddChildAgeBand(item.tempId)}
+                          onClick={() => handleAddChildAgeBand(
+                            item.tempId,
+                            hasRoomChildContracts ? childContractRoom?.key : ''
+                          )}
                           style={{ fontSize: '0.75rem', padding: '0.25rem 0.65rem', background: '#f0fdf4', color: '#00665c', border: '1px solid #bbf7d0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}
                         >
                           <Plus size={13} /> Add Age Tier
                         </button>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        {(item.childAgeRanges || []).map((band, bandIdx) => (
+                        {childAgeBands.map((band, bandIdx) => (
                           <div key={band.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '7px', padding: '0.45rem 0.65rem' }}>
                             <input
                               type="text"
                               value={band.name}
-                              onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'name', e.target.value)}
+                              onChange={(e) => handleUpdateChildAgeBand(
+                                item.tempId,
+                                bandIdx,
+                                'name',
+                                e.target.value,
+                                hasRoomChildContracts ? childContractRoom?.key : ''
+                              )}
                               placeholder="Name"
                               style={{ flex: '1', minWidth: '80px', fontSize: '0.8rem', padding: '0.25rem 0.4rem', border: '1px solid #cbd5e1', borderRadius: '5px', fontWeight: 600, color: '#1e293b' }}
                             />
@@ -6524,7 +6777,13 @@ export const LibraryItems = () => {
                               type="number"
                               min="0"
                               value={band.ageFrom}
-                              onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'ageFrom', e.target.value)}
+                              onChange={(e) => handleUpdateChildAgeBand(
+                                item.tempId,
+                                bandIdx,
+                                'ageFrom',
+                                e.target.value,
+                                hasRoomChildContracts ? childContractRoom?.key : ''
+                              )}
                               style={{ width: '52px', fontSize: '0.8rem', padding: '0.25rem 0.35rem', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'center' }}
                             />
                             <span style={{ fontSize: '0.75rem', color: '#64748b' }}>–</span>
@@ -6532,14 +6791,24 @@ export const LibraryItems = () => {
                               type="number"
                               min="0"
                               value={band.ageTo}
-                              onChange={(e) => handleUpdateChildAgeBand(item.tempId, bandIdx, 'ageTo', e.target.value)}
+                              onChange={(e) => handleUpdateChildAgeBand(
+                                item.tempId,
+                                bandIdx,
+                                'ageTo',
+                                e.target.value,
+                                hasRoomChildContracts ? childContractRoom?.key : ''
+                              )}
                               style={{ width: '52px', fontSize: '0.8rem', padding: '0.25rem 0.35rem', border: '1px solid #cbd5e1', borderRadius: '5px', textAlign: 'center' }}
                             />
                             <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>yrs</span>
-                            {(item.childAgeRanges || []).length > 1 && (
+                            {childAgeBands.length > 1 && (
                               <button
                                 type="button"
-                                onClick={() => handleRemoveChildAgeBand(item.tempId, bandIdx)}
+                                onClick={() => handleRemoveChildAgeBand(
+                                  item.tempId,
+                                  bandIdx,
+                                  hasRoomChildContracts ? childContractRoom?.key : ''
+                                )}
                                 style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '0.1rem', lineHeight: 1 }}
                                 title="Remove age tier"
                               >
@@ -7505,6 +7774,12 @@ export const LibraryItems = () => {
                       );
                     })()}
 
+                    {item.category === 'Accommodation' && !dbFeatures.rateTypes && (
+                      <div role="status" style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.75rem 0.9rem', marginBottom: '0.75rem', fontSize: '0.78rem', color: '#92400e', lineHeight: 1.5 }}>
+                        FIT / Series contract selection is unavailable in this database session. Confirm that the Supabase migration <code>20261267_rate_contract_types.sql</code> has been applied, then reload Library Items. Until then, rates cannot be assigned separately to FIT and Series tour types. After it is available, use Add FIT rate or Add Series rate on the season card to copy its room and dates with blank prices.
+                      </div>
+                    )}
+
                     {item.seasons.map((season, seasonIdx) => {
                       /* Seasonal Rates Matrix shows one season at a time; the
                          arrows below move between them. Accommodation and Extras
@@ -7520,6 +7795,14 @@ export const LibraryItems = () => {
                         ? activeSeasonIndexOf(item.tempId, chargeGroups)
                         : activeSeasonIndexOf(item.tempId, item.seasons);
                       const activeGroup = groupsSeasons ? chargeGroups[activeGroupIdx] : null;
+                      const missingContractTypes = isAccom && dbFeatures.rateTypes && activeGroup
+                        ? ['fit', 'series'].filter((rateType) => !(item.seasons || []).some((candidate) => (
+                          String(candidate.seasonName || '').trim() === String(activeGroup.seasonName || '').trim()
+                          && String(candidate.validFrom || '') === String(activeGroup.validFrom || '')
+                          && String(candidate.validTo || '') === String(activeGroup.validTo || '')
+                          && normalizeRateType(candidate.rateType) === rateType
+                        )))
+                        : [];
                       /* A room with no seasons of its own shows the empty state
                          below, never another room's first season: index 0 would
                          render a foreign row under this room's matrix and its
@@ -7532,12 +7815,15 @@ export const LibraryItems = () => {
                       const seasonPos = groupsSeasons ? activeGroupIdx : seasonIdx;
                       const headerName = groupsSeasons ? activeGroup?.seasonName : season.seasonName;
                       const navSeasons = groupsSeasons ? chargeGroups : item.seasons;
-                      const bands = item.childAgeRanges || [];
+                      const seasonRoomKey = isAccom ? (activeGroup?.roomKey || activeRoomKeyFor(item)) : '';
+                      const contractRoom = isAccom && dbFeatures.roomChildContracts
+                        ? activeRoomFor(item, seasonRoomKey)
+                        : null;
+                      const bands = contractRoom?.childAgeRanges || item.childAgeRanges || [];
                       /* Capacity decides which price boxes are live: a room
                          that cannot take two adults has no sharing rate, one
                          that cannot take three has no extra-adult rate, and a
                          room with no child slots has no child prices. */
-                      const seasonRoomKey = isAccom ? (activeGroup?.roomKey || activeRoomKeyFor(item)) : '';
                       const roomModel = roomModelFor(item, seasonRoomKey);
                       const isFlatRoom = roomModel === 'per_room';
                       /* A villa on the occupancy ladder replaces the whole adult
@@ -7615,6 +7901,11 @@ export const LibraryItems = () => {
                                 <span style={{ fontWeight: 400, color: '#94a3b8' }}>
                                   of {totalSeasons} ({headerName})
                                 </span>
+                                {dbFeatures.rateTypes && normalizeRateType(season.rateType) && (
+                                  <span style={{ fontWeight: 600, fontSize: '0.7rem', color: '#5b21b6', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '999px', padding: '0.1rem 0.5rem', marginLeft: '0.35rem' }}>
+                                    {RATE_TYPES.find((type) => type.id === normalizeRateType(season.rateType))?.label || 'Contract'}
+                                  </span>
+                                )}
                               </span>
                               {isAccom && (item.roomTypes || []).length > 1 && (
                                 <span
@@ -7708,6 +7999,41 @@ export const LibraryItems = () => {
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value))} />
                             </div>
                           </div>
+
+                          {/* FIT and Series are two contracts for the same room
+                              and season. The contract belongs to the season, so
+                              it moves every charge type and every room's row. */}
+                          {dbFeatures.rateTypes && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b' }}>Contract:</label>
+                              <select
+                                className="pricing-select"
+                                style={{ padding: '0.4rem', fontSize: '0.85rem', maxWidth: '260px' }}
+                                value={normalizeRateType(season.rateType)}
+                                onChange={(e) => (groupsSeasons && activeGroup
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'rateType', e.target.value)
+                                  : handleSeasonChange(item.tempId, seasonIdx, 'rateType', e.target.value))}
+                              >
+                                {RATE_TYPES.map((type) => (
+                                  <option key={type.id} value={type.id}>{type.label}</option>
+                                ))}
+                              </select>
+                              <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                                Add the other contract below to copy this season and its room/board options with blank prices.
+                              </span>
+                              {isAccom && missingContractTypes.map((rateType) => (
+                                <button
+                                  key={rateType}
+                                  type="button"
+                                  className="secondary-btn"
+                                  style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }}
+                                  onClick={() => handleAddAccommodationContract(item.tempId, activeGroup, rateType)}
+                                >
+                                  <Plus size={13} /> Add {rateType === 'fit' ? 'FIT' : 'Series'} rate
+                                </button>
+                              ))}
+                            </div>
+                          )}
 
                           {/* Whether this tariff's price already covers fuel. A
                               fuel-included contract refuses a fuel allowance on
@@ -10358,12 +10684,12 @@ export const LibraryItems = () => {
                       <button className="action-btn" onClick={() => setDetailItem(item)} title="View all pricing">
                         <Eye size={16} />
                       </button>
-                      <button className="action-btn" onClick={() => handleEditItem(item)} title="Edit Item">
+                      {mayWrite && <button className="action-btn" onClick={() => handleEditItem(item)} title="Edit Item">
                         <Edit3 size={16} />
-                      </button>
-                      <button className="action-btn delete" onClick={() => handleDeleteItem(item)} title="Delete Item">
+                      </button>}
+                      {mayWrite && <button className="action-btn delete" onClick={() => handleDeleteItem(item)} title="Delete Item">
                         <Trash2 size={16} />
-                      </button>
+                      </button>}
                     </div>
                   </td>
                 </tr>

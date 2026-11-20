@@ -80,26 +80,33 @@ export const withRoomTypeRates = (rate, { item = null, rates = [], nightDate = '
     const fromItem = roomTypesOf(item).filter((type) => type.name);
     return fromItem.length ? fromItem : roomsFromRates(matrix).filter((type) => type.name);
   })();
-  if (types.length < 2) return rate;
-  if (!types.some((type) => matrix.some((row) => roomMatchesRate(type, row)))) return rate;
   const soldRoom = roomForRate(rate, types);
   const percent = Number(rate.price_protection_percent) || 0;
-  const ageRanges = Array.isArray(rate._ageRanges) ? rate._ageRanges : null;
-  /* A sibling row arrives from the matrix without the item's age bands, and the
-     engines that price a child read them off the row, so the bands the line was
-     priced with are copied across. They describe the property, not the room. */
-  const withAgeBands = (row) => (row && !row._ageRanges && ageRanges ? { ...row, _ageRanges: ageRanges } : row);
+  const ageRanges = Array.isArray(rate._ageRanges)
+    ? rate._ageRanges
+    : (Array.isArray(item?.child_age_ranges) ? item.child_age_ranges : item?.childAgeRanges);
+  /* Child bands belong to the contracted room just like its rates do. A room
+     without its own stored bands keeps the legacy property-level fallback. */
+  const withAgeBands = (row, type) => {
+    if (!row) return row;
+    if (type?.hasChildAgeRanges) return { ...row, _ageRanges: type.childAgeRanges };
+    return row._ageRanges || !Array.isArray(ageRanges) ? row : { ...row, _ageRanges: ageRanges };
+  };
+  if (types.length < 2) return withAgeBands(rate, soldRoom);
+  if (!types.some((type) => matrix.some((row) => roomMatchesRate(type, row)))) {
+    return withAgeBands(rate, soldRoom);
+  }
   const entries = types.map((type) => {
     const isSold = soldRoom
       ? String(soldRoom.key || soldRoom.id) === String(type.key || type.id)
       : roomMatchesRate(type, rate);
-    if (isSold) return { roomTypeId: type.id, roomType: type.name, rate, reason: '' };
+    if (isSold) return { roomTypeId: type.id, roomType: type.name, rate: withAgeBands(rate, type), reason: '' };
     const found = siblingRow(matrix, type, rate);
     return {
       roomTypeId: type.id,
       roomType: type.name,
       /* Priced for this night and uplifted exactly as the line's own row was. */
-      rate: found.rate ? withAgeBands(applyProtectionToRate(rateForNight(found.rate, nightDate), percent)) : null,
+      rate: found.rate ? withAgeBands(applyProtectionToRate(rateForNight(found.rate, nightDate), percent), type) : null,
       reason: found.reason
     };
   });

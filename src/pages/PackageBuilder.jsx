@@ -41,6 +41,9 @@ packageRateForDates,
   vehicleVectorPrice
 } from '../lib/packagePricing';
 import { ratesForServiceRoom, roomTypesOf } from '../lib/roomTypes';
+import { normalizeRateType, ratesForContract, RATE_TYPES } from '../lib/rateTypes';
+import { stripConversionNote } from '../lib/itineraryToPackage';
+import { categoryLabel } from '../lib/i18n/documentTerms';
 import { singleSupplementLadderSummary } from '../lib/singleSupplement';
 import {
   crewChargeOf,
@@ -53,6 +56,7 @@ import {
 } from '../lib/guidePricing';
 import {
   feeBasisChargesHeads,
+  isFeeLevyOrTollItem,
   isSurchargeChargeable,
   isSurchargeItem,
   surchargeBasisOf,
@@ -126,8 +130,11 @@ import {
   labelFor,
   localizedText,
   textI18nPayload,
-  translationsOf
+  translationsOf,
+  translateInclusionsBlock,
+  translateExclusionsBlock
 } from '../lib/i18n';
+import { feeCategoryLabel } from '../lib/i18n/documentTerms';
 import { textI18nColumn } from '../lib/i18n/textI18nColumn';
 import { useTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { accommodationHasChoices, nightBandLabel, rateOptionLabel } from '../lib/accommodationOptions';
@@ -146,7 +153,7 @@ import { starRatingOf, withStarGrade } from '../lib/starGrading';
 import { supplierColumns } from '../lib/supplierStarColumn';
 import { fetchRoomTypesForItems } from '../lib/roomTypeTable';
 import { LIBRARY_ITEM_PACKAGE_FIELDS, LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK } from '../lib/libraryItemFields';
-import { VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { VEHICLE_TYPES, TOUR_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { itemDestinationLabel } from '../lib/libraryItemDetail';
 import { destinationClause, destinationsOf, fetchDestinationCatalog, matchesDestinations } from '../lib/destinationFilter';
 import MultiSelectFilter from '../components/MultiSelectFilter';
@@ -331,7 +338,7 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => 
 const initialForm = {
   description: '', inclusions: '', exclusions: '', terms: '', textI18n: null,
   isAvailable: false, acceptsChildren: false, childAgeRange: null,
-  assignedClientIds: []
+  rateType: '', assignedClientIds: []
 };
 
 /* The package form styles its own textareas from `.package-field textarea`. The
@@ -427,12 +434,15 @@ const [bandScope, setBandScope] = useState('');
   /* RBAC: a job that may read packages may open one and work in it, but only a
      write-level job can put it back on the shelf. The route admits the reader,
      so the save itself is where the answer is given. */
-  const { can: holdModule } = useSession();
-  const mayEditPackage = holdModule('packages', 'write');
+  const { can: holdModule, userId, roleKey } = useSession();
+  const isConsultant = roleKey === 'consultant';
+  const ownsPackage = pkg?.created_by === userId;
+  const mayEditPackage = holdModule('packages', 'write')
+    && (!isConsultant || !pkg || ownsPackage);
   /* Newer season columns are written on the same insert as the season itself, where an
      unknown column rejects the whole payload. They stay off until the database proves it
      has them, so an unmigrated package still saves. */
-  const [dbFeatures, setDbFeatures] = useState({ singleRooms: false, roomTypes: false, stayPay: false, lineLink: false });
+  const [dbFeatures, setDbFeatures] = useState({ singleRooms: false, roomTypes: false, stayPay: false, lineLink: false, rateTypes: false });
   const [dayDestinationsAvailable, setDayDestinationsAvailable] = useState(false);
   useEffect(() => {
     let active = true;
@@ -602,6 +612,14 @@ const [bandScope, setBandScope] = useState('');
       } catch {
         // Probe unavailable; keep the link off.
       }
+      /* Whether the package can state the contract it is sold under. Until
+         20261267 lands the selector stays off and every rate row stays in play. */
+      try {
+        const { error } = await supabase.from('packages').select('rate_type').limit(1);
+        setDbFeatures((current) => ({ ...current, rateTypes: !error }));
+      } catch {
+        // Probe unavailable; keep the contract unstated.
+      }
       /* Whether a package line can carry the hire copy. Until that migration is
          applied, the drop still prices - the answer simply lives in the line's
          own snapshot rather than in a column of its own. */
@@ -619,7 +637,7 @@ const [bandScope, setBandScope] = useState('');
         supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number'),
         supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
         supabase.from('package_pax_options').select('*').eq('package_id', packageId).order('pax'),
-        supabase.from('company_billing_settings').select(`itinerary_terms, price_protection_percent${billingHasText ? ', text_i18n' : ''}`).eq('company_id', scopeCompanyId(profile.company_id)).maybeSingle(),
+        supabase.from('company_billing_settings').select(`itinerary_terms, itinerary_inclusions, itinerary_exclusions, price_protection_percent${billingHasText ? ', text_i18n' : ''}`).eq('company_id', scopeCompanyId(profile.company_id)).maybeSingle(),
         supabase.from('company_vehicle_types').select('*').or(vocabularyReadFilter(scopeCompanyId(profile.company_id))).order(...VEHICLE_TYPES.orderBy)
       ]);
       for (const result of [pkgRes, dayRes, periodRes, paxRes, billingRes, vehicleTypesRes]) {
@@ -659,7 +677,10 @@ const [bandScope, setBandScope] = useState('');
         assignedClientIds = (assignmentsRes.data || []).map((assignment) => assignment.client_id);
       }
       const packageForm = {
-        description: pkgRes.data.description || '',
+        /* Packages converted before this change still carry the conversion note.
+           It is internal provenance, so it is stripped before the operator sees
+           the field and before any client document prints it. */
+        description: stripConversionNote(pkgRes.data.description || ''),
         inclusions: pkgRes.data.inclusions || '',
         exclusions: pkgRes.data.exclusions || '',
         terms: pkgRes.data.terms_and_conditions || billingRes.data?.itinerary_terms || '',
@@ -669,6 +690,7 @@ const [bandScope, setBandScope] = useState('');
         /* A package carries one child age range. Older packages saved several bands
            per supplier; only the first is kept so the price stays one number. */
         childAgeRange: packageChildAgeRange(Array.isArray(pkgRes.data.child_age_ranges) ? pkgRes.data.child_age_ranges[0] : null),
+        rateType: normalizeRateType(pkgRes.data.rate_type),
         assignedClientIds
       };
       setPkg(pkgRes.data);
@@ -988,7 +1010,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       .map((service) => {
         const item = library.find((entry) => entry.id === service.item_id) || null;
         const rate = item?.item_rates?.find((entry) => entry.id === service.rate_id) || service.rate_snapshot;
-        return packageSeasonResolution({ item, rate, periods: validPeriods, currencyCode: service.currency_code, protectionPercent });
+        return packageSeasonResolution({ item, rate, periods: validPeriods, currencyCode: service.currency_code, protectionPercent, rateType: contractType });
       })
       .find((season) => !season.canAdd);
     if (seasonProblem) {
@@ -1012,6 +1034,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         child_age_ranges: nextForm.acceptsChildren && nextForm.childAgeRange
           ? [normaliseChildAgeRange(nextForm.childAgeRange)]
           : [],
+        ...(dbFeatures.rateTypes ? { rate_type: normalizeRateType(nextForm.rateType) || null } : {}),
   /* Kept in step with the currency chosen at creation. It is not editable here: the modal
      owns it, and only while the package has no priced services. */
   currency_code: packageCurrency,
@@ -1205,7 +1228,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, dbFeatures.stayPay, dbFeatures.lineLink, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage, dayDestinationsAvailable]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, dbFeatures.stayPay, dbFeatures.lineLink, dbFeatures.rateTypes, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage, dayDestinationsAvailable]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -1214,9 +1237,15 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
      season is never chosen by hand from the sidebar - the sidebar shows the
      resulting figure only. A different season can still be picked on the day
      row once the item has landed. */
+  /* The contract this package is sold under. A supplier can quote the same room
+     and season once FIT and once Series; the package reads only the rows that
+     belong to its own contract, and an unstated contract leaves every row in
+     play exactly as before. */
+  const contractType = normalizeRateType(form.rateType);
   const rateForDates = (item) => {
-    const eligible = (item.item_rates || []).filter((entry) => currencyMatches(entry, packageCurrency));
-    const covering = packageRateForDates(item, periods);
+    const eligible = ratesForContract(item.item_rates || [], contractType)
+      .filter((entry) => currencyMatches(entry, packageCurrency));
+    const covering = packageRateForDates(item, periods, contractType);
     return (covering && eligible.find((entry) => entry.id === covering.id))
       || eligible[0];
   };
@@ -1235,7 +1264,8 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     return protectionPercent;
   };
   const seasonFor = (item, rate, scope = {}) => packageSeasonResolution({
-    item, rate, periods, currencyCode: rate?.currency || item?.currency || '', protectionPercent: effectiveProtectionPercent(scope)
+    item, rate, periods, currencyCode: rate?.currency || item?.currency || '',
+    protectionPercent: effectiveProtectionPercent(scope), rateType: contractType
   });
   /* The row a line is stored with: whichever season the resolver actually priced
      from. A protected line carries its uplifted snapshot; a stale one carries the
@@ -2599,14 +2629,23 @@ const childRange = packageChildAgeRange(form.childAgeRange);
        the client is receiving four vehicles. So they collapse into a single line that names
        what they actually get, and the ladder is only spelled out when asked for. */
     const dayMarkup = days.map((day, index) => {
-      const included = day.services.filter((service) => service.is_included !== false);
+      /* A levy, park fee, porterage or toll is not a service the client travels
+         on. It belongs in Inclusions, where it is named as a charge, not in the
+         day's routing, where it reads as something to do. */
+      const included = day.services.filter((service) => service.is_included !== false && !isFeeLevyOrTollItem(service));
       const named = (service) => {
-        const supplier = packageServiceSupplier(service, library);
-        const room = /accommodation/i.test(String(service.category || '')) && service.room_type
+        const category = String(service.category || '').trim();
+        /* The same shape the itinerary document prints: a bold category label,
+           then what the client actually receives. The supplier behind the line is
+           absent on purpose - it belongs on the voucher issued to that supplier. */
+        const label = /accommodation/i.test(category)
+          ? L('doc.accommodation')
+          : (category ? categoryLabel(lang, category) : L('doc.service'));
+        const room = /accommodation/i.test(category) && service.room_type
           ? ` (${escapeHtml(service.room_type)})`
           : '';
         /* The charge an extra is sold as, in the same bracket the room type uses. */
-        const charge = /extras?/i.test(String(service.category || '')) && lineChargeLabel(service)
+        const charge = /extras?/i.test(category) && lineChargeLabel(service)
           ? ` (${escapeHtml(lineChargeLabel(service))})`
           : '';
         const stayPay = service.stay_pay_free === true || service.stayPayFree === true
@@ -2615,7 +2654,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
             service.currency_code || packageCurrency
           ))})`
           : '';
-        return `${escapeHtml(service.item_name)}${room}${charge}${supplier ? ` — ${escapeHtml(supplier)}` : ''}${stayPay}`;
+        return `<strong>${escapeHtml(label)}</strong>: ${escapeHtml(service.item_name)}${room}${charge}${stayPay}`;
       };
       /* A day's lines, printed. Several parts sold as one composed offer print as one
          named block with its parts indented under it, because the client is buying
@@ -2629,7 +2668,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         const others = lines.filter((service) => !packageIsTransport(service, library));
         const vehicleLines = vehicles.length ? (options.showVehicleOptions
           ? vehicles.map((service) => `<li>${named(service)}</li>`).join('')
-          : `<li>${escapeHtml(packageTransportSummary(vehicles, library))}</li>`) : '';
+          : `<li><strong>${escapeHtml(vehicles[0].category ? categoryLabel(lang, vehicles[0].category) : L('doc.service'))}</strong>: ${escapeHtml(packageTransportSummary(vehicles, library))}</li>`) : '';
         return `${vehicleLines}${others.map((service) => `<li>${named(service)}</li>`).join('')}`;
       };
       const services = bundleGroups(included)
@@ -2677,7 +2716,13 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       const pool = vehicleColumnPools({ days, library, vehicleTypes });
       const price = (value) => (partnerView ? applyPackageMarkup(value, exportMarkup) : value);
       const childPrice = Number(childBreakdownSummary?.childTotal) || 0;
-      const childText = `<strong>${amount(price(childPrice), packageCurrency)}</strong><span class="sum-flat-from">${TL('doc.childFlat')}</span>`;
+      /* The age band the figure was priced for travels with the figure: the
+         operator set it under Children & ages, and a parent reading the quote
+         needs to know whether their child falls inside it. */
+      const childAges = form.acceptsChildren && childRange
+        ? ` · ${TL('doc.childAges', { from: childRange.ageFrom, to: childRange.ageTo })}`
+        : '';
+      const childText = `<strong>${amount(price(childPrice), packageCurrency)}</strong><span class="sum-flat-from">${TL('doc.childFlat')}${childAges}</span>`;
       /* One table per season, stacked. The vehicle pool and the party sizes never move with
          the season, so from table to table only the season line, the accommodation-based
          price and the single supplement change. */
@@ -2735,21 +2780,90 @@ const childRange = packageChildAgeRange(form.childAgeRange);
     const childNote = !form.acceptsChildren
       ? `<p class="pattern-note">${TL('doc.childNoteNotAccepted')}</p>`
       : (!childRange ? `<p class="pattern-note">${TL('doc.childNoteNoRange')}</p>` : '');
-    const inclusionsText = prose('inclusions', form.inclusions, form.textI18n);
-    const exclusionsText = prose('exclusions', form.exclusions, form.textI18n);
+    /* If package has no inclusions or exclusions, fall back to company default inclusions and exclusions */
+    const companyInclusionsBlock = (() => {
+      const block = translationsOf(companyTerms);
+      const next = {};
+      Object.entries(block || {}).forEach(([code, fields]) => {
+        const text = fields && typeof fields === 'object' ? fields.itinerary_inclusions : '';
+        if (typeof text === 'string' && text.trim()) next[code] = { inclusions: text };
+      });
+      return next;
+    })();
+    const companyExclusionsBlock = (() => {
+      const block = translationsOf(companyTerms);
+      const next = {};
+      Object.entries(block || {}).forEach(([code, fields]) => {
+        const text = fields && typeof fields === 'object' ? fields.itinerary_exclusions : '';
+        if (typeof text === 'string' && text.trim()) next[code] = { exclusions: text };
+      });
+      return next;
+    })();
+    const incSource = form.inclusions || companyTerms?.itinerary_inclusions || '';
+    const incBlock = form.inclusions ? form.textI18n : (companyTerms?.itinerary_inclusions ? companyInclusionsBlock : form.textI18n);
+    const rawInclusions = prose('inclusions', incSource, incBlock);
+    const inclusionsText = translateInclusionsBlock(rawInclusions, lang);
+
+    const excSource = form.exclusions || companyTerms?.itinerary_exclusions || '';
+    const excBlock = form.exclusions ? form.textI18n : (companyTerms?.itinerary_exclusions ? companyExclusionsBlock : form.textI18n);
+    const rawExclusions = prose('exclusions', excSource, excBlock);
+    const exclusionsText = translateExclusionsBlock(rawExclusions, lang);
+
+    /* Every active package line belongs in Inclusions, even when it is hidden
+       from the day-by-day routing (fees, levies, porterage and tolls). */
+    const packageInclusions = (() => {
+      const entries = new Map();
+      days.forEach((day) => {
+        (day.services || []).forEach((service) => {
+          const included = service.is_included !== false;
+          const rawCategory = String(service.category || '').trim();
+          const category = isFeeLevyOrTollItem(service)
+            ? feeCategoryLabel(lang, rawCategory || 'Fees & Tickets')
+            : rawCategory ? categoryLabel(lang, rawCategory) : '';
+          const name = String(service.item_name || service.name || '').trim();
+          if (!category && !name) return;
+          const room = /accommodation/i.test(rawCategory) && service.room_type
+            ? ` (${service.room_type})`
+            : '';
+          const label = [category, name ? `${name}${room}` : ''].filter(Boolean).join(': ');
+          const key = `${included ? 'included' : 'excluded'}:${label.toLowerCase()}`;
+          const quantity = Math.max(1, Number(service.quantity) || 1);
+          const existing = entries.get(key);
+          if (existing) existing.quantity += quantity;
+          else entries.set(key, { label, included, quantity });
+        });
+      });
+      return [...entries.values()];
+    })();
+    const includedServiceHtml = packageInclusions.some((entry) => entry.included)
+      ? `<ul class="doc-fees">${packageInclusions.filter((entry) => entry.included).map((entry) => `<li>${entry.quantity > 1 ? `${entry.quantity} x ` : ''}${escapeHtml(entry.label)}</li>`).join('')}</ul>`
+      : '';
+    const excludedServices = packageInclusions.filter((entry) => !entry.included)
+      .map((entry) => `${entry.quantity > 1 ? `${entry.quantity} x ` : ''}${entry.label}`);
+    const exclusionLines = String(exclusionsText || '')
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*[-*•–—✘\u2718]\s*/, '').trim())
+      .filter(Boolean)
+      .concat(excludedServices);
+    const exclusionHtml = exclusionLines.length
+      ? `<ul class="doc-exclusions" style="list-style:none;padding-left:0;margin:6px 0;">${exclusionLines.map((line) => `<li style="margin:3px 0;">${escapeHtml(line)}</li>`).join('')}</ul>`
+      : '';
     const inclusionMarkup = options.inclusions
-      ? `${inclusionsText ? `<h3>${TL('doc.inclusionsTitle')}</h3><p>${escapeHtml(inclusionsText).replace(/\n/g, '<br>')}</p>` : ''}${exclusionsText ? `<h3>${TL('doc.exclusionsTitle')}</h3><p>${escapeHtml(exclusionsText).replace(/\n/g, '<br>')}</p>` : ''}`
+      ? `${(inclusionsText || includedServiceHtml) ? `<h3>${TL('doc.inclusionsTitle')}</h3>${inclusionsText ? `<p>${escapeHtml(inclusionsText).replace(/\n/g, '<br>')}</p>` : ''}${includedServiceHtml}` : ''}${exclusionHtml ? `<h3>${TL('doc.exclusionsTitle')}</h3>${exclusionHtml}` : ''}`
       : '';
     const termsMarkup = options.terms && termsText
       ? `<section><h2>${TL('doc.termsTitle')}</h2><p>${escapeHtml(termsText).replace(/\n/g, '<br>')}</p></section>`
       : '';
     const clientNames = selectedClients.map(nameOf).join(', ');
-    const descriptionText = prose('description', form.description, form.textI18n);
+    /* A description saved before the conversion note was dropped still holds it.
+       Stripping here keeps it out of the document even when the field was never
+       reopened, and the translated block is cleaned the same way. */
+    const descriptionText = stripConversionNote(prose('description', form.description, form.textI18n));
     /* The three price cards reuse the tab's colours exactly: teal for the two adult
        prices, amber for the child, and grey when no child range is set. */
     const priceCardCss = `.price-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 4px}.price-card{display:flex;flex-direction:column;gap:4px;padding:12px;border-radius:8px;background:#f0fdfa}.price-card span,.price-card small{color:#64748b;font-size:11px;line-height:1.35}.price-card strong{color:#0f766e;font-size:17px}.price-card.lead{box-shadow:0 0 0 2px #0d7478 inset}.price-card-party{background:#f0fdf4;border:1px solid #bbf7d0}.price-card-party span,.price-card-party small{color:#166534}.price-card-party strong{color:#15803d}.price-card-child{background:#fff7ed;border:1px solid #fed7aa}.price-card-child span,.price-card-child small{color:#9a5b13}.price-card-child strong{color:#b45309}.price-card-child.pending{background:#f8fafc;border:1px dashed #cbd5e1}.price-card-child.pending span,.price-card-child.pending small,.price-card-child.pending strong{color:#94a3b8}.pattern-pax{margin:0 0 2px;font-weight:bold;color:#1a202c}.pattern-note{margin:8px 0 0;padding:8px 10px;border-left:3px solid #94a3b8;background:#f8fafc;color:#475569;font-size:12px;line-height:1.45}.price-matrix-card{margin:12px 0;padding:12px 14px;border:1px solid #e2e8f0;border-radius:9px;background:#f8fafc}.price-matrix-card h2{margin:0 0 9px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#0d7478}.price-matrix-scroll{overflow-x:auto}.price-matrix{width:100%;border-collapse:collapse}.price-matrix th,.price-matrix td{padding:9px 12px;text-align:center;border:1px solid #e2e8f0;font-size:14px;white-space:nowrap}.price-matrix th{background:#f0fdfa;color:#0f766e;font-weight:700}.price-matrix td{color:#1e293b;font-weight:700}.price-matrix td.pending{color:#94a3b8;font-weight:400}@media print{.price-cards,.price-matrix-card{break-inside:avoid}}`;
     const summaryCss = `.pricing-summary-section{break-inside:avoid}.price-summary{width:100%;border-collapse:collapse;margin:10px 0;table-layout:fixed;break-inside:avoid}.price-summary .lab{width:168px;background:#f8fafc;text-align:left;font-size:12.5px;font-weight:600;color:#334155}.price-summary th,.price-summary td{border:1px solid #e2e8f0;padding:10px 12px;vertical-align:top}.price-summary .sum-cell{text-align:center}.price-summary .sum-trav{background:#f0fdfa}.price-summary .sum-pax{display:block;font-size:15px;font-weight:700;color:#0f766e;font-variant-numeric:tabular-nums}.price-summary .sum-price{display:block;font-size:15px;font-weight:700;color:#0f172a;font-variant-numeric:tabular-nums}.price-summary .sum-date{background:#fffbeb;text-align:left;font-size:15px;font-weight:700;color:#78350f;font-variant-numeric:tabular-nums}.price-summary .sum-flat{text-align:left;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}.price-summary .sum-flat-amber{background:#fefce8;color:#854d0e}.price-summary .sum-flat-child{background:#fdf2f8;color:#9d174d}.price-summary .sum-flat-from{display:block;margin-top:3px;font-size:11px;font-weight:500;color:#94a3b8}`;
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}.car-specs{margin:8px 0 0}.doc-bundle{margin:8px 0}.doc-bundle>strong{color:#0d7478}.doc-bundle>ul{margin:4px 0 0;padding-left:18px;list-style:circle}.doc-bundle li{margin:3px 0}${priceCardCss}${summaryCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(descriptionText)}</p>${clientNames ? `<h3>${TL('doc.forPartner', { names: clientNames })}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${summaryMarkup}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(pkg.name)}</title><style>body{font:15px Arial,sans-serif;color:#1e293b;max-width:850px;margin:36px auto;padding:0 24px}h1,h2,h3{color:#0d7478}header{border-bottom:2px solid #0d7478;padding-bottom:16px;margin-bottom:24px}section{margin:22px 0;padding-bottom:12px;border-bottom:1px solid #e2e8f0}.cover{max-width:100%;max-height:280px;object-fit:cover}li{margin:6px 0}.car-specs{margin:8px 0 0}.doc-bundle{margin:8px 0}.doc-bundle>strong{color:#0d7478}.doc-bundle>ul{margin:4px 0 0;padding-left:18px;list-style:circle}.doc-bundle li{margin:3px 0}.doc-fees,.doc-exclusions{list-style:none;padding-left:0;margin:6px 0}.doc-fees li,.doc-exclusions li{margin:3px 0;padding-left:1.1em;text-indent:-1.1em}.doc-exclusions li::before{content:"\\2718";color:#b91c1c;font-weight:700;margin-right:.4em}.doc-fees li::before{content:"\\2713";color:#0d7478;font-weight:700;margin-right:.4em}${priceCardCss}${summaryCss}@media print{body{margin:0 auto}}</style></head><body><header>${cover}<h1>${escapeHtml(pkg.name)}</h1><p>${escapeHtml(descriptionText)}</p>${clientNames ? `<h3>${TL('doc.forPartner', { names: clientNames })}</h3>` : ''}</header>${dayMarkup}${vehicleNote}${inclusionMarkup ? `<section>${inclusionMarkup}</section>` : ''}${summaryMarkup}${markupNoteLine}${childNote}${termsMarkup}</body></html>`;
   };
 
   const exportDocument = () => {
@@ -3259,6 +3373,9 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         setActiveSeason={setActiveSeason}
         accommodationPerPerson={accommodationPerPerson}
         derivedAccommodation={derivedAccommodation}
+        rateType={form.rateType || ''}
+        onChangeRateType={(value) => updateForm('rateType', value)}
+        rateTypesAvailable={dbFeatures.rateTypes}
         derivedSingleSupplement={derivedSingleSupplement}
         singleSupplementOverride={hasSupplementOverride}
         singleSupplement={singleSupplementForDisplay}

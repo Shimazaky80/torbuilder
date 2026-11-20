@@ -54,6 +54,81 @@ export const isoWeekday = (iso) => {
 
 export const weekdayLabel = (value) => WEEKDAYS.find((day) => day.value === Number(value))?.label || '';
 
+export const seriesPackageDepartureMatch = ({
+  travelStart,
+  travelDatePrecision = 'exact',
+  templates = [],
+  departures = []
+} = {}) => {
+  const seriesTemplates = Array.isArray(templates) ? templates : [];
+  if (!seriesTemplates.length) return { matches: true, reason: '' };
+  const activeTemplates = seriesTemplates.filter((template) => !template.status || template.status === 'active');
+  if (!activeTemplates.length) {
+    return {
+      matches: false,
+      reason: 'This package has no active series schedule. Activate a series template or choose a different package.'
+    };
+  }
+  if (travelDatePrecision !== 'exact' || utcMs(travelStart) === null) {
+    return {
+      matches: false,
+      reason: 'Series packages need an exact date for the selected itinerary day. Set exact dates before adding the package.'
+    };
+  }
+
+  const date = String(travelStart).slice(0, 10);
+  const weekday = isoWeekday(date);
+  const inWindow = activeTemplates.filter((template) => (
+    date >= String(template.valid_from || '').slice(0, 10)
+    && date <= String(template.valid_to || '').slice(0, 10)
+  ));
+  if (!inWindow.length) {
+    const windows = activeTemplates
+      .map((template) => `${template.valid_from || 'unknown'} to ${template.valid_to || 'unknown'}`)
+      .join('; ');
+    return {
+      matches: false,
+      reason: `The date ${date} is outside this series' operating period (${windows}). Choose an operating date or a different package.`
+    };
+  }
+
+  const onOperatingDay = inWindow.filter((template) => (
+    (Array.isArray(template.operates_on) ? template.operates_on : []).map(Number).includes(weekday)
+  ));
+  if (!onOperatingDay.length) {
+    const operatingDays = [...new Set(inWindow.flatMap((template) => (
+      (Array.isArray(template.operates_on) ? template.operates_on : []).map(Number)
+    )))].map(weekdayLabel).filter(Boolean);
+    return {
+      matches: false,
+      reason: `This series does not operate on ${weekdayLabel(weekday)}. It runs ${operatingDays.join(' and ') || 'on no configured weekdays'}. Choose an operating date or a different package.`
+    };
+  }
+
+  const sellableStatuses = new Set(['open', 'guaranteed', 'waitlist']);
+  const matchingTemplate = onOperatingDay.find((template) => (
+    (Array.isArray(departures) ? departures : []).some((departure) => (
+      departure.template_id === template.id
+      && String(departure.departure_date || '').slice(0, 10) === date
+      && sellableStatuses.has(String(departure.status || '').toLowerCase())
+    ))
+  ));
+  if (!matchingTemplate) {
+    return {
+      matches: false,
+      reason: `There is no bookable series departure for ${date}. Generate or reopen that date in Series Departures, or choose a different package.`
+    };
+  }
+
+  return {
+    matches: true,
+    reason: '',
+    templateId: matchingTemplate.id,
+    templateName: matchingTemplate.name || '',
+    departureDate: date
+  };
+};
+
 /* The dates a template's schedule produces inside its validity window. Additive
    by design: `existing` is what the calendar already holds, so re-generating
    after a schedule change adds the new days and never touches a departure that

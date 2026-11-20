@@ -5,6 +5,8 @@
 import {
   normalizeRoomTypes,
   roomForRate,
+  roomForAllocation,
+  childAgeRangesForAllocation,
   roomMatchesRate,
   ratesForRoom,
   roomsFromRates,
@@ -23,11 +25,19 @@ import {
 } from '../src/lib/accommodationOptions.js';
 import {
   accommodationRoomCapacity,
-  accommodationRoomPlan
+  accommodationRoomPlan,
+  packageRateForDates
 } from '../src/lib/packagePricing.js';
+import {
+  itemForContract,
+  normalizeRateType,
+  ratesForContract,
+  rateTypeForTourType
+} from '../src/lib/rateTypes.js';
 import { libraryItemDetail, detailDocumentHtml } from '../src/lib/libraryItemDetail.js';
 import { buildItineraryPackage } from '../src/lib/itineraryToPackage.js';
 import {
+  contractRowsForSeason,
   seasonIdentityOf,
   chargeTypeOf,
   sharedSeasonSkeletonOf,
@@ -98,6 +108,30 @@ check('a child cap above the beds reads as the room full of children',
   normalizeRoomTypes([{ id: 'r', name: 'Villa', max_occupancy: 6, max_children: 22 }])[0].maxChildren, 6);
 check('a derived room with no child figure on its rate states none',
   roomsFromRates([{ room_type_id: 'r9', room_type: 'Loft', room_max_occupancy: 4 }])[0].maxChildren, null);
+const childContractRooms = normalizeRoomTypes([
+  {
+    id: 'legacy-child-room',
+    name: 'Legacy Child Room',
+    child_age_ranges: [{ id: 'legacy-room-band', ageFrom: 0, ageTo: 17 }]
+  },
+  { id: 'legacy-room', name: 'Legacy Room' }
+]);
+check('room child age bands are marked as explicitly configured',
+  roomForAllocation(childContractRooms, { roomTypeId: 'legacy-child-room' })?.hasChildAgeRanges, true);
+check('legacy room rows are distinguishable from explicitly empty bands',
+  roomForAllocation(childContractRooms, { roomType: 'Legacy Room' })?.hasChildAgeRanges, false);
+checkJson('an allocation uses its room contract age bands',
+  childAgeRangesForAllocation({
+    roomTypes: childContractRooms,
+    child_age_ranges: [{ id: 'property-band', ageFrom: 0, ageTo: 17 }]
+  }, { roomTypeId: 'legacy-child-room' }).map((band) => band.id),
+  ['legacy-room-band']);
+checkJson('legacy allocations retain the property-level age-band fallback',
+  childAgeRangesForAllocation({
+    roomTypes: childContractRooms,
+    child_age_ranges: [{ id: 'property-band', ageFrom: 0, ageTo: 17 }]
+  }, { roomTypeId: 'legacy-room' }).map((band) => band.id),
+  ['property-band']);
 checkJson(
   'occupancy is read off the rate row',
   roomOccupancyForRate({ room_max_occupancy: 4, room_max_adults: 3, room_max_children: 1 }),
@@ -350,6 +384,85 @@ check('a cloned season prices the new room', seasonForRoom(clonedForVilla, 'room
 check('a cloned season keeps the shared window', seasonForRoom(clonedForVilla, 'room-villa').validFrom, '2026-01-01');
 check('the shared skeleton leaves money behind', sharedSeasonSkeletonOf(sharedRows[0]).roomRate, undefined);
 check('the shared skeleton leaves the charge type to its row', sharedSeasonSkeletonOf(sharedRows[0]).optionName, undefined);
+
+/* --- FIT and Series contracts on one room and season -------------------- */
+/* A supplier quotes the same room twice: once on its FIT contract and once on
+   its Series contract. Both are real prices for one season, so the contract
+   belongs on the rate row, not on a duplicate library item. */
+check('a FIT tour type asks for the FIT contract', rateTypeForTourType('FIT'), 'fit');
+check('a Series departure asks for the Series contract', rateTypeForTourType('Series Departure'), 'series');
+check('an unknown tour type states no contract', rateTypeForTourType('Tailor-made'), '');
+check('a stored rate type is normalised', normalizeRateType('Series'), 'series');
+check('an untyped row is every contract', normalizeRateType(null), '');
+
+const contractRows = [
+  { ...sharedRows[0], rateType: 'fit', roomRate: '1000' },
+  { ...sharedRows[0], rateType: 'series', roomRate: '900' },
+  { ...sharedRows[4], rateType: 'fit', roomRate: '800' }
+];
+const duplicateContractSources = [
+  { seasonName: '2027 Shoulder', validFrom: '2027-02-01', validTo: '2027-05-31', rateType: 'fit', optionName: 'Bed & Breakfast', roomKey: 'standard', adultRate: '100' },
+  { seasonName: '2027 Shoulder', validFrom: '2027-02-01', validTo: '2027-05-31', rateType: 'fit', optionName: 'Bed & Breakfast', roomKey: 'suite', adultRate: '200' },
+  { seasonName: '2027 Shoulder', validFrom: '2027-02-01', validTo: '2027-05-31', rateType: 'fit', optionName: 'Half Board', roomKey: 'standard', adultRate: '120' },
+  { seasonName: '2027 Shoulder', validFrom: '2027-02-01', validTo: '2027-05-31', rateType: 'fit', optionName: 'Half Board', roomKey: 'suite', adultRate: '220' }
+];
+const duplicateContractGroup = sharedSeasonGroupsFor(duplicateContractSources, 'standard')[0];
+const seriesContractRows = contractRowsForSeason({
+  seasons: duplicateContractSources,
+  group: duplicateContractGroup,
+  rateType: 'series',
+  roomKeys: ['standard', 'suite'],
+  emptyRate: () => ({ adultRate: '' })
+});
+checkJson('adding a contract copies every board option and room',
+  seriesContractRows.map((row) => `${row.optionName}:${row.roomKey}`),
+  ['Bed & Breakfast:standard', 'Bed & Breakfast:suite', 'Half Board:standard', 'Half Board:suite']);
+check('contract copies retain the season window and start with blank prices',
+  seriesContractRows.every((row) => row.rateType === 'series'
+    && row.seasonName === '2027 Shoulder'
+    && row.validFrom === '2027-02-01'
+    && row.validTo === '2027-05-31'
+    && row.adultRate === ''),
+  true);
+/* The same contracts as the database returns them: snake_case columns, because
+   the package resolver reads the stored rows rather than the editor's copies. */
+const contractStoredRows = contractRows.map((row) => ({
+  id: `contract-${row.rateType}-${row.seasonName.replace(/\s+/g, '-')}`,
+  season_name: row.seasonName,
+  valid_from: row.validFrom,
+  valid_to: row.validTo,
+  currency: 'ZAR',
+  rate_type: row.rateType,
+  price_2_adults: Number(row.roomRate)
+}));
+checkJson('a FIT booking reads only its own contract',
+  ratesForContract(contractRows, 'fit').map((row) => row.seasonName), ['High season', 'Low season']);
+checkJson('a Series booking reads only the Series row',
+  ratesForContract(contractRows, 'series').map((row) => row.seasonName), ['High season']);
+checkJson('an unstated contract keeps every row',
+  ratesForContract(contractRows, '').map((row) => row.rateType), ['fit', 'series', 'fit']);
+checkJson('the untyped rows stay available beside a typed one',
+  ratesForContract([...contractRows, sharedRows[1]], 'fit').map((row) => row.rateType),
+  ['fit', 'fit', undefined]);
+
+const contractItem = { ...item, item_rates: contractRows };
+checkJson('an item is narrowed to one contract',
+  itemForContract(contractItem, 'series').item_rates.map((row) => row.rateType), ['series']);
+check('an item with no typed rows is left untouched',
+  itemForContract(item, 'fit') === item, true);
+check('the FIT and Series rows are different seasons',
+  seasonIdentityOf(contractRows[0]) === seasonIdentityOf(contractRows[1]), false);
+check('the contract splits the season groups', sharedSeasonGroupsFor(contractRows).length, 3);
+check('a cloned season carries its contract', seasonForRoom({ ...contractRows[1], roomKey: 'room-villa' }, 'room-villa').rateType, 'series');
+
+const contractStoredItem = { ...item, item_rates: contractStoredRows };
+const contractPeriods = [{ valid_from: '2026-03-01', valid_to: '2026-03-05' }];
+check('the package prices the FIT row under a FIT contract',
+  packageRateForDates(contractStoredItem, contractPeriods, 'fit')?.rate_type, 'fit');
+check('the package prices the Series row under a Series contract',
+  packageRateForDates(contractStoredItem, contractPeriods, 'series')?.rate_type, 'series');
+check('an unstated contract keeps the old first-match behaviour',
+  packageRateForDates(contractStoredItem, contractPeriods)?.rate_type, 'fit');
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

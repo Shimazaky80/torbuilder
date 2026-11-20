@@ -12,7 +12,13 @@
 import { OCCUPANCY_BASIS, occupancyRateForPax } from '../src/lib/occupancyPricing.js';
 import { serviceRoomIdentity, ratesForServiceRoom, roomTypesOf } from '../src/lib/roomTypes.js';
 import { resolveSeasonForTravel } from '../src/lib/priceValidity.js';
-import { buildRoomModalItem, calculateRoomCharges, allocationIdentityPatch } from '../src/lib/roomAllocationHelper.js';
+import {
+  buildRoomModalItem,
+  calculateRoomCharges,
+  allocationIdentityPatch,
+  roomCapacityOfService,
+  roomOverflow
+} from '../src/lib/roomAllocationHelper.js';
 import { withRoomTypeRates, homogeneousRoomIdentity } from '../src/lib/roomTypePricing.js';
 import { revalidateServicesForWindow } from '../src/lib/servicePricing.js';
 import { computePerPersonRows } from '../src/lib/perPersonPricing.js';
@@ -122,6 +128,113 @@ const mixedNight = calculateRoomCharges(modalItem, [
 ], 'ZAR', 0);
 check('a typed 4-Bed beside it pays its own 2-pax band', mixedNight.totalBuy, 32748 + 34410);
 check('and neither room is refused', mixedNight.unpricedRooms.length, 0);
+
+/* Each room keeps its own child cap and age bands, even when both rooms share
+   the same property and season. */
+const childContracts = {
+  id: 'child-contract-property',
+  category: 'Accommodation',
+  max_occupancy: 4,
+  child_age_ranges: [{ id: 'legacy', name: 'Legacy', ageFrom: 0, ageTo: 17 }],
+  roomTypes: [
+    {
+      id: 'adults-only-room',
+      name: 'Adults Only',
+      maxOccupancy: 2,
+      maxAdults: 2,
+      maxChildren: 0,
+      sharingCapacityRules: [{ adults: 1, maxChildren: 0 }, { adults: 2, maxChildren: 0 }],
+      childAgeRanges: [{ id: 'adults-only-child', name: 'No child rate', ageFrom: 0, ageTo: 17 }]
+    },
+    {
+      id: 'family-room',
+      name: 'Family Room',
+      maxOccupancy: 4,
+      maxAdults: 2,
+      maxChildren: 2,
+      sharingCapacityRules: [{ adults: 1, maxChildren: 1 }, { adults: 2, maxChildren: 2 }],
+      childAgeRanges: [
+        { id: 'family-young', name: 'Young child', ageFrom: 0, ageTo: 5 },
+        { id: 'family-older', name: 'Older child', ageFrom: 6, ageTo: 17 }
+      ]
+    }
+  ],
+  item_rates: [
+    {
+      id: 'adults-only-rate',
+      currency: 'ZAR',
+      season_name: 'Child contract season',
+      valid_from: '2027-01-01',
+      valid_to: '2027-12-31',
+      meal_plan: 'Bed & Breakfast',
+      rate_basis: 'per_person_sharing',
+      room_type_id: 'adults-only-room',
+      room_type: 'Adults Only',
+      price_1_adult: 500,
+      price_2_adults: 400,
+      child_rates_breakdown: { 'adults-only-child': 100 }
+    },
+    {
+      id: 'family-rate',
+      currency: 'ZAR',
+      season_name: 'Child contract season',
+      valid_from: '2027-01-01',
+      valid_to: '2027-12-31',
+      meal_plan: 'Bed & Breakfast',
+      rate_basis: 'per_person_sharing',
+      room_type_id: 'family-room',
+      room_type: 'Family Room',
+      price_1_adult: 600,
+      price_2_adults: 500,
+      child_rates_breakdown: { 'family-young': 250, 'family-older': 350 }
+    }
+  ]
+};
+const childCapacity = roomCapacityOfService(childContracts);
+const adultsOnlyOverflow = roomOverflow({
+  roomTypeId: 'adults-only-room',
+  roomType: 'Adults Only',
+  allocatedTravellers: [{ age: 30 }, { age: 32 }, { age: 4 }]
+}, childCapacity);
+check('an adults-only room rejects children despite a sibling room taking them', adultsOnlyOverflow.overChildren, 1);
+check('the adults-only rule reports its own zero child limit', adultsOnlyOverflow.maxChildren, 0);
+const familyOverflow = roomOverflow({
+  roomTypeId: 'family-room',
+  roomType: 'Family Room',
+  allocatedTravellers: [{ age: 30 }, { age: 32 }, { age: 4 }, { age: 7 }]
+}, childCapacity);
+check('the family room applies its two-adult sharing rule', familyOverflow.overChildren, 0);
+const oneAdultFamilyOverflow = roomOverflow({
+  roomTypeId: 'family-room',
+  roomType: 'Family Room',
+  allocatedTravellers: [{ age: 30 }, { age: 4 }, { age: 7 }]
+}, childCapacity);
+check('the family room applies a different rule for one adult', oneAdultFamilyOverflow.overChildren, 1);
+
+const childContractRate = withRoomTypeRates(childContracts.item_rates[0], {
+  item: childContracts,
+  rates: childContracts.item_rates,
+  nightDate: '2027-03-01'
+});
+check('the adults-only rate carries its own child age range',
+  childContractRate._roomTypeRates.find((entry) => entry.roomTypeId === 'adults-only-room').rate._ageRanges[0].id,
+  'adults-only-child');
+check('the family rate carries its separate child age ranges',
+  childContractRate._roomTypeRates.find((entry) => entry.roomTypeId === 'family-room').rate._ageRanges.map((band) => band.id).join(','),
+  'family-young,family-older');
+const familyModalItem = buildRoomModalItem({
+  base: childContracts,
+  service: { itemId: childContracts.id, roomTypeId: 'adults-only-room', roomType: 'Adults Only' },
+  modalRates: [childContractRate]
+});
+const familyRoomCost = calculateRoomCharges(familyModalItem, [{
+  roomId: 1,
+  roomTypeId: 'family-room',
+  roomType: 'Family Room',
+  allocatedTravellers: [{ age: 30 }, { age: 32 }, { age: 4 }]
+}], 'ZAR', 0);
+check('the allocated family room charges the child using its own age band', familyRoomCost.totalBuy, 1250);
+
 const overcrowded = calculateRoomCharges(modalItem, [guests(30, 30, 30, 30, 30, 30, 30)], 'ZAR', 0);
 check('seven in a six-bed villa is refused, not clamped', overcrowded.totalBuy, 0);
 check('the refusal names the unsold party size', overcrowded.unpricedRooms[0].reason.includes('is not sold at 7 pax'), true);

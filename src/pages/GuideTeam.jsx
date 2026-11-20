@@ -6,7 +6,9 @@ import { useListRowLimit } from '../hooks/useListRowLimit';
 import { fetchDestinationCatalog } from '../lib/destinationFilter';
 import { guideMemberName, guideUpliftPercent } from '../lib/guideRoster';
 import ConfirmDialog from '../components/ConfirmDialog';
+import GuideDetailModal from '../components/GuideDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
+import { useSession } from '../hooks/useSession';
 import { scopeCompanyId } from '../lib/tenantScope';
 import {
   UserCog,
@@ -89,7 +91,10 @@ const SectionTitle = ({ children }) => (
 );
 
 export const GuideTeam = () => {
+  const { can } = useSession();
+  const mayWrite = can('guide_team', 'write');
   const [guides, setGuides] = useState([]);
+  const [detailGuide, setDetailGuide] = useState(null);
   const [confirmDialog, confirm] = useConfirm();
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
@@ -343,13 +348,13 @@ export const GuideTeam = () => {
             <p>The people who guide — their details for accounts and tax, and what each costs above the destination rate</p>
           </div>
         </div>
-        <button
+        {mayWrite && <button
           className="primary-btn"
           style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           onClick={openAdd}
         >
           <Plus size={18} /> Add Guide
-        </button>
+        </button>}
       </header>
 
       <div style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '12px', padding: '0.9rem 1.1rem', marginBottom: '1.5rem', fontSize: '0.85rem', color: '#134e4a', maxWidth: '70rem' }}>
@@ -373,7 +378,7 @@ export const GuideTeam = () => {
         </div>
       )}
 
-      {showForm && !rosterMissing && (
+      {showForm && mayWrite && !rosterMissing && (
         <div style={{ background: '#fff', borderRadius: '16px', padding: '2rem', border: '1px solid #cbd5e1', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)', marginBottom: '2.5rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -559,7 +564,9 @@ export const GuideTeam = () => {
                   <td>
                     <div className="company-cell">
                       <div>
-                        <span className="company-name">{guideMemberName(guide) || '—'}</span>
+                        <button type="button" className="company-name" onClick={() => setDetailGuide(guide)} style={{ border: 0, background: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', color: 'inherit', font: 'inherit' }}>
+                          {guideMemberName(guide) || '—'}
+                        </button>
                         <span className="company-id" style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
                           {guide.email && <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}><Mail size={12} /> {guide.email}</span>}
                           {guide.phone && <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}><Phone size={12} /> {guide.phone}</span>}
@@ -605,6 +612,8 @@ export const GuideTeam = () => {
                   </td>
                   <td>
                     <div className="action-buttons">
+                      <button className="action-btn" onClick={() => setDetailGuide(guide)} title="View guide details">View</button>
+                      {mayWrite && <>
                       <button className="action-btn" onClick={() => openEdit(guide)} title="Edit guide">
                         <Edit3 size={16} />
                       </button>
@@ -618,6 +627,7 @@ export const GuideTeam = () => {
                       <button className="action-btn delete" onClick={() => handleDelete(guide)} title="Delete guide">
                         <Trash2 size={16} />
                       </button>
+                      </>}
                     </div>
                   </td>
                 </tr>
@@ -636,6 +646,7 @@ export const GuideTeam = () => {
       </div>
 
       {confirmDialog && <ConfirmDialog {...confirmDialog} />}
+      <GuideDetailModal guide={detailGuide} isOpen={!!detailGuide} onClose={() => setDetailGuide(null)} />
     </div>
   );
 };

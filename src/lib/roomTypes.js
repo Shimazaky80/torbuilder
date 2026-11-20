@@ -27,6 +27,11 @@ const childCapOf = (value, maxOccupancy) => {
 
 export const normalizeRoomType = (row = {}) => {
   const maxOccupancy = Math.max(1, intOr(row.max_occupancy ?? row.maxOccupancy, 2));
+  const maxChildren = childCapOf(row.max_children ?? row.maxChildren, maxOccupancy);
+  const childPolicy = String(row.child_policy ?? row.childPolicy ?? (maxChildren === 0 ? 'adults_only' : 'standard')).trim();
+  const rawChildAgeRanges = row.child_age_ranges ?? row.childAgeRanges;
+  const childAgeRanges = Array.isArray(rawChildAgeRanges) ? rawChildAgeRanges : [];
+  const rawSharingRules = row.sharing_capacity_rules ?? row.sharingCapacityRules;
   return {
     key: String(row.id || row.key || ''),
     id: row.id || null,
@@ -34,11 +39,24 @@ export const normalizeRoomType = (row = {}) => {
     description: String(row.description ?? '').trim(),
     maxOccupancy,
     maxAdults: Math.max(1, Math.min(maxOccupancy, intOr(row.max_adults ?? row.maxAdults, maxOccupancy))),
-    maxChildren: childCapOf(row.max_children ?? row.maxChildren, maxOccupancy),
+    maxChildren,
+    childPolicy,
+    childAgeRanges,
+    hasChildAgeRanges: row.hasChildAgeRanges ?? Array.isArray(rawChildAgeRanges),
+    sharingCapacityRules: Array.isArray(rawSharingRules) ? rawSharingRules : [],
+    hasSharingCapacityRules: row.hasSharingCapacityRules ?? Array.isArray(rawSharingRules),
     pricingModel: String(row.pricing_model ?? row.pricingModel ?? '').trim(),
     sortOrder: intOr(row.sort_order ?? row.sortOrder, 0)
   };
 };
+
+export const roomAllowsChildren = (room) => (
+  room?.maxChildren !== 0 && room?.childPolicy !== 'adults_only' && room?.childPolicy !== 'no_children'
+);
+
+export const roomIsFlatRate = (room) => (
+  room?.pricingModel === 'per_unit' || room?.childPolicy === 'flat_rate'
+);
 
 export const normalizeRoomTypes = (rows) => (Array.isArray(rows) ? rows : [])
   .filter((row) => row && (row.id || row.key || row.name))
@@ -50,6 +68,24 @@ export const roomTypesOf = (item) => normalizeRoomTypes(item?.roomTypes || item?
 export const roomTypeNameOf = (room) => String(room?.name || '').trim();
 
 export const roomTypeKeyOf = (room) => String(room?.key || room?.id || '');
+
+export const roomForAllocation = (rooms, allocation) => {
+  const list = (Array.isArray(rooms) ? rooms : []).map(normalizeRoomType);
+  const id = String(allocation?.roomTypeId ?? allocation?.room_type_id ?? '');
+  if (id) {
+    const byId = list.find((room) => String(room.id || room.key) === id);
+    if (byId) return byId;
+  }
+  const name = String(allocation?.roomType ?? allocation?.room_type ?? '').trim().toLowerCase();
+  return name ? list.find((room) => room.name.toLowerCase() === name) || null : null;
+};
+
+export const childAgeRangesForAllocation = (item, allocation) => {
+  const room = roomForAllocation(roomTypesOf(item), allocation);
+  if (room?.hasChildAgeRanges) return room.childAgeRanges;
+  const fallback = item?.child_age_ranges ?? item?.childAgeRanges;
+  return Array.isArray(fallback) ? fallback : [];
+};
 
 /* The room a rate row prices. Older rows have no room, so a null answer means
    "this rate belongs to the item as a whole" and every caller keeps its legacy

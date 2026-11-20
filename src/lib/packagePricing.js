@@ -2,6 +2,7 @@ import { childRateForAge } from './roomAllocationHelper';
 import { isOccupancyTiered, occupancyCeiling, occupancyLadderOf, occupancyRateForPax, pricedCapacity } from './occupancyPricing';
 import { rateCoversNights } from './accommodationOptions';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
+import { ratesForContract } from './rateTypes';
 import { chargesChildRate, contractPaxRate } from './servicePricing';
 import { buildShareContext } from './staffPricing';
 import { chargeNameOf, isExtrasItem, isVehicleExtra, ratesForCharge } from './extrasChargeTypes';
@@ -168,7 +169,7 @@ const hireComponentAnswer = (item, rate, windows, protectionPercent) => resolveH
  *   missing no season covers it, so the user has to add an item that is
  *           contracted for the package dates before the package can be saved.
  */
-export const packageSeasonCoverage = (item, rate, periods = []) => {
+export const packageSeasonCoverage = (item, rate, periods = [], rateType = '') => {
   const windows = packageValidityWindows(periods);
   const name = item?.name || 'This item';
   if (isRentalRate(rate) && !isHireComponent(rate)) return { status: 'ok', ok: true, message: '' };
@@ -186,7 +187,7 @@ export const packageSeasonCoverage = (item, rate, periods = []) => {
   if (!windows.length) return { status: 'open', ok: true, message: '' };
 
   const ranges = windows.map((window) => `${window.from} – ${window.to}`).join(', ');
-  const rates = uniqueRates(item, rate);
+  const rates = ratesForContract(uniqueRates(item, rate), rateType);
   if (rate && rateCoverageCount(rate, windows) === windows.length) return { status: 'ok', ok: true, message: '' };
 
   const covering = rates.find((row) => rateCoverageCount(row, windows) === windows.length);
@@ -237,7 +238,7 @@ export const packageItemSeasonError = (item, rate, periods = []) => packageSeaso
  *             set, so the package is charged that old contract figure unchanged
  *   blocked   nothing usable, so the item cannot join the package
  */
-export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode = '', protectionPercent = 0 } = {}) => {
+export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode = '', protectionPercent = 0, rateType = '' } = {}) => {
   const windows = packageValidityWindows(periods);
   const name = item?.name || 'This item';
   if (!windows.length) return { status: 'open', ok: true, canAdd: true, protectionPercent: 0, rate: rate || null, seasonName: '', message: '' };
@@ -264,7 +265,9 @@ export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode
     };
   }
 
-  const rates = uniqueRates(item, rate);
+  /* FIT and Series contracts price the same room and season, so only the rows
+     that belong to this package's contract may stand in for one another. */
+  const rates = ratesForContract(uniqueRates(item, rate), rateType);
   const ranges = windows.map((window) => `${window.from} – ${window.to}`).join(', ');
   const results = windows.map((window) => resolveSeasonForTravel({
     rates,
@@ -328,10 +331,11 @@ export const packageSeasonResolution = ({ item, rate, periods = [], currencyCode
 /* The season to price an item with on this package: the first one that covers the
    whole validity range, so adding an item never silently picks a season that does
    not apply. Returns undefined when the package has no restricted dates. */
-export const packageRateForDates = (item, periods = []) => {
+export const packageRateForDates = (item, periods = [], rateType = '') => {
   const windows = packageValidityWindows(periods);
-  const rates = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  const all = Array.isArray(item?.item_rates) ? item.item_rates : [];
   if (!windows.length) return undefined;
+  const rates = ratesForContract(all, rateType);
   return rates.find((row) => rateCoverageCount(row, windows) === windows.length) || undefined;
 };
 

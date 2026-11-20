@@ -64,12 +64,19 @@ check('the migration seeds as many roles as the app mirrors', seeded.length, BUI
    otherwise every new module reads as drift. */
 const migrationsDir = join(here, '..', 'supabase', 'migrations');
 const grantPattern = /UPDATE\s+public\.roles\s+SET\s+access\s*=\s*access\s*\|\|\s*'(\{[^']*\})'::jsonb\s+WHERE\s+is_builtin\s+AND\s+key\s+IN\s*\(([^)]*)\)/g;
+const flagGrantPattern = /UPDATE\s+public\.roles\s+SET\s+flags\s*=\s*flags\s*\|\|\s*'(\{[^']*\})'::jsonb\s+WHERE\s+is_builtin(?:\s+AND\s+key\s+IN\s*\(([^)]*)\))?/g;
 readdirSync(migrationsDir).filter((file) => file.endsWith('.sql')).sort().forEach((file) => {
   const sql = readFileSync(join(migrationsDir, file), 'utf8');
   [...sql.matchAll(grantPattern)].forEach(([, delta, keyList]) => {
     const keys = [...keyList.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
     seeded.forEach((row) => {
       if (keys.includes(row.key)) Object.assign(row.access, JSON.parse(delta));
+    });
+  });
+  [...sql.matchAll(flagGrantPattern)].forEach(([, delta, keyList]) => {
+    const keys = keyList ? [...keyList.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]) : null;
+    seeded.forEach((row) => {
+      if (!keys || keys.includes(row.key)) Object.assign(row.flags, JSON.parse(delta));
     });
   });
 });
@@ -103,6 +110,9 @@ check('admin sees the cost price', canSeeCosts(admin), true);
 const consultant = resolveAccess({ roleKey: 'consultant' });
 check('consultant reads the catalogue but cannot change it', can(consultant, 'library'), true);
 check('consultant cannot write the catalogue', can(consultant, 'library', 'write'), false);
+check('consultant can read client details but cannot change clients', [can(consultant, 'clients'), can(consultant, 'clients', 'write')], [true, false]);
+check('consultant cannot access tariffs or create series', [can(consultant, 'tariffs'), can(consultant, 'series', 'write')], [false, false]);
+check('other consultants’ itineraries are private by default', consultant.flags.view_all_itineraries.value, false);
 check('consultant has no users page', can(consultant, 'users'), false);
 check('consultant has no finance page', can(consultant, 'finance'), false);
 check('consultant is not shown the cost price', canSeeCosts(consultant), false);
@@ -285,14 +295,28 @@ check('every module page stands behind its own gate', MODULES.filter((module) =>
 )).map((module) => module.id), []);
 
 check('series is the departure module, not part of the quote engine', MODULES.find((module) => module.id === 'series')?.route, '/series-departures');
-check('a consultant sells seats', can(consultant, 'series', 'write'), true);
+check('a consultant can view the series chart', can(consultant, 'series', 'read'), true);
+check('a consultant cannot create series', can(consultant, 'series', 'write'), false);
 check('operations runs the departure', can(resolveAccess({ roleKey: 'operations' }), 'series', 'write'), true);
 check('finance reads the departure it bills', can(resolveAccess({ roleKey: 'finance' }), 'series', 'write'), false);
 check('finance still reaches it', can(resolveAccess({ roleKey: 'finance' }), 'series'), true);
 check('field staff read the running they are on', can(guide, 'series'), true);
 check('field staff cannot close a departure', can(guide, 'series', 'write'), false);
 check('a view-only account changes no seats', can(resolveAccess({ roleKey: 'viewer' }), 'series', 'write'), false);
-check('jobs that run a departure', rolesHolding('series', 'write'), ['Admin', 'Consultant', 'Operations']);
+check('jobs that run a departure', rolesHolding('series', 'write'), ['Admin', 'Operations']);
+
+const transferMigration = readFileSync(join(here, '..', 'supabase', 'migrations', '20261273_consultant_file_transfers.sql'), 'utf8');
+check('file transfers are Admin-only', transferMigration.includes("user_module_access('users') = 'write'"), true);
+check('file transfer changes itinerary ownership', /UPDATE public\.itineraries[\s\S]*SET created_by = p_to_user/.test(transferMigration), true);
+check('file transfer changes package ownership', /UPDATE public\.packages[\s\S]*SET created_by = p_to_user/.test(transferMigration), true);
+check('file transfers retain source and recipient names', transferMigration.includes('transferred_from_name') && transferMigration.includes('transferred_to_name'), true);
+const usersPage = readFileSync(join(here, '..', 'src', 'pages', 'Users.jsx'), 'utf8');
+check('the Users page invokes the file transfer RPC', usersPage.includes("rpc('admin_transfer_consultant_files'"), true);
+const packagePage = readFileSync(join(here, '..', 'src', 'pages', 'Packages.jsx'), 'utf8');
+check('the package list can copy a package as a new owned record', packagePage.includes('Copy package as your own') && packagePage.includes('created_by: userId'), true);
+const chartRefreshMigration = readFileSync(join(here, '..', 'supabase', 'migrations', '20261274_refresh_series_chart_after_service_edits.sql'), 'utf8');
+check('series chart refreshes when service items change', chartRefreshMigration.includes('itinerary_day_items_sync_series_chart'), true);
+check('series chart uses linked series names and codes when available', chartRefreshMigration.includes('SELECT t.name, t.code') && chartRefreshMigration.includes('JOIN public.series_templates t'), true);
 
 console.log(failures
   ? `\n${failures} rbac example(s) FAILED\n`

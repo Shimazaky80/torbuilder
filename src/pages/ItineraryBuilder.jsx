@@ -63,7 +63,7 @@ import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
 import { DayRail, DayBoardModal, DayStepper } from '../components/DayNavigator';
 import DayDestinationEditor from '../components/DayDestinationEditor';
 import { DAY_DESTINATION_COLUMNS, destinationFields, destinationLabel, dayDestinationHeading, dayRoute, dayEndLabel, applyDayDestination } from '../lib/dayDestination';
-import { VEHICLE_TYPES, activeVehicleTypes, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { VEHICLE_TYPES, TOUR_TYPES, activeVehicleTypes, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { columnExists } from '../lib/schemaColumnProbe';
 import {
   guideChargeTotal,
@@ -100,8 +100,16 @@ import {
 import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount, payingGuestsBooked, clientRoomsBooked, withRoomCapacity, tourGuideCount, allocationIdentityPatch } from '../lib/roomAllocationHelper';
 import { roomTypesOf, ratesForServiceRoom, soldRoomCapacity, allocatedRoomTypeLabel, serviceRoomName } from '../lib/roomTypes';
 import { withRoomTypeRates } from '../lib/roomTypePricing';
+import { contractTypeForTourType, itemForContract, ratesForContract } from '../lib/rateTypes';
+import { seriesPackageDepartureMatch } from '../lib/seriesDepartures';
+import { buildServiceCostRows } from '../lib/itineraryCostBreakdown';
+import {
+  COST_REPORT_OMITTED_SECTIONS,
+  exportSectionsForView,
+  isInternalCostBreakdown
+} from '../lib/itineraryExportOptions';
 import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus, ESTIMATE_SEASON_STATUSES, CONSENT_SEASON_STATUSES, PROTECTABLE_SEASON_STATUSES, protectionForSeason, itemHasPricedRate, rateForTravel as resolveRateForTravel } from '../lib/priceValidity';
-import { isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargeNightsBuy, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
+import { isFeeLevyOrTollItem, isSurchargeItem, surchargeTypeOf, surchargeBasisOf, isSurchargeChargeable, surchargeLinkId, surchargeRepeats, surchargeBuyTotal, surchargeNightsBuy, surchargePricing, needsRepeatPrompt, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES } from '../lib/surchargeFees';
 import { computePerPersonRows, breakdownSnapshot, perPersonPrintRows } from '../lib/perPersonPricing';
 import {
   carRentalBuyTotal,
@@ -135,9 +143,15 @@ import {
   statusLabel,
   textI18nPayload,
   translationsOf,
-  travelTimingText
+  travelTimingText,
+  translateInclusionLine,
+  translateExclusionLine,
+  translateInclusionsBlock,
+  translateExclusionsBlock,
+  translateMealPlan
 } from '../lib/i18n';
 import { textI18nColumn } from '../lib/i18n/textI18nColumn';
+import { categoryLabel, feeCategoryLabel } from '../lib/i18n/documentTerms';
 import { useTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { contractedServiceTotal, contractPaxRate, repriceServicesForPax, revalidateServicesForWindow, servicePax, sidebarLibraryRate, supplierPaymentDocumentStatus } from '../lib/servicePricing';
 import { PRECISION_EXACT, PRECISION_MONTH, isMonthTiming, travelTiming, travelTimingLabel, travelWindowFor } from '../lib/travelTiming';
@@ -451,7 +465,8 @@ const EXPORT_SECTIONS = [
 const PER_PERSON_VIEWS = [
   ['detailed', 'Service per day (detailed)'],
   ['perPerson', 'Per person figures only (no totals)'],
-  ['perPersonTotal', 'Per person figures, then the totals and the total per person']
+  ['perPersonTotal', 'Per person figures, then the totals and the total per person'],
+  ['categorySummary', 'Service costs by category and service (per person)']
 ];
 
 const rateForItem = (item, code) => {
@@ -561,7 +576,12 @@ const computePerPerson = (days, code, travellers, libraryItems, defaults = {}) =
     });
   });
   const rateBy = (itemId, svcRates, dayDate = '', sv = null) => {
-    const item = libraryItems.find((x) => String(x.id) === String(itemId)) || null;
+    /* The trip's contract narrows the library matrix before anything resolves a
+       season: a FIT itinerary must not read the Series row for the same room. */
+    const item = itemForContract(
+      libraryItems.find((x) => String(x.id) === String(itemId)) || null,
+      defaults.rateType
+    );
     const forNight = (rate) => (rate ? rateForNight(rate, dayDate) : rate);
     /* One row prices the line, but the night can mix this property's room types
        and each of them carries its own contract. The sibling rows ride on the
@@ -811,6 +831,26 @@ const companyContactLines = (billing) => {
 
 const companyNameOf = (billing) =>
   String(billing?.legal_name || billing?.name || '').trim();
+
+/* A company name and a person's name are not the same fact. Older itineraries
+   stored the company in consultant_name, so a document asking for the Tour
+   Designer printed the agency. Fold the legal suffixes and punctuation away to
+   tell the two apart; when the stored name IS the company, the signed-in
+   consultant is the person who designed the trip. */
+const companyNameKey = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/\(pty\)|\bpty\b|\bltd\b|\blimited\b|\binc\b|\bllc\b|\bcc\b|\bcompany\b|\bco\b/g, ' ')
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
+
+const consultantForDocument = (consultant, loggedIn, company) => {
+  const stored = String(consultant || '').trim();
+  const storedKey = companyNameKey(stored);
+  const companyKey = companyNameKey(company);
+  const storedIsCompany = !!storedKey && !!companyKey && storedKey === companyKey;
+  if (stored && !storedIsCompany) return stored;
+  return String(loggedIn || '').trim() || stored || '—';
+};
 
 /* Supplier records for the services on an itinerary, keyed by supplier id.
    Services carry their own supplier_id (persisted on itinerary_day_items), so
@@ -1665,14 +1705,24 @@ export const ItineraryBuilder = () => {
     numChildren: data?.numChildren || 0,
     agencyRef: data?.agencyRef || null,
     status: normaliseStatus(data?.status),
+    createdBy: data?.createdBy || null,
     notes: '',
     tourType: data?.tourType || '',
     consultantName: data?.consultantName || ''
   });
 
   const [companyId, setCompanyId] = useState(null);
+  /* The signed-in consultant, kept beside the itinerary so a document can name
+     the person who designed it even when the saved record carries the company
+     name in that field. */
+  const [loggedInUserName, setLoggedInUserName] = useState('');
   const [libraryItems, setLibraryItems] = useState([]);
   const [vehicleTypes, setVehicleTypes] = useState([]);
+  const [tourTypes, setTourTypes] = useState([]);
+  /* The contract this trip is priced under, from Settings > Tour Types. Every
+     rate lookup in the builder reads this one value, so the sidebar, the charge
+     dialog, the room allocation and the reprice all agree on the row. */
+  const contractType = useMemo(() => contractTypeForTourType(tourTypes, meta.tourType), [tourTypes, meta.tourType]);
   const [taxRates, setTaxRates] = useState([]);
   const [companyDepositPct, setCompanyDepositPct] = useState(DEPOSIT_PCT);
   const [billing, setBilling] = useState(null);
@@ -1759,10 +1809,29 @@ export const ItineraryBuilder = () => {
      language control at all until a second language is switched on. */
   const [exportLang, setExportLang] = useState(SOURCE_LANGUAGE);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [copyOpen, setCopyOpen] = useState(false);
-  const [copySourceId, setCopySourceId] = useState('');
+  const [copyOpen, setCopyOpen] = useState(Boolean(data?.copySourceId));
+  const [copySourceId, setCopySourceId] = useState(data?.copySourceId || '');
   const [copyInsertDay, setCopyInsertDay] = useState(1);
   const [availableItineraries, setAvailableItineraries] = useState([]);
+  useEffect(() => {
+    if (!data?.copySourceId) return undefined;
+    let active = true;
+    const loadCopySource = async () => {
+      const { data: sourceRows, error } = await supabase
+        .from('itineraries')
+        .select('id, itinerary_name, reference_number')
+        .neq('id', meta.itineraryId || '');
+      if (!active) return;
+      if (error) {
+        showToast(`Could not load the source itinerary: ${error.message}`, 'error');
+        setCopyOpen(false);
+        return;
+      }
+      setAvailableItineraries(sourceRows || []);
+    };
+    void loadCopySource();
+    return () => { active = false; };
+  }, [data?.copySourceId, meta.itineraryId, showToast]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [editSvc, setEditSvc] = useState(null);
   /* Which languages this operator writes content in. The list the editors show
@@ -1929,7 +1998,11 @@ export const ItineraryBuilder = () => {
      explicit zero, which means "charge it as quoted" - so the line, the toast and
      the saved percentage all describe the money actually taken. */
   const resolveAddSeason = useCallback((item, options = {}) => {
-    const focusRates = ratesForOption(item, options.optionLabel);
+    /* The contract is read from the tour type's Settings mapping: a Series
+       departure prices the Series row and a FIT booking the FIT one. A pinned
+       row is the operator's own pick and is never filtered away. */
+    const contractRates = ratesForContract(item.item_rates || [], contractType);
+    const focusRates = ratesForContract(ratesForOption(item, options.optionLabel), contractType);
     const pinnedRate = options.rateId ? rateById(item, options.rateId) : null;
     const allowEstimate = options.allowEstimate === true;
     /* A fee bills the night it sits on, not the whole trip: a levy that changes
@@ -1949,7 +2022,7 @@ export const ItineraryBuilder = () => {
         allowEstimate
       })
       : resolveSeasonForTravel({
-        rates: focusRates.length ? focusRates : (item.item_rates || []),
+        rates: focusRates.length ? focusRates : contractRates,
         currencyCode,
         startDate,
         endDate,
@@ -1970,7 +2043,7 @@ export const ItineraryBuilder = () => {
        one rule that answers both: only a season that does not cover the trip is
        ever uplifted. */
     return { ...season, protectionPercent: protectionForSeason(season, protectionPercent) };
-  }, [currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, monthTimed]);
+  }, [currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, monthTimed, contractType]);
   /* The out-of-season dialog. It opens carrying the percentage the add will be
      charged at - Settings, or the uplift the resolver already chose - so the
      operator confirms or edits the number instead of merely agreeing to it. */
@@ -2012,8 +2085,12 @@ export const ItineraryBuilder = () => {
      but only a job with write access to itineraries may change one. The route
      admits the reader, so the lock has to live here, where every mutation
      already funnels through setDays / setMeta. */
-  const { can: holdModule, canSeeCosts } = useSession();
-  const mayEditItinerary = holdModule('itineraries', 'write');
+  const { can: holdModule, canSeeCosts, userId, roleKey, name: sessionName } = useSession();
+  const isConsultant = roleKey === 'consultant';
+  const ownsItinerary = meta.createdBy === userId
+    || (!meta.createdBy && meta.consultantName === sessionName);
+  const mayEditItinerary = holdModule('itineraries', 'write')
+    && (!isConsultant || !meta.itineraryId || ownsItinerary);
   /* Provisional, Confirmed, In Progress, Completed, and Cancelled itineraries
      are locked against commercial edits. Only the status badge stays live, so
      an eligible booking can be returned to Quotation to re-open editing. */
@@ -2472,6 +2549,30 @@ export const ItineraryBuilder = () => {
     }
   }, []);
 
+  /* Tour types carry the contract a trip is priced under. The read falls back to
+     the long-standing columns on a database that has not run the contract
+     migration, and the rows then simply carry no `rate_type` - which the
+     resolver reads as "work it out from the name", exactly as before. */
+  const loadTourTypes = useCallback(async (cid) => {
+    if (!cid) {
+      setTourTypes([]);
+      return;
+    }
+    try {
+      const read = (columns) => supabase
+        .from(TOUR_TYPES.table)
+        .select(columns)
+        .or(vocabularyReadFilter(cid))
+        .order(...TOUR_TYPES.orderBy);
+      let { data, error } = await read(TOUR_TYPES.columns);
+      if (error) ({ data, error } = await read(TOUR_TYPES.baseColumns));
+      if (error) throw error;
+      setTourTypes(mergeVocabulary(data || [], TOUR_TYPES.keyColumn));
+    } catch {
+      setTourTypes([]);
+    }
+  }, []);
+
   // Sidebar picker: on-demand server-side search. Bounded to a page of results
   // so the biggest cost (all rates for a whole company catalogue) never runs.
   const fetchPickerItems = useCallback(async () => {
@@ -2587,6 +2688,39 @@ export const ItineraryBuilder = () => {
       if (error) throw error;
       const packages = data || [];
       const packageIds = packages.map((pkg) => pkg.id);
+      let seriesTemplates = [];
+      let seriesDepartures = [];
+      if (packageIds.length) {
+        const templatesResult = await supabase.from('series_templates')
+          .select('id, package_id, name, operates_on, valid_from, valid_to, status')
+          .eq('company_id', companyId)
+          .in('package_id', packageIds);
+        const templatesMissing = templatesResult.error && (
+          templatesResult.error.code === '42P01'
+          || templatesResult.error.code === 'PGRST205'
+          || /series_templates.*(does not exist|not found|schema cache)/i.test(templatesResult.error.message || '')
+        );
+        if (templatesResult.error && !templatesMissing) throw templatesResult.error;
+        seriesTemplates = templatesMissing ? [] : templatesResult.data || [];
+
+        const templateIds = seriesTemplates.map((template) => template.id);
+        if (templateIds.length) {
+          let departureQuery = supabase.from('series_departures')
+            .select('template_id, departure_date, status')
+            .eq('company_id', companyId)
+            .in('template_id', templateIds);
+          if (meta.travelStart) departureQuery = departureQuery.gte('departure_date', meta.travelStart);
+          if (meta.travelEnd) departureQuery = departureQuery.lte('departure_date', meta.travelEnd);
+          const departuresResult = await departureQuery;
+          const departuresMissing = departuresResult.error && (
+            departuresResult.error.code === '42P01'
+            || departuresResult.error.code === 'PGRST205'
+            || /series_departures.*(does not exist|not found|schema cache)/i.test(departuresResult.error.message || '')
+          );
+          if (departuresResult.error && !departuresMissing) throw departuresResult.error;
+          seriesDepartures = departuresMissing ? [] : departuresResult.data || [];
+        }
+      }
       const { data: packageDays, error: daysError } = packageIds.length
         ? await supabase.from('package_days').select('*').in('package_id', packageIds).order('day_number')
         : { data: [], error: null };
@@ -2604,6 +2738,10 @@ export const ItineraryBuilder = () => {
       }]));
       setPickerPackages(packages.map((pkg) => ({
         ...pkg,
+        series_schedule: seriesTemplates.filter((template) => template.package_id === pkg.id).map((template) => ({
+          ...template,
+          departures: seriesDepartures.filter((departure) => departure.template_id === template.id)
+        })),
         package_snapshot: {
           id: pkg.id, name: pkg.name, description: pkg.description,
           text_i18n: pkg.text_i18n || null,
@@ -2621,7 +2759,7 @@ export const ItineraryBuilder = () => {
     } finally {
       setPickerPackagesLoading(false);
     }
-  }, [companyId, categoryFilter, searchTerm, showToast]);
+  }, [companyId, categoryFilter, searchTerm, showToast, meta.travelStart, meta.travelEnd]);
 
   useEffect(() => {
     const timer = setTimeout(fetchPickerPackages, 300);
@@ -2679,6 +2817,7 @@ export const ItineraryBuilder = () => {
           travelDatePrecision: it.travel_date_precision === PRECISION_MONTH ? PRECISION_MONTH : PRECISION_EXACT,
           durationDays: Number(it.duration_days) > 0 ? Number(it.duration_days) : prev.durationDays,
           status: normaliseStatus(it.status),
+          createdBy: it.created_by || null,
           notes: it.notes || '',
           /* Travellers must be reloaded from the persisted row too. They are only
              ever entered on the Client form, so they are not in the route state on
@@ -2851,6 +2990,7 @@ repeatGroupId: ii.repeat_group_id || null,
       try {
         const username = await getLoggedInUserName();
         if (username) {
+          setLoggedInUserName(username);
           hydrateRef.current = true;
           setMeta((prev) => ({
             ...prev,
@@ -2870,6 +3010,7 @@ repeatGroupId: ii.repeat_group_id || null,
       const cid = await fetchCompanyId();
       await loadCompanyMeta(cid);
       await loadVehicleTypes(cid);
+      await loadTourTypes(cid);
       let foundSaved = false;
       if (cid && data?.itineraryId) {
         const savedItemIds = await fetchItineraryItemIds(data.itineraryId);
@@ -2880,7 +3021,7 @@ repeatGroupId: ii.repeat_group_id || null,
       setBootedState(true);
     };
     boot();
-  }, [data, fetchCompanyId, loadCompanyMeta, loadVehicleTypes, fetchItineraryItemIds, loadLibraryItemsByIds, loadExistingDays, initDaysFromRange]);
+  }, [data, fetchCompanyId, loadCompanyMeta, loadVehicleTypes, loadTourTypes, fetchItineraryItemIds, loadLibraryItemsByIds, loadExistingDays, initDaysFromRange]);
 
   /* Safety net for the day skeleton. The boot pass above runs exactly once and
      builds the days from the travel range, but it is async — if the user sets
@@ -3049,6 +3190,7 @@ repeatGroupId: ii.repeat_group_id || null,
             taxRate: numOr(sv.taxRate, defaultTaxRate),
             qty: paxCount,
             unit: (Number(sv.sellPP) || 0),
+            buy: round2(buyLine),
             subExcl: round2(line - taxAmt),
             tax: round2(taxAmt),
             sell: round2(line)
@@ -3075,6 +3217,7 @@ repeatGroupId: ii.repeat_group_id || null,
           taxRate: numOr(sv.taxRate, defaultTaxRate),
           qty: paxCount,
           unit: (Number(sv.sellPP) || 0),
+          buy: round2(buyLine),
           subExcl: round2(line - taxAmt),
           tax: round2(taxAmt),
           sell: round2(line)
@@ -3262,7 +3405,9 @@ repeatGroupId: ii.repeat_group_id || null,
        because it built its own single-row item. Resolving here once means the
        line total, the room-allocation dialog and anything copied afterwards
        all read the same season. */
-    const seasonalRates = seasonRate ? [protectedSeasonRate] : (item.item_rates || []);
+    const seasonalRates = seasonRate
+      ? [protectedSeasonRate]
+      : ratesForContract(item.item_rates || [], contractType);
     const pricedItem = { ...item, item_rates: seasonalRates };
     /* The single protected row, used directly by the surcharge pricing path
        below. */
@@ -4276,12 +4421,33 @@ repeatGroupId: ii.repeat_group_id || null,
 
   const addPackageToDay = useCallback((dayIndex, pkg) => {
     if (completedRef.current || isReadOnly || !days[dayIndex]) return;
+    const seriesSchedule = pkg.series_schedule || [];
+    let seriesAssignment = null;
+    if (seriesSchedule.length) {
+      seriesAssignment = seriesPackageDepartureMatch({
+        travelStart: days[dayIndex].date,
+        travelDatePrecision: meta.travelDatePrecision,
+        templates: seriesSchedule,
+        departures: seriesSchedule.flatMap((template) => template.departures || [])
+      });
+      if (!seriesAssignment.matches) {
+        showToast(`Cannot add ${pkg.name} as a Series section: ${seriesAssignment.reason}`, 'error');
+        return;
+      }
+    }
     const taxApplies = taxAppliesForCurrency(currencyCode);
     // The itinerary owns a detached copy of the reusable package contents.
     // Editing this copy must never mutate the saved package in the Packages menu.
     const packageSnapshot = pkg.package_snapshot
       ? JSON.parse(JSON.stringify(pkg.package_snapshot))
       : { id: pkg.id, name: pkg.name, description: pkg.description || '', text_i18n: pkg.text_i18n || null, days: [] };
+    if (seriesAssignment?.templateId) {
+      packageSnapshot.series_section = {
+        template_id: seriesAssignment.templateId,
+        template_name: seriesAssignment.templateName,
+        departure_date: seriesAssignment.departureDate
+      };
+    }
     const snapshotServices = (packageSnapshot.days || []).flatMap((day) => day.services || []);
     const includedServices = snapshotServices.filter((service) => service.is_included !== false);
     const packageCurrencies = [...new Set(includedServices.map((service) => service.currency_code || 'ZAR'))];
@@ -4313,8 +4479,11 @@ repeatGroupId: ii.repeat_group_id || null,
       ? { ...day, services: [...day.services, service] }
       : day));
     const mixedCurrencies = packageCurrencies.length > 1;
-    showToast(`Added ${pkg.name} to Day ${days[dayIndex].dayNumber}.${mixedCurrencies ? ` Its main price uses ${packageCurrency}; review other currencies in the expanded details.` : ''}`, mixedCurrencies ? 'warning' : 'success');
-  }, [isReadOnly, days, currencyCode, taxAppliesForCurrency, nextId, paxCount, markupPct, defaultTaxRate, defaultTaxLabel, setDays, showToast]);
+    const seriesNote = seriesAssignment?.templateId
+      ? ` Schedule matched ${seriesAssignment.templateName || 'the series'} for ${seriesAssignment.departureDate}; this does not reserve seats.`
+      : '';
+    showToast(`Added ${pkg.name} to Day ${days[dayIndex].dayNumber}.${seriesNote}${mixedCurrencies ? ` Its main price uses ${packageCurrency}; review other currencies in the expanded details.` : ''}`, mixedCurrencies ? 'warning' : 'success');
+  }, [isReadOnly, days, currencyCode, taxAppliesForCurrency, nextId, paxCount, markupPct, defaultTaxRate, defaultTaxLabel, setDays, showToast, meta.travelDatePrecision]);
 
   const removePackageService = useCallback((dayIndex, packageRowKey, packageDayIndex, serviceIndex) => {
     if (completedRef.current || isReadOnly) return;
@@ -4629,9 +4798,12 @@ repeatGroupId: ii.repeat_group_id || null,
        row. This is also what keeps a reloaded itinerary honest: the season is
        not stored on itinerary_day_items, so it has to be derived from the
        travel dates every time the dialog opens. */
-    const sourceRates = (Array.isArray(libraryItem.item_rates) && libraryItem.item_rates.length)
-      ? libraryItem.item_rates
-      : (Array.isArray(sv.item_rates) ? sv.item_rates : []);
+    const sourceRates = ratesForContract(
+      (Array.isArray(libraryItem.item_rates) && libraryItem.item_rates.length)
+        ? libraryItem.item_rates
+        : (Array.isArray(sv.item_rates) ? sv.item_rates : []),
+      contractType
+    );
     /* The season is resolved over THIS line's room alone. Two villas on one
        property can share a season name, validity dates and board, so a
        room-blind resolve lets the sibling villa's row win the tie and the
@@ -5636,7 +5808,7 @@ return !!sv.time; /* activities / meals / other */
        export with every content box off is refused here rather than printing an
        empty page. Optional extras are not counted: they ride under the cost
        breakdown and cannot stand as a document of their own. */
-    const include = sections;
+    const include = exportSectionsForView(sections);
     const hasContent = include.itinerary || include.pricing || include.inclusions
       || include.exclusions || include.terms || include.travellers;
     if (!hasContent) {
@@ -5695,8 +5867,8 @@ return !!sv.time; /* activities / meals / other */
     const paxWord = paxCount > 0 ? L('doc.travellers', { n: paxCount, count: paxCount }) : '—';
     const taxLabel = defaultTaxLabel || 'VAT';
     const taxRateOf = (ccy) => (taxAppliesForCurrency(ccy) ? defaultTaxRate : 0);
-    const showSupplierBase = billing?.show_supplier_in_description !== false;
-    const showSupplierOf = (sv) => showSupplierBase || /accommodation/i.test(sv.category || '');
+    /* Supplier names are deliberately absent from the client document; the
+       voucher, which is addressed to the supplier, is where they belong. */
     const showMealPlanBase = billing?.show_meal_plan_on_accommodation !== false;
     /* The charge a line is bought as prints under its description: the board basis
        on a room, the named charge on an extra. */
@@ -5745,7 +5917,10 @@ return !!sv.time; /* activities / meals / other */
           }
           const line = Number(sv.sell) || 0;
           const taxRate = numOr(sv.taxRate, defaultTaxRate);
-          const item = sv.itemId ? libraryItems.find((x) => String(x.id) === String(sv.itemId)) : null;
+          const item = itemForContract(
+            sv.itemId ? libraryItems.find((x) => String(x.id) === String(sv.itemId)) : null,
+            contractType
+          );
           /* The row is resolved over the charge and room this line sold: a
              sibling villa sharing the season name must not price this night's
              expanded rows off its own ladder. */
@@ -5854,6 +6029,9 @@ return !!sv.time; /* activities / meals / other */
           <tr><td colspan="7" align="right"><b>${TL('doc.totalIfAdded', { code: grp.code })}</b></td><td${numAttr}><b>${M(grp.optionalTotalSell, grp.symbol)}</b></td></tr>` : ''}
         </table>`;
     };
+    /* The client document names the service and the room bought, never the
+       supplier behind it. Supplier names live on the vouchers, which are issued
+       to that supplier and are a different document. */
     const rowDescHtml = (r, escFn) => {
       const l = { category: r.category, mealPlan: r.mealPlan, supplierName: r.supplierName };
       const mealTxt = showMealPlanOf(l) ? ` - ${escFn(abbrevMealPlan(r.mealPlan))}` : '';
@@ -5861,24 +6039,13 @@ return !!sv.time; /* activities / meals / other */
          so it sits beside the service name in the same bracket the room picker
          uses. */
       const roomTxt = r.roomType ? ` (${escFn(r.roomType)})` : '';
-      const supplierText = /accommodation/i.test(r.category || '')
-        ? withStarGrade(r.supplierName, r.supplierStar, starWord(r.supplierStar))
-        : r.supplierName;
-      const supplierLine = showSupplierOf(l) && supplierText
-        ? (escFn === esc ? `<br><span style="color:#666;font-size:12px;">${escFn(supplierText)}</span>` : `<br><span class="muted">${escFn(supplierText)}</span>`)
-        : '';
-      return `${escFn(r.name)}${roomTxt}${mealTxt}${supplierLine}`;
+      return `${escFn(r.name)}${roomTxt}${mealTxt}`;
     };
     const rowDesc = (r) => {
       const l = { category: r.category, mealPlan: r.mealPlan, supplierName: r.supplierName };
       const mealTxt = showMealPlanOf(l) ? ` - ${abbrevMealPlan(r.mealPlan)}` : '';
       const roomTxt = r.roomType ? ` (${r.roomType})` : '';
-      const supplierText = /accommodation/i.test(r.category || '')
-        ? withStarGrade(r.supplierName, r.supplierStar, starWord(r.supplierStar))
-        : r.supplierName;
-      return showSupplierOf(l) && supplierText
-        ? `${r.name}${roomTxt}${mealTxt} — ${supplierText}`
-        : `${r.name}${roomTxt}${mealTxt}`;
+      return `${r.name}${roomTxt}${mealTxt}`;
     };
     const logoAlign = billing?.logo_position === 'center' ? 'margin:0 auto 8px' : (billing?.logo_position === 'right' ? 'margin:0 0 8px auto' : 'margin:0 0 8px');
     const logoImgTag = billing?.logo_data_url
@@ -5927,9 +6094,13 @@ return !!sv.time; /* activities / meals / other */
        grey is what the eye was meeting as the whole line before. The party's names
        get a header of their own, because the Travellers line answers how many and
        this one answers who. */
+    /* The person, not the agency. A record saved before this change may hold the
+       company in consultant_name, so the document resolves the signed-in
+       consultant when the stored name is the company's own. */
+    const designerName = consultantForDocument(meta.consultantName, loggedInUserName, companyNameOf(billing));
     const metaFields = [
       [L('doc.fieldReference'), meta.referenceNumber || '—'],
-      [L('doc.fieldTourDesigner'), meta.consultantName || '—'],
+      [L('doc.fieldTourDesigner'), designerName],
       [L('doc.fieldClient'), meta.client?.name || '—'],
       [L('doc.fieldDates'), timingOf(meta)],
       [L('doc.fieldStatus'), statusWord(meta.status)],
@@ -5974,30 +6145,26 @@ return !!sv.time; /* activities / meals / other */
         : '';
     })();
 
-    /* Day-by-day routing: per-day description plus every service on the day
-       rendered as a bullet. Non-accommodation shows "Service type: Service name".
-       Accommodation shows "Accommodation: Supplier, Meal plan" (abbreviated),
-       which is always shown regardless of the line-item toggle. When a day has
-       more than one accommodation at the same supplier (e.g. two room types),
-       the service name is added so the lines stay distinguishable. */
+    /* Day-by-day routing: per-day description plus every service the client
+       travels on, rendered as a bullet. Non-accommodation shows "Service type:
+       Service name"; accommodation shows "Accommodation: Property, Room, Meal
+       plan". Supplier names never appear here - they belong on the voucher - and
+       levies, park fees, porterage and tolls belong in Inclusions, not in the
+       day's routing, where they would read as something to do. */
     const dayByDayHtml = () => {
       const list = (days || []).map((d, i) => {
         const num = d.dayNumber || i + 1;
         const date = d.date ? dateOf(d.date) : '';
         const desc = localizedText(d, 'notes', lang).trim();
         const services = d.services || [];
-        /* Count how many accommodation entries share each supplier on this day. */
-        const supplierUse = new Map();
-        services.forEach((sv) => {
-          if (!/accommodation/i.test(String(sv.category || ''))) return;
-          const key = String(sv.supplierName || sv.supplier_name || '').trim().toLowerCase();
-          if (!key) return;
-          supplierUse.set(key, (supplierUse.get(key) || 0) + 1);
-        });
-        const itemLines = services.map((sv) => {
+        const itemLines = services
+          /* A levy, park fee, porterage or toll is not a service the client
+             travels on. Those belong in the Inclusions list, not in the day's
+             routing, where they read as something to do. */
+          .filter((sv) => !isFeeLevyOrTollItem(sv))
+          .map((sv) => {
           const name = String(sv.name || '').trim() || L('doc.service');
           const category = String(sv.category || '').trim();
-          const supplier = String(sv.supplierName || sv.supplier_name || '').trim();
           const meal = String(sv.mealPlan || '').trim();
           /* Optional / alternative services are badged in the routing so the
              client can see at a glance they are not part of the confirmed
@@ -6006,13 +6173,10 @@ return !!sv.time; /* activities / meals / other */
             ? ` <span style="color:#b45309;font-size:12px;font-style:italic;">(${TL(isAccommodationItem(sv) ? 'doc.alternativeNotIncluded' : 'doc.optionalNotIncluded')})</span>`
             : '';
           if (/accommodation/i.test(category)) {
-            const shared = supplier
-              ? (supplierUse.get(supplier.toLowerCase()) || 0) > 1
-              : false;
-            const head = shared && supplier ? `${supplier}, ${name}` : (supplier || name);
-            /* The grade belongs to the property, so it is printed with the hotel
-               name the client reads — "Hotel X (4-star), B&B". */
-            const graded = supplier ? withStarGrade(head, supplierStarOfService(sv, libraryItems), starWord(supplierStarOfService(sv, libraryItems))) : head;
+            /* The property, not the supplier: a client document names the hotel
+               they sleep in. The grade belongs to the property, so it prints
+               with the name the client reads — "Hotel X (4-star), B&B". */
+            const graded = withStarGrade(name, supplierStarOfService(sv, libraryItems), starWord(supplierStarOfService(sv, libraryItems)));
             const room = allocatedRoomTypeLabel(sv);
             return `<strong>${esc(L('doc.accommodation'))}</strong>: ${esc(graded)}${room ? `, ${esc(room)}` : ''}${meal ? `, ${esc(abbrevMealPlan(meal))}` : ''}${badge}`;
           }
@@ -6020,7 +6184,7 @@ return !!sv.time; /* activities / meals / other */
              hire, so the spec grid is printed on the day it leaves the yard rather
              than repeated for every 24-hour block billed after it. */
           const specs = rentalPrintsSpecGrid(sv.rental) ? `<div style="margin:4px 0 2px;">${carSpecGridHtml(sv.rental)}</div>` : '';
-          return `<strong>${esc(category || L('doc.service'))}</strong>: ${esc(name)}${badge}${specs}`;
+          return `<strong>${esc(category ? categoryLabel(lang, category) : L('doc.service'))}</strong>: ${esc(name)}${badge}${specs}`;
         }).filter(Boolean);
         return `<div style="margin:0 0 14px;">
           <div style="background:#eee;font-weight:700;color:#0d7478;padding:6px 10px;">${esc(dayDestinationHeading(d, num, lang))}${date ? ` &mdash; ${esc(date)}` : ''}</div>
@@ -6030,7 +6194,10 @@ return !!sv.time; /* activities / meals / other */
           ${itemLines.length ? `<ul style="margin:4px 0;padding:0 2px 0 20px;list-style-type:disc;">${itemLines.map((l) => `<li style="margin:0 0 2px;">${l}</li>`).join('')}</ul>` : ''}
         </div>`;
       }).join('');
-      return `<h2 style="color:#0d7478;margin-top:20px;margin-bottom:28px;text-align:center;">${TL('doc.itinerary')}</h2>${list || `<p>${TL('doc.noDays')}</p>`}`;
+      /* The day-by-day section opens a page of its own and opens it with the
+         word "Itinerary", so a reader flicking through the PDF always lands on
+         the heading rather than the tail of the pricing table. */
+      return `<h2 style="color:#0d7478;margin-top:0;margin-bottom:24px;text-align:center;page-break-before:always;break-before:page;">${TL('doc.itinerary')}</h2>${list || `<p>${TL('doc.noDays')}</p>`}`;
     };
 
     /* Dynamic Inclusions list, generated from the day items themselves because
@@ -6051,21 +6218,25 @@ return !!sv.time; /* activities / meals / other */
           if (sv?.isOptional) return;
           const type = String(sv?.category || '').trim();
           const name = String(sv?.name || '').trim();
-          const supplier = String(sv?.supplierName || sv?.supplier_name || '').trim();
           const meal = String(sv?.mealPlan || '').trim();
           const qty = Math.max(1, Number(sv?.qty) || 1);
           if (!type && !name) return;
 
           let label;
           if (/accommodation/i.test(type) || /accommodation/i.test(name)) {
-            // Accommodation: Supplier - Meal Plan (meal plan shown in full), with
-            // the hotel's star grading beside the property name.
-            const property = withStarGrade(supplier || name, supplierStarOfService(sv, libraryItems), starWord(supplierStarOfService(sv, libraryItems)));
+            /* The property the client stays at, not the supplier that sells it:
+               a client-facing inclusions list names the hotel. */
+            const property = withStarGrade(name, supplierStarOfService(sv, libraryItems), starWord(supplierStarOfService(sv, libraryItems)));
             const room = allocatedRoomTypeLabel(sv);
-            const head = [type || L('doc.accommodation'), [property, room].filter(Boolean).join(' - ')].filter(Boolean).join(': ');
-            label = meal ? `${head} - ${meal}` : head;
+            const head = [categoryLabel(lang, type) || L('doc.accommodation'), [property, room].filter(Boolean).join(' - ')].filter(Boolean).join(': ');
+            const translatedMeal = translateMealPlan(meal, lang);
+            label = translatedMeal ? `${head} - ${translatedMeal}` : head;
+          } else if (isFeeLevyOrTollItem(sv)) {
+            const feeCat = feeCategoryLabel(lang, type || 'Fees & Tickets');
+            label = name ? `${feeCat}: ${name}` : feeCat;
           } else {
-            label = type && name ? `${type}: ${name}` : (name || type);
+            const typeLabel = type ? categoryLabel(lang, type) : '';
+            label = typeLabel && name ? `${typeLabel}: ${name}` : (name || typeLabel);
           }
 
           const key = label.toLowerCase();
@@ -6085,7 +6256,8 @@ return !!sv.time; /* activities / meals / other */
     const includeDefaultInclusions = billing?.itinerary_include_default_inclusions !== false;
     const defaultInclusionItems = (() => {
       const raw = includeDefaultInclusions ? localizedText(billing, 'itinerary_inclusions', lang) : '';
-      return raw
+      const translated = translateInclusionsBlock(raw, lang);
+      return translated
         .split(/\r?\n/)
         .map((s) => s.replace(/^\s*[-*•–—]\s*/, '').trim())
         .filter(Boolean);
@@ -6102,7 +6274,7 @@ return !!sv.time; /* activities / meals / other */
     const itineraryBlocks = [
       { key: 'terms', title: L('doc.termsTitle'), text: localizedText(billing, 'itinerary_terms', lang), position: billing?.itinerary_terms_position || 'under_day_by_day' },
       { key: 'inclusions', title: L('doc.inclusionsTitle'), text: '', position: billing?.itinerary_inclusions_position || 'under_day_by_day', extraHtml: defaultInclusionsHtml + dynamicInclusionsHtml },
-      { key: 'exclusions', title: L('doc.exclusionsTitle'), text: localizedText(billing, 'itinerary_exclusions', lang), position: billing?.itinerary_exclusions_position || 'under_day_by_day' }
+      { key: 'exclusions', title: L('doc.exclusionsTitle'), text: translateExclusionsBlock(localizedText(billing, 'itinerary_exclusions', lang), lang), position: billing?.itinerary_exclusions_position || 'under_day_by_day' }
     ].filter((b) => include[b.key] && ((b.text || '').trim() || (b.extraHtml || '')));
     /* Terms, Inclusions and Exclusions are sections of the document in their own
        right, not the tail of the day they follow, so each one opens behind a rule
@@ -6110,7 +6282,13 @@ return !!sv.time; /* activities / meals / other */
        page; the inclusions list is not held, because a long list that will not fit
        is better carried over a page edge than clipped by a break that refuses it. */
     const itineraryBlockHtml = (b, { keep = true } = {}) => {
-      const text = (b.text || '').trim() ? `<div style="white-space:pre-line;">${esc(b.text)}</div>` : '';
+      /* Exclusions read as a list of what the client does not get, so each line
+         carries a heavy ballot X rather than running together as prose. The
+         operator's own line breaks are the list. */
+      const lines = String(b.text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const text = b.key === 'exclusions' && lines.length
+        ? `<ul style="margin:6px 0 0;padding-left:0;list-style:none;">${lines.map((line) => `<li style="margin:2px 0;"><span style="color:#b91c1c;font-weight:700;margin-right:0.4em;">&#10008;</span>${esc(line.replace(/^\s*[-*•–—✘\u2718]\s*/, ''))}</li>`).join('')}</ul>`
+        : (b.text || '').trim() ? `<div style="white-space:pre-line;">${esc(b.text)}</div>` : '';
       return `<div style="margin-top:26px;padding-top:12px;border-top:2px solid #0d7478;${keep ? 'page-break-inside:avoid;' : ''}">`
         + `<h1 style="color:#0d7478;font-size:19px;margin:0 0 10px;">${esc(b.title)}</h1>${text}${b.extraHtml || ''}</div>`;
     };
@@ -6122,16 +6300,14 @@ return !!sv.time; /* activities / meals / other */
       const pricing = include.pricing ? pricingHtml : '';
       const routing = include.itinerary ? dayByDayHtml() : '';
       /* The day list and the prices are the services being sold, so the document
-         says they are finished and then turns the page: what follows — terms,
-         inclusions, exclusions — starts on a page of its own and the sections run
-         on together instead of each hunting for room on a half-full page. The break
-         is inline because Word carries no stylesheet, and the class is for the PDF
-         window, which shows the document as one continuous scroll until it prints —
-         an invisible promise looks like a broken one, so the screen marks the turn. */
+         says so, centred, and then carries straight on: Inclusions, Exclusions
+         and Terms follow about three paragraphs below the line rather than each
+         starting a page of its own. A short document reads as one document; a
+         long one breaks naturally where the paper ends. */
       const underBlocks = itineraryBlocks.filter((b) => (b.position || 'under_day_by_day') === 'under_day_by_day');
       const under = underBlocks.length
-        ? `<div style="margin-top:26px;font-weight:700;color:#111;">${TL('doc.endOfServices')}</div>`
-          + `<div class="doc-page-break" style="page-break-before:always;break-before:page;">`
+        ? `<div style="margin-top:26px;text-align:center;font-weight:700;color:#111;">${TL('doc.endOfServices')}</div>`
+          + `<div style="margin-top:54px;">`
           + underBlocks.map((b) => itineraryBlockHtml(b, { keep: b.key !== 'inclusions' })).join('')
           + `</div>`
         : '';
@@ -6145,7 +6321,7 @@ return !!sv.time; /* activities / meals / other */
 
     const ppData = (() => {
       const m = new Map();
-      groups.forEach((g) => m.set(g.code, computePerPerson(days, g.code, meta.travellers || [], libraryItems, { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent, allowPartial: monthTimed })));
+      groups.forEach((g) => m.set(g.code, computePerPerson(days, g.code, meta.travellers || [], libraryItems, { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent, allowPartial: monthTimed, rateType: contractType })));
       return m;
     })();
     /* An adult's price and a child's price are different money, so the per-person
@@ -6174,6 +6350,25 @@ return !!sv.time; /* activities / meals / other */
         r.label, r.qty, r.unit, r.subExcl, r.tax, r.incl
       ]);
     };
+    const categorySummaryRows = (grp) => buildServiceCostRows({
+      days: grp.days,
+      paxCount,
+      categoryLabel: (label) => categoryLabel(lang, label),
+      serviceFallback: L('doc.service')
+    });
+    const categorySummaryHtml = (grp, right) => categorySummaryRows(grp)
+      .map((row) => {
+        const bold = row.isSubtotal || row.category === 'Grand total';
+        return `<tr${bold ? ' style="background:#f8fafc;"' : ''}><td>${bold ? `<b>${esc(row.category)}</b>` : esc(row.category)}</td><td>${bold ? `<b>${esc(row.service)}</b>` : esc(row.service)}</td><td>${esc(row.day || '—')}</td><td>${esc(row.date || '—')}</td><td${right}>${bold ? '<b>' : ''}${M(row.buy, grp.symbol)}${bold ? '</b>' : ''}</td><td${right}>${bold ? '<b>' : ''}${M(row.tax, grp.symbol)}${bold ? '</b>' : ''}</td><td${right}>${bold ? '<b>' : ''}${M(row.markup, grp.symbol)}${bold ? '</b>' : ''}</td><td${right}>${bold ? '<b>' : ''}${M(row.sellWithoutMarkup, grp.symbol)}${bold ? '</b>' : ''}</td><td${right}><b>${M(row.sellWithMarkup, grp.symbol)}</b></td></tr>`;
+      })
+      .join('');
+    const categorySummaryCsv = (grp) => {
+      const rows = categorySummaryRows(grp);
+      return [
+        ['Service category', 'Service', 'Day', 'Date', 'Buy / person (incl. tax)', 'Tax / person (included)', 'Markup / person', 'Sell without markup / person', 'Sell with markup / person'],
+        ...rows.map((row) => [row.category, row.service, row.day, row.date, row.buy, row.tax, row.markup, row.sellWithoutMarkup, row.sellWithMarkup])
+      ];
+    };
     const ppRowsHtml = (g, pdf) => {
       const set = ppPrintable(g);
       const num = (v) => (v === '' ? '' : M(v, g.symbol));
@@ -6190,7 +6385,7 @@ return !!sv.time; /* activities / meals / other */
       const lines = [
         `"${L('doc.itinerary')}: ${csvEscape(meta.itineraryName)}"`,
         `"${L('doc.fieldReference')}: ${csvEscape(meta.referenceNumber || '')}"`,
-        `"${L('doc.fieldTourDesigner')}: ${csvEscape(meta.consultantName || '')}"`,
+        `"${L('doc.fieldTourDesigner')}: ${csvEscape(designerName === '—' ? '' : designerName)}"`,
         `"${L('doc.fieldClient')}: ${csvEscape(meta.client?.name || '')}"`,
         `"${L('doc.fieldDates')}: ${csvEscape(timingOf(meta))}"`,
         `"${L('doc.fieldStatus')}: ${csvEscape(statusWord(meta.status))}"`,
@@ -6223,9 +6418,14 @@ return !!sv.time; /* activities / meals / other */
       if (include.pricing) groups.forEach((grp, idx) => {
         if (idx > 0) lines.push('');
         lines.push(`"${L('doc.fieldCurrency')}: ${csvEscape(grp.code)} (${csvEscape(grp.symbol)})${grp.name ? ` - ${csvEscape(grp.name)}` : ''}"`);
-        const header = [L('doc.thDay'), L('doc.thDate'), L('doc.thDescription'), L('doc.thQty'), L('doc.thUnit'), L('doc.subtotalExcl', { tax: taxWord(grp.code) }), taxWordUp(grp.code), L('doc.totalIncl', { tax: taxWordUp(grp.code) })].map(csvEscape).join(',');
+        const categoryView = perPersonView === 'categorySummary';
+        const header = (categoryView
+          ? ['Service category', 'Service', 'Day', 'Date', 'Buy / person (incl. tax)', 'Tax / person (included)', 'Markup / person', 'Sell without markup / person', 'Sell with markup / person']
+          : [L('doc.thDay'), L('doc.thDate'), L('doc.thDescription'), L('doc.thQty'), L('doc.thUnit'), L('doc.subtotalExcl', { tax: taxWord(grp.code) }), taxWordUp(grp.code), L('doc.totalIncl', { tax: taxWordUp(grp.code) })]).map(csvEscape).join(',');
         lines.push(header);
-        if (perPerson) {
+        if (categoryView) {
+          categorySummaryCsv(grp).slice(1).forEach((row) => lines.push(row.map(csvEscape).join(',')));
+        } else if (perPerson) {
           ppRows(grp).forEach((r) => lines.push(r.map(csvEscape).join(',')));
         } else {
           dayRowsOf(grp).forEach((r) => lines.push([dayHeading(r.day), r.date, rowDesc(r), r.qty, round2(r.unit), r.subExcl, r.tax, r.sell].map(csvEscape).join(',')));
@@ -6233,7 +6433,7 @@ return !!sv.time; /* activities / meals / other */
         /* Choice 1 of the per-person breakdown is a document with no totals at
            all: every figure in it is one traveller's money, so the party's
            subtotal, tax and total due are left out rather than misleading. */
-        if (showTripTotals) {
+        if (showTripTotals && !categoryView) {
           lines.push([L('doc.subtotalExcl', { tax: taxWord(grp.code) }), '', '', '', '', '', '', grp.totalExcl].map(csvEscape).join(','));
           lines.push([`${taxWordUp(grp.code)} (${taxLine(grp.code, taxLabel, taxRateOf(grp.code))} ${taxRateOf(grp.code)}%)`, '', '', '', '', '', '', grp.totalTax].map(csvEscape).join(','));
           lines.push([L('doc.totalDue', { code: grp.code, tax: taxWordUp(grp.code) }), '', '', '', '', '', '', grp.totalInclTax].map(csvEscape).join(','));
@@ -6265,11 +6465,15 @@ return !!sv.time; /* activities / meals / other */
       const sectionsHtml = include.pricing ? groups.map((grp) => `
         <h2 style="color:#0d7478;margin-top:20px;margin-bottom:8px;">${TL('doc.pricingBreakdown')} — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;">
-          <tr><th>${TL('doc.thDay')}</th><th>${TL('doc.thDate')}</th><th>${TL('doc.thDescription')}</th><th${RIGHT}>${TL('doc.thQty')}</th><th${RIGHT}>${TL('doc.thUnit')}</th><th${RIGHT}>${TL('doc.subtotalExcl', { tax: taxWord(grp.code) })}</th><th${RIGHT}>${esc(taxWordUp(grp.code))}</th><th${RIGHT}>${TL('doc.totalIncl', { tax: taxWordUp(grp.code) })}</th></tr>
-          ${perPerson
+          <tr>${perPersonView === 'categorySummary'
+            ? `<th>Service category</th><th>Service</th><th>Day</th><th>Date</th><th${RIGHT}>Buy / person (incl. tax)</th><th${RIGHT}>Tax / person (included)</th><th${RIGHT}>Markup / person</th><th${RIGHT}>Sell without markup / person</th><th${RIGHT}>Sell with markup / person</th>`
+            : `<th>${TL('doc.thDay')}</th><th>${TL('doc.thDate')}</th><th>${TL('doc.thDescription')}</th><th${RIGHT}>${TL('doc.thQty')}</th><th${RIGHT}>${TL('doc.thUnit')}</th><th${RIGHT}>${TL('doc.subtotalExcl', { tax: taxWord(grp.code) })}</th><th${RIGHT}>${esc(taxWordUp(grp.code))}</th><th${RIGHT}>${TL('doc.totalIncl', { tax: taxWordUp(grp.code) })}</th>`}</tr>
+          ${perPersonView === 'categorySummary'
+            ? categorySummaryHtml(grp, RIGHT)
+            : perPerson
             ? ppRowsHtml(grp, false)
             : dayRowsOf(grp).map((r) => `<tr><td>${esc(dayHeading(r.day))}</td><td>${esc(r.date || '—')}</td><td>${rowDescHtml(r, esc)}</td><td${r.qtyText ? ` title="${esc(r.qtyTitle)}"` : ''}${RIGHT}>${esc(r.qty)}</td><td${RIGHT}>${M(round2(r.unit), grp.symbol)}</td><td${RIGHT}>${M(r.subExcl, grp.symbol)}</td><td${RIGHT}>${M(r.tax, grp.symbol)}</td><td${RIGHT}><b>${M(r.sell, grp.symbol)}</b></td></tr>`).join('')}
-          ${showTripTotals ? `
+          ${showTripTotals && perPersonView !== 'categorySummary' ? `
           <tr><td colspan="7" align="right">${TL('doc.subtotalExcl', { tax: taxWord(grp.code) })}</td><td${RIGHT}><b>${M(grp.totalExcl, grp.symbol)}</b></td></tr>
           <tr><td colspan="7" align="right">${esc(taxWordUp(grp.code))} (${esc(taxLine(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td${RIGHT}><b>${M(grp.totalTax, grp.symbol)}</b></td></tr>
           <tr><td colspan="7" align="right"><b>${TL('doc.totalDue', { code: grp.code, tax: taxWordUp(grp.code) })}</b></td><td${RIGHT}><b>${M(grp.totalInclTax, grp.symbol)}</b></td></tr>` : ''}
@@ -6289,7 +6493,18 @@ return !!sv.time; /* activities / meals / other */
         ${composeItineraryHtml(sectionsHtml)}
         <p style="margin-top:24px;"><i>${TL('doc.generatedBy')}</i></p>`;
 
-      downloadBlob(`<html><head><meta charset="utf-8"></head><body>${body}</body></html>`, `${safeName}.doc`, 'application/msword');
+      /* Word carries no stylesheet of its own, so the page geometry and the
+         type scale are stated here: narrower side margins and a smaller body
+         size than the old default, which squeezed a wide pricing table. */
+      downloadBlob(`<html><head><meta charset="utf-8"><style>
+        @page{margin:1.4cm 1.5cm}
+        body{font-family:Arial,sans-serif;font-size:10.5pt;color:#111;margin:0}
+        h1{font-size:18pt;margin:0 0 6pt}
+        h2{font-size:14pt}
+        table{border-collapse:collapse;width:100%}
+        th,td{border:1px solid #ccc;padding:3pt 5pt;font-size:9.5pt;text-align:left}
+        th{background:#eee}
+      </style></head><body>${body}</body></html>`, `${safeName}.doc`, 'application/msword');
       showToast('Itinerary exported as Word', 'success');
       return;
     }
@@ -6304,11 +6519,15 @@ return !!sv.time; /* activities / meals / other */
       const sectionsHtml = include.pricing ? groups.map((grp) => `
         <h2 style="color:#0d7478;font-size:16px;margin:24px 0 8px;border-bottom:2px solid #0d7478;padding-bottom:4px;">${TL('doc.pricingBreakdown')} — ${esc(grp.code)} (${esc(grp.symbol)}${grp.name ? ` - ${esc(grp.name)}` : ''})</h2>
         <table>
-          <tr><th>${TL('doc.thDay')}</th><th>${TL('doc.thDate')}</th><th>${TL('doc.thDescription')}</th><th class="num">${TL('doc.thQty')}</th><th class="num">${TL('doc.thUnit')}</th><th>${TL('doc.subtotalExcl', { tax: taxWord(grp.code) })}</th><th>${esc(taxWordUp(grp.code))}</th><th>${TL('doc.totalIncl', { tax: taxWordUp(grp.code) })}</th></tr>
-          ${perPerson
+          <tr>${perPersonView === 'categorySummary'
+            ? '<th>Service category</th><th>Service</th><th>Day</th><th>Date</th><th class="num">Buy / person (incl. tax)</th><th class="num">Tax / person (included)</th><th class="num">Markup / person</th><th class="num">Sell without markup / person</th><th class="num">Sell with markup / person</th>'
+            : `<th>${TL('doc.thDay')}</th><th>${TL('doc.thDate')}</th><th>${TL('doc.thDescription')}</th><th class="num">${TL('doc.thQty')}</th><th class="num">${TL('doc.thUnit')}</th><th>${TL('doc.subtotalExcl', { tax: taxWord(grp.code) })}</th><th>${esc(taxWordUp(grp.code))}</th><th>${TL('doc.totalIncl', { tax: taxWordUp(grp.code) })}</th>`}</tr>
+          ${perPersonView === 'categorySummary'
+            ? categorySummaryHtml(grp, ' class="num"')
+            : perPerson
             ? ppRowsHtml(grp, true)
             : dayRowsOf(grp).map((r) => `<tr><td>${esc(dayHeading(r.day))}</td><td>${esc(r.date || '—')}</td><td>${rowDescHtml(r, esc)}</td><td${r.qtyText ? ` title="${esc(r.qtyTitle)}"` : ''} class="num">${esc(r.qty)}</td><td class="num">${M(round2(r.unit), grp.symbol)}</td><td class="num">${M(r.subExcl, grp.symbol)}</td><td class="num">${M(r.tax, grp.symbol)}</td><td class="num">${M(r.sell, grp.symbol)}</td></tr>`).join('')}
-          ${showTripTotals ? `
+          ${showTripTotals && perPersonView !== 'categorySummary' ? `
           <tr class="grand"><td colspan="7" align="right">${TL('doc.subtotalExcl', { tax: taxWord(grp.code) })}</td><td class="num">${M(grp.totalExcl, grp.symbol)}</td></tr>
           <tr class="grand"><td colspan="7" align="right">${esc(taxWordUp(grp.code))} (${esc(taxLine(grp.code, taxLabel, taxRateOf(grp.code)))} ${taxRateOf(grp.code)}%)</td><td class="num">${M(grp.totalTax, grp.symbol)}</td></tr>
           <tr class="grand"><td colspan="7" align="right">${TL('doc.totalDue', { code: grp.code, tax: taxWordUp(grp.code) })}</td><td class="num">${M(grp.totalInclTax, grp.symbol)}</td></tr>` : ''}
@@ -6317,10 +6536,12 @@ return !!sv.time; /* activities / meals / other */
       `).join('') : '';
 
       w.document.write(`<!doctype html><html><head><title>${esc(meta.itineraryName)}</title><style>
-        body{font-family:Arial,sans-serif;margin:32px;color:#111}
-        h1{margin:0 0 6px} .muted{color:#666;font-size:13px;margin:2px 0}
-        table{border-collapse:collapse;width:100%;margin-top:16px}
-        th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:13px}
+        /* Narrower side margins and a smaller type scale: the pricing table is
+           wide, and 32px of gutter each side left it fighting for room. */
+        body{font-family:Arial,sans-serif;margin:16px 18px;color:#111;font-size:11.5px}
+        h1{margin:0 0 6px;font-size:19px} .muted{color:#666;font-size:11px;margin:2px 0}
+        table{border-collapse:collapse;width:100%;margin-top:12px}
+        th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;font-size:10.5px}
         th{background:#eee} .grand{font-weight:700} td.num{text-align:right}
         @media screen{
           .doc-page-break{position:relative;margin-top:30px;padding-top:26px;border-top:1px dashed #9aa4a8}
@@ -6375,6 +6596,19 @@ return !!sv.time; /* activities / meals / other */
         }
       }
       showToast('Add at least one day before saving this itinerary.', 'warning');
+      return false;
+    }
+    const changedSeriesSection = days.flatMap((day) => (day.services || [])
+      .filter((service) => service.packageSnapshot?.series_section)
+      .map((service) => ({ day, service })))
+      .find(({ day, service }) => day.date !== service.packageSnapshot.series_section.departure_date);
+    if (changedSeriesSection) {
+      const { day, service } = changedSeriesSection;
+      const departureDate = service.packageSnapshot.series_section.departure_date;
+      showToast(
+        `${service.name || 'Series package'} was matched to ${departureDate}, but Day ${day.dayNumber} is now ${day.date || 'undated'}. Remove and re-add the package to validate the new date.`,
+        'error'
+      );
       return false;
     }
     const allocCheck = validateAllRoomAllocations();
@@ -6443,14 +6677,15 @@ return !!sv.time; /* activities / meals / other */
             company_id: companyId,
             client_id: meta.client?.id || null,
             reference_number: ref,
-            currency_code: currencyCode
+            currency_code: currencyCode,
+            created_by: userId
           }])
           .select()
           .single();
         if (error) throw error;
         id = created.id;
-        persistedMeta = { ...persistedMeta, itineraryId: id, referenceNumber: ref };
-        setMeta((prev) => ({ ...prev, itineraryId: id, referenceNumber: ref }));
+        persistedMeta = { ...persistedMeta, itineraryId: id, referenceNumber: ref, createdBy: userId };
+        setMeta((prev) => ({ ...prev, itineraryId: id, referenceNumber: ref, createdBy: userId }));
       } else {
         const { error: upErr } = await supabase
           .from('itineraries')
@@ -6754,6 +6989,31 @@ return !!sv.time; /* activities / meals / other */
       } catch {
         // fallback to empty if vocabulary not available
       }
+      /* What the itinerary promises the client travels on. The package inherits
+         both lists: the company's standing wording, then the services actually
+         booked, de-duplicated the way the itinerary document prints them. */
+      const includedLines = [];
+      const seenInclusions = new Set();
+      (days || []).forEach((day) => {
+        (day.services || []).forEach((sv) => {
+          if (sv?.isOptional) return;
+          const type = String(sv?.category || '').trim();
+          const name = String(sv?.name || '').trim();
+          if (!type && !name) return;
+          const room = /accommodation/i.test(type) ? allocatedRoomTypeLabel(sv) : '';
+          const meal = String(sv?.mealPlan || '').trim();
+          const label = /accommodation/i.test(type) || /accommodation/i.test(name)
+            ? `${type || 'Accommodation'}: ${[name, room].filter(Boolean).join(' - ')}${meal ? ` - ${meal}` : ''}`
+            : (type && name ? `${type}: ${name}` : (name || type));
+          if (seenInclusions.has(label.toLowerCase())) return;
+          seenInclusions.add(label.toLowerCase());
+          includedLines.push(label);
+        });
+      });
+      const defaultInclusionsText = String(billing?.itinerary_inclusions || '').trim();
+      const inclusionsForPackage = [defaultInclusionsText, ...includedLines.map((line) => `- ${line}`)]
+        .filter(Boolean)
+        .join('\n');
       const payload = buildItineraryPackage({
         meta,
         days,
@@ -6765,7 +7025,9 @@ return !!sv.time; /* activities / meals / other */
           end: toISODate(meta.travelEnd) || travelWindow.end
         },
         currencyCode,
-        vehicleTypes: vTypes
+        vehicleTypes: vTypes,
+        inclusions: inclusionsForPackage,
+        exclusions: String(billing?.itinerary_exclusions || '').trim()
       });
       /* The package starts client-agnostic at contract cost: no client is assigned and
          no quote markup is carried. A partner assignment in Package Builder is what
@@ -6776,6 +7038,8 @@ return !!sv.time; /* activities / meals / other */
           company_id: companyId,
           name: payload.name,
           description: payload.description,
+          inclusions: payload.inclusions,
+          exclusions: payload.exclusions,
           currency_code: payload.currency_code,
           accepts_children: payload.accepts_children,
           child_age_ranges: payload.child_age_ranges,
@@ -6928,7 +7192,7 @@ return !!sv.time; /* activities / meals / other */
         targetCurrency,
         Array.isArray(meta.travellers) ? meta.travellers : [],
         libraryItems,
-        { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent, allowPartial: monthTimed }
+        { defaultTaxRate, paxCount, travelWindow, protectionPercent: priceProtectionPercent, allowPartial: monthTimed, rateType: contractType }
       ));
 
       /* The invoice bills what the trip costs less what has already been billed
@@ -7673,7 +7937,8 @@ return !!sv.time; /* activities / meals / other */
           end: payload.travelEnd || nextDays[nextDays.length - 1]?.date || ''
         },
         protectionPercent: priceProtectionPercent,
-        allowPartial: nextPrecision === PRECISION_MONTH
+        allowPartial: nextPrecision === PRECISION_MONTH,
+        rateType: contractType
       });
       /* A month-timed quote has to re-check every line against the new window:
          an exact date that lands in a different season must be repriced, while
@@ -7694,7 +7959,8 @@ return !!sv.time; /* activities / meals / other */
               end: payload.travelEnd || ''
             },
             protectionPercent: priceProtectionPercent,
-            allowPartial: nextPrecision === PRECISION_MONTH
+            allowPartial: nextPrecision === PRECISION_MONTH,
+            rateType: contractType
           })
         : null;
       const finalDays = revalidated ? revalidated.days : priced.days;
@@ -8712,7 +8978,10 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                 </div>
               </div>
             ) : (
-              pickerItemsToShow.map((item) => {
+              pickerItemsToShow.map((sourceItem) => {
+                /* The card prices this trip's contract, so the other contract's
+                   rows are not offered as a figure the drop will not honour. */
+                const item = itemForContract(sourceItem, contractType);
                 /* Resolve the season that will actually be used when this item
                    is dropped — the same logic createService() uses. Showing the
                    correctly-dated price in the sidebar prevents the operator
@@ -9291,6 +9560,14 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                               {sv.stayPayFree ? ` · free night${sv.stayPayRule ? ` (${sv.stayPayRule})` : ''}` : ''}
                               {servicePax > 0 ? ` · ${servicePax} pax` : ''}
                               {sv.currencyCode ? ` · ${sv.currencyCode}` : ''}
+                              {sv.packageSnapshot?.series_section && (
+                                <span
+                                  className="basis-tag"
+                                  title={`${sv.packageSnapshot.series_section.template_name || 'Series package'} matched to departure ${sv.packageSnapshot.series_section.departure_date}.`}
+                                >
+                                  Series section · {sv.packageSnapshot.series_section.departure_date}
+                                </span>
+                              )}
                               <span className={`basis-tag ${isFlatBasis(sv.basis) ? 'flat' : ''}`}>
                                 {isVehicleExtra(sv) ? 'Per vehicle' : basisLabelOf(sv.basis)}
                               </span>
@@ -11541,13 +11818,13 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
           )}
           {accomChargeModal && (
             <AccommodationChargeModal
-              item={accomChargeModal.item}
+              item={itemForContract(accomChargeModal.item, contractType)}
               variant={accomChargeModal.variant || 'accommodation'}
               currency={accomChargeModal.item.currency_code || currencyCode}
               travelStart={travelWindow.start}
               travelEnd={travelWindow.end}
               defaultRateId={(resolveSeasonForTravel({
-                rates: accomChargeModal.item.item_rates || [],
+                rates: ratesForContract(accomChargeModal.item.item_rates || [], contractType),
                 currencyCode,
                 startDate: travelWindow.start,
                 endDate: travelWindow.end,
@@ -11726,7 +12003,9 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                   )}
                   <div className="package-export-options">
                     <span className="package-export-subhead">Include</span>
-                    {EXPORT_SECTIONS.map(([key, label]) => (
+                    {EXPORT_SECTIONS
+                      .filter(([key]) => !isInternalCostBreakdown(exportOptions) || !COST_REPORT_OMITTED_SECTIONS.includes(key))
+                      .map(([key, label]) => (
                       <label key={key}>
                         <input
                           type="checkbox"
@@ -11739,6 +12018,11 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                   {exportOptions.pricing && (
                     <div className="package-export-options">
                       <span className="package-export-subhead">Cost breakdown</span>
+                      {isInternalCostBreakdown(exportOptions) && (
+                        <small style={{ color: '#64748b', fontWeight: 400 }}>
+                          Internal cost report. Day-by-day itinerary, inclusions, and exclusions are omitted.
+                        </small>
+                      )}
                       {PER_PERSON_VIEWS.map(([value, label]) => (
                         <label key={value}>
                           <input

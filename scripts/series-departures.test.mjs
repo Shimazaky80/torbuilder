@@ -10,6 +10,7 @@ import {
   releaseDateFor,
   resolveDepartureStatus,
   returnDateFor,
+  seriesPackageDepartureMatch,
   seatRollup,
   templateDuration,
   toISODate,
@@ -85,6 +86,35 @@ check('an unset release period is not today', releaseDateFor('2028-06-01', null)
 check('the duration comes from the package days', templateDuration([{ day_number: 1 }, { day_number: 7 }, { day_number: 3 }]), { durationDays: 7, durationNights: 6 });
 check('a package with no days has no duration', templateDuration([]), { durationDays: 0, durationNights: 0 });
 check('a day tour has no nights', templateDuration([{ day_number: 1 }]), { durationDays: 1, durationNights: 0 });
+const seriesPackage = [{
+  id: 'template-1',
+  status: 'active',
+  operates_on: [1, 4],
+  valid_from: '2028-01-01',
+  valid_to: '2028-01-31'
+}];
+const seriesDepartures = [
+  { template_id: 'template-1', departure_date: '2028-01-03', status: 'open' },
+  { template_id: 'template-1', departure_date: '2028-01-06', status: 'cancelled' }
+];
+check('series package matches an active departure on its scheduled day', seriesPackageDepartureMatch({
+  travelStart: '2028-01-03', templates: seriesPackage, departures: seriesDepartures
+}), { matches: true, reason: '', templateId: 'template-1', templateName: '', departureDate: '2028-01-03' });
+check('series package rejects a non-operating weekday with a reason', seriesPackageDepartureMatch({
+  travelStart: '2028-01-05', templates: seriesPackage, departures: seriesDepartures
+}).reason, 'This series does not operate on Wednesday. It runs Monday and Thursday. Choose an operating date or a different package.');
+check('series package rejects a date outside its validity window', seriesPackageDepartureMatch({
+  travelStart: '2028-02-01', templates: seriesPackage, departures: seriesDepartures
+}).matches, false);
+check('series package requires exact dates, not month-only timing', seriesPackageDepartureMatch({
+  travelStart: '2028-01-03', travelDatePrecision: 'month', templates: seriesPackage, departures: seriesDepartures
+}).matches, false);
+check('series package requires a generated bookable departure', seriesPackageDepartureMatch({
+  travelStart: '2028-01-06', templates: seriesPackage, departures: seriesDepartures
+}).matches, false);
+check('a regular package has no series date restriction', seriesPackageDepartureMatch({
+  travelStart: '2028-01-04', templates: [], departures: []
+}), { matches: true, reason: '' });
 
 /* 5. The ledger is the authority on seats. Options are reported beside the sold
       count, because the database holds confirmed seats against the cap. */

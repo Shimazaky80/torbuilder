@@ -32,6 +32,13 @@ export {
   SOURCE_LANGUAGE
 } from './languages.js';
 export { DOCUMENT_LABELS, DOCUMENT_LABEL_KEYS, statusLabelKey } from './documentLabels.js';
+export {
+  translateInclusionLine,
+  translateExclusionLine,
+  translateInclusionsBlock,
+  translateExclusionsBlock,
+  translateMealPlan
+} from './inclusionExclusionTranslations.js';
 
 const pluralValue = (count) => {
   const n = Number(count);

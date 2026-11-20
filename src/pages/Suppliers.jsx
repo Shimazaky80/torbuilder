@@ -6,7 +6,9 @@ import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import ConfirmDialog from '../components/ConfirmDialog';
+import SupplierDetailModal from '../components/SupplierDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
+import { useSession } from '../hooks/useSession';
 import {
   Building2,
   Search,
@@ -31,9 +33,11 @@ import { supplierStarColumn } from '../lib/supplierStarColumn';
 import { scopeCompanyId } from '../lib/tenantScope';
 
 export const Suppliers = () => {
+  const { can } = useSession();
+  const mayWrite = can('suppliers', 'write');
   const [suppliers, setSuppliers] = useState([]);
+  const [detailSupplier, setDetailSupplier] = useState(null);
   const [confirmDialog, confirm] = useConfirm();
-  const [userProfile, setUserProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [fetchingSuppliers, setFetchingSuppliers] = useState(false);
   const [totalSuppliers, setTotalSuppliers] = useState(null);
@@ -107,8 +111,6 @@ export const Suppliers = () => {
         .select('*, company_id')
         .eq('id', user.id)
         .single();
-
-      setUserProfile(profile);
 
       if (!scopeCompanyId(profile?.company_id)) {
         setSuppliers([]);
@@ -317,7 +319,7 @@ export const Suppliers = () => {
       </header>
 
       {/* EXPANSIVE INLINE SUPPLIER FORM BLOCK (No Modals!) */}
-      {showInlineForm && (
+      {showInlineForm && mayWrite && (
         <div style={{
           background: '#fff',
           borderRadius: '16px',
@@ -674,13 +676,13 @@ export const Suppliers = () => {
           </div>
 
           <div className="action-buttons">
-            <button
+            {mayWrite && <button
               className="primary-btn"
               style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478' }}
               onClick={handleOpenAddForm}
             >
               <Plus size={18} /> Add New Supplier
-            </button>
+            </button>}
           </div>
         </div>
 
@@ -715,7 +717,9 @@ export const Suppliers = () => {
               <tr key={supplier.id}>
                 <td>
                   <div className="company-cell">
-                    <span className="company-name">{supplier.name}</span>
+                    <button type="button" className="company-name" onClick={() => setDetailSupplier(supplier)} style={{ border: 0, background: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', color: 'inherit', font: 'inherit' }}>
+                      {supplier.name}
+                    </button>
                     {supplier.contact_person && (
                       <span className="company-id" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
                         <User size={12} /> {supplier.contact_person}
@@ -780,6 +784,7 @@ export const Suppliers = () => {
                     >
                       <Package size={16} /> Library Items
                     </button>
+                    {mayWrite && <>
                     <button
                       className="action-btn"
                       onClick={() => handleOpenEditForm(supplier)}
@@ -794,6 +799,7 @@ export const Suppliers = () => {
                     >
                       <Trash2 size={16} />
                     </button>
+                    </>}
                   </div>
                 </td>
               </tr>
@@ -814,6 +820,7 @@ export const Suppliers = () => {
       </div>
 
       {confirmDialog && <ConfirmDialog {...confirmDialog} />}
+      <SupplierDetailModal supplier={detailSupplier} isOpen={!!detailSupplier} onClose={() => setDetailSupplier(null)} />
     </div>
   );
 };

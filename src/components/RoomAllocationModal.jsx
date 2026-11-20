@@ -55,21 +55,36 @@ const isCrewRoom = (room) => String(room?.roomType || room?.room_type || '').tri
    capacity of whichever room the line was sold at. */
 const roomCapsOf = (room, choices, fallback) => {
   const named = String(room?.roomType || room?.room_type || '').trim();
-  const choice = named && !isCrewRoom(room)
-    ? choices.find((rt) => rt.name.toLowerCase() === named.toLowerCase())
+  const roomTypeId = String(room?.roomTypeId || room?.room_type_id || '');
+  const choice = !isCrewRoom(room)
+    ? (roomTypeId && choices.find((rt) => String(rt.id || rt.key) === roomTypeId))
+      || (named && choices.find((rt) => rt.name.toLowerCase() === named.toLowerCase()))
     : null;
-  if (!choice) return fallback;
-  const maxOccupancy = Math.max(1, parseInt(choice.maxOccupancy, 10) || fallback.maxOccupancy);
-  const statedAdults = parseInt(choice.maxAdults, 10);
-  const statedChildren = parseInt(choice.maxChildren, 10);
+  const contract = choice || fallback;
+  const maxOccupancy = choice
+    ? Math.max(1, parseInt(choice.maxOccupancy, 10) || fallback.maxOccupancy)
+    : fallback.maxOccupancy;
+  const statedAdults = parseInt(contract.maxAdults, 10);
+  const statedChildren = parseInt(contract.maxChildren, 10);
+  const adults = occupantCounts(room).adults;
+  const sharingRule = (contract.sharingCapacityRules || []).find(
+    (rule) => parseInt(rule?.adults, 10) === adults
+  );
+  const ruleChildren = parseInt(sharingRule?.maxChildren, 10);
+  const roomChildren = Number.isFinite(statedChildren) && statedChildren >= 0
+    ? statedChildren
+    : (choice ? null : fallback.maxChildren);
+  const maxChildren = contract.childPolicy === 'adults_only' || contract.childPolicy === 'no_children'
+    ? 0
+    : Number.isFinite(ruleChildren) && ruleChildren >= 0
+      ? (roomChildren === null ? ruleChildren : Math.min(roomChildren, ruleChildren))
+      : roomChildren;
   return {
     maxOccupancy,
     maxAdults: Number.isFinite(statedAdults) && statedAdults > 0
       ? Math.min(statedAdults, maxOccupancy)
       : fallback.maxAdults,
-    maxChildren: Number.isFinite(statedChildren) && statedChildren >= 0
-      ? statedChildren
-      : fallback.maxChildren
+    maxChildren
   };
 };
 
@@ -91,14 +106,20 @@ const roomIsOverCapacity = (room, maxOccupancy, maxAdults, maxChildren) => {
 };
 
 /* Why this traveller cannot join this room, or '' when they fit. */
-const roomCapacityBlock = (roomId, room, traveller, maxOccupancy, maxAdults, maxChildren) => {
+const roomCapacityBlock = (roomId, room, traveller, maxOccupancy, maxAdults, maxChildren, maxChildrenAfter = maxChildren) => {
   const counts = occupantCounts(room);
+  const isAdult = isAdultTraveller(traveller);
   if (counts.total >= maxOccupancy) return `Room ${roomId} is full (${maxOccupancy} max)`;
-  if (isAdultTraveller(traveller) && maxAdults !== null && counts.adults >= maxAdults) {
+  if (isAdult && maxAdults !== null && counts.adults >= maxAdults) {
     return `Room ${roomId} has no adult bed left (${maxAdults} adult${maxAdults === 1 ? '' : 's'} max)`;
   }
-  if (!isAdultTraveller(traveller) && maxChildren !== null && counts.children >= maxChildren) {
+  if (!isAdult && maxChildren !== null && counts.children >= maxChildren) {
+    if (maxChildren === 0) return `Room ${roomId} is Adults Only and does not allow children`;
     return `Room ${roomId} has no child bed left (${maxChildren} child${maxChildren === 1 ? '' : 'ren'} max)`;
+  }
+  const projectedChildren = counts.children + (isAdult ? 0 : 1);
+  if (maxChildrenAfter !== null && projectedChildren > maxChildrenAfter) {
+    return `Room ${roomId} would exceed its child-sharing limit (${maxChildrenAfter} child${maxChildrenAfter === 1 ? '' : 'ren'} max)`;
   }
   return '';
 };
@@ -146,7 +167,13 @@ export default function RoomAllocationModal({
   const capacityLabel = capacityParts.length
     ? `${capacityParts.join(' + ')} · ${maxOccupancy} pax`
     : `${maxOccupancy} pax`;
-  const lineCaps = useMemo(() => ({ maxOccupancy, maxAdults, maxChildren }), [maxOccupancy, maxAdults, maxChildren]);
+  const lineCaps = useMemo(() => ({
+    maxOccupancy,
+    maxAdults,
+    maxChildren,
+    sharingCapacityRules: item?.sharingCapacityRules || [],
+    childPolicy: item?.childPolicy || ''
+  }), [maxOccupancy, maxAdults, maxChildren, item?.sharingCapacityRules, item?.childPolicy]);
   /* The property's own room types. A night can mix them - one Family Suite and
      two Standard Rooms - and the allocation is what knows which guest sleeps
      where, so each room carries its own type. With only one type there is
@@ -378,7 +405,17 @@ export default function RoomAllocationModal({
     const occs = target.allocatedTravellers || [];
     if (occs.some((t) => t.id === traveller.id)) return `Already in Room ${target.roomId}`;
     const caps = roomCapsOf(target, roomTypeChoices, lineCaps);
-    return roomCapacityBlock(target.roomId, target, traveller, caps.maxOccupancy, caps.maxAdults, caps.maxChildren);
+    const after = { ...target, allocatedTravellers: [...occs, traveller] };
+    const afterCaps = roomCapsOf(after, roomTypeChoices, lineCaps);
+    return roomCapacityBlock(
+      target.roomId,
+      target,
+      traveller,
+      caps.maxOccupancy,
+      caps.maxAdults,
+      caps.maxChildren,
+      afterCaps.maxChildren
+    );
   };
 
   const moveTraveller = (traveller, targetRoomId) => {
@@ -410,7 +447,6 @@ export default function RoomAllocationModal({
       return;
     }
     const targetRoomId = activeRoom.roomId;
-    const targetCaps = activeRoomCaps;
     const movers = selectedMovableTravellers.filter(
       (t) => roomByTravellerId.get(t.id) !== targetRoomId
     );
@@ -418,13 +454,19 @@ export default function RoomAllocationModal({
       setMoveNotice('Selected traveller(s) are already in this room.');
       return;
     }
+    const activeCaps = roomCapsOf(activeRoom, roomTypeChoices, lineCaps);
     /* Fill by bed type: three adults must not be crammed into a room that
        takes two adults just because it has three beds. */
     const accepted = [];
     const rejected = [];
     movers.forEach((traveller) => {
       const roomAfter = { ...activeRoom, allocatedTravellers: [...(activeRoom.allocatedTravellers || []), ...accepted] };
-      const blocked = roomCapacityBlock(targetRoomId, roomAfter, traveller, targetCaps.maxOccupancy, targetCaps.maxAdults, targetCaps.maxChildren);
+      const targetCaps = roomCapsOf(roomAfter, roomTypeChoices, lineCaps);
+      const afterCaps = roomCapsOf({
+        ...roomAfter,
+        allocatedTravellers: [...roomAfter.allocatedTravellers, traveller]
+      }, roomTypeChoices, lineCaps);
+      const blocked = roomCapacityBlock(targetRoomId, roomAfter, traveller, targetCaps.maxOccupancy, targetCaps.maxAdults, targetCaps.maxChildren, afterCaps.maxChildren);
       if (blocked) rejected.push(traveller);
       else accepted.push(traveller);
     });
@@ -442,7 +484,7 @@ export default function RoomAllocationModal({
     clearSelection();
     setMoveNotice(
       rejected.length
-        ? `${rejected.length} traveller(s) not moved into Room ${targetRoomId} — it takes ${capsLabel(targetCaps)}.`
+        ? `${rejected.length} traveller(s) not moved into Room ${targetRoomId} — it takes ${capsLabel(activeCaps)}.`
         : ''
     );
   };
@@ -454,7 +496,6 @@ export default function RoomAllocationModal({
       setMoveNotice('Add or select a room first.');
       return;
     }
-    const fillCaps = roomCapsOf(activeRoom, roomTypeChoices, lineCaps);
     const candidates = travellersList.filter(
       (t) => !roomByTravellerId.has(t.id) && !isBeddedElsewhere.has(t.id)
     );
@@ -462,7 +503,12 @@ export default function RoomAllocationModal({
     let firstBlocked = '';
     candidates.forEach((traveller) => {
       const roomAfter = { ...activeRoom, allocatedTravellers: [...(activeRoom.allocatedTravellers || []), ...chosen] };
-      const blocked = roomCapacityBlock(activeRoom.roomId, roomAfter, traveller, fillCaps.maxOccupancy, fillCaps.maxAdults, fillCaps.maxChildren);
+      const fillCaps = roomCapsOf(roomAfter, roomTypeChoices, lineCaps);
+      const afterCaps = roomCapsOf({
+        ...roomAfter,
+        allocatedTravellers: [...roomAfter.allocatedTravellers, traveller]
+      }, roomTypeChoices, lineCaps);
+      const blocked = roomCapacityBlock(activeRoom.roomId, roomAfter, traveller, fillCaps.maxOccupancy, fillCaps.maxAdults, fillCaps.maxChildren, afterCaps.maxChildren);
       if (blocked) firstBlocked = firstBlocked || blocked;
       else chosen.push(traveller);
     });
@@ -478,7 +524,7 @@ export default function RoomAllocationModal({
       ))
     );
     clearSelection();
-    setMoveNotice(firstBlocked ? `Room ${activeRoom.roomId} takes ${capsLabel(fillCaps)}.` : '');
+    setMoveNotice(firstBlocked ? `Room ${activeRoom.roomId} takes ${capsLabel(activeRoomCaps)}.` : '');
   };
 
   // Handlers

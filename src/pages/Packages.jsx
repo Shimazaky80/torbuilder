@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Backpack, Search, Plus, Edit3, ListTree, Trash2, X, ImagePlus } from 'lucide-react';
+import { Backpack, Search, Plus, Edit3, ListTree, Trash2, X, ImagePlus, Copy } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
@@ -10,8 +10,12 @@ import { packageBandLabel } from '../lib/packagePricing';
 import { VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { scopeCompanyId } from '../lib/tenantScope';
 import { isVehicleExtra } from '../lib/extrasChargeTypes';
+import { useSession } from '../hooks/useSession';
 
 const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false, vehicleColumns: [] });
+const omitFields = (row, fields) => Object.fromEntries(
+  Object.entries(row).filter(([key]) => !fields.includes(key))
+);
 const dateLabel = (iso) => iso ? new Date(`${iso}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 const flatBasis = (basis) => /per_trip|per_vehicle|per_room|per_unit|flat/i.test(String(basis || ''));
 const estimatePackage = (pkg) => {
@@ -45,6 +49,10 @@ const estimatePackage = (pkg) => {
 
 export const Packages = () => {
   const navigate = useNavigate();
+  const { userId, name: currentUserName, roleKey, access } = useSession();
+  const mayWrite = access?.modules?.packages?.level === 'write';
+  const consultant = roleKey === 'consultant';
+  const ownsPackage = (pkg) => pkg.created_by === userId;
   const { showToast } = useToast();
   const [dialogProps, confirm] = useConfirm();
   const [rows, setRows] = useState([]);
@@ -216,7 +224,8 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
       }
       const { data: pkg, error } = await supabase.from('packages').insert({
         company_id: companyId, name: draft.name.trim(), description: draft.description,
-        currency_code: currency, vehicle_columns: draft.vehicleColumns
+        currency_code: currency, vehicle_columns: draft.vehicleColumns,
+        created_by: userId, created_by_name: currentUserName || null
       }).select().single();
       if (error) throw error;
       const coverUrl = await uploadImage(draft.cover, pkg.id);
@@ -230,6 +239,93 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
     finally { setSaving(false); }
   };
 
+  const copyPackage = async (source) => {
+    let copyId = null;
+    setSaving(true);
+    try {
+      const {
+        package_validity_periods: periods = [],
+        package_pax_options: paxOptions = [],
+        package_days: packageDays = []
+      } = source;
+      const packageFields = omitFields(source, [
+        'id', 'created_at', 'updated_at', 'created_by', 'created_by_name',
+        'transferred_from', 'transferred_from_name', 'transferred_to',
+        'transferred_to_name', 'transferred_at', 'transferred_by',
+        'package_validity_periods', 'package_pax_options', 'package_days'
+      ]);
+      const { data: copy, error } = await supabase.from('packages').insert({
+        ...packageFields,
+        company_id: companyId,
+        name: `${source.name} (Copy)`,
+        is_available_in_library: false,
+        created_by: userId,
+        created_by_name: currentUserName || null,
+        transferred_from: null,
+        transferred_from_name: null,
+        transferred_to: null,
+        transferred_to_name: null,
+        transferred_at: null,
+        transferred_by: null
+      }).select().single();
+      if (error) throw error;
+      copyId = copy.id;
+
+      const periodRows = periods.map((row) => ({
+        ...omitFields(row, ['id', 'package_id', 'created_at', 'updated_at']),
+        package_id: copyId
+      }));
+      if (periodRows.length) {
+        const { error: periodError } = await supabase.from('package_validity_periods').insert(periodRows);
+        if (periodError) throw periodError;
+      }
+
+      const paxRows = paxOptions.map((row) => ({
+        ...omitFields(row, ['id', 'package_id', 'created_at', 'updated_at']),
+        package_id: copyId
+      }));
+      if (paxRows.length) {
+        const { error: paxError } = await supabase.from('package_pax_options').insert(paxRows);
+        if (paxError) throw paxError;
+      }
+
+      for (const day of packageDays) {
+        const items = day.package_day_items || [];
+        const { data: dayCopy, error: dayError } = await supabase.from('package_days').insert({
+          ...omitFields(day, ['id', 'package_id', 'package_day_items', 'created_at', 'updated_at']),
+          package_id: copyId,
+          company_id: companyId
+        }).select('id').single();
+        if (dayError) throw dayError;
+
+        const itemRows = items.map((item) => ({
+          ...omitFields(item, ['id', 'package_day_id', 'created_at', 'updated_at']),
+          package_day_id: dayCopy.id,
+          company_id: companyId
+        }));
+        if (itemRows.length) {
+          const { error: itemError } = await supabase.from('package_day_items').insert(itemRows);
+          if (itemError) throw itemError;
+        }
+      }
+
+      showToast(`Copied "${source.name}" as your package.`, 'success');
+      await load();
+      navigate(`/packages/builder/${copyId}`, { state: { packageId: copyId, packageName: copy.name } });
+    } catch (error) {
+      if (copyId) {
+        const { error: cleanupError } = await supabase.from('packages').delete().eq('id', copyId);
+        if (cleanupError) {
+          showToast(`Copy failed: ${error.message}. The incomplete copy could not be removed: ${cleanupError.message}`, 'error');
+          return;
+        }
+      }
+      showToast(`Could not copy package: ${error.message}`, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const remove = async (pkg) => {
     const ok = await confirm({ title: 'Delete package?', message: `“${pkg.name}” and its days, validity periods, and passenger options will be deleted.`, confirmLabel: 'Delete package', destructive: true });
     if (!ok) return;
@@ -241,7 +337,7 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
   return <div className="super-admin-page">
     <header className="page-header packages-page-header">
       <div className="header-title"><Backpack className="header-icon" /><div><h1>Packages</h1><p>Create and manage reusable tour packages</p></div></div>
-      <button className="primary-btn" onClick={() => { setEditingPkg(null); setDraft(emptyDraft()); setModal(true); }}><Plus size={17} /> Create Package</button>
+      {mayWrite && <button className="primary-btn" onClick={() => { setEditingPkg(null); setDraft(emptyDraft()); setModal(true); }}><Plus size={17} /> Create Package</button>}
     </header>
     <div className="admin-table-container packages-table-container">
       <div className="table-header-actions">
@@ -271,7 +367,14 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
           pax: Number(x.pax) || Number(x.max_pax) || Number(x.adults || 0) + Number(x.children || 0)
         })).sort();
         return <tr key={pkg.id}>
-          <td><button type="button" className="package-list-name" onClick={() => navigate(`/packages/view/${pkg.id}`)}>{pkg.name}</button></td>
+          <td>
+            <button type="button" className="package-list-name" onClick={() => navigate(`/packages/view/${pkg.id}`)}>{pkg.name}</button>
+            {pkg.transferred_from_name && (
+              <small title={`Transferred from ${pkg.transferred_from_name} to ${pkg.transferred_to_name || pkg.created_by_name || 'this consultant'}`} style={{ display: 'block', marginTop: '0.2rem', color: '#92400e' }}>
+                Transferred from {pkg.transferred_from_name} to {pkg.transferred_to_name || pkg.created_by_name || 'this consultant'}
+              </small>
+            )}
+          </td>
           <td>{periods.length ? periods.map((p) => `${dateLabel(p.valid_from)} – ${dateLabel(p.valid_to)}`).join('; ') : <span className="package-list-muted">Not set</span>}</td>
           <td>{bandLabels.length ? bandLabels.join(', ') : <span className="package-list-muted">Not set</span>}</td>
           <td>{pkg.package_days?.length || 0} days</td>
@@ -283,9 +386,12 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
             {/* Two different edits, kept apart: this opens the builder to change
                 what is inside the package, the pencil next to it only renames the
                 package and swaps its cover. */}
-            <button className="action-btn" title="Edit package contents (days, items, pricing)" onClick={() => navigate(`/packages/builder/${pkg.id}`, { state: { packageId: pkg.id, packageName: pkg.name } })}><ListTree size={16} /></button>
-            <button className="action-btn" title="Edit package name, overview or cover image" onClick={() => openEdit(pkg)}><Edit3 size={16} /></button>
-            <button className="action-btn delete" title="Delete package" onClick={() => remove(pkg)}><Trash2 size={16} /></button>
+            {mayWrite && (!consultant || ownsPackage(pkg)) && <>
+              <button className="action-btn" title="Edit package contents (days, items, pricing)" onClick={() => navigate(`/packages/builder/${pkg.id}`, { state: { packageId: pkg.id, packageName: pkg.name } })}><ListTree size={16} /></button>
+              <button className="action-btn" title="Edit package name, overview or cover image" onClick={() => openEdit(pkg)}><Edit3 size={16} /></button>
+              <button className="action-btn delete" title="Delete package" onClick={() => remove(pkg)}><Trash2 size={16} /></button>
+            </>}
+            {mayWrite && <button className="action-btn" title="Copy package as your own" onClick={() => void copyPackage(pkg)} disabled={saving}><Copy size={16} /></button>}
           </div></td>
         </tr>;
       })}

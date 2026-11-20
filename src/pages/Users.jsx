@@ -11,7 +11,8 @@ import {
   Check,
   Copy,
   ExternalLink,
-  Clock
+  Clock,
+  ArrowRightLeft
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useSession } from '../hooks/useSession';
@@ -125,6 +126,13 @@ export const Users = () => {
 
   const [accessFor, setAccessFor] = useState(null);
   const [draft, setDraft] = useState(null);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferFrom, setTransferFrom] = useState('');
+  const [transferTo, setTransferTo] = useState('');
+  const [transferScope, setTransferScope] = useState('all_files');
+  const [transferItineraries, setTransferItineraries] = useState([]);
+  const [transferItinerariesLoading, setTransferItinerariesLoading] = useState(false);
+  const [transferItineraryId, setTransferItineraryId] = useState('');
 
   const mayWrite = can('users', 'write');
 
@@ -181,6 +189,56 @@ export const Users = () => {
     run();
   }, [load]);
 
+  useEffect(() => {
+    let active = true;
+    const loadOwnedItineraries = async () => {
+      if (!transferOpen || !transferFrom || transferScope !== 'one_itinerary' || !companyId) {
+        setTransferItineraries([]);
+        setTransferItinerariesLoading(false);
+        setTransferItineraryId('');
+        return;
+      }
+      const source = members.find((member) => member.user_id === transferFrom);
+      if (!source) {
+        setTransferItinerariesLoading(false);
+        return;
+      }
+      setTransferItinerariesLoading(true);
+      const sourceName = [source.first_name, source.last_name].filter(Boolean).join(' ');
+      const ownedQuery = supabase.from('itineraries')
+        .select('id, itinerary_name, reference_number, travel_start_date, status')
+        .eq('company_id', companyId)
+        .eq('created_by', transferFrom);
+      const legacyQuery = sourceName
+        ? supabase.from('itineraries')
+          .select('id, itinerary_name, reference_number, travel_start_date, status')
+          .eq('company_id', companyId)
+          .is('created_by', null)
+          .eq('consultant_name', sourceName)
+        : Promise.resolve({ data: [], error: null });
+      try {
+        const [ownedResult, legacyResult] = await Promise.all([ownedQuery, legacyQuery]);
+        if (!active) return;
+        if (ownedResult.error || legacyResult.error) {
+          throw ownedResult.error || legacyResult.error;
+        }
+        const unique = new Map();
+        [...(ownedResult.data || []), ...(legacyResult.data || [])].forEach((itinerary) => unique.set(itinerary.id, itinerary));
+        const rows = [...unique.values()].sort((a, b) => String(b.travel_start_date || '').localeCompare(String(a.travel_start_date || '')));
+        setTransferItineraries(rows);
+        setTransferItineraryId(rows[0]?.id || '');
+      } catch (error) {
+        if (!active) return;
+        showToast(`Could not load ${nameOf(source)}’s itineraries: ${error.message}`, 'error');
+        setTransferItineraries([]);
+      } finally {
+        if (active) setTransferItinerariesLoading(false);
+      }
+    };
+    void loadOwnedItineraries();
+    return () => { active = false; };
+  }, [companyId, members, showToast, transferFrom, transferOpen, transferScope]);
+
   const applyResult = (result, fallback) => {
     if (result?.success === false) {
       showToast(result.error || fallback, 'error');
@@ -207,6 +265,65 @@ export const Users = () => {
     );
     if (!ok) return;
     showToast(disabling ? `${nameOf(member)} can no longer sign in.` : `${nameOf(member)} is active again.`);
+    await Promise.all([load(), refresh()]);
+  };
+
+  const transferFiles = async (event) => {
+    event.preventDefault();
+    const source = members.find((member) => member.user_id === transferFrom);
+    const target = members.find((member) => member.user_id === transferTo);
+    if (!source || !target) {
+      showToast('Choose a source and an active consultant to receive the files.', 'warning');
+      return;
+    }
+    const selectedItinerary = transferItineraries.find((itinerary) => itinerary.id === transferItineraryId);
+    if (transferScope === 'one_itinerary' && !selectedItinerary) {
+      showToast('Choose an itinerary to transfer.', 'warning');
+      return;
+    }
+    const transferDescription = transferScope === 'all_files'
+      ? `${nameOf(source)}’s itineraries and packages`
+      : transferScope === 'all_itineraries'
+        ? `all of ${nameOf(source)}’s itineraries`
+        : `"${selectedItinerary.itinerary_name}" (${selectedItinerary.reference_number || 'no reference'})`;
+    const confirmed = await confirm({
+      title: 'Transfer consultant ownership?',
+      message: `Transfer ${transferDescription} to ${nameOf(target)}?`,
+      detail: transferScope === 'all_files'
+        ? 'The new owner can edit the itineraries and packages. Each transferred file will retain the source, recipient and transfer date.'
+        : 'Only the selected itinerary scope will move; packages will remain with the source consultant. The transfer source, recipient and date remain visible on the itinerary.',
+      confirmLabel: 'Transfer'
+    });
+    if (!confirmed) return;
+
+    setSaving(true);
+    const { data, error } = transferScope === 'all_files'
+      ? await supabase.rpc('admin_transfer_consultant_files', {
+        p_from_user: transferFrom,
+        p_to_user: transferTo
+      })
+      : await supabase.rpc('admin_transfer_consultant_itineraries', {
+        p_from_user: transferFrom,
+        p_to_user: transferTo,
+        p_itinerary_ids: transferScope === 'one_itinerary' ? [transferItineraryId] : null
+      });
+    setSaving(false);
+    if (error) {
+      showToast(`Could not transfer files: ${error.message}`, 'error');
+      return;
+    }
+    if (!applyResult(data, 'The files could not be transferred.')) return;
+    const fromName = data.from_name || nameOf(source);
+    const toName = data.to_name || nameOf(target);
+    showToast(transferScope === 'all_files'
+      ? `Transferred ${Number(data.itineraries) || 0} itineraries and ${Number(data.packages) || 0} packages from ${fromName} to ${toName}.`
+      : `Transferred ${Number(data.itineraries) || 0} ${Number(data.itineraries) === 1 ? 'itinerary' : 'itineraries'} from ${fromName} to ${toName}.`, 'success');
+    setTransferOpen(false);
+    setTransferFrom('');
+    setTransferTo('');
+    setTransferItineraries([]);
+    setTransferItineraryId('');
+    setTransferScope('all_files');
     await Promise.all([load(), refresh()]);
   };
 
@@ -311,13 +428,28 @@ export const Users = () => {
           </div>
         </div>
         {mayWrite && !rosterMissing && (
-          <button
-            className="primary-btn"
-            style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-            onClick={() => { setShowInvite(true); setIssued(null); }}
-          >
-            <Plus size={18} /> Invite a user
-          </button>
+          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+            <button
+              className="secondary-btn"
+              style={{ width: 'auto', padding: '0.625rem 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+              onClick={() => {
+                const consultants = members.filter((member) => member.user_role === 'consultant' && member.is_active !== false);
+                setTransferFrom('');
+                setTransferTo(consultants.find((member) => member.user_id !== userId)?.user_id || '');
+                setTransferScope('all_files');
+                setTransferOpen(true);
+              }}
+            >
+              <ArrowRightLeft size={16} /> Transfer consultant files
+            </button>
+            <button
+              className="primary-btn"
+              style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+              onClick={() => { setShowInvite(true); setIssued(null); }}
+            >
+              <Plus size={18} /> Invite a user
+            </button>
+          </div>
         )}
       </header>
 
@@ -571,6 +703,70 @@ export const Users = () => {
             </tbody>
           </table>
         </section>
+      )}
+
+      {transferOpen && (
+        <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setTransferOpen(false); }}>
+          <form className="modal-content" onSubmit={transferFiles} style={{ maxWidth: '560px', width: '94%' }}>
+            <div className="modal-header">
+              <h2>Transfer consultant ownership</h2>
+              <button type="button" className="close-btn" onClick={() => setTransferOpen(false)} disabled={saving}><X size={20} /></button>
+            </div>
+            <p style={{ color: '#64748b', fontSize: '0.87rem', marginTop: 0 }}>
+              Choose whether to transfer all files, all itineraries only, or one itinerary. Itinerary-only transfers leave packages with the original consultant.
+            </p>
+            <p style={{ color: '#64748b', fontSize: '0.78rem', marginTop: '-0.5rem' }}>
+              All-file transfers require migration <code>20261273</code>; itinerary-only transfers require <code>20261276</code>.
+            </p>
+            <div style={{ display: 'grid', gap: '1rem' }}>
+              <Field label="What should move?">
+                <select className="pricing-select" value={transferScope} onChange={(event) => setTransferScope(event.target.value)}>
+                  <option value="all_files">All itineraries and packages</option>
+                  <option value="all_itineraries">All itineraries only</option>
+                  <option value="one_itinerary">One itinerary only</option>
+                </select>
+              </Field>
+              <Field label="Transfer files from">
+                <select required className="pricing-select" value={transferFrom} onChange={(event) => {
+                  setTransferFrom(event.target.value);
+                  setTransferItineraryId('');
+                  if (event.target.value === transferTo) setTransferTo('');
+                }}>
+                  <option value="">Choose a consultant…</option>
+                  {members.filter((member) => member.user_role === 'consultant').map((member) => (
+                    <option key={member.user_id} value={member.user_id}>{nameOf(member)}{member.is_active === false ? ' (disabled)' : ''}</option>
+                  ))}
+                </select>
+              </Field>
+              {transferScope === 'one_itinerary' && (
+                <Field label="Itinerary to transfer" hint={transferItinerariesLoading ? 'Loading this consultant’s itineraries…' : transferFrom && transferItineraries.length === 0 ? 'This consultant has no itineraries to transfer.' : undefined}>
+                  <select required className="pricing-select" value={transferItineraryId} onChange={(event) => setTransferItineraryId(event.target.value)} disabled={!transferFrom || transferItinerariesLoading || transferItineraries.length === 0}>
+                    <option value="">{transferItinerariesLoading ? 'Loading itineraries…' : 'Choose an itinerary…'}</option>
+                    {transferItineraries.map((itinerary) => (
+                      <option key={itinerary.id} value={itinerary.id}>
+                        {itinerary.reference_number || 'No reference'} · {itinerary.itinerary_name || 'Unnamed itinerary'}{itinerary.travel_start_date ? ` · ${dateLabel(itinerary.travel_start_date)}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              <Field label="Transfer files to">
+                <select required className="pricing-select" value={transferTo} onChange={(event) => setTransferTo(event.target.value)}>
+                  <option value="">Choose an active consultant…</option>
+                  {members.filter((member) => member.user_role === 'consultant' && member.is_active !== false && member.user_id !== transferFrom).map((member) => (
+                    <option key={member.user_id} value={member.user_id}>{nameOf(member)}</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', marginTop: '1.5rem' }}>
+              <button type="button" className="secondary-btn" style={{ width: 'auto' }} onClick={() => setTransferOpen(false)} disabled={saving}>Cancel</button>
+              <button type="submit" className="primary-btn" style={{ width: 'auto', background: '#0d7478' }} disabled={saving || !transferFrom || !transferTo || (transferScope === 'one_itinerary' && (!transferItineraryId || transferItinerariesLoading))}>
+                {saving ? 'Transferring…' : transferScope === 'all_itineraries' ? 'Transfer all itineraries' : transferScope === 'one_itinerary' ? 'Transfer itinerary' : 'Transfer files'}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {accessFor && draft && (

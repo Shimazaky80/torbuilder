@@ -1,4 +1,5 @@
 import { resolveSeasonForTravel, applyProtectionToRate, seasonLineStatus, protectionForSeason } from './priceValidity';
+import { itemForContract } from './rateTypes';
 import { isOccupancyTiered, occupancyCeiling, occupancyRateForPax } from './occupancyPricing';
 import { isSurchargeItem, isSurchargeChargeable, surchargeNightsBuy, surchargePricing, surchargeRateAmount } from './surchargeFees';
 import { isGuideService, isGuideOnly, guideChargeTotal, lineGuideUpliftPercent, crewShareOn, refreshCrewShare, crewSharePerPerson } from './guidePricing';
@@ -272,7 +273,8 @@ export const repriceServicesForPax = ({
   travellers = [],
   travelWindow = {},
   protectionPercent = 0,
-  allowPartial = false
+  allowPartial = false,
+  rateType = ''
 } = {}) => {
   const count = Math.max(0, Number(paxCount) || 0);
   const guideDivisor = travellersPlusTlCount(travellers) || count;
@@ -358,7 +360,10 @@ export const repriceServicesForPax = ({
         return service;
       }
 
-      const item = libraryItems.find((entry) => String(entry.id) === String(service.itemId));
+      const item = itemForContract(
+        libraryItems.find((entry) => String(entry.id) === String(service.itemId)),
+        rateType
+      );
       if (!item || !Array.isArray(item.item_rates) || !item.item_rates.length) {
         skipped.push(service.name || 'Unnamed service');
         return service;
@@ -490,7 +495,8 @@ export const revalidateServicesForWindow = ({
   travelWindow = {},
   protectionPercent = 0,
   allowPartial = false,
-  allowFuture = false
+  allowFuture = false,
+  rateType = ''
 } = {}) => {
   const count = Math.max(0, Number(paxCount) || 0);
   const guideDivisor = travellersPlusTlCount(travellers) || count || 1;
@@ -539,7 +545,10 @@ export const revalidateServicesForWindow = ({
         || service.seasonName || service.protectedSeasonName || service.rateSeasonStatus);
       if (!hasSeasonStamp) return service;
 
-      const item = libraryItems.find((entry) => String(entry.id) === String(service.itemId));
+      const item = itemForContract(
+        libraryItems.find((entry) => String(entry.id) === String(service.itemId)),
+        rateType
+      );
       if (!item || !Array.isArray(item.item_rates) || !item.item_rates.length) return service;
 
       const currencyCode = service.currencyCode || item.currency || '';

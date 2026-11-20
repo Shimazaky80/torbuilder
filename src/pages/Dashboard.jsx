@@ -7,6 +7,7 @@ import { round2 } from '../lib/financeJournal';
 import { fmtMoney, effectiveBalance } from '../lib/invoiceDoc';
 import { receiptDirection } from '../lib/settlement';
 import { scopeCompanyId } from '../lib/tenantScope';
+import { useSession } from '../hooks/useSession';
 import {
   LayoutDashboard,
   RefreshCw,
@@ -192,6 +193,8 @@ export const Dashboard = () => {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { currencies } = useCurrencies();
+  const { userId, roleKey, name: sessionName } = useSession();
+  const isConsultant = roleKey === 'consultant';
 
   const [loading, setLoading] = useState(true);
   const [currentUserName, setCurrentUserName] = useState('');
@@ -267,7 +270,7 @@ export const Dashboard = () => {
       ] = await Promise.all([
         supabase
           .from('itineraries')
-          .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, updated_at, clients(name)')
+          .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, created_by, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, updated_at, clients(name)')
           .eq('company_id', cid)
           .order('travel_start_date', { ascending: true, nullsFirst: false }),
         supabase.from('company_billing_settings').select('legal_name').eq('company_id', cid).maybeSingle(),
@@ -301,7 +304,11 @@ export const Dashboard = () => {
         if (res.error) throw res.error;
       }
 
-      setItineraries(tripRes.data || []);
+      const visibleItineraries = isConsultant
+        ? (tripRes.data || []).filter((it) => it.created_by === userId
+          || (!it.created_by && it.consultant_name === (username || sessionName)))
+        : tripRes.data || [];
+      setItineraries(visibleItineraries);
       setLegalName(companyRes.data?.legal_name || '');
       setUnpaidInvoices(unpaidRes.data || []);
       setMonthInvoices(monthBillRes.data || []);
@@ -318,7 +325,7 @@ export const Dashboard = () => {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [isConsultant, sessionName, showToast, userId]);
 
   useEffect(() => {
     load();
@@ -475,18 +482,18 @@ export const Dashboard = () => {
           color="#16a34a"
           onClick={() => navigate('/itineraries')}
         />
-        <StatCard
+        {!isConsultant && <StatCard
           icon={<Clock size={22} />}
           label="Overdue invoices"
           value={loading ? '—' : stats.overdueCount.toLocaleString()}
           sub={overdueSub}
           color="#dc2626"
           onClick={() => navigate('/finance')}
-        />
+        />}
       </div>
 
       {/* Money */}
-      <div className="admin-table-container" style={{ marginBottom: '1.5rem' }}>
+      {!isConsultant && <div className="admin-table-container" style={{ marginBottom: '1.5rem' }}>
         <PanelTitle icon={<HandCoins size={18} color="#0d7478" />} action="Open Finance" onAction={() => navigate('/finance')}>
           Money · {windows.monthLabel}
         </PanelTitle>
@@ -538,10 +545,10 @@ export const Dashboard = () => {
         <p style={{ margin: '0.75rem 1rem 0.25rem', fontSize: '0.72rem', color: '#94a3b8' }}>
           Billed counts validated and paid invoices issued this month — a proforma is not billed yet. Collected is cash received, after any refunded out; credit drawn from a client&apos;s wallet settles an invoice but is not new money, so it is not counted. Outstanding covers every unpaid invoice, not only this month&apos;s.
         </p>
-      </div>
+      </div>}
 
       {/* Departures + recent activity */}
-      <div style={gridStyle}>
+      <div style={{ ...gridStyle, gridTemplateColumns: isConsultant ? '1fr' : gridStyle.gridTemplateColumns }}>
         <div className="admin-table-container" style={{ marginBottom: 0 }}>
           <PanelTitle icon={<CalendarDays size={18} color="#0d7478" />} action="All itineraries" onAction={() => navigate('/itineraries')}>
             Next departures
@@ -593,7 +600,7 @@ export const Dashboard = () => {
           </div>
         </div>
 
-        <div className="admin-table-container" style={{ marginBottom: 0 }}>
+        {!isConsultant && <div className="admin-table-container" style={{ marginBottom: 0 }}>
           <PanelTitle icon={<Clock size={18} color="#0d7478" />} action="All itineraries" onAction={() => navigate('/itineraries')}>
             Last touched
           </PanelTitle>
@@ -640,11 +647,11 @@ export const Dashboard = () => {
               </tbody>
             </table>
           </div>
-        </div>
+        </div>}
       </div>
 
       {/* Catalogue + consultant load */}
-      <div style={gridStyle}>
+      {!isConsultant && <div style={gridStyle}>
         <div className="admin-table-container" style={{ marginBottom: 0 }}>
           <PanelTitle icon={<Building2 size={18} color="#0d7478" />}>Catalogue</PanelTitle>
           <div style={{ padding: '0.5rem 1rem 1rem' }}>
@@ -705,7 +712,7 @@ export const Dashboard = () => {
             )}
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 };

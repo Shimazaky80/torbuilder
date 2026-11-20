@@ -4,6 +4,7 @@ import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { vocabularyNames, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { scopeCompanyId } from '../lib/tenantScope';
+import { useSession } from '../hooks/useSession';
 import {
   BarChart3,
   Users,
@@ -126,28 +127,12 @@ const buildChecklistXls = (itineraries, defaultConsultant = '') => {
 </body></html>`;
 };
 
-/* ─── Stat Card ────────────────────────────────────────────────────────────── */
-
-const StatCard = ({ icon: Icon, label, value, sub, color = '#0d7478' }) => (
-  <div className="stat-card" style={{ position: 'relative', overflow: 'hidden' }}>
-    <div style={{ width: '4px', position: 'absolute', left: 0, top: 0, bottom: 0, background: color, borderRadius: '4px 0 0 4px' }} />
-    <div style={{ paddingLeft: '0.5rem', display: 'flex', alignItems: 'center', gap: '1rem', width: '100%' }}>
-      <div style={{ background: `${color}18`, borderRadius: '12px', padding: '10px', flexShrink: 0 }}>
-        <Icon size={22} style={{ color }} />
-      </div>
-      <div className="stat-info">
-        <div className="stat-value" style={{ color: '#1a202c' }}>{value}</div>
-        <div className="stat-label">{label}</div>
-        {sub && <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '0.1rem' }}>{sub}</div>}
-      </div>
-    </div>
-  </div>
-);
-
 /* ─── Main Analytics Page ──────────────────────────────────────────────────── */
 
 export const Analytics = () => {
   const { showToast } = useToast();
+  const { userId, roleKey, name: sessionName } = useSession();
+  const isConsultant = roleKey === 'consultant';
   const [itineraries, setItineraries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -157,9 +142,9 @@ export const Analytics = () => {
   const [currentUserName, setCurrentUserName] = useState('');
 
   const fetchData = useCallback(async () => {
-    setLoading(true);
     try {
       const username = await getLoggedInUserName();
+      setLoading(true);
       if (username) setCurrentUserName(username);
 
       const { data: { user } } = await supabase.auth.getUser();
@@ -176,7 +161,7 @@ export const Analytics = () => {
       const [{ data, error }, { data: tourTypeRows, error: tourTypeError }] = await Promise.all([
         supabase
           .from('itineraries')
-          .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(name, client_type)')
+          .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, created_by, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(name, client_type)')
           .eq('company_id', scopeCompanyId(profile.company_id))
           .order('travel_start_date', { ascending: true, nullsFirst: false }),
         supabase
@@ -187,17 +172,21 @@ export const Analytics = () => {
       ]);
 
       if (error) throw error;
-      setItineraries(data || []);
+      const visibleItineraries = isConsultant
+        ? (data || []).filter((it) => it.created_by === userId
+          || (!it.created_by && it.consultant_name === (username || sessionName)))
+        : data || [];
+      setItineraries(visibleItineraries);
       if (tourTypeError) throw tourTypeError;
       const configuredTypes = vocabularyNames(tourTypeRows);
-      const previouslyUsedTypes = (data || []).map((itinerary) => itinerary.itinerary_tour_type).filter(Boolean);
+      const previouslyUsedTypes = visibleItineraries.map((itinerary) => itinerary.itinerary_tour_type).filter(Boolean);
       setTourTypes([...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b)));
     } catch (err) {
       showToast(err.message || 'Failed to load analytics data', 'error');
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [isConsultant, sessionName, showToast, userId]);
 
   useEffect(() => {
     fetchData();

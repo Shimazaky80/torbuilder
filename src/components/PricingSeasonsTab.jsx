@@ -7,6 +7,7 @@ import {
 } from '../lib/packagePricing';
 import { singleSupplementLadderSummary } from '../lib/singleSupplement';
 import { nightBandLabel } from '../lib/accommodationOptions';
+import { RATE_TYPES } from '../lib/rateTypes';
 
 const MAX_COLUMNS = 6;
 
@@ -62,7 +63,10 @@ export const PricingSeasonsTab = ({
   accommodationPerPerson = null,
   derivedAccommodation = { total: null, rows: [], derived: false, unresolved: [] },
   derivedSingleSupplement = { total: null, rows: [], derived: false, unresolved: [] },
-  singleRoomsAvailable = true
+  singleRoomsAvailable = true,
+  rateType = '',
+  onChangeRateType,
+  rateTypesAvailable = false
 }) => {
   const [tripFrom, setTripFrom] = useState('');
   const [tripTo, setTripTo] = useState('');
@@ -198,6 +202,23 @@ export const PricingSeasonsTab = ({
     <section className="package-tab-panel ps-seasons">
       <h2><CalendarDays size={19} /> Seasons</h2>
       <p>A season is a header, not a copy: it points at the same service rows and stores only the two numbers that vary inside the year &mdash; accommodation and the single supplement. Everything else is the annual grid below.</p>
+      {rateTypesAvailable && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', margin: '0 0 0.9rem' }}>
+          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: '#64748b' }}>Contract:</label>
+          <select
+            value={rateType || ''}
+            onChange={(event) => onChangeRateType?.(event.target.value)}
+            style={{ padding: '0.4rem', fontSize: '0.85rem', maxWidth: '260px' }}
+          >
+            {RATE_TYPES.map((type) => (
+              <option key={type.id} value={type.id}>{type.label}</option>
+            ))}
+          </select>
+          <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+            A supplier that quotes the same room and season on both contracts is priced from the one this package is sold under.
+          </span>
+        </div>
+      )}
       <div className="ps-season-strip">
         {(periods || []).map((period, index) => <button
           key={`season-${index}`}

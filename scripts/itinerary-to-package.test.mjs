@@ -1,4 +1,4 @@
-import { buildItineraryPackage } from '../src/lib/itineraryToPackage.js';
+import { buildItineraryPackage, stripConversionNote } from '../src/lib/itineraryToPackage.js';
 
 const check = (label, actual, expected) => {
   const passed = Object.is(actual, expected);
@@ -107,7 +107,13 @@ const built = buildItineraryPackage({
 });
 
 check('package name', built.name, 'Kruger Safari Package');
+check('a converted package starts with no description', built.description, '');
 check('package currency', built.currency_code, 'ZAR');
+check('the conversion note is stripped from an old description',
+  stripConversionNote('Converted from itinerary IT-2026-000001 (November 2026).'), '');
+check('the conversion note is stripped mid-text',
+  stripConversionNote('Converted from itinerary IT-2026-000001. A lodge stay.'), 'A lodge stay.');
+check('operator prose is left alone', stripConversionNote('A lodge stay in Kruger.'), 'A lodge stay in Kruger.');
 check('band is the paying party (3 clients: 2 adults, 1 child)', built.pax_options[0].pax, 3);
 check('band adults mirror', built.pax_options[0].adults, 2);
 check('band children mirror', built.pax_options[0].children, 1);
@@ -119,6 +125,18 @@ check('validity to', built.validity_periods[0].valid_to, '2026-11-30');
 check('season name is month and year', built.validity_periods[0].name, 'November 2026');
 check('vehicle capacity retained', built.vehicle_capacity, 8);
 check('days copied including empty day', built.days.length, 2);
+const listedPackage = buildItineraryPackage({
+  meta,
+  days,
+  libraryItems: [vehicle, guide, meal, hotel, surcharge],
+  fallbackPax: 4,
+  travelWindow,
+  currencyCode: 'ZAR',
+  inclusions: 'Accommodation: Lodge\n- Transfers: 8-seat van',
+  exclusions: 'International flights'
+});
+check('the package inherits the itinerary inclusions', listedPackage.inclusions, 'Accommodation: Lodge\n- Transfers: 8-seat van');
+check('the package inherits the itinerary exclusions', listedPackage.exclusions, 'International flights');
 check('day notes', built.days[0].notes, 'Arrival and transfer');
 check('day numbering', built.days[1].day_number, 2);
 

@@ -10,6 +10,7 @@ import { Map as MapIcon, Building2, User, Calendar, Plus, Copy, Edit3, Search } 
 import ClientTourForm from '../components/ClientTourForm';
 import { PRECISION_MONTH, travelTimingLabel } from '../lib/travelTiming';
 import { scopeCompanyId } from '../lib/tenantScope';
+import { useSession } from '../hooks/useSession';
 
 const STATUS_MODS = {
   quotation: 'quotation',
@@ -39,6 +40,12 @@ const childrenCount = (travellers = []) => {
 
 export const Itineraries = () => {
   const navigate = useNavigate();
+  const { userId, name: currentUserName, roleKey, access } = useSession();
+  const mayWrite = access?.modules?.itineraries?.level === 'write';
+  const consultant = roleKey === 'consultant';
+  const canViewAll = access?.flags?.view_all_itineraries?.value === true;
+  const isOwnItinerary = (itinerary) => itinerary.created_by === userId
+    || (!itinerary.created_by && itinerary.consultant_name === currentUserName);
   const { showToast } = useToast();
 
   const [itineraries, setItineraries] = useState([]);
@@ -174,6 +181,7 @@ export const Itineraries = () => {
           agency_reference: payload.agencyRef,
           itinerary_tour_type: payload.tourType || null,
           consultant_name: consultantName,
+          created_by: userId,
           status: 'quotation'
         }])
         .select()
@@ -255,7 +263,7 @@ export const Itineraries = () => {
       }
 
       const defaultConsultant = await getLoggedInUserName();
-      const consultantName = itinerary.consultant_name || defaultConsultant || null;
+      const consultantName = defaultConsultant || currentUserName || null;
 
       const { data: copy, error } = await supabase
         .from('itineraries')
@@ -277,6 +285,7 @@ export const Itineraries = () => {
           agency_reference: itinerary.agency_reference || null,
           itinerary_tour_type: itinerary.itinerary_tour_type || null,
           consultant_name: consultantName,
+          created_by: user.id,
           status: 'quotation'
         }])
         .select()
@@ -300,7 +309,8 @@ export const Itineraries = () => {
           numChildren: childrenCount(trav),
           agencyRef: copy.agency_reference || null,
           tourType: copy.itinerary_tour_type || '',
-          consultantName: consultantName || ''
+          consultantName: consultantName || '',
+          copySourceId: itinerary.id
         }
       });
     } catch (err) {
@@ -334,13 +344,13 @@ export const Itineraries = () => {
             <p>Client &amp; Tour — create a new itinerary and open the itinerary builder</p>
           </div>
         </div>
-        <button
+        {mayWrite && <button
           className="primary-btn"
           style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           onClick={() => setShowInlineForm(!showInlineForm)}
         >
           <Plus size={18} /> {showInlineForm ? 'Close Form' : 'New Itinerary'}
-        </button>
+        </button>}
       </header>
 
       {showInlineForm && (
@@ -468,7 +478,7 @@ export const Itineraries = () => {
             ) : filteredItineraries.map((it) => {
               const isCompleted = it.status === 'completed';
               return (
-              <tr key={it.id} onClick={() => handleEdit(it)} style={{ cursor: 'pointer' }} title={isCompleted ? 'Open itinerary (read-only)' : 'Open itinerary'}>
+              <tr key={it.id} onClick={() => handleEdit(it)} style={{ cursor: 'pointer' }} title={isCompleted || (consultant && !isOwnItinerary(it)) ? 'Open itinerary (read-only)' : 'Open itinerary'}>
                 <td>
                   <div className="company-cell">
                     <span className="company-name">{it.clients?.name || 'Unknown client'}</span>
@@ -487,6 +497,11 @@ export const Itineraries = () => {
                   <span style={{ fontWeight: 600, color: '#1e293b' }}>{it.itinerary_name}</span>
                   <div style={{ marginTop: '0.25rem' }}>
                     <span className={`status-badge ${STATUS_MODS[it.status] || ''}`}>{STATUS_LABELS[it.status] || it.status || 'Quotation'}</span>
+                    {it.transferred_from_name && (
+                      <span title={`Transferred from ${it.transferred_from_name} to ${it.transferred_to_name || it.consultant_name || 'this consultant'}`} style={{ display: 'block', marginTop: '0.2rem', color: '#92400e', fontSize: '0.72rem' }}>
+                        Transferred from {it.transferred_from_name} to {it.transferred_to_name || it.consultant_name || 'this consultant'}
+                      </span>
+                    )}
                   </div>
                 </td>
                 <td style={{ fontSize: '0.9rem', fontWeight: 600 }}>{formatTravellerSummary(it)}</td>
@@ -510,15 +525,16 @@ export const Itineraries = () => {
                     <button
                       className="action-btn"
                       onClick={(e) => { e.stopPropagation(); if (!isCompleted) handleEdit(it); }}
-                      disabled={isCompleted}
-                      title={isCompleted ? 'Completed itineraries cannot be edited' : 'Edit Itinerary'}
+                      disabled={isCompleted || (consultant && !isOwnItinerary(it))}
+                      title={isCompleted ? 'Completed itineraries cannot be edited' : consultant && !isOwnItinerary(it) ? 'Other consultants’ itineraries are view-only' : 'Edit Itinerary'}
                     >
                       <Edit3 size={16} />
                     </button>
                     <button
                       className="action-btn"
                       onClick={(e) => { e.stopPropagation(); handleCopy(it); }}
-                      title="Copy Itinerary"
+                      title={consultant && it.created_by !== userId && !canViewAll ? 'This itinerary is not shared with your account' : 'Copy Itinerary'}
+                      disabled={consultant && !isOwnItinerary(it) && !canViewAll}
                     >
                       <Copy size={16} />
                     </button>

@@ -64,7 +64,7 @@ const AppPages = () => {
         {/* The catalogue is an editing page. A consultant still reads contracted
             prices where they work — the itinerary sidebar, the rate card, the
             charge dialog — so withholding the editor hides nothing they need. */}
-        <Route path="library-items" element={<RequireAccess module="library" level="write"><LibraryItems /></RequireAccess>} />
+        <Route path="library-items" element={<RequireAccess module="library"><LibraryItems /></RequireAccess>} />
         <Route path="packages" element={<RequireAccess module="packages"><Packages /></RequireAccess>} />
         <Route path="packages/view/:packageId" element={<RequireAccess module="packages"><PackageView /></RequireAccess>} />
         <Route path="packages/builder/:packageId" element={<RequireAccess module="packages"><PackageBuilder /></RequireAccess>} />

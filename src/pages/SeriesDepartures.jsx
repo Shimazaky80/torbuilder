@@ -165,6 +165,8 @@ export const SeriesDepartures = () => {
   const [templates, setTemplates] = useState([]);
   const [departures, setDepartures] = useState([]);
   const [bookings, setBookings] = useState([]);
+  const [seriesChart, setSeriesChart] = useState([]);
+  const [seriesChartMissing, setSeriesChartMissing] = useState(false);
   const [packages, setPackages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [schemaMissing, setSchemaMissing] = useState(false);
@@ -190,20 +192,28 @@ export const SeriesDepartures = () => {
   const load = useCallback(async () => {
     if (!companyId) {
       setTemplates([]); setDepartures([]); setBookings([]); setPackages([]);
+      setSeriesChart([]);
       setLoading(false);
       return;
     }
     try {
-      const [templateRes, departureRes, bookingRes, packageRes] = await Promise.all([
+      const [templateRes, departureRes, bookingRes, packageRes, chartRes] = await Promise.all([
         supabase.from('series_templates').select('*').eq('company_id', companyId).order('created_at', { ascending: false }),
         supabase.from('series_departures').select('*').eq('company_id', companyId).order('departure_date'),
         supabase.from('series_bookings').select('departure_id, seats, status').eq('company_id', companyId),
-        supabase.from('packages').select('id, name, currency_code').eq('company_id', companyId).order('name')
+        supabase.from('packages').select('id, name, currency_code').eq('company_id', companyId).order('name'),
+        supabase.from('series_chart_bookings').select('*').eq('company_id', companyId).order('departure_date')
       ]);
       if (templateRes.error) throw templateRes.error;
       if (departureRes.error) throw departureRes.error;
       if (bookingRes.error) throw bookingRes.error;
       if (packageRes.error) throw packageRes.error;
+      const chartMissing = chartRes.error && (
+        chartRes.error.code === '42P01'
+        || chartRes.error.code === 'PGRST205'
+        || /series_chart_bookings.*(does not exist|not found|schema cache)/i.test(chartRes.error.message || '')
+      );
+      if (chartRes.error && !chartMissing) throw chartRes.error;
 
       /* The duration is the package's own day count, read from the rows rather
          than stored a second time here where the two could disagree. */
@@ -221,6 +231,8 @@ export const SeriesDepartures = () => {
       setTemplates(templateRes.data || []);
       setDepartures(departureRes.data || []);
       setBookings(bookingRes.data || []);
+      setSeriesChart(chartMissing ? [] : chartRes.data || []);
+      setSeriesChartMissing(!!chartMissing);
       setPackages((packageRes.data || []).map((row) => ({
         ...row,
         ...templateDuration(daysByPackage.get(row.id) || [])
@@ -236,7 +248,7 @@ export const SeriesDepartures = () => {
       } else {
         showToast(`Could not load series departures: ${message}`, 'error');
       }
-      setTemplates([]); setDepartures([]); setBookings([]);
+      setTemplates([]); setDepartures([]); setBookings([]); setSeriesChart([]);
     } finally {
       setLoading(false);
     }
@@ -541,7 +553,8 @@ export const SeriesDepartures = () => {
 
   const tabs = [
     { id: 'templates', label: 'Series Templates', count: templates.length },
-    { id: 'calendar', label: 'Departure Calendar', count: departures.length }
+    { id: 'calendar', label: 'Departure Calendar', count: departures.length },
+    { id: 'chart', label: 'Series Chart', count: seriesChart.length }
   ];
 
   return (
@@ -563,6 +576,15 @@ export const SeriesDepartures = () => {
 
       <div style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '12px', padding: '0.9rem 1.1rem', marginBottom: '1.5rem', fontSize: '0.85rem', color: '#134e4a', maxWidth: '70rem' }}>
         <strong>The itinerary stays on the package.</strong> A series points at a package and adds only what a package deliberately does not carry: the weekdays it runs, the seats offered, the number that guarantees it, and the day unsold rooms go back. Sold seats are counted from the bookings, never typed in here.
+        <div style={{ marginTop: '0.55rem' }}><strong>Current booking flow:</strong></div>
+        <ol style={{ margin: '0.25rem 0 0 1.25rem', padding: 0 }}>
+          <li>Create the series template from a package, set its operating weekdays and date window, then generate the departure dates here.</li>
+          <li>Create an itinerary (new itineraries currently start as Quotations) with exact dates, then add the linked package on the itinerary day matching an open departure. The schedule check applies to that package section even if the overall itinerary is FIT.</li>
+          <li>Complete the required supplier confirmations and mark the itinerary Confirmed. A Series-type itinerary appears in Series Chart; an FIT itinerary with a Series section does not, because the chart still uses the itinerary-wide tour type.</li>
+        </ol>
+        <div style={{ marginTop: '0.55rem' }}>
+          <strong>Important:</strong> The package-section guard verifies the selected day against an active series departure and labels it as a Series section, but it does not change that line&apos;s pricing contract or reserve seats. Series Chart is a confirmation report, not a seat reservation; confirming an itinerary does not reduce departure availability or create a row in the departure seat ledger. Separate FIT and Series pricing contracts within one itinerary are not yet supported.
+        </div>
       </div>
 
       {!mayWrite && !schemaMissing && (
@@ -581,15 +603,6 @@ export const SeriesDepartures = () => {
         </div>
       ) : (
         <>
-          {!loading && templates.length > 0 && (
-            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
-              <Stat label="Series" value={templates.length} />
-              <Stat label="Departures" value={departures.length} tone="#0d7478" />
-              <Stat label="Still to run" value={upcoming} tone="#0d7478" />
-              <Stat label="Seats sold" value={seatsSold} tone={seatsSold > 0 ? '#15803d' : '#94a3b8'} />
-            </div>
-          )}
-
           <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
             {tabs.map((entry) => (
               <button
@@ -610,6 +623,59 @@ export const SeriesDepartures = () => {
               </button>
             ))}
           </div>
+
+          {tab === 'chart' && (
+            <div className="admin-table-container">
+              <div className="table-header-actions">
+                <h2 style={{ margin: 0, fontSize: '1rem', color: '#1e293b' }}>Confirmed series itineraries</h2>
+                <button type="button" className="secondary-btn" style={{ width: 'auto', padding: '0.5rem 1rem' }} onClick={() => void load()} disabled={loading}>
+                  Refresh
+                </button>
+              </div>
+              {seriesChartMissing ? (
+                <p style={{ padding: '1rem 1.25rem', color: '#64748b' }}>
+                  Apply migration <code>20261270</code> to enable the automatic confirmed-series chart.
+                </p>
+              ) : (
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th>Consultant</th><th>Itinerary ref #</th><th>Series name</th>
+                      <th>Series code / type</th><th>Series dates</th><th>Pickup hotel</th><th>Drop-off hotel</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {seriesChart.length === 0 ? (
+                      <tr><td colSpan="7" style={{ padding: '2rem', textAlign: 'center', color: '#64748b' }}>
+                        {loading ? 'Loading confirmed series itineraries…' : 'No confirmed series itineraries yet. Confirm a series-type itinerary to add its summary here; this does not reserve seats.'}
+                      </td></tr>
+                    ) : seriesChart.map((entry) => (
+                      <tr key={entry.id}>
+                        <td>{entry.consultant_name || '—'}</td>
+                        <td>{entry.itinerary_ref || '—'}</td>
+                        <td>{entry.series_name || '—'}</td>
+                        <td>{entry.series_code || '—'}</td>
+                        <td>{dateLabel(entry.departure_date)}{entry.return_date ? ` – ${dateLabel(entry.return_date)}` : ''}</td>
+                        <td>{entry.pickup_hotel || '—'}</td>
+                        <td>{entry.dropoff_hotel || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+
+          {tab !== 'chart' && (
+            <>
+          {tab === 'calendar' && !loading && templates.length > 0 && (
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
+              <Stat label="Series" value={templates.length} />
+              <Stat label="Departures" value={departures.length} tone="#0d7478" />
+              <Stat label="Still to run" value={upcoming} tone="#0d7478" />
+              <Stat label="Seats sold" value={seatsSold} tone={seatsSold > 0 ? '#15803d' : '#94a3b8'} />
+            </div>
+          )}
 
           {showForm && mayWrite && tab === 'templates' && (
             <div style={{ background: '#fff', borderRadius: '16px', padding: '2rem', border: '1px solid #cbd5e1', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)', marginBottom: '2.5rem' }}>
@@ -1023,6 +1089,8 @@ export const SeriesDepartures = () => {
                 </div>
               )}
             </div>
+          )}
+            </>
           )}
         </>
       )}

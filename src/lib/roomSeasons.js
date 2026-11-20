@@ -12,7 +12,11 @@
 export const seasonIdentityOf = (season = {}) => [
   String(season.seasonName ?? season.season_name ?? '').trim(),
   String(season.validFrom ?? season.valid_from ?? '').trim(),
-  String(season.validTo ?? season.valid_to ?? '').trim()
+  String(season.validTo ?? season.valid_to ?? '').trim(),
+  /* FIT and Series are two contracts for the same season, so the rate type is
+     part of what makes a season row that season row. An untyped row keeps the
+     identity every existing season already had. */
+  String(season.rateType ?? season.rate_type ?? '').trim().toLowerCase()
 ].join('|');
 
 /* The charge type (room only, half board, ...) a rate row prices. Empty means
@@ -26,6 +30,7 @@ export const SEASON_SHARED_FIELDS = [
   'seasonName',
   'validFrom',
   'validTo',
+  'rateType',
   'minNights',
   'maxNights',
   'weekendDays',
@@ -63,6 +68,7 @@ export const sharedSeasonGroupsFor = (seasons, roomKey = '') => {
         seasonName: season.seasonName,
         validFrom: season.validFrom,
         validTo: season.validTo,
+        rateType: season.rateType ?? season.rate_type ?? '',
         roomKey: '',
         roomKeys: [],
         chargeNames: [],
@@ -93,6 +99,41 @@ export const seasonRowsWithIdentity = (seasons, identity) =>
   (seasons || [])
     .map((season, index) => ({ season, index }))
     .filter(({ season }) => seasonIdentityOf(season) === identity);
+
+/* Clone every charge type of a season into another contract, with fresh blank
+   prices for each room. This keeps the room/board matrix aligned between FIT
+   and Series while retaining the shared season rules. */
+export const contractRowsForSeason = ({
+  seasons = [],
+  group,
+  rateType,
+  roomKeys = [],
+  emptyRate = () => ({})
+} = {}) => {
+  if (!group || !rateType) return [];
+
+  const identity = group.key ?? seasonIdentityOf(group);
+  const sourceRows = seasonRowsWithIdentity(seasons, identity).map(({ season }) => season);
+  const sourceByCharge = new Map();
+  sourceRows.forEach((season) => {
+    const charge = chargeTypeOf(season);
+    if (!sourceByCharge.has(charge)) sourceByCharge.set(charge, season);
+  });
+  if (!sourceByCharge.size) return [];
+
+  const targetRooms = roomKeys.length
+    ? roomKeys
+    : [...new Set(sourceRows.map((season) => season.roomKey || ''))];
+  return [...sourceByCharge.entries()].flatMap(([charge, source]) =>
+    targetRooms.map((roomKey) => ({
+      ...emptyRate(),
+      ...sharedSeasonSkeletonOf(source),
+      rateType,
+      optionName: charge,
+      roomKey: roomKey || ''
+    }))
+  );
+};
 
 /* Rows that carry the same season AND the same charge type. A night band or
    weekend rule is shared across rooms but stays per charge type, because half

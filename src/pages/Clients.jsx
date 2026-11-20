@@ -5,7 +5,9 @@ import { useToast } from '../context/ToastContext';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useCountries } from '../hooks/useCountries';
 import ConfirmDialog from '../components/ConfirmDialog';
+import ClientDetailModal from '../components/ClientDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
+import { useSession } from '../hooks/useSession';
 import { scopeCompanyId } from '../lib/tenantScope';
 import {
   Users,
@@ -134,7 +136,10 @@ const CountrySelect = ({ value, onChange, countries, placeholder }) => {
 };
 
 export const Clients = () => {
+  const { can } = useSession();
+  const mayWrite = can('clients', 'write');
   const [clients, setClients] = useState([]);
+  const [detailClient, setDetailClient] = useState(null);
   const [confirmDialog, confirm] = useConfirm();
   const countries = useCountries();
   const [salesTotals, setSalesTotals] = useState({});
@@ -465,13 +470,13 @@ useEffect(() => {
             <p>Manage direct clients and travel agencies</p>
           </div>
         </div>
-        <button
+        {mayWrite && <button
           className="primary-btn"
           style={{ width: 'auto', padding: '0.625rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           onClick={handleOpenAddForm}
         >
           <Plus size={18} /> Add Client
-        </button>
+        </button>}
       </header>
 
       {/* Stats summary */}
@@ -493,7 +498,7 @@ useEffect(() => {
       )}
 
       {/* EXPANSIVE INLINE CLIENT FORM */}
-      {showInlineForm && (
+      {showInlineForm && mayWrite && (
         <div style={{
           background: '#fff',
           borderRadius: '16px',
@@ -825,7 +830,9 @@ useEffect(() => {
                       <img src={client.logo_data_url} alt="" style={{ width: '30px', height: '30px', objectFit: 'contain', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff' }} />
                     ) : null}
                     <div>
-                      <span className="company-name">{client.name}</span>
+                      <button type="button" className="company-name" onClick={() => setDetailClient(client)} style={{ border: 0, background: 'none', padding: 0, textAlign: 'left', cursor: 'pointer', color: 'inherit', font: 'inherit' }}>
+                        {client.name}
+                      </button>
                       <span className="company-id" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
                         <User size={12} /> Client
                       </span>
@@ -906,6 +913,8 @@ useEffect(() => {
                 </td>
                 <td>
                   <div className="action-buttons">
+                    {!mayWrite && <button type="button" className="action-btn" onClick={() => setDetailClient(client)} title="View client details">View details</button>}
+                    {mayWrite && <>
                     <button
                       className="action-btn"
                       onClick={() => handleOpenEditForm(client)}
@@ -920,6 +929,7 @@ useEffect(() => {
                     >
                       <Trash2 size={16} />
                     </button>
+                    </>}
                   </div>
                 </td>
               </tr>
@@ -941,6 +951,7 @@ useEffect(() => {
       </div>
 
       {confirmDialog && <ConfirmDialog {...confirmDialog} />}
+      <ClientDetailModal client={detailClient} isOpen={!!detailClient} onClose={() => setDetailClient(null)} />
     </div>
   );
 };

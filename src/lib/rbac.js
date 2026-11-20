@@ -44,6 +44,11 @@ export const MODULE_IDS = MODULES.map((module) => module.id);
 
 export const FLAGS = [
   {
+    id: 'view_all_itineraries',
+    label: "View other consultants' itineraries",
+    summary: 'Lets this consultant read and copy company itineraries created by other consultants; editing remains limited to their own files.'
+  },
+  {
     id: 'view_costs',
     label: 'See the cost price',
     summary: 'Supplier buy totals, margin and cost columns. Selling prices are unaffected.'
@@ -62,15 +67,15 @@ export const BUILT_IN_ROLES = [
     name: 'Admin',
     description: 'Full access to everything, including the money the supplier charges and the people who may hold it.',
     access: fullAccess('write'),
-    flags: { view_costs: true },
+    flags: { view_costs: true, view_all_itineraries: false },
     sortOrder: 10
   },
   {
     key: 'consultant',
     name: 'Consultant',
     description: 'Sells the trip: clients, itineraries and packages. Quotes are priced for the client, not for the margin.',
-    access: { ...fullAccess('none'), dashboard: 'read', clients: 'write', suppliers: 'read', guide_team: 'read', library: 'read', packages: 'write', itineraries: 'write', series: 'write', tariffs: 'read' },
-    flags: { view_costs: false },
+    access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'read', guide_team: 'read', library: 'read', packages: 'write', itineraries: 'write', series: 'read' },
+    flags: { view_costs: false, view_all_itineraries: false },
     sortOrder: 20
   },
   {
@@ -78,7 +83,7 @@ export const BUILT_IN_ROLES = [
     name: 'Operations',
     description: 'Runs the trip once it is sold: suppliers, guide team, hire and the confirmations on every service.',
     access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'write', guide_team: 'write', library: 'read', packages: 'read', itineraries: 'write', series: 'write', tariffs: 'write', finance: 'read', analytics: 'read' },
-    flags: { view_costs: true },
+    flags: { view_costs: true, view_all_itineraries: false },
     sortOrder: 30
   },
   {
@@ -86,7 +91,7 @@ export const BUILT_IN_ROLES = [
     name: 'Finance',
     description: 'Bills and collects: invoices, receipts, payments and the margin reports that go with them.',
     access: { ...fullAccess('none'), dashboard: 'read', clients: 'read', suppliers: 'read', itineraries: 'read', series: 'read', tariffs: 'read', finance: 'write', analytics: 'write' },
-    flags: { view_costs: true },
+    flags: { view_costs: true, view_all_itineraries: false },
     sortOrder: 40
   },
   {
@@ -94,7 +99,7 @@ export const BUILT_IN_ROLES = [
     name: 'Guide / Field Staff',
     description: 'Reads the trip they are on the day before: the itinerary, the crew roster and nothing else.',
     access: { ...fullAccess('none'), dashboard: 'read', guide_team: 'read', itineraries: 'read', series: 'read' },
-    flags: { view_costs: false },
+    flags: { view_costs: false, view_all_itineraries: false },
     sortOrder: 50
   },
   {
@@ -102,7 +107,7 @@ export const BUILT_IN_ROLES = [
     name: 'View Only',
     description: 'Reads everything the company sells and books, changes nothing, and is not shown the cost price.',
     access: { ...fullAccess('read'), users: 'none', settings: 'none' },
-    flags: { view_costs: false },
+    flags: { view_costs: false, view_all_itineraries: false },
     sortOrder: 60
   },
   {
@@ -110,7 +115,7 @@ export const BUILT_IN_ROLES = [
     name: 'Platform Admin',
     description: 'The platform owner. Sees every company; not assignable by a tenant admin.',
     access: fullAccess('write'),
-    flags: { view_costs: true },
+    flags: { view_costs: true, view_all_itineraries: false },
     sortOrder: 100
   }
 ];
@@ -215,7 +220,10 @@ export const resolveAccess = ({
       isPlatformAdmin: true,
       isActive: true,
       modules: MODULE_IDS.reduce((map, id) => ({ ...map, [id]: { level: 'write', from: 'platform' } }), {}),
-      flags: { view_costs: { value: true, from: 'platform' } }
+      flags: {
+        view_costs: { value: true, from: 'platform' },
+        view_all_itineraries: { value: false, from: 'platform' }
+      }
     };
   }
 

@@ -4,7 +4,12 @@ import {
   normaliseSingleSupplementLadder,
   singleSupplementForOrdinal
 } from './singleSupplement';
-import { roomTypesOf, soldRoomCapacity } from './roomTypes';
+import {
+  childAgeRangesForAllocation,
+  roomForAllocation,
+  roomTypesOf,
+  soldRoomCapacity
+} from './roomTypes';
 import { homogeneousRoomIdentity, rateForAllocatedRoom } from './roomTypePricing';
 import { isOccupancyTiered, occupancyRateForPax } from './occupancyPricing';
 import {
@@ -168,6 +173,8 @@ export const buildRoomModalItem = ({
     maxOccupancy: capacity.maxOccupancy || service?.maxOccupancy || base.maxOccupancy || base.max_occupancy,
     maxAdults: capacity.maxAdults,
     maxChildren: capacity.maxChildren,
+    sharingCapacityRules: capacity.room?.sharingCapacityRules || service?.sharingCapacityRules || base.sharingCapacityRules || [],
+    childPolicy: capacity.room?.childPolicy || '',
     roomType: service?.roomType || base.roomType || base.room_type || '',
     roomAllocations: service?.roomAllocations || [],
     isOptional: !!service?.isOptional,
@@ -195,13 +202,20 @@ export const serviceRoomCapacity = (service, libraryItems = []) => {
   const rate = (roomId && rates.find((row) => String(row?.room_type_id || '') === String(roomId)))
     || rates[0]
     || null;
-  return soldRoomCapacity({
+  const capacity = soldRoomCapacity({
     rooms: roomTypesOf(item),
     rate,
     roomTypeId: roomId,
     roomType: service?.roomType || service?.room_type,
     fallback: service?.maxOccupancy ?? service?.max_occupancy
   });
+  return {
+    ...capacity,
+    sharingCapacityRules: capacity.room?.hasSharingCapacityRules
+      ? capacity.room.sharingCapacityRules
+      : (Array.isArray(item?.sharing_capacity_rules) ? item.sharing_capacity_rules : []),
+    roomTypes: roomTypesOf(item)
+  };
 };
 
 /* A copy of the service with the sold room's capacity attached, so the
@@ -214,7 +228,9 @@ export const withRoomCapacity = (service, libraryItems = []) => {
     ...service,
     maxOccupancy: capacity.maxOccupancy,
     maxAdults: capacity.maxAdults,
-    maxChildren: capacity.maxChildren
+    maxChildren: capacity.maxChildren,
+    sharingCapacityRules: capacity.sharingCapacityRules,
+    roomTypes: capacity.roomTypes
   };
 };
 
@@ -397,7 +413,6 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   const rate = getRateRow(item, currencyCode);
   const markup = Number(markupPct) || 0;
   const taxRate = defaultTaxRate;
-  const ageRanges = item?.child_age_ranges || [];
 
   /* The line's own row prices every room that names no type of its own, and
      every staff bed. A room the allocation types as another of the property's
@@ -514,6 +529,12 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
        allocation types it as one of the property's other rooms, the line's row
        for an untyped bed, a staff bed or the room the line was sold at. */
     const { profile: p, reason: typeRefusal, roomType: typedAs } = profileForRoom(rm);
+    const allocationRoom = roomForAllocation(roomTypesOf(item), rm);
+    const roomAgeRanges = allocationRoom?.hasChildAgeRanges
+      ? allocationRoom.childAgeRanges
+      : (Array.isArray(p?.rate?._ageRanges)
+        ? p.rate._ageRanges
+        : childAgeRangesForAllocation(item, rm));
 
     if (occupants.length === 0) {
       roomBuy = 0;
@@ -632,7 +653,7 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
         roomBuy = p.singlePrice;
         rateDescription = `1 Child (Single Room Rate: ${round2(roomBuy).toFixed(2)})`;
       } else {
-        const soloChild = childRateForAge(p.rate, parseFloat(occupants[0].age), ageRanges, p.sharingPrice);
+        const soloChild = childRateForAge(p.rate, parseFloat(occupants[0].age), roomAgeRanges, p.sharingPrice);
         if (soloChild.known) {
           roomBuy = soloChild.rate;
           rateDescription = `1 Child (Child Rate: ${soloChild.rate.toFixed(2)})`;
@@ -669,7 +690,7 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
       let childCost = 0;
       const childRates = [];
       occupants.filter((t) => !isAdultTraveller(t)).forEach((t) => {
-        const child = childRateForAge(p.rate, parseFloat(t.age), ageRanges, p.sharingPrice);
+        const child = childRateForAge(p.rate, parseFloat(t.age), roomAgeRanges, p.sharingPrice);
         const rateForChild = child.known ? child.rate : p.sharingPrice;
         childCost += rateForChild;
         childRates.push(rateForChild);
@@ -941,27 +962,56 @@ const statedCap = (value) => {
 export const roomCapacityOfService = (sv) => ({
   maxOccupancy: maxOccupancyOf(sv),
   maxAdults: statedCap(sv?.maxAdults ?? sv?.max_adults),
-  maxChildren: statedCap(sv?.maxChildren ?? sv?.max_children)
+  maxChildren: statedCap(sv?.maxChildren ?? sv?.max_children),
+  sharingCapacityRules: Array.isArray(sv?.sharingCapacityRules)
+    ? sv.sharingCapacityRules
+    : (Array.isArray(sv?.sharing_capacity_rules) ? sv.sharing_capacity_rules : []),
+  roomTypes: roomTypesOf(sv)
 });
 
 export const roomOverflow = (room, capacity) => {
   const occupants = Array.isArray(room?.allocatedTravellers) ? room.allocatedTravellers : [];
   const adults = occupants.filter(isAdultTraveller).length;
   const children = occupants.length - adults;
-  const overTotal = Math.max(0, occupants.length - capacity.maxOccupancy);
-  const overAdults = capacity.maxAdults === null ? 0 : Math.max(0, adults - capacity.maxAdults);
-  const overChildren = capacity.maxChildren === null ? 0 : Math.max(0, children - capacity.maxChildren);
-  return { adults, children, overTotal, overAdults, overChildren, over: overTotal + overAdults + overChildren };
+  const roomType = roomForAllocation(capacity.roomTypes, room);
+  const maxOccupancy = roomType?.maxOccupancy ?? capacity.maxOccupancy;
+  const maxAdults = roomType?.maxAdults ?? capacity.maxAdults;
+  const baseMaxChildren = roomType
+    ? (roomType.childPolicy === 'adults_only' || roomType.childPolicy === 'no_children'
+      ? 0
+      : statedCap(roomType.maxChildren))
+    : capacity.maxChildren;
+  const sharingRules = roomType?.hasSharingCapacityRules
+    ? roomType.sharingCapacityRules
+    : capacity.sharingCapacityRules;
+  const rule = sharingRules.find((candidate) => parseInt(candidate?.adults, 10) === adults);
+  const ruleMaxChildren = rule ? statedCap(rule.maxChildren) : null;
+  const childCaps = [baseMaxChildren, ruleMaxChildren].filter((value) => value !== null);
+  const effectiveMaxChildren = childCaps.length ? Math.min(...childCaps) : null;
+  const overTotal = Math.max(0, occupants.length - maxOccupancy);
+  const overAdults = maxAdults === null ? 0 : Math.max(0, adults - maxAdults);
+  const overChildren = effectiveMaxChildren === null ? 0 : Math.max(0, children - effectiveMaxChildren);
+  return {
+    adults,
+    children,
+    maxOccupancy,
+    maxAdults,
+    maxChildren: effectiveMaxChildren,
+    overTotal,
+    overAdults,
+    overChildren,
+    over: overTotal + overAdults + overChildren
+  };
 };
 
 export const roomOverflowReason = (label, capacity, overflow) => {
   if (overflow.overAdults > 0) {
-    return `Room over adult capacity in ${label} (Max ${capacity.maxAdults} adult${capacity.maxAdults === 1 ? '' : 's'} per room)`;
+    return `Room over adult capacity in ${label} (Max ${overflow.maxAdults} adult${overflow.maxAdults === 1 ? '' : 's'} per room)`;
   }
   if (overflow.overChildren > 0) {
-    return `Room over child capacity in ${label} (Max ${capacity.maxChildren} child${capacity.maxChildren === 1 ? '' : 'ren'} per room)`;
+    return `Room over child capacity in ${label} (Max ${overflow.maxChildren} child${overflow.maxChildren === 1 ? '' : 'ren'} per room)`;
   }
-  return `Room over capacity in ${label} (Max ${capacity.maxOccupancy} per room)`;
+  return `Room over capacity in ${label} (Max ${overflow.maxOccupancy} per room)`;
 };
 
 /**
