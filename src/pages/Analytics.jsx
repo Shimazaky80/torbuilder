@@ -538,8 +538,9 @@ export const Analytics = () => {
         </div>
       </header>
 
-      {/* Report filters */}
-      <div className="admin-table-container" style={{ padding: '1.15rem 1.25rem', marginBottom: '1.5rem' }}>
+      {/* Report filters — the shared card is overflow:hidden for tables, so let
+          the searchable dropdowns escape it and sit above the panels below. */}
+      <div className="admin-table-container" style={{ padding: '1.15rem 1.25rem', marginBottom: '1.5rem', overflow: 'visible', position: 'relative', zIndex: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
           <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Calculator size={18} color="#0d7478" /> Report filters
@@ -606,11 +607,10 @@ export const Analytics = () => {
             <input type="number" min="0" step="0.01" style={filterInputStyle} placeholder="Any" value={minRevenue} onChange={(e) => setMinRevenue(e.target.value)} />
           </FilterField>
         </div>
-        {isConsultant && (
-          <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0.8rem 0 0' }}>
-            Consultant reports are limited to itineraries you created.
-          </p>
-        )}
+        <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0.8rem 0 0' }}>
+          Filters update the reports immediately — no search button needed. Use Refresh to reload the latest data from the database.
+          {isConsultant && ' Reports are limited to itineraries you created.'}
+        </p>
       </div>
 
       {/* Stats Grid */}
