@@ -1,7 +1,8 @@
--- ==========================================
--- RESET SCRIPT FOR TOURBUILDER
--- This script wipes and recreates the schema
--- ==========================================
+-- DANGER: DISPOSABLE DEVELOPMENT RESET SCRIPT ONLY.
+-- Do not run this file against staging or production. The DROP TABLE ... CASCADE
+-- statements below permanently remove core tables and their data.
+-- Apply reviewed, incremental production changes from supabase/migrations/ using
+-- the approved Supabase migration workflow instead.
 
 -- 1. Drop existing triggers and functions
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users CASCADE;

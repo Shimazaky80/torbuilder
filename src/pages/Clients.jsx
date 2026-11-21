@@ -225,25 +225,23 @@ export const Clients = () => {
     }
   }, [search, showToast, pageSize]);
 
-  const fetchSalesTotals = useCallback(async () => {
-    try {
-      const { data, error } = await supabase.rpc('get_client_sales_totals');
-
-      if (error) throw error;
-
-      const totals = {};
-      (data || []).forEach(row => {
-        totals[row.client_id] = row.total_sold;
+  useEffect(() => {
+    let active = true;
+    supabase.rpc('get_client_sales_totals')
+      .then(({ data, error }) => {
+        if (error) throw error;
+        if (!active) return;
+        const totals = {};
+        (data || []).forEach((row) => {
+          totals[row.client_id] = row.total_sold;
+        });
+        setSalesTotals(totals);
+      })
+      .catch((err) => {
+        if (active) console.error('Failed to load client sales totals:', err.message);
       });
-      setSalesTotals(totals);
-    } catch (err) {
-      console.error('Failed to load client sales totals:', err.message);
-    }
+    return () => { active = false; };
   }, []);
-
-useEffect(() => {
-  fetchSalesTotals();
-}, [fetchSalesTotals]);
 
   useEffect(() => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);

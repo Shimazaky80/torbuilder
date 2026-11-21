@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import SearchableSelect from '../components/SearchableSelect';
 import CarSpecGrid from '../components/CarSpecGrid';
 import { useLocation } from 'react-router-dom';
@@ -742,7 +742,7 @@ export const LibraryItems = () => {
   const amountSettings = useAmountSettings();
   const moneyStep = stepForAmounts(amountSettings.allowDecimals);
 
-  const categoryOptions = [
+  const categoryOptions = useMemo(() => [
     { id: 'Accommodation', label: 'Accommodation', icon: Hotel, color: '#863bff' },
     { id: SURCHARGE_CATEGORY, label: 'Fees & Tickets', icon: Receipt, color: '#f43f5e' },
     { id: 'Transfers', label: 'Transfers', icon: Bus, color: '#3b82f6' },
@@ -755,7 +755,7 @@ export const LibraryItems = () => {
     { id: 'Extras', label: 'Extras', icon: Sparkles, color: '#ec4899' },
     { id: 'Car Rental', label: 'Car Rental', icon: Car, color: '#06b6d4' },
     { id: 'Transport', label: 'Transport', icon: BusFront, color: '#0ea5e9' }
-  ];
+  ], []);
 
 // Category options are driven by the library_categories table when present,
 // falling back to the built-in list above (e.g. before the migration is run).
@@ -1085,9 +1085,9 @@ export const LibraryItems = () => {
      rental-length ladder priced inside it. The same car group is contracted at
      other figures in other weeks, so a group holds one season per window, exactly
      as a room holds one rate row per season. */
-  function createCarRentalGroup() {
+  function createCarRentalGroup(groupId = 'crg_1') {
     return {
-      groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      groupId,
       vehicleGroup: '',
       vehicleName: '',
       rateCode: '',
@@ -1129,7 +1129,7 @@ export const LibraryItems = () => {
     };
   }
 
-  function createNewItemTemplate(index = 1) {
+  function createNewItemTemplate(index = 1, tempId = `new-${index}`) {
     const defaultAgeBands = [
       { id: 'band_1', name: 'Infants', ageFrom: 0, ageTo: 2 },
       { id: 'band_2', name: 'Children', ageFrom: 3, ageTo: 11 },
@@ -1143,7 +1143,7 @@ export const LibraryItems = () => {
     defaultRoom.sharingCapacityRules = sharingRulesForRoom(defaultRoom);
 
     return {
-      tempId: Date.now() + Math.random(),
+      tempId,
       itemIndex: index,
       name: '',
       destinationRegion: '',
@@ -1705,10 +1705,6 @@ export const LibraryItems = () => {
   };
 
   useEffect(() => {
-    fetchInitialData();
-  }, []);
-
-  useEffect(() => {
     if (!lightbox) return;
     const onKeyDown = (e) => {
       if (e.key === 'Escape') setLightbox(null);
@@ -1719,7 +1715,7 @@ export const LibraryItems = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [lightbox]);
 
-  const fetchInitialData = async () => {
+  const fetchInitialData = useCallback(async () => {
     setLoading(true);
     try {
       /* Optional columns differ between deployments, so probe the ones the
@@ -1906,9 +1902,17 @@ export const LibraryItems = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [location.state?.supplierId, showToast, categoryOptions]);
 
-  const fetchLibraryItems = async ({ offset = 0, append = false } = {}) => {
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) return fetchInitialData();
+    });
+    return () => { active = false; };
+  }, [fetchInitialData]);
+
+  const fetchLibraryItems = useCallback(async ({ offset = 0, append = false } = {}) => {
     setFetchingItems(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -1979,7 +1983,7 @@ export const LibraryItems = () => {
         try {
           const carRes = await supabase.from('car_rental_rates').select('*').in('item_id', itemIds);
           carRatesData = carRes.data || [];
-        } catch (e) {
+        } catch {
           carRatesData = [];
         }
       }
@@ -2029,7 +2033,7 @@ export const LibraryItems = () => {
     } finally {
       setFetchingItems(false);
     }
-  };
+  }, [categoryFilter, supplierFilter, search, suppliers, pageSize, showToast]);
 
   useEffect(() => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
@@ -2037,13 +2041,14 @@ export const LibraryItems = () => {
     return () => {
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     };
-  }, [categoryFilter, supplierFilter, search]);
+  }, [categoryFilter, supplierFilter, search, fetchLibraryItems]);
 
   // Add Another Library Item Card in Batch Form
   const handleAddAnotherItem = () => {
+    const tempId = crypto.randomUUID();
     setItemsToSave(prev => [
       ...prev,
-      createNewItemTemplate(prev.length + 1)
+      createNewItemTemplate(prev.length + 1, tempId)
     ]);
   };
 
@@ -2079,17 +2084,19 @@ export const LibraryItems = () => {
 
   // ── Car Rental groups ──────────────────────────────────────────────────────
   const handleAddCarGroup = (tempId) => {
+    const groupId = `crg_${crypto.randomUUID()}`;
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
-      return { ...item, carGroups: [...(item.carGroups || []), createCarRentalGroup()] };
+      return { ...item, carGroups: [...(item.carGroups || []), createCarRentalGroup(groupId)] };
     }));
   };
 
   const handleRemoveCarGroup = (tempId, groupId) => {
+    const fallbackGroupId = `crg_${crypto.randomUUID()}`;
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const groups = (item.carGroups || []).filter(g => g.groupId !== groupId);
-      return { ...item, carGroups: groups.length > 0 ? groups : [createCarRentalGroup()] };
+      return { ...item, carGroups: groups.length > 0 ? groups : [createCarRentalGroup(fallbackGroupId)] };
     }));
   };
 
@@ -3900,7 +3907,6 @@ export const LibraryItems = () => {
               const pricedVector = Object.values(vehiclePrices).filter(p => typeof p === 'number' && p > 0);
               const typedAdult = moneyOrNull(s.adultRate);
               const adultRate = typedAdult !== null ? typedAdult : (pricedVector.length ? Math.min(...pricedVector) : null);
-              const vehicleRate = parseFloat(s.vehicleRate) || 0;
               const childRate = childEntry(s.childRate);
               const isTiered = pricingModel === 'tiered';
               const tiers = Array.isArray(s.tiers) ? s.tiers
@@ -4606,7 +4612,7 @@ export const LibraryItems = () => {
       const key = `${r.vehicle_group || ''}|${r.vehicle_name || ''}|${r.rate_code || ''}|${r.kms_unlimited !== false}|${r.kms_included || ''}`;
       if (!carGroupsMap[key]) {
         carGroupsMap[key] = {
-          groupId: 'crg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+          groupId: `crg_${Object.keys(carGroupsMap).length + 1}`,
           vehicleGroup: r.vehicle_group || '',
           vehicleName: r.vehicle_name || '',
           rateCode: r.rate_code || '',
@@ -4652,7 +4658,7 @@ export const LibraryItems = () => {
       : [createCarRentalGroup()];
 
     return {
-      tempId: Date.now() + Math.random(),
+      tempId: item.id,
       itemIndex: 1,
       name: item.name || '',
       destinationRegion: item.destination_region || item.location || '',

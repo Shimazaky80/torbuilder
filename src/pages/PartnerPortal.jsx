@@ -59,14 +59,6 @@ function documentHtml(title, profile, content) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font:14px Arial,sans-serif;color:#1d2d31;margin:36px}h1{color:#0d7478;margin:18px 0 4px}h2{color:#0d7478;margin-top:26px}h3{margin:20px 0 4px}small{color:#66787d;font-weight:400}table{border-collapse:collapse;width:100%;margin:8px 0 20px}th,td{border:1px solid #cbd5d7;padding:7px;text-align:left;vertical-align:top}th{background:#eef3f3}.brand{margin-bottom:24px;color:#42565a}.muted{color:#65787c}</style></head><body><div class="brand">${profileHeader(profile)}</div>${content}</body></html>`;
 }
 
-function chosenRate(item, serviceDate, rentalDays = 1) {
-  const rates = item.item_snapshot?.rates || [];
-  const dateRates = rates.filter((rate) => (!rate.valid_from || rate.valid_from <= serviceDate) && (!rate.valid_to || rate.valid_to >= serviceDate)
-    && (rate.min_days === undefined || Number(rentalDays) >= Number(rate.min_days))
-    && (rate.max_days === null || rate.max_days === undefined || Number(rentalDays) <= Number(rate.max_days)));
-  return dateRates[0] || null;
-}
-
 function rateAmount(rate, child = false, age = 8, item = null, variant = '') {
   if (!rate) return 0;
   if (child) {
@@ -136,68 +128,94 @@ export const PartnerPortal = () => {
   const [selectedCategory, setSelectedCategory] = useState('');
   const [selectedCurrency, setSelectedCurrency] = useState('');
   const [globalTargetDay, setGlobalTargetDay] = useState('');
-  const [itemTargetDays, setItemTargetDays] = useState({});
 
   // Room allocation modal state
   const [allocatingServiceKey, setAllocatingServiceKey] = useState(null);
 
   const loadPortal = useCallback(async () => {
-    setLoading(true);
+    const [{ data: { user: currentUser } }, { data: contextRows, error: contextError }] = await Promise.all([
+      supabase.auth.getUser(),
+      supabase.rpc('current_partner_portal_context')
+    ]);
+    if (!currentUser) throw new Error('Sign in to open the partner portal');
+    if (contextError) throw contextError;
+    const details = Array.isArray(contextRows) ? contextRows[0] : contextRows;
+    if (!details) throw new Error('Partner access is not active');
+    const [tariffRes, quoteRes, profileRes] = await Promise.all([
+      supabase.from('partner_tariffs').select('id, name, valid_from, valid_to, categories, all_services, tenant_profile_snapshot, created_at').eq('client_id', details.client_id).eq('status', 'active').gte('valid_to', today()).order('valid_from'),
+      supabase.from('partner_quotations').select('*').eq('client_id', details.client_id).order('created_at', { ascending: false }),
+      supabase.from('partner_company_profiles').select('*').eq('client_id', details.client_id).maybeSingle()
+    ]);
+    for (const result of [tariffRes, quoteRes, profileRes]) if (result.error) throw result.error;
+    let invitations = null;
+    if (details.role === 'partner_admin') {
+      const { data: inviteRows, error: inviteError } = await supabase.from('partner_portal_invitations').select('id,email,role,status,invite_code,created_at').eq('client_id', details.client_id).order('created_at', { ascending: false });
+      if (inviteError) throw inviteError;
+      invitations = inviteRows || [];
+    }
+    return {
+      user: currentUser,
+      context: details,
+      tariffs: tariffRes.data || [],
+      quotes: quoteRes.data || [],
+      profileRow: profileRes.data,
+      invitations
+    };
+  }, []);
+
+  const applyPortal = useCallback((result) => {
+    setUser(result.user);
+    setContext(result.context);
+    setTariffs(result.tariffs);
+    setSelectedTariffId((current) => current || result.tariffs[0]?.id || '');
+    setQuotes(result.quotes);
+    setProfileRowExists(!!result.profileRow);
+    if (result.profileRow) setProfile({
+      legal_name: result.profileRow.legal_name || '',
+      address: result.profileRow.address || '',
+      tax_number: result.profileRow.tax_number || '',
+      email: result.profileRow.email || '',
+      telephone: result.profileRow.telephone || '',
+      website: result.profileRow.website || '',
+      logo_data_url: result.profileRow.logo_data_url || ''
+    });
+    if (result.invitations) setInvitations(result.invitations);
+  }, []);
+
+  const refreshPortal = useCallback(async () => {
     try {
-      const [{ data: { user: currentUser } }, { data: contextRows, error: contextError }] = await Promise.all([
-        supabase.auth.getUser(),
-        supabase.rpc('current_partner_portal_context')
-      ]);
-      if (!currentUser) throw new Error('Sign in to open the partner portal');
-      if (contextError) throw contextError;
-      const details = Array.isArray(contextRows) ? contextRows[0] : contextRows;
-      if (!details) throw new Error('Partner access is not active');
-      setUser(currentUser);
-      setContext(details);
-      const [tariffRes, quoteRes, profileRes] = await Promise.all([
-        supabase.from('partner_tariffs').select('id, name, valid_from, valid_to, categories, all_services, tenant_profile_snapshot, created_at').eq('client_id', details.client_id).eq('status', 'active').gte('valid_to', today()).order('valid_from'),
-        supabase.from('partner_quotations').select('*').eq('client_id', details.client_id).order('created_at', { ascending: false }),
-        supabase.from('partner_company_profiles').select('*').eq('client_id', details.client_id).maybeSingle()
-      ]);
-      for (const result of [tariffRes, quoteRes, profileRes]) if (result.error) throw result.error;
-      setTariffs(tariffRes.data || []);
-      setQuotes(quoteRes.data || []);
-      setProfileRowExists(!!profileRes.data);
-      if (profileRes.data) setProfile({ legal_name: profileRes.data.legal_name || '', address: profileRes.data.address || '', tax_number: profileRes.data.tax_number || '', email: profileRes.data.email || '', telephone: profileRes.data.telephone || '', website: profileRes.data.website || '', logo_data_url: profileRes.data.logo_data_url || '' });
-      if (details.role === 'partner_admin') {
-        const { data: inviteRows, error: inviteError } = await supabase.from('partner_portal_invitations').select('id,email,role,status,invite_code,created_at').eq('client_id', details.client_id).order('created_at', { ascending: false });
-        if (inviteError) throw inviteError;
-        setInvitations(inviteRows || []);
-      }
+      applyPortal(await loadPortal());
     } catch (error) {
       showToast(error.message || 'Could not load the partner portal', 'error');
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [applyPortal, loadPortal, showToast]);
 
   useEffect(() => {
-    loadPortal();
-  }, [loadPortal]);
+    let active = true;
+    loadPortal()
+      .then((result) => {
+        if (active) applyPortal(result);
+      })
+      .catch((error) => {
+        if (active) showToast(error.message || 'Could not load the partner portal', 'error');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [applyPortal, loadPortal, showToast]);
 
   useEffect(() => {
     const loadItems = async () => {
-      if (!selectedTariffId) { setTariffItems([]); return; }
+      if (!selectedTariffId) return;
       const { data, error } = await supabase.from('partner_tariff_items').select('id,category,item_snapshot').eq('tariff_id', selectedTariffId).order('category');
       if (error) { showToast(error.message || 'Could not load tariff services', 'error'); return; }
       setTariffItems(data || []);
     };
     loadItems();
   }, [selectedTariffId, showToast]);
-
-  const selectedTariff = tariffs.find((tariff) => tariff.id === selectedTariffId) || null;
-
-  // Auto select first tariff if available
-  useEffect(() => {
-    if (tariffs.length > 0 && !selectedTariffId) {
-      setSelectedTariffId(tariffs[0].id);
-    }
-  }, [tariffs, selectedTariffId]);
 
   // Compute itinerary days array based on start and end dates
   const itineraryDays = useMemo(() => {
@@ -220,12 +238,7 @@ export const PartnerPortal = () => {
     return list;
   }, [quoteForm.start, quoteForm.end]);
 
-  // Auto-select first day as target when dates are set
-  useEffect(() => {
-    if (itineraryDays.length > 0 && itineraryDays[0].date && !globalTargetDay) {
-      setGlobalTargetDay(itineraryDays[0].date);
-    }
-  }, [itineraryDays, globalTargetDay]);
+  const activeTargetDay = globalTargetDay || itineraryDays[0]?.date || '';
 
   // Derive unique currencies from tariff items
   const availableCurrencies = useMemo(() => {
@@ -238,12 +251,7 @@ export const PartnerPortal = () => {
     return [...set].sort();
   }, [tariffItems]);
 
-  // Auto-select first currency when tariff items load
-  useEffect(() => {
-    if (availableCurrencies.length > 0 && !selectedCurrency) {
-      setSelectedCurrency(availableCurrencies[0]);
-    }
-  }, [availableCurrencies, selectedCurrency]);
+  const activeCurrency = selectedCurrency || availableCurrencies[0] || '';
 
   // Get display price for any service category — with markup applied
   const getItemDisplayPrice = (row, date) => {
@@ -252,7 +260,7 @@ export const PartnerPortal = () => {
     // Rate currency can be on the rate row itself OR inherited from item.currency
     const effectiveCurrency = (rate) => rate.currency || item.currency || '';
     const rates = (item.rates || []).filter((rate) => {
-      const currMatch = !selectedCurrency || effectiveCurrency(rate) === selectedCurrency;
+      const currMatch = !activeCurrency || effectiveCurrency(rate) === activeCurrency;
       const dateMatch = (!rate.valid_from || rate.valid_from <= date) && (!rate.valid_to || rate.valid_to >= date);
       return currMatch && dateMatch;
     });
@@ -261,7 +269,7 @@ export const PartnerPortal = () => {
       (!r.valid_from || r.valid_from <= date) && (!r.valid_to || r.valid_to >= date)
     ) || null;
     if (!rate) return null;
-    const currency = effectiveCurrency(rate) || selectedCurrency || 'ZAR';
+    const currency = effectiveCurrency(rate) || activeCurrency || 'ZAR';
     const baseAmount = rateAmount(rate, false, 8, row, '');
     const amount = Math.round((baseAmount * markupFactor + Number.EPSILON) * 100) / 100;
     const basis = rate.rate_basis || item.pricing_model || 'per person';
@@ -283,11 +291,11 @@ export const PartnerPortal = () => {
       );
       // Currency filter — match on rate.currency OR item.currency (many non-accommodation rates store currency at item level)
       const rates = item.rates || [];
-      const currencyMatch = !selectedCurrency || item.currency === selectedCurrency ||
-        rates.some((r) => (r.currency || item.currency) === selectedCurrency);
+      const currencyMatch = !activeCurrency || item.currency === activeCurrency ||
+        rates.some((r) => (r.currency || item.currency) === activeCurrency);
       return categoryMatch && searchMatch && currencyMatch;
     });
-  }, [tariffItems, selectedCategory, searchQuery, selectedCurrency]);
+  }, [tariffItems, selectedCategory, searchQuery, activeCurrency]);
 
   // Sync adults and children count with travellers array
   const adultCount = useMemo(() => travellers.filter((t) => t.type === 'adult').length, [travellers]);
@@ -320,12 +328,12 @@ export const PartnerPortal = () => {
 
   // Add item from sidebar to a specific target day
   const addItemToDay = (itemRow, targetDate) => {
-    const serviceDate = targetDate || globalTargetDay || quoteForm.start || today();
+    const serviceDate = targetDate || activeTargetDay || quoteForm.start || today();
     // Pick rate matching selected currency first, then fall back to any date-valid rate
     const rates = (itemRow.item_snapshot?.rates || []).filter((r) =>
       (!r.valid_from || r.valid_from <= serviceDate) && (!r.valid_to || r.valid_to >= serviceDate)
     );
-    const rate = rates.find((r) => r.currency === selectedCurrency) || rates[0] || null;
+    const rate = rates.find((r) => r.currency === activeCurrency) || rates[0] || null;
     if (!rate) {
       showToast('No dated rate is available for this service on the selected date', 'warning');
       return;
@@ -471,7 +479,7 @@ export const PartnerPortal = () => {
         travellers: travellers.map((person) => ({ id: person.id, type: person.type, name: person.name, surname: person.surname, age: Number(person.age) || 0 })),
         quotation_data: quoteData,
         partner_profile_snapshot: profile,
-        currency_code: selectedCurrency || Object.keys(quoteData.totals)[0] || 'ZAR',
+        currency_code: activeCurrency || Object.keys(quoteData.totals)[0] || 'ZAR',
         status,
         submitted_at: status === 'draft' ? null : new Date().toISOString()
       };
@@ -481,7 +489,8 @@ export const PartnerPortal = () => {
       setServices([]);
       setQuoteForm({ title: '', start: '', end: '', adults: 2, children: 0 });
       setTab('quotations');
-      await loadPortal();
+      setLoading(true);
+      await refreshPortal();
     } catch (error) {
       showToast(error.message || 'Could not save quotation', 'error');
     } finally {
@@ -553,7 +562,8 @@ export const PartnerPortal = () => {
       await navigator.clipboard?.writeText(inviteUrl);
       setInviteEmail('');
       showToast('Team invitation created; link copied', 'success');
-      await loadPortal();
+      setLoading(true);
+      await refreshPortal();
     } catch (error) {
       showToast(error.message || 'Could not invite team member', 'error');
     }
@@ -636,7 +646,7 @@ export const PartnerPortal = () => {
                   <Tag size={13} color="#0d7478" style={{ flexShrink: 0 }} />
                   Currency:
                   <SearchableSelect
-                    value={selectedCurrency}
+                    value={activeCurrency}
                     onChange={(e) => setSelectedCurrency(e.target.value)}
                     style={{ flex: 1, padding: '.32rem .45rem', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '.8rem', background: '#fff' }}
                   >
@@ -646,9 +656,9 @@ export const PartnerPortal = () => {
                 </label>
 
                 {/* Selected day indicator */}
-                <div style={{ fontSize: '.75rem', color: globalTargetDay ? '#0d7478' : '#94a3b8', fontWeight: globalTargetDay ? 700 : 400, padding: '.25rem .4rem', background: globalTargetDay ? '#e6f4f4' : '#f1f5f9', borderRadius: '4px', border: `1px solid ${globalTargetDay ? '#b2dede' : '#e2e8f0'}` }}>
-                  {globalTargetDay
-                    ? `➕ Adding to: ${itineraryDays.find((d) => d.date === globalTargetDay)?.label || globalTargetDay}`
+                <div style={{ fontSize: '.75rem', color: activeTargetDay ? '#0d7478' : '#94a3b8', fontWeight: activeTargetDay ? 700 : 400, padding: '.25rem .4rem', background: activeTargetDay ? '#e6f4f4' : '#f1f5f9', borderRadius: '4px', border: `1px solid ${activeTargetDay ? '#b2dede' : '#e2e8f0'}` }}>
+                  {activeTargetDay
+                    ? `➕ Adding to: ${itineraryDays.find((d) => d.date === activeTargetDay)?.label || activeTargetDay}`
                     : '👆 Click a day below to select it'}
                 </div>
               </div>
@@ -694,7 +704,7 @@ export const PartnerPortal = () => {
                   </div>
                 ) : filteredSidebarItems.length === 0 ? (
                   <div style={{ padding: '2rem 1rem', textAlign: 'center', color: '#64748b', fontSize: '.82rem' }}>
-                    No services found{selectedCurrency ? ` in ${selectedCurrency}` : ''}.
+                    No services found{activeCurrency ? ` in ${activeCurrency}` : ''}.
                   </div>
                 ) : (
                   filteredSidebarItems.map((row) => {
@@ -742,23 +752,23 @@ export const PartnerPortal = () => {
                         {/* Add button */}
                         <button
                           type="button"
-                          disabled={!globalTargetDay && !quoteForm.start}
-                          onClick={() => addItemToDay(row, globalTargetDay || quoteForm.start || today())}
+                          disabled={!activeTargetDay && !quoteForm.start}
+                          onClick={() => addItemToDay(row, activeTargetDay || quoteForm.start || today())}
                           style={{
                             ...commandStyle,
                             width: '100%',
                             justifyContent: 'center',
                             padding: '.32rem .6rem',
                             fontSize: '.78rem',
-                            background: globalTargetDay ? '#0d7478' : '#64748b',
+                            background: activeTargetDay ? '#0d7478' : '#64748b',
                             color: '#fff',
-                            borderColor: globalTargetDay ? '#0d7478' : '#64748b',
+                            borderColor: activeTargetDay ? '#0d7478' : '#64748b',
                             marginTop: '.2rem',
-                            opacity: (!globalTargetDay && !quoteForm.start) ? 0.5 : 1
+                            opacity: (!activeTargetDay && !quoteForm.start) ? 0.5 : 1
                           }}
                         >
-                          <Plus size={13} /> {globalTargetDay
-                            ? `Add to ${itineraryDays.find((d) => d.date === globalTargetDay)?.label?.split('—')[0]?.trim() || globalTargetDay}`
+                          <Plus size={13} /> {activeTargetDay
+                            ? `Add to ${itineraryDays.find((d) => d.date === activeTargetDay)?.label?.split('—')[0]?.trim() || activeTargetDay}`
                             : 'Add to itinerary'}
                         </button>
                       </div>
@@ -833,7 +843,7 @@ export const PartnerPortal = () => {
                 <section style={{ display: 'grid', gap: '1rem' }}>
                   {itineraryDays.map((day) => {
                     const dayServices = computedServices.filter((s) => s.date === day.date || (!day.date && s.date === quoteForm.start));
-                    const isSelected = globalTargetDay === day.date;
+                    const isSelected = activeTargetDay === day.date;
 
                     return (
                       <div

@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['dist/', 'backup/', '.tmp-*/', '.tmp-*.mjs']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [
@@ -24,6 +24,11 @@ export default defineConfig([
     },
     rules: {
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // React Compiler is not enabled in this app; its manual-memoization diagnostics are not applicable.
+      'react-hooks/preserve-manual-memoization': 'off',
+      'react-refresh/only-export-components': ['error', {
+        allowExportNames: ['usePageGuard', 'useNavigationGuard', 'useToast'],
+      }],
     },
   },
 ])

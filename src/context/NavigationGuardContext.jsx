@@ -19,6 +19,7 @@ export const NavigationGuardProvider = ({ children }) => {
   const guardsRef = useRef({});
   const pendingPathRef = useRef(null);
   const [pendingPath, setPendingPath] = useState(null);
+  const [pendingGuardLabel, setPendingGuardLabel] = useState('your changes');
   const [saving, setSaving] = useState(false);
   const [pageResetToken, setPageResetToken] = useState(0);
 
@@ -78,9 +79,10 @@ export const NavigationGuardProvider = ({ children }) => {
       navigate(path);
       return;
     }
+    setPendingGuardLabel(getActiveGuard()?.labelRef?.current || 'your changes');
     pendingPathRef.current = path;
     setPendingPath(path);
-  }, [navigate, isAnyDirty, location.pathname, resetCurrentPage]);
+  }, [navigate, isAnyDirty, getActiveGuard, location.pathname, resetCurrentPage]);
 
   const handleCancel = useCallback(() => {
     pendingPathRef.current = null;
@@ -129,7 +131,7 @@ export const NavigationGuardProvider = ({ children }) => {
     return () => window.removeEventListener('beforeunload', handler);
   }, [isAnyDirty]);
 
-  const dirtyLabel = pendingPath ? (getActiveGuard()?.labelRef?.current || 'your changes') : '';
+  const dirtyLabel = pendingPath ? pendingGuardLabel : '';
 
   return (
     <NavigationGuardContext.Provider value={{ registerGuard, requestNavigate, pageResetToken }}>

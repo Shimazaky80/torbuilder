@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
@@ -52,27 +52,7 @@ export const SuperAdmin = () => {
     pricing: 'Basic'
   });
 
-  useEffect(() => {
-    fetchData();
-
-    // Set up Realtime subscription
-    const channel = supabase
-      .channel('schema-db-changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'companies' },
-        () => {
-          fetchData();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [activeTab]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       // Fetch stats
@@ -106,7 +86,31 @@ export const SuperAdmin = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeTab, showToast]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) return fetchData();
+    });
+
+    // Set up Realtime subscription
+    const channel = supabase
+      .channel('schema-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'companies' },
+        () => {
+          fetchData();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, [fetchData]);
 
   const handleUpdateStatus = async (companyId, newStatus) => {
     try {

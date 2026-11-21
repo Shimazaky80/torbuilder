@@ -224,7 +224,6 @@ export const Dashboard = () => {
   }, [currencies]);
 
   const load = useCallback(async () => {
-    setLoading(true);
     /* The windows are computed here and pushed into state, rather than read
        back out of it. `load` is memoised on the toast alone, so a refresh after
        midnight or on the first of the month would otherwise re-query the window
@@ -237,13 +236,10 @@ export const Dashboard = () => {
       monthEnd: isoDay(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
       monthLabel: MONTH_NAME.format(now)
     };
-    setWindows(win);
-    try {
-      const username = await getLoggedInUserName();
-      if (username) setCurrentUserName(username);
+    const username = await getLoggedInUserName();
 
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setLoading(false); return; }
+      if (!user) return { win, username, hasData: false };
 
       const { data: profile } = await supabase
         .from('profiles')
@@ -252,7 +248,7 @@ export const Dashboard = () => {
         .single();
 
       const cid = scopeCompanyId(profile?.company_id);
-      if (!cid) { setLoading(false); return; }
+      if (!cid) return { win, username, hasData: false };
 
       const countRows = (table) => supabase
         .from(table)
@@ -308,28 +304,49 @@ export const Dashboard = () => {
         ? (tripRes.data || []).filter((it) => it.created_by === userId
           || (!it.created_by && it.consultant_name === (username || sessionName)))
         : tripRes.data || [];
-      setItineraries(visibleItineraries);
-      setLegalName(companyRes.data?.legal_name || '');
-      setUnpaidInvoices(unpaidRes.data || []);
-      setMonthInvoices(monthBillRes.data || []);
-      setMonthReceipts(monthCashRes.data || []);
-      setCatalogue({
+    return {
+      win,
+      username,
+      hasData: true,
+      itineraries: visibleItineraries,
+      legalName: companyRes.data?.legal_name || '',
+      unpaidInvoices: unpaidRes.data || [],
+      monthInvoices: monthBillRes.data || [],
+      monthReceipts: monthCashRes.data || [],
+      catalogue: {
         clients: clientRes.count || 0,
         suppliers: supplierRes.count || 0,
         items: itemRes.count || 0,
         packages: packageRes.count || 0,
         guides: guideRes.count || 0
-      });
-    } catch (err) {
-      showToast(err.message || 'Failed to load dashboard data', 'error');
-    } finally {
-      setLoading(false);
-    }
-  }, [isConsultant, sessionName, showToast, userId]);
+      }
+    };
+  }, [isConsultant, sessionName, userId]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let active = true;
+    load()
+      .then((result) => {
+        if (!active) return;
+        setWindows(result.win);
+        setCurrentUserName(result.username || '');
+        if (result.hasData) {
+          setItineraries(result.itineraries);
+          setLegalName(result.legalName);
+          setUnpaidInvoices(result.unpaidInvoices);
+          setMonthInvoices(result.monthInvoices);
+          setMonthReceipts(result.monthReceipts);
+          setCatalogue(result.catalogue);
+        }
+      })
+      .catch((error) => {
+        if (active) showToast(error.message || 'Failed to load dashboard data', 'error');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [load, showToast]);
 
   /* ─── Derived figures ───────────────────────────────────────────────────── */
 

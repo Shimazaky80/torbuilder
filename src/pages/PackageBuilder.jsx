@@ -405,6 +405,7 @@ export const PackageBuilder = () => {
   const [companyId, setCompanyId] = useState(null);
   const [pkg, setPkg] = useState(null);
   const [form, setForm] = useState(initialForm);
+  const contractType = normalizeRateType(form.rateType);
   const [packageDays, setDays] = useState([]);
   const [periods, setPeriods] = useState([]);
   const [paxOptions, setPaxOptions] = useState([]);
@@ -1228,7 +1229,7 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
     } finally {
       setSaving(false);
     }
-  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, dbFeatures.stayPay, dbFeatures.lineLink, dbFeatures.rateTypes, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage, dayDestinationsAvailable]);
+  }, [companyId, pkg, days, periods, mergedBands, form, library, autoRoomsFor, protectionPercent, packageCurrency, grid.usedCodes, dbFeatures.singleRooms, dbFeatures.roomTypes, dbFeatures.stayPay, dbFeatures.lineLink, dbFeatures.rateTypes, rentalColumnReady, crewColumnReady, bundleColumnReady, canStoreTranslations, showToast, mayEditPackage, dayDestinationsAvailable, contractType]);
 
   const { requestNavigate } = usePageGuard('package-builder', 'this package', dirty, () => persist());
 
@@ -1241,7 +1242,6 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
      and season once FIT and once Series; the package reads only the rows that
      belong to its own contract, and an unstated contract leaves every row in
      play exactly as before. */
-  const contractType = normalizeRateType(form.rateType);
   const rateForDates = (item) => {
     const eligible = ratesForContract(item.item_rates || [], contractType)
       .filter((entry) => currencyMatches(entry, packageCurrency));

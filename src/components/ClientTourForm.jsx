@@ -112,7 +112,7 @@ export const ClientTourForm = ({ initial, submitLabel = 'Create Itinerary', subm
       }
     })();
     return () => { active = false; };
-  }, []);
+  }, [form.consultantName]);
 
   const fetchClients = useCallback(async () => {
     try {

@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { declaredFields } from './schema-audit-parser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATIONS = path.join(ROOT, 'supabase');
@@ -106,17 +107,6 @@ const migrationColumns = () => {
   return tables;
 };
 
-/** The columns src/lib/libraryItemFields.js asks PostgREST for. */
-const declaredFields = () => {
-  if (!fs.existsSync(FIELDS_FILE)) return [];
-  const block = fs.readFileSync(FIELDS_FILE, 'utf8').match(/LIBRARY_ITEM_LIGHT_FIELDS\s*=\s*\[([\s\S]*?)\]/);
-  if (!block) return [];
-  return block[1]
-    .split(',')
-    .map((part) => part.trim().replace(/^'|'$/g, ''))
-    .filter((part) => part && part !== '.join');
-};
-
 /* -- run -------------------------------------------------------------------- */
 const env = readEnv();
 const url = env.VITE_SUPABASE_URL;
@@ -157,7 +147,9 @@ for (const [table, columns] of [...migrations.entries()].sort()) {
   }
 }
 
-const fields = wanted.length === 0 || wanted.includes('library_items') ? declaredFields() : [];
+const fields = wanted.length === 0 || wanted.includes('library_items')
+  ? declaredFields(fs.existsSync(FIELDS_FILE) ? fs.readFileSync(FIELDS_FILE, 'utf8') : '')
+  : [];
 const liveLibraryItems = live.get('library_items');
 const fieldGaps = fields.filter((f) => liveLibraryItems && !liveLibraryItems.has(f.toLowerCase()));
 

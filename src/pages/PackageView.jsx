@@ -20,61 +20,78 @@ export const PackageView = () => {
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [packageResult, periodsResult, paxResult, daysResult] = await Promise.all([
-        supabase.from('packages').select('*').eq('id', packageId).single(),
-        supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
-        supabase.from('package_pax_options').select('*').eq('package_id', packageId).order('adults'),
-        supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number')
-      ]);
-      if (packageResult.error) throw packageResult.error;
-      if (periodsResult.error) throw periodsResult.error;
-      if (paxResult.error) throw paxResult.error;
-      if (daysResult.error) throw daysResult.error;
-      const packageDays = daysResult.data || [];
-      const dayIds = packageDays.map((day) => day.id);
-      const itemsResult = dayIds.length
-        ? await supabase.from('package_day_items').select('*').in('package_day_id', dayIds).order('sort_order')
-        : { data: [], error: null };
-      if (itemsResult.error) throw itemsResult.error;
-      /* The hotel grade belongs to the supplier, and a package line only stores
-         the item it came from, so the item -> supplier chain resolves it here. */
-      const supplierStarsByItem = new Map();
-      const itemIds = [...new Set((itemsResult.data || []).map((item) => item.item_id).filter(Boolean))];
-      if (itemIds.length) {
-        const { data: libraryRows } = await supabase
-          .from('library_items')
-          .select('id, supplier_id')
-          .in('id', itemIds);
-        const supplierIds = [...new Set((libraryRows || []).map((row) => row.supplier_id).filter(Boolean))];
-        if (supplierIds.length) {
-          const { data: supplierRows } = await supabase
-            .from('suppliers')
-            .select(await supplierColumns('id'))
-            .in('id', supplierIds);
-          const starBySupplier = new Map((supplierRows || []).map((row) => [row.id, row.star_rating]));
-          (libraryRows || []).forEach((row) => {
-            if (starBySupplier.get(row.supplier_id)) {
-              supplierStarsByItem.set(row.id, starBySupplier.get(row.supplier_id));
-            }
-          });
-        }
+    const [packageResult, periodsResult, paxResult, daysResult] = await Promise.all([
+      supabase.from('packages').select('*').eq('id', packageId).single(),
+      supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
+      supabase.from('package_pax_options').select('*').eq('package_id', packageId).order('adults'),
+      supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number')
+    ]);
+    if (packageResult.error) throw packageResult.error;
+    if (periodsResult.error) throw periodsResult.error;
+    if (paxResult.error) throw paxResult.error;
+    if (daysResult.error) throw daysResult.error;
+    const packageDays = daysResult.data || [];
+    const dayIds = packageDays.map((day) => day.id);
+    const itemsResult = dayIds.length
+      ? await supabase.from('package_day_items').select('*').in('package_day_id', dayIds).order('sort_order')
+      : { data: [], error: null };
+    if (itemsResult.error) throw itemsResult.error;
+    /* The hotel grade belongs to the supplier, and a package line only stores
+       the item it came from, so the item -> supplier chain resolves it here. */
+    const supplierStarsByItem = new Map();
+    const itemIds = [...new Set((itemsResult.data || []).map((item) => item.item_id).filter(Boolean))];
+    if (itemIds.length) {
+      const { data: libraryRows } = await supabase
+        .from('library_items')
+        .select('id, supplier_id')
+        .in('id', itemIds);
+      const supplierIds = [...new Set((libraryRows || []).map((row) => row.supplier_id).filter(Boolean))];
+      if (supplierIds.length) {
+        const { data: supplierRows } = await supabase
+          .from('suppliers')
+          .select(await supplierColumns('id'))
+          .in('id', supplierIds);
+        const starBySupplier = new Map((supplierRows || []).map((row) => [row.id, row.star_rating]));
+        (libraryRows || []).forEach((row) => {
+          if (starBySupplier.get(row.supplier_id)) {
+            supplierStarsByItem.set(row.id, starBySupplier.get(row.supplier_id));
+          }
+        });
       }
-      const itemsByDay = new Map();
-      (itemsResult.data || []).forEach((item) => itemsByDay.set(item.package_day_id, [...(itemsByDay.get(item.package_day_id) || []), { ...item, supplier_star_rating: supplierStarsByItem.get(item.item_id) || null }]));
-      setPkg(packageResult.data);
-      setPeriods(periodsResult.data || []);
-      setPaxOptions(paxResult.data || []);
-      setDays(packageDays.map((day) => ({ ...day, services: itemsByDay.get(day.id) || [] })));
-    } catch (error) {
-      showToast(`Could not load package: ${error.message}`, 'error');
-    } finally {
-      setLoading(false);
     }
-  }, [packageId, showToast]);
+    const itemsByDay = new Map();
+    (itemsResult.data || []).forEach((item) => itemsByDay.set(item.package_day_id, [...(itemsByDay.get(item.package_day_id) || []), { ...item, supplier_star_rating: supplierStarsByItem.get(item.item_id) || null }]));
+    return {
+      pkg: packageResult.data,
+      periods: periodsResult.data || [],
+      paxOptions: paxResult.data || [],
+      days: packageDays.map((day) => ({ ...day, services: itemsByDay.get(day.id) || [] }))
+    };
+  }, [packageId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    let active = true;
+    Promise.resolve()
+      .then(() => {
+        if (!active) return null;
+        setLoading(true);
+        return load();
+      })
+      .then((result) => {
+        if (!active || !result) return;
+        setPkg(result.pkg);
+        setPeriods(result.periods);
+        setPaxOptions(result.paxOptions);
+        setDays(result.days);
+      })
+      .catch((error) => {
+        if (active) showToast(`Could not load package: ${error.message}`, 'error');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [load, showToast]);
 
   const currencies = [...new Set(days.flatMap((day) => day.services)
     .filter((service) => service.is_included !== false)

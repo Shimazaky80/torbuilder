@@ -6,31 +6,20 @@ import fullLogo from '../assets/full_logo.png';
 import { useToast } from '../context/ToastContext';
 
 export const Login = () => {
-  const [view, setView] = useState('login');
-  const [regStep, setRegStep] = useState('choice');
+  const [queryParams] = useSearchParams();
+  const initialInvitationCode = queryParams.get('code') || '';
+  const [view, setView] = useState(initialInvitationCode ? 'register' : 'login');
+  const [regStep, setRegStep] = useState(initialInvitationCode ? 'invitation' : 'choice');
   const [forgotEmail, setForgotEmail] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [fullName, setFullName] = useState('');
-  const [companyPhone, setCompanyPhone] = useState('');
-  const [invitationCode, setInvitationCode] = useState('');
+  const companyPhone = '';
+  const [invitationCode, setInvitationCode] = useState(initialInvitationCode);
   const [loading, setLoading] = useState(false);
   const { showToast } = useToast();
   const navigate = useNavigate();
-  const [queryParams] = useSearchParams();
-
-  /* The Admin copies a code into an email; clicking it should not make the new
-     person type it back in by hand. */
-  useEffect(() => {
-    const code = queryParams.get('code');
-    if (code) {
-      setInvitationCode(code);
-      setView('register');
-      setRegStep('invitation');
-    }
-  }, [queryParams]);
-
   useEffect(() => {
     let cancelled = false;
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -115,14 +104,14 @@ export const Login = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      const { data: authData, error: authError } = await supabase.auth.signUp({
+      const { error: authError } = await supabase.auth.signUp({
         email,
         password,
         options: { data: { full_name: fullName } }
       });
       if (authError) throw authError;
 
-      const { data: rpcData, error: rpcError } = await supabase.rpc('register_new_company', {
+      const { error: rpcError } = await supabase.rpc('register_new_company', {
         company_name: companyName,
         company_phone: companyPhone,
         user_full_name: fullName

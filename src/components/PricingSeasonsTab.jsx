@@ -141,7 +141,7 @@ export const PricingSeasonsTab = ({
     ...accommodationRatesForTrip(service, item, tripFrom, tripTo, tripNights),
     item,
     service
-  })), [accommodationLines, tripFrom, tripTo]);
+  })), [accommodationLines, tripFrom, tripTo, tripNights]);
 
   const allServices = useMemo(() => {
     const rows = [];

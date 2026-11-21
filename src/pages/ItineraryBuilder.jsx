@@ -144,8 +144,6 @@ import {
   textI18nPayload,
   translationsOf,
   travelTimingText,
-  translateInclusionLine,
-  translateExclusionLine,
   translateInclusionsBlock,
   translateExclusionsBlock,
   translateMealPlan
@@ -2231,7 +2229,7 @@ export const ItineraryBuilder = () => {
       });
     });
     return round2(t);
-  }, [days, paxCount, defaultTaxRate, shareContext]);
+  }, [days, paxCount, shareContext]);
 
   /* VAT embedded in the client total — used to show Subtotal (Excl. VAT) /
      VAT / TOTAL DUE (INCL. VAT) on the client-facing invoice drafts. */
@@ -2386,6 +2384,8 @@ export const ItineraryBuilder = () => {
 
   useEffect(() => {
     if (!bootedState) return;
+    // Establish the clean baseline after asynchronous itinerary hydration commits.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLastSavedKey(stateKey);
     setSavedSeq(editSeqRef.current);
     lastSavedSnapshotRef.current = { days, meta };
@@ -2981,7 +2981,7 @@ repeatGroupId: ii.repeat_group_id || null,
     } finally {
       hydrateRef.current = false;
     }
-  }, [data, meta.travelStart, meta.travelEnd, meta.numAdults, meta.numChildren, meta.client, nextId, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency]);
+  }, [data, meta.travelStart, meta.travelEnd, meta.numAdults, meta.numChildren, meta.travellers, meta.client, nextId, defaultTaxRate, defaultTaxLabel, taxAppliesForCurrency, setDays, setMeta]);
 
   /* Auto-populate consultant name from the logged-in user's profile on first
      load. If the itinerary already has a consultant stored, loadExistingDays wins. */
@@ -3757,7 +3757,7 @@ repeatGroupId: ii.repeat_group_id || null,
     /* A flight the supplier sells the guide a seat on needs no question: the seat
        is priced off the same season row as the clients' ticket and folded into
        this line, shared by the party — see crewChargeOf above. */
-  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow, resolveAddSeason, meta.numChildren, meta.travellers, setSurchargeRepeatPrompt, setGuideDetailsModal, shareContext, guideMembersById]);
+  }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow, resolveAddSeason, meta.numChildren, meta.travellers, setSurchargeRepeatPrompt, setGuideDetailsModal, shareContext, guideMembersById, contractType]);
 
   /* The unlinked per-night fee was added optimistically at a repeat count of 1
      because nothing was known at the time; once the operator answers, the line
@@ -4887,7 +4887,7 @@ repeatGroupId: ii.repeat_group_id || null,
       item: libItem,
       service: sv
     });
-  }, [libraryItems, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, meta, days]);
+  }, [libraryItems, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, meta, days, contractType]);
 
   const validateAllRoomAllocations = useCallback(() => {
     for (let i = 0; i < (days || []).length; i++) {
@@ -6563,7 +6563,7 @@ return !!sv.time; /* activities / meals / other */
       setTimeout(() => w.print(), 350);
       showToast('Itinerary PDF opened in a new window', 'success');
     }
-  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent, monthTimed, exportLang]);
+  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent, monthTimed, exportLang, contractType, libraryItems, loggedInUserName, openRoomAllocationModal, stage, taxAppliesForCurrency, validateAllRoomAllocations]);
 
   const handleSave = useCallback(async ({ silent = false } = {}) => {
     if (isReadOnly && !(isProvisional && mayEditItinerary)) {
@@ -6874,7 +6874,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, mayEditItinerary, EDIT_LOCK_MESSAGE, setDaysRaw, rentalColumnReady, crewShareColumnReady, stayPayColumnReady, canStoreTranslations, dayDestinationsReady]);
+  }, [companyId, meta, currencyCode, days, paxCount, shareContext, showToast, isReadOnly, isProvisional, mayEditItinerary, EDIT_LOCK_MESSAGE, setDaysRaw, rentalColumnReady, crewShareColumnReady, stayPayColumnReady, canStoreTranslations, dayDestinationsReady, guideRosterReady, openRoomAllocationModal, setMeta, userId, validateAllRoomAllocations]);
 
   const applyStatusChange = useCallback(async (nextStatus) => {
     setUpdatingStatus(true);
@@ -7117,7 +7117,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setCreatingPackage(false);
     }
-  }, [companyId, creatingPackage, currencyCode, days, hasConvertibleContent, libraryItems, meta, paxCount, requestNavigate, shareContext, showToast, canStoreTranslations, travelWindow.end, travelWindow.start]);
+  }, [companyId, creatingPackage, currencyCode, days, hasConvertibleContent, libraryItems, meta, paxCount, requestNavigate, shareContext, showToast, canStoreTranslations, travelWindow.end, travelWindow.start, billing?.itinerary_exclusions, billing?.itinerary_inclusions]);
 
   /* -- Issue an invoice from inside the builder. Editable quotations are saved
      first; locked bookings use their already-persisted itinerary without
@@ -7320,7 +7320,7 @@ return !!sv.time; /* activities / meals / other */
       financeSubmissionRef.current = false;
       setIssuingInvoice(false);
     }
-  }, [companyId, currencyCode, svcSymbol, fetchBookingHistory, handleSave, isReadOnly, isCancelled, meta.itineraryId, meta.client, meta.travellers, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, libraryItems, loadItineraryInvoices, showToast, travelWindow, priceProtectionPercent, monthTimed]);
+  }, [companyId, currencyCode, svcSymbol, fetchBookingHistory, handleSave, isReadOnly, isCancelled, meta.itineraryId, meta.client, meta.travellers, days, paxCount, depositPct, defaultTaxRate, bankAccounts, billing, libraryItems, loadItineraryInvoices, showToast, travelWindow, priceProtectionPercent, monthTimed, contractType]);
 
   /* -- Raise a payment receipt against the active invoice.
      A client can settle an invoice in instalments, so the amount is collected
@@ -7349,7 +7349,7 @@ return !!sv.time; /* activities / meals / other */
       payment_method: 'EFT',
       payment_reference: inv.payment_reference || ''
     });
-  }, [activeInvoice, currencyCode, paymentInvoicesByCurrency, itineraryInvoices, itineraryReceipts, itineraryCreditNotes, handleIssueInvoiceHere, showToast]);
+  }, [activeInvoice, currencyCode, paymentInvoicesByCurrency, itineraryInvoices, itineraryReceipts, itineraryCreditNotes, handleIssueInvoiceHere]);
 
   const changePaymentCurrency = useCallback((targetCurrency) => {
     void openPaymentPrompt(targetCurrency);
@@ -7993,7 +7993,7 @@ return !!sv.time; /* activities / meals / other */
     } finally {
       setSaving(false);
     }
-  }, [meta, showToast, days, libraryItems, priceProtectionPercent, setDays, setMeta, nextId]);
+  }, [meta, showToast, days, libraryItems, priceProtectionPercent, setDays, setMeta, nextId, contractType]);
 
   /* -- Edit a day service (name + description override) -------------------- */
 
@@ -12103,6 +12103,8 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                 onCancel={() => setInvoiceIssuePrompt(null)}
                 onConfirm={async () => {
                   if (!validPercentage) return;
+                  // This runs only after confirmation; the ref prevents duplicate invoice submissions.
+                  // eslint-disable-next-line react-hooks/refs
                   const created = await handleIssueInvoiceHere({
                     targetCurrency,
                     requestPercent: percentage

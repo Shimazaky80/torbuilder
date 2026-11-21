@@ -142,55 +142,64 @@ export const Analytics = () => {
   const [currentUserName, setCurrentUserName] = useState('');
 
   const fetchData = useCallback(async () => {
-    try {
-      const username = await getLoggedInUserName();
-      setLoading(true);
-      if (username) setCurrentUserName(username);
+    const username = await getLoggedInUserName();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { username, itineraries: [], tourTypes: [] };
 
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setLoading(false); return; }
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('company_id')
+      .eq('id', user.id)
+      .single();
 
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('company_id')
-        .eq('id', user.id)
-        .single();
+    const companyId = scopeCompanyId(profile?.company_id);
+    if (!companyId) return { username, itineraries: [], tourTypes: [] };
 
-      if (!scopeCompanyId(profile?.company_id)) { setLoading(false); return; }
+    const [{ data, error }, { data: tourTypeRows, error: tourTypeError }] = await Promise.all([
+      supabase
+        .from('itineraries')
+        .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, created_by, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(name, client_type)')
+        .eq('company_id', companyId)
+        .order('travel_start_date', { ascending: true, nullsFirst: false }),
+      supabase
+        .from('company_tour_types')
+        .select('name, company_id, is_active')
+        .or(vocabularyReadFilter(companyId))
+        .order('name', { ascending: true })
+    ]);
 
-      const [{ data, error }, { data: tourTypeRows, error: tourTypeError }] = await Promise.all([
-        supabase
-          .from('itineraries')
-          .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, created_by, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(name, client_type)')
-          .eq('company_id', scopeCompanyId(profile.company_id))
-          .order('travel_start_date', { ascending: true, nullsFirst: false }),
-        supabase
-          .from('company_tour_types')
-          .select('name, company_id, is_active')
-          .or(vocabularyReadFilter(scopeCompanyId(profile.company_id)))
-          .order('name', { ascending: true })
-      ]);
-
-      if (error) throw error;
-      const visibleItineraries = isConsultant
-        ? (data || []).filter((it) => it.created_by === userId
-          || (!it.created_by && it.consultant_name === (username || sessionName)))
-        : data || [];
-      setItineraries(visibleItineraries);
-      if (tourTypeError) throw tourTypeError;
-      const configuredTypes = vocabularyNames(tourTypeRows);
-      const previouslyUsedTypes = visibleItineraries.map((itinerary) => itinerary.itinerary_tour_type).filter(Boolean);
-      setTourTypes([...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b)));
-    } catch (err) {
-      showToast(err.message || 'Failed to load analytics data', 'error');
-    } finally {
-      setLoading(false);
-    }
-  }, [isConsultant, sessionName, showToast, userId]);
+    if (error) throw error;
+    if (tourTypeError) throw tourTypeError;
+    const visibleItineraries = isConsultant
+      ? (data || []).filter((it) => it.created_by === userId
+        || (!it.created_by && it.consultant_name === (username || sessionName)))
+      : data || [];
+    const configuredTypes = vocabularyNames(tourTypeRows);
+    const previouslyUsedTypes = visibleItineraries.map((itinerary) => itinerary.itinerary_tour_type).filter(Boolean);
+    return {
+      username,
+      itineraries: visibleItineraries,
+      tourTypes: [...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b))
+    };
+  }, [isConsultant, sessionName, userId]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    let active = true;
+    fetchData()
+      .then((result) => {
+        if (!active) return;
+        setCurrentUserName(result.username || '');
+        setItineraries(result.itineraries);
+        setTourTypes(result.tourTypes);
+      })
+      .catch((err) => {
+        if (active) showToast(err.message || 'Failed to load analytics data', 'error');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [fetchData, showToast]);
 
   /* ─── Stats ─────────────────────────────────────────────────────────────── */
 

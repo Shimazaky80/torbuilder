@@ -4,10 +4,9 @@ import { rateCoversNights } from './accommodationOptions';
 import { applyProtectionToRate, resolveSeasonForTravel } from './priceValidity';
 import { ratesForContract } from './rateTypes';
 import { chargesChildRate, contractPaxRate } from './servicePricing';
-import { buildShareContext } from './staffPricing';
 import { chargeNameOf, isExtrasItem, isVehicleExtra, ratesForCharge } from './extrasChargeTypes';
 import { ratesForServiceRoom, roomTypesOf, serviceRoomIdentity } from './roomTypes';
-import { isGuideItem, isGuideService, isGuideOnly, guideChargeTotal, crewShareOn } from './guidePricing';
+import { crewShareOn } from './guidePricing';
 import { hireOfferRateSnapshot, resolveHireOfferForDetails } from './packageBundlePricing';
 import {
   combineSingleSupplements,
@@ -815,7 +814,7 @@ export const vehicleBlockReason = (service, item, pax, vehicleTypes = []) => {
    Pass a child age range to price ONE CHILD's share instead of an adult's. Only the
    categories that buy per head (meals, entries, extras) contract a child figure; a
    vehicle, a trip or a room is space, so a child takes the adult share there too. */
-const unitContractContribution = (service, item, pax, vehicleTypes = [], shareContext = null, childRange = null) => {
+const unitContractContribution = (service, item, pax, vehicleTypes = [], childRange = null) => {
   const rate = rateFor(service, item);
   const currency = service.currency_code || rate.currency || item?.currency || 'ZAR';
   const pricedItem = {
@@ -874,8 +873,8 @@ const unitContractContribution = (service, item, pax, vehicleTypes = [], shareCo
 /* One service's share per traveller, including the crew figure folded onto it.
    A guide's seat or place is bought once for the whole line, so a bigger band
    splits the same sum over more heads rather than buying a seat per head. */
-const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], shareContext = null, childRange = null) => {
-  const base = unitContractContribution(service, item, pax, vehicleTypes, shareContext, childRange);
+const unitContributionPerTraveller = (service, item, pax, vehicleTypes = [], childRange = null) => {
+  const base = unitContractContribution(service, item, pax, vehicleTypes, childRange);
   if (base === null) return null;
   const crew = crewShareOn(service);
   if (!crew) return base;
@@ -1123,11 +1122,8 @@ export const applyPackageMarkup = (value, percent) => round2(
   numberOf(value) * (1 + Math.max(0, numberOf(percent)) / 100)
 );
 
-export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library = [], childRange = null, markupPercent = 0, vehicleTypes = [], shareContext = null } = {}) => {
+export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library = [], childRange = null, markupPercent = 0, vehicleTypes = [] } = {}) => {
   const pax = totalTravellers(pattern);
-  const resolvedShareContext = shareContext || buildShareContext({
-    travellers: Array.isArray(pattern?.travellers) ? pattern.travellers : []
-  });
   const services = includedServices(days);
   const currency = packageCurrencyFor(days);
   const rows = services.filter((service) => currencyOf(service) === currency);
@@ -1162,7 +1158,7 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
         if (priced.occupancyBlocked) blockedVehicleReasons.push(occupancyBlockReason);
         return;
       }
-      const perPerson = unitContributionPerTraveller(service, item, pax, vehicleTypes, resolvedShareContext);
+      const perPerson = unitContributionPerTraveller(service, item, pax, vehicleTypes);
       if (perPerson === null) {
         /* The rate carries a price vector and this party size is not on it (D12): nothing
            priced for the resolved vehicle, or no configured vehicle seats them. The row is
@@ -1189,7 +1185,7 @@ export const calculatePackageTravellerBreakdown = ({ days = [], pattern, library
            package with nothing to discount still prices a child at the adult
            total. */
         childPerPerson: round2(unitContributionPerTraveller(
-          service, item, pax, vehicleTypes, resolvedShareContext, packageChildAgeRange(childRange)
+          service, item, pax, vehicleTypes, packageChildAgeRange(childRange)
         ) ?? perPerson),
         total: round2(perPerson * pax),
         /* Accommodation figures are zero, not blank: this row genuinely carries no
