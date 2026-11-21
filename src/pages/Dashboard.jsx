@@ -8,6 +8,7 @@ import { fmtMoney, effectiveBalance } from '../lib/invoiceDoc';
 import { receiptDirection } from '../lib/settlement';
 import { scopeCompanyId } from '../lib/tenantScope';
 import { useSession } from '../hooks/useSession';
+import StatCard from '../components/StatCard';
 import {
   LayoutDashboard,
   RefreshCw,
@@ -119,34 +120,6 @@ const MoneyCell = ({ totals, symOf }) => {
     </div>
   );
 };
-
-/* ─── Stat card ──────────────────────────────────────────────────────────────
-   Takes the icon as a node, not a component, so the tinted box sets `color` and
-   lucide's currentColor stroke picks it up. */
-
-const StatCard = ({ icon, label, value, sub, color = '#0d7478', onClick }) => (
-  <div
-    className="stat-card"
-    onClick={onClick}
-    style={{
-      position: 'relative',
-      overflow: 'hidden',
-      cursor: onClick ? 'pointer' : 'default'
-    }}
-  >
-    <div style={{ width: '4px', position: 'absolute', left: 0, top: 0, bottom: 0, background: color, borderRadius: '4px 0 0 4px' }} />
-    <div style={{ paddingLeft: '0.5rem', display: 'flex', alignItems: 'center', gap: '1rem', width: '100%' }}>
-      <div style={{ background: `${color}18`, borderRadius: '12px', padding: '10px', flexShrink: 0, color }}>
-        {icon}
-      </div>
-      <div className="stat-info">
-        <div className="stat-value" style={{ color: '#1a202c' }}>{value}</div>
-        <div className="stat-label">{label}</div>
-        {sub && <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '0.1rem' }}>{sub}</div>}
-      </div>
-    </div>
-  </div>
-);
 
 /* ─── Panel shell ──────────────────────────────────────────────────────────── */
 

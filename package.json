@@ -8,6 +8,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "test:schema-audit": "node scripts/schema-audit-parser.test.mjs",
+    "test:analytics-reports": "vite build --ssr scripts/analytics-reports.test.mjs --outDir .tmp-analytics-reports-test --emptyOutDir --logLevel error && node .tmp-analytics-reports-test/analytics-reports.test.js",
     "test:pricing": "vite build --ssr scripts/pricing-season.test.mjs --outDir .tmp-test --emptyOutDir --logLevel error && node .tmp-test/pricing-season.test.js",
     "test:settlement": "vite build --ssr scripts/settlement.test.mjs --outDir .tmp-settlement-test --emptyOutDir --logLevel error && node .tmp-settlement-test/settlement.test.js",
     "test:finance-cost-of-sales": "vite build --ssr scripts/finance-cost-of-sales.test.mjs --outDir .tmp-finance-cost-of-sales-test --emptyOutDir --logLevel error && node .tmp-finance-cost-of-sales-test/finance-cost-of-sales.test.js",

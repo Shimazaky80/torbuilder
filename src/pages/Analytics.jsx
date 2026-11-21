@@ -1,10 +1,21 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import SearchableSelect from '../components/SearchableSelect';
+import StatCard from '../components/StatCard';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { vocabularyNames, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { scopeCompanyId } from '../lib/tenantScope';
 import { useSession } from '../hooks/useSession';
+import { useCurrencies } from '../hooks/useCurrencies';
+import { fmtMoney } from '../lib/invoiceDoc';
+import {
+  buildAnalyticsReports,
+  moneyOf,
+  statusLabel,
+  REPORT_DATE_BASES,
+  REPORT_FINANCIAL_BASES,
+  REPORT_LOSS_FILTERS
+} from '../lib/analyticsReports';
 import {
   BarChart3,
   Users,
@@ -14,7 +25,12 @@ import {
   User,
   Calendar,
   RefreshCw,
-  TrendingUp
+  TrendingUp,
+  Calculator,
+  CircleDollarSign,
+  TrendingDown,
+  FilterX,
+  FileText
 } from 'lucide-react';
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
@@ -61,6 +77,63 @@ const STATUS_LABELS = {
   cancelled: 'Cancelled',
   completed: 'Completed'
 };
+
+/* ─── Report building blocks ───────────────────────────────────────────────── */
+
+const filterSelectStyle = {
+  width: 'auto',
+  minWidth: '150px',
+  padding: '0.55rem 0.75rem',
+  borderRadius: '10px',
+  border: '1px solid #e2e8f0',
+  fontSize: '0.85rem',
+  color: '#334155',
+  background: '#f8fafc'
+};
+
+const filterInputStyle = {
+  ...filterSelectStyle,
+  minWidth: '140px',
+  width: '140px'
+};
+
+const FilterField = ({ label, children }) => (
+  <label style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+    {label}
+    {children}
+  </label>
+);
+
+const ReportPanel = ({ title, subtitle, columns, rows, empty = 'No records match the selected filters.' }) => (
+  <section className="admin-table-container" style={{ marginBottom: '1.5rem', overflow: 'hidden' }}>
+    <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+      <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0 }}>{title}</h2>
+      {subtitle && <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{subtitle}</span>}
+    </div>
+    <div style={{ overflowX: 'auto' }}>
+      <table className="admin-table" style={{ minWidth: '760px' }}>
+        <thead>
+          <tr>{columns.map((column) => <th key={column.key} style={column.align ? { textAlign: column.align } : undefined}>{column.label}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length} style={{ padding: '2.5rem', textAlign: 'center', color: '#94a3b8' }}>{empty}</td>
+            </tr>
+          ) : rows.map((row, index) => (
+            <tr key={row.key || row.id || index}>
+              {columns.map((column) => (
+                <td key={column.key} style={column.align ? { textAlign: column.align } : undefined}>
+                  {column.render ? column.render(row) : (row[column.key] ?? '—')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </section>
+);
 
 /* ─── Excel Export ─────────────────────────────────────────────────────────── */
 
@@ -127,6 +200,30 @@ const buildChecklistXls = (itineraries, defaultConsultant = '') => {
 </body></html>`;
 };
 
+/* PostgREST caps a single response. Books with thousands of services still need
+   their full financials, so page each chunk of parent ids to completion. */
+const fetchInBatches = async (table, select, column, ids) => {
+  const rows = [];
+  const chunkSize = 100;
+  const pageSize = 500;
+  for (let start = 0; start < ids.length; start += chunkSize) {
+    const chunk = ids.slice(start, start + chunkSize);
+    let from = 0;
+    for (;;) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .in(column, chunk)
+        .range(from, from + pageSize - 1);
+      if (error) throw error;
+      rows.push(...(data || []));
+      if (!data || data.length < pageSize) break;
+      from += pageSize;
+    }
+  }
+  return rows;
+};
+
 /* ─── Main Analytics Page ──────────────────────────────────────────────────── */
 
 export const Analytics = () => {
@@ -140,6 +237,18 @@ export const Analytics = () => {
   const [tourTypes, setTourTypes] = useState([]);
   const [statusFilter, setStatusFilter] = useState('');
   const [currentUserName, setCurrentUserName] = useState('');
+  const [dayItems, setDayItems] = useState([]);
+  const [clientOptions, setClientOptions] = useState([]);
+  const [consultantOptions, setConsultantOptions] = useState([]);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [dateBasis, setDateBasis] = useState('travel');
+  const [consultantFilter, setConsultantFilter] = useState('');
+  const [clientFilter, setClientFilter] = useState('');
+  const [financialBasis, setFinancialBasis] = useState('booked');
+  const [lossFilter, setLossFilter] = useState('all');
+  const [minRevenue, setMinRevenue] = useState('');
+  const { currencies } = useCurrencies();
 
   const fetchData = useCallback(async () => {
     const username = await getLoggedInUserName();
@@ -155,43 +264,84 @@ export const Analytics = () => {
     const companyId = scopeCompanyId(profile?.company_id);
     if (!companyId) return { username, itineraries: [], tourTypes: [] };
 
-    const [{ data, error }, { data: tourTypeRows, error: tourTypeError }] = await Promise.all([
+    const [
+      { data, error },
+      { data: tourTypeRows, error: tourTypeError },
+      { data: clientRows, error: clientError }
+    ] = await Promise.all([
       supabase
         .from('itineraries')
-        .select('id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, created_by, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(name, client_type)')
+        .select('id, client_id, reference_number, itinerary_name, itinerary_tour_type, consultant_name, created_by, created_at, travel_start_date, travel_end_date, travellers, num_adults, num_children, status, clients(id, name, client_type)')
         .eq('company_id', companyId)
         .order('travel_start_date', { ascending: true, nullsFirst: false }),
       supabase
         .from('company_tour_types')
         .select('name, company_id, is_active')
         .or(vocabularyReadFilter(companyId))
+        .order('name', { ascending: true }),
+      supabase
+        .from('clients')
+        .select('id, name')
+        .eq('company_id', companyId)
         .order('name', { ascending: true })
     ]);
 
     if (error) throw error;
     if (tourTypeError) throw tourTypeError;
+    if (clientError) throw clientError;
     const visibleItineraries = isConsultant
       ? (data || []).filter((it) => it.created_by === userId
         || (!it.created_by && it.consultant_name === (username || sessionName)))
       : data || [];
+
+    /* Money lives on the day items, which store a day id rather than an
+       itinerary id. Resolve that link here so the report engine only sees rows
+       belonging to itineraries this user is allowed to see. */
+    let items = [];
+    const itineraryIds = visibleItineraries.map((it) => it.id);
+    if (itineraryIds.length) {
+      const days = await fetchInBatches('itinerary_days', 'id, itinerary_id', 'itinerary_id', itineraryIds);
+      const itineraryOfDay = new Map((days || []).map((day) => [day.id, day.itinerary_id]));
+      const dayIds = [...itineraryOfDay.keys()];
+      if (dayIds.length) {
+        const rawItems = await fetchInBatches(
+          'itinerary_day_items',
+          'itinerary_day_id, item_name, currency_code, total_buy, total_sell, unit_cost, unit_price, item_price_per_person, pax, tax_rate, is_included',
+          'itinerary_day_id',
+          dayIds
+        );
+        items = (rawItems || [])
+          .map((item) => ({ ...item, itinerary_id: itineraryOfDay.get(item.itinerary_day_id) }))
+          .filter((item) => item.itinerary_id);
+      }
+    }
+
     const configuredTypes = vocabularyNames(tourTypeRows);
     const previouslyUsedTypes = visibleItineraries.map((itinerary) => itinerary.itinerary_tour_type).filter(Boolean);
     return {
       username,
       itineraries: visibleItineraries,
-      tourTypes: [...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b))
+      tourTypes: [...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b)),
+      dayItems: items,
+      clients: clientRows || [],
+      consultants: [...new Set(visibleItineraries.map((it) => it.consultant_name).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b))
     };
   }, [isConsultant, sessionName, userId]);
+
+  const applyResult = useCallback((result) => {
+    setCurrentUserName(result.username || '');
+    setItineraries(result.itineraries);
+    setTourTypes(result.tourTypes);
+    setDayItems(result.dayItems || []);
+    setClientOptions(result.clients || []);
+    setConsultantOptions(result.consultants || []);
+  }, []);
 
   useEffect(() => {
     let active = true;
     fetchData()
-      .then((result) => {
-        if (!active) return;
-        setCurrentUserName(result.username || '');
-        setItineraries(result.itineraries);
-        setTourTypes(result.tourTypes);
-      })
+      .then((result) => { if (active) applyResult(result); })
       .catch((err) => {
         if (active) showToast(err.message || 'Failed to load analytics data', 'error');
       })
@@ -199,47 +349,148 @@ export const Analytics = () => {
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [fetchData, showToast]);
+  }, [fetchData, showToast, applyResult]);
 
-  /* ─── Stats ─────────────────────────────────────────────────────────────── */
+  /* The Refresh button used to call fetchData directly, which returned the rows
+     but never put them on screen. It now runs the same load as the first render
+     and applies the result, so a consultant sees newly confirmed work. */
+  const handleRefresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      applyResult(await fetchData());
+      showToast('Analytics refreshed', 'success');
+    } catch (err) {
+      showToast(err.message || 'Failed to refresh analytics', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchData, showToast, applyResult]);
 
-  const stats = useMemo(() => {
-    const totalTravellers = itineraries.reduce((sum, it) => {
-      const trav = Array.isArray(it.travellers) ? it.travellers : [];
-      return sum + (trav.length || 0);
-    }, 0);
+  /* ─── Money display ─────────────────────────────────────────────────────── */
 
-    const active = itineraries.filter((it) =>
-      !['cancelled', 'completed'].includes(it.status)
-    ).length;
+  const symbolOf = useCallback((code) => {
+    const upper = String(code || '').toUpperCase();
+    return currencies.find((currency) => currency.code === upper)?.symbol || `${upper} `;
+  }, [currencies]);
 
-    const cancelled = itineraries.filter((it) => it.status === 'cancelled').length;
-    const completed = itineraries.filter((it) => it.status === 'completed').length;
+  const formatAmount = useCallback((amount, code) => fmtMoney(amount, symbolOf(code)), [symbolOf]);
 
-    return { totalTravellers, active, cancelled, completed, total: itineraries.length };
-  }, [itineraries]);
+  /* A mixed-currency company never gets a single fake total: every figure is
+     printed once per currency, with the code alongside it. */
+  const moneyText = useCallback((byCurrency, field = 'revenue') => {
+    const rows = moneyOf(byCurrency);
+    if (!rows.length) return '—';
+    return rows.map((row) => `${row.code} ${formatAmount(row[field], row.code)}`).join('  ·  ');
+  }, [formatAmount]);
+
+  const marginCell = useCallback((byCurrency) => {
+    const rows = moneyOf(byCurrency);
+    if (!rows.length) return <span style={{ color: '#cbd5e1' }}>—</span>;
+    return rows.map((row) => (
+      <div key={row.code} style={{ whiteSpace: 'nowrap' }}>
+        <span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#94a3b8', marginRight: '0.25rem' }}>{row.code}</span>
+        {row.margin == null ? '—' : `${row.margin}%`}
+      </div>
+    ));
+  }, []);
+
+  const moneyCell = useCallback((byCurrency, field = 'revenue') => {
+    const rows = moneyOf(byCurrency);
+    if (!rows.length) return <span style={{ color: '#cbd5e1' }}>—</span>;
+    return rows.map((row) => {
+      const isBad = field === 'loss' && row.loss > 0;
+      return (
+        <div key={row.code} style={{ whiteSpace: 'nowrap', color: isBad ? '#dc2626' : '#1e293b', fontWeight: isBad ? 700 : 500 }}>
+          <span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#94a3b8', marginRight: '0.25rem' }}>{row.code}</span>
+          {formatAmount(row[field], row.code)}
+        </div>
+      );
+    });
+  }, [formatAmount]);
+
+  /* ─── Reports ───────────────────────────────────────────────────────────── */
+
+  const reportFilters = useMemo(() => ({
+    from: dateFrom,
+    to: dateTo,
+    dateBasis,
+    consultant: isConsultant ? '' : consultantFilter,
+    clientId: clientFilter,
+    status: statusFilter,
+    tourType: tourTypeFilter,
+    financialBasis,
+    lossFilter,
+    minRevenue
+  }), [dateFrom, dateTo, dateBasis, isConsultant, consultantFilter, clientFilter, statusFilter, tourTypeFilter, financialBasis, lossFilter, minRevenue]);
+
+  const report = useMemo(
+    () => buildAnalyticsReports({ itineraries, items: dayItems, filters: reportFilters }),
+    [itineraries, dayItems, reportFilters]
+  );
+
+  const clearFilters = () => {
+    setDateFrom('');
+    setDateTo('');
+    setDateBasis('travel');
+    setConsultantFilter('');
+    setClientFilter('');
+    setStatusFilter('');
+    setTourTypeFilter('');
+    setFinancialBasis('booked');
+    setLossFilter('all');
+    setMinRevenue('');
+  };
+
+  const stats = useMemo(() => ({
+    total: report.totals.itineraries,
+    travellers: report.totals.travellers,
+    revenue: moneyText(report.totals.byCurrency, 'revenue'),
+    loss: moneyText(report.totals.byCurrency, 'loss'),
+    quotations: report.quotationsByClient.reduce((sum, group) => sum + group.itineraries, 0)
+  }), [report, moneyText]);
 
   /* ─── Filtered list ─────────────────────────────────────────────────────── */
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return itineraries.filter((it) => {
-      if (statusFilter && it.status !== statusFilter) return false;
-      if (tourTypeFilter && it.itinerary_tour_type !== tourTypeFilter) return false;
-      if (q) {
-        const trav = Array.isArray(it.travellers) ? it.travellers : [];
-        const haystack = [
-          it.reference_number,
-          it.clients?.name,
-          it.itinerary_name,
-          it.consultant_name || currentUserName,
-          leadTraveller(trav)
-        ].filter(Boolean).join(' ').toLowerCase();
-        if (!haystack.includes(q)) return false;
-      }
-      return true;
+    return report.rows.filter((row) => {
+      if (!q) return true;
+      const it = row.itinerary;
+      const trav = Array.isArray(it.travellers) ? it.travellers : [];
+      const haystack = [
+        it.reference_number,
+        it.clients?.name,
+        it.itinerary_name,
+        it.consultant_name || currentUserName,
+        leadTraveller(trav)
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(q);
     });
-  }, [itineraries, searchQuery, statusFilter, tourTypeFilter, currentUserName]);
+  }, [report.rows, searchQuery, currentUserName]);
+
+  const statusColumns = report.statusColumns;
+
+  const consultantRows = useMemo(() => report.byConsultant.map((group) => ({
+    ...group,
+    statuses: Object.fromEntries(statusColumns.map((status) => [
+      status,
+      report.rows.filter((row) => row.consultant === group.key && row.status === status).length
+    ]))
+  })), [report, statusColumns]);
+
+  const clientRows = useMemo(() => report.byClient.map((group) => ({
+    ...group,
+    quotations: report.quotationsByClient.find((row) => row.key === group.key)?.itineraries || 0
+  })), [report]);
+
+  const statusRows = useMemo(() => report.byStatus
+    .filter((row) => row.itineraries > 0)
+    .map((row) => ({
+      ...row,
+      share: report.totals.itineraries ? Math.round((row.itineraries / report.totals.itineraries) * 100) : 0
+    })), [report]);
+
+  const itineraryRows = useMemo(() => filtered.map((row) => ({ ...row, key: row.id })), [filtered]);
 
   /* ─── Export ────────────────────────────────────────────────────────────── */
 
@@ -248,7 +499,7 @@ export const Analytics = () => {
       showToast('No records to export', 'warning');
       return;
     }
-    const xls = buildChecklistXls(filtered, currentUserName);
+    const xls = buildChecklistXls(filtered.map((row) => row.itinerary), currentUserName);
     const date = new Date().toISOString().slice(0, 10);
     downloadBlob(xls, `travelers-checklist-${date}.xls`, 'application/vnd.ms-excel');
     showToast('Travelers checklist exported as Excel', 'success');
@@ -262,14 +513,15 @@ export const Analytics = () => {
           <BarChart3 className="header-icon" />
           <div>
             <h1>Analytics</h1>
-            <p>Travelers checklist — all itineraries sorted by arrival date</p>
+            <p>{isConsultant ? 'Your itineraries, revenue and loss' : 'Consultant, client and financial reporting across the company'}</p>
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
           <button
             type="button"
             className="icon-btn outline"
-            onClick={fetchData}
+            onClick={handleRefresh}
+            disabled={loading}
             title="Refresh"
             style={{ padding: '0.55rem 0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem', border: '1px solid #e2e8f0', borderRadius: '10px', background: '#fff', color: '#475569', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
           >
@@ -286,37 +538,253 @@ export const Analytics = () => {
         </div>
       </header>
 
+      {/* Report filters */}
+      <div className="admin-table-container" style={{ padding: '1.15rem 1.25rem', marginBottom: '1.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
+          <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Calculator size={18} color="#0d7478" /> Report filters
+          </h2>
+          <button
+            type="button"
+            className="icon-btn outline"
+            onClick={clearFilters}
+            style={{ padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
+          >
+            <FilterX size={14} /> Clear filters
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: '0.85rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          {!isConsultant && (
+            <FilterField label="Consultant">
+              <SearchableSelect className="pricing-select" style={filterSelectStyle} value={consultantFilter} onChange={(e) => setConsultantFilter(e.target.value)}>
+                <option value="">All consultants</option>
+                {consultantOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              </SearchableSelect>
+            </FilterField>
+          )}
+          <FilterField label="Date basis">
+            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={dateBasis} onChange={(e) => setDateBasis(e.target.value)}>
+              {REPORT_DATE_BASES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </SearchableSelect>
+          </FilterField>
+          <FilterField label="From">
+            <input type="date" style={filterInputStyle} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+          </FilterField>
+          <FilterField label="To">
+            <input type="date" style={filterInputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          </FilterField>
+          <FilterField label="Status">
+            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="">All statuses</option>
+              {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              <option value="pending_confirmation">Pending Confirmation</option>
+            </SearchableSelect>
+          </FilterField>
+          <FilterField label="Tour type">
+            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={tourTypeFilter} onChange={(e) => setTourTypeFilter(e.target.value)}>
+              <option value="">All tour types</option>
+              {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
+            </SearchableSelect>
+          </FilterField>
+          <FilterField label="Client">
+            <SearchableSelect className="pricing-select" style={{ ...filterSelectStyle, minWidth: '180px' }} value={clientFilter} onChange={(e) => setClientFilter(e.target.value)}>
+              <option value="">All clients</option>
+              {clientOptions.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
+            </SearchableSelect>
+          </FilterField>
+          <FilterField label="Trip scope">
+            <SearchableSelect className="pricing-select" style={{ ...filterSelectStyle, minWidth: '210px' }} value={financialBasis} onChange={(e) => setFinancialBasis(e.target.value)}>
+              {REPORT_FINANCIAL_BASES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </SearchableSelect>
+          </FilterField>
+          <FilterField label="Profit / loss">
+            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={lossFilter} onChange={(e) => setLossFilter(e.target.value)}>
+              {REPORT_LOSS_FILTERS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </SearchableSelect>
+          </FilterField>
+          <FilterField label="Min revenue">
+            <input type="number" min="0" step="0.01" style={filterInputStyle} placeholder="Any" value={minRevenue} onChange={(e) => setMinRevenue(e.target.value)} />
+          </FilterField>
+        </div>
+        {isConsultant && (
+          <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0.8rem 0 0' }}>
+            Consultant reports are limited to itineraries you created.
+          </p>
+        )}
+      </div>
+
       {/* Stats Grid */}
-      <div className="admin-stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginBottom: '2rem' }}>
+      <div className="admin-stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: '1.5rem' }}>
         <StatCard
           icon={Users}
-          label="Total Travelers Managed"
-          value={stats.totalTravellers.toLocaleString()}
-          sub="Across all itineraries including cancelled"
+          label="Total Travelers"
+          value={stats.travellers.toLocaleString()}
+          sub="Within the selected filters"
           color="#0d7478"
         />
         <StatCard
           icon={TrendingUp}
           label="Total Itineraries"
           value={stats.total.toLocaleString()}
-          sub={`${stats.active} active · ${stats.completed} completed`}
+          sub="Matching the selected filters"
           color="#6366f1"
         />
         <StatCard
-          icon={Calendar}
-          label="Active Itineraries"
-          value={stats.active.toLocaleString()}
-          sub="Quotation, provisional, confirmed, in progress"
+          icon={CircleDollarSign}
+          label="Revenue"
+          value={stats.revenue}
+          sub="Tax excluded · per currency"
           color="#16a34a"
         />
         <StatCard
-          icon={BarChart3}
-          label="Cancelled"
-          value={stats.cancelled.toLocaleString()}
-          sub="Shown in red with XX prefix"
+          icon={TrendingDown}
+          label="Loss"
+          value={stats.loss}
+          sub="Sum of loss-making trips"
           color="#dc2626"
         />
+        <StatCard
+          icon={FileText}
+          label="Quotations"
+          value={stats.quotations.toLocaleString()}
+          sub="Counted separately from bookings"
+          color="#f59e0b"
+        />
       </div>
+
+      {/* Admin-only management reports */}
+      {!isConsultant && (
+        <>
+          <ReportPanel
+            title="Revenue & loss by consultant"
+            subtitle="Itineraries, revenue and loss follow every filter above"
+            rows={consultantRows}
+            columns={[
+              { key: 'consultant', label: 'Consultant', render: (row) => <strong>{row.key}</strong> },
+              { key: 'itineraries', label: 'Trips', align: 'center' },
+              { key: 'travellers', label: 'Travellers', align: 'center' },
+              ...statusColumns.map((status) => ({
+                key: `status_${status}`,
+                label: statusLabel(status),
+                align: 'center',
+                render: (row) => row.statuses[status] || 0
+              })),
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost') },
+              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
+              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') },
+              { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency) }
+            ]}
+          />
+
+          <ReportPanel
+            title="Itineraries per client and status"
+            subtitle="Every client with its status breakdown"
+            rows={clientRows}
+            columns={[
+              { key: 'client', label: 'Client', render: (row) => <strong>{row.key}</strong> },
+              { key: 'itineraries', label: 'Total trips', align: 'center' },
+              ...statusColumns.map((status) => ({
+                key: `status_${status}`,
+                label: statusLabel(status),
+                align: 'center',
+                render: (row) => row.statuses?.[status] || 0
+              })),
+              { key: 'travellers', label: 'Travellers', align: 'center' },
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') }
+            ]}
+          />
+
+          <ReportPanel
+            title="Revenue & quotations per client"
+            subtitle="Quotations are counted even when the trip scope is set to booked only"
+            rows={clientRows}
+            columns={[
+              { key: 'client', label: 'Client', render: (row) => <strong>{row.key}</strong> },
+              { key: 'itineraries', label: 'Booked trips', align: 'center' },
+              { key: 'quotations', label: 'Quotations', align: 'center' },
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost') },
+              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
+              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') },
+              { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency) }
+            ]}
+          />
+        </>
+      )}
+
+      {/* Reports useful to both management and consultants */}
+      <ReportPanel
+        title="Monthly trend"
+        subtitle={dateBasis === 'created' ? 'Grouped by itinerary creation month' : 'Grouped by travel start month'}
+        rows={report.monthly}
+        columns={[
+          { key: 'month', label: 'Month', render: (row) => <strong>{row.key}</strong> },
+          { key: 'itineraries', label: 'Trips', align: 'center' },
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
+        ]}
+      />
+
+      <ReportPanel
+        title="Status mix"
+        subtitle="Where the current bookings sit in the pipeline"
+        rows={statusRows}
+        columns={[
+          { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{row.label}</span> },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'share', label: 'Share', align: 'center', render: (row) => `${row.share}%` }
+        ]}
+      />
+
+      <ReportPanel
+        title="Tour type mix"
+        rows={report.byTourType}
+        columns={[
+          { key: 'tourType', label: 'Tour type', render: (row) => <strong>{row.key}</strong> },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
+        ]}
+      />
+
+      <ReportPanel
+        title="Loss-making itineraries"
+        subtitle="Trips sold below their buy cost — a profitable month can hide these"
+        rows={report.lossMaking}
+        empty="No loss-making itineraries in this period."
+        columns={[
+          { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
+          { key: 'client', label: 'Client' },
+          ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
+          { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
+        ]}
+      />
+
+      <ReportPanel
+        title={isConsultant ? 'Your itineraries — financials' : 'Itinerary financials'}
+        subtitle="Per-itinerary figures behind the totals"
+        rows={itineraryRows}
+        columns={[
+          { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
+          { key: 'client', label: 'Client' },
+          { key: 'name', label: 'Tour name' },
+          { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
+          ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
+          { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{statusLabel(row.status)}</span> },
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.financials, 'profit') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
+        ]}
+      />
 
       {/* Checklist Table */}
       <div className="admin-table-container">
@@ -341,31 +809,6 @@ export const Analytics = () => {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            {/* Tour type filter */}
-            <SearchableSelect
-              className="pricing-select"
-              style={{ width: 'auto', minWidth: '140px', padding: '0.55rem 0.75rem', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#334155', background: '#f8fafc' }}
-              value={tourTypeFilter}
-              onChange={(e) => setTourTypeFilter(e.target.value)}
-            >
-              <option value="">All tour types</option>
-              {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
-            </SearchableSelect>
-            {/* Status filter */}
-            <SearchableSelect
-              className="pricing-select"
-              style={{ width: 'auto', minWidth: '140px', padding: '0.55rem 0.75rem', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#334155', background: '#f8fafc' }}
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-            >
-              <option value="">All statuses</option>
-              <option value="quotation">Quotation</option>
-              <option value="provisional">Provisional</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="in_progress">In Progress</option>
-              <option value="cancelled">Cancelled</option>
-              <option value="completed">Completed</option>
-            </SearchableSelect>
           </div>
         </div>
 
