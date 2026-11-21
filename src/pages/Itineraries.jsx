@@ -4,9 +4,11 @@ import { useNavigate } from 'react-router-dom';
 import { supabase, getLoggedInUserName } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useListRowLimit } from '../hooks/useListRowLimit';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useConfirm } from '../hooks/useConfirm';
 /* The icon is aliased: importing it as `Map` shadowed the global Map
    constructor and broke the load-more merge below. */
-import { Map as MapIcon, Building2, User, Calendar, Plus, Copy, Edit3, Search } from 'lucide-react';
+import { Map as MapIcon, Building2, User, Calendar, Plus, Copy, Edit3, Search, Trash2 } from 'lucide-react';
 import ClientTourForm from '../components/ClientTourForm';
 import { PRECISION_MONTH, travelTimingLabel } from '../lib/travelTiming';
 import { scopeCompanyId } from '../lib/tenantScope';
@@ -40,13 +42,18 @@ const childrenCount = (travellers = []) => {
 
 export const Itineraries = () => {
   const navigate = useNavigate();
-  const { userId, name: currentUserName, roleKey, access } = useSession();
+  const { userId, name: currentUserName, roleKey, access, can } = useSession();
   const mayWrite = access?.modules?.itineraries?.level === 'write';
+  /* Admin is deliberately tied to the Users module, the same gate the
+     server-side transfer and access RPCs use. Consultants and Operations can
+     write itineraries, but they must never be able to remove one. */
+  const isAdmin = can('users', 'write');
   const consultant = roleKey === 'consultant';
   const canViewAll = access?.flags?.view_all_itineraries?.value === true;
   const isOwnItinerary = (itinerary) => itinerary.created_by === userId
     || (!itinerary.created_by && itinerary.consultant_name === currentUserName);
   const { showToast } = useToast();
+  const [confirmDialog, confirm] = useConfirm();
 
   const [itineraries, setItineraries] = useState([]);
   const [loadingItineraries, setLoadingItineraries] = useState(true);
@@ -318,6 +325,67 @@ export const Itineraries = () => {
     }
   };
 
+  const handleDelete = async (itinerary) => {
+    if (!isAdmin) {
+      showToast('Only an Admin can delete itineraries.', 'error');
+      return;
+    }
+
+    try {
+      /* Pre-check so the user gets a useful reason instead of a raw RLS or
+         foreign-key error. The RLS policy repeats both checks server-side. */
+      const [invoiceResult, receiptResult] = await Promise.all([
+        supabase.from('invoices').select('id').eq('itinerary_id', itinerary.id).limit(1),
+        supabase.from('invoice_receipts').select('id').eq('itinerary_id', itinerary.id).limit(1)
+      ]);
+      if (invoiceResult.error) throw invoiceResult.error;
+      if (receiptResult.error) throw receiptResult.error;
+      if (invoiceResult.data?.length || receiptResult.data?.length) {
+        showToast('This itinerary cannot be deleted because it has invoices.', 'error');
+        return;
+      }
+    } catch (err) {
+      showToast(err.message || 'Could not check this itinerary for invoices.', 'error');
+      return;
+    }
+
+    const ok = await confirm({
+      title: 'Delete itinerary?',
+      message: `"${itinerary.reference_number || itinerary.itinerary_name}" will be permanently removed.`,
+      detail: 'Itineraries with invoices cannot be deleted. Linked days, items and other trip details will also be removed.',
+      confirmLabel: 'Delete itinerary',
+      destructive: true
+    });
+    if (!ok) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('itineraries')
+        .delete()
+        .eq('id', itinerary.id)
+        .select('id');
+
+      if (error) throw error;
+      /* RLS silently hides rows from DELETE that fail its USING clause, so an
+         empty result is the normal way a blocked deletion reports back. */
+      if (!data?.length) {
+        showToast('Itinerary could not be deleted. It may have invoices, or you may not have Admin access.', 'error');
+        return;
+      }
+
+      setItineraries((prev) => prev.filter((row) => row.id !== itinerary.id));
+      setTotalItineraries((prev) => (prev == null ? prev : Math.max(0, prev - 1)));
+      showToast('Itinerary deleted', 'success');
+    } catch (err) {
+      if (err.code === '23503') {
+        showToast('This itinerary cannot be deleted while invoices are linked to it.', 'error');
+      } else if (err.code === '42501') {
+        showToast('Only an Admin can delete itineraries.', 'error');
+      } else {
+        showToast(err.message || 'Could not delete itinerary', 'error');
+      }
+    }
+  };
 
   const formatTravellerSummary = (itinerary) => {
     const trav = Array.isArray(itinerary.travellers) ? itinerary.travellers : [];
@@ -538,6 +606,15 @@ export const Itineraries = () => {
                     >
                       <Copy size={16} />
                     </button>
+                    {isAdmin && (
+                      <button
+                        className="action-btn delete"
+                        onClick={(e) => { e.stopPropagation(); handleDelete(it); }}
+                        title="Delete itinerary (Admin only)"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -557,6 +634,8 @@ export const Itineraries = () => {
           </div>
         )}
       </div>
+
+      {confirmDialog && <ConfirmDialog {...confirmDialog} />}
     </div>
   );
 }
