@@ -11,6 +11,7 @@ import { fmtMoney } from '../lib/invoiceDoc';
 import {
   buildAnalyticsReports,
   financialsForItems,
+  inReportRange,
   moneyOf,
   statusLabel,
   REPORT_DATE_BASES,
@@ -247,6 +248,10 @@ export const Analytics = () => {
      traveller from the checklist or stop its search from finding one. */
   const [checklistTourTypeFilter, setChecklistTourTypeFilter] = useState('');
   const [checklistStatusFilter, setChecklistStatusFilter] = useState('');
+  const [checklistConsultantFilter, setChecklistConsultantFilter] = useState('');
+  const [checklistClientFilter, setChecklistClientFilter] = useState('');
+  const [checklistDateFrom, setChecklistDateFrom] = useState('');
+  const [checklistDateTo, setChecklistDateTo] = useState('');
   const [tourTypeFilter, setTourTypeFilter] = useState('');
   const [tourTypes, setTourTypes] = useState([]);
   const [statusFilter, setStatusFilter] = useState('');
@@ -455,6 +460,16 @@ export const Analytics = () => {
     setMinRevenue('');
   };
 
+  const clearChecklistFilters = () => {
+    setSearchQuery('');
+    setChecklistConsultantFilter('');
+    setChecklistClientFilter('');
+    setChecklistDateFrom('');
+    setChecklistDateTo('');
+    setChecklistStatusFilter('');
+    setChecklistTourTypeFilter('');
+  };
+
   const stats = useMemo(() => ({
     total: report.totals.itineraries,
     travellers: report.totals.travellers,
@@ -470,6 +485,9 @@ export const Analytics = () => {
     return itineraries.filter((it) => {
       if (checklistStatusFilter && it.status !== checklistStatusFilter) return false;
       if (checklistTourTypeFilter && it.itinerary_tour_type !== checklistTourTypeFilter) return false;
+      if (checklistConsultantFilter && (it.consultant_name || currentUserName) !== checklistConsultantFilter) return false;
+      if (checklistClientFilter && (it.client_id || it.clients?.id) !== checklistClientFilter) return false;
+      if (!inReportRange(it, { from: checklistDateFrom, to: checklistDateTo, dateBasis: 'travel' })) return false;
       if (!q) return true;
       const trav = Array.isArray(it.travellers) ? it.travellers : [];
       const haystack = [
@@ -481,7 +499,7 @@ export const Analytics = () => {
       ].filter(Boolean).join(' ').toLowerCase();
       return haystack.includes(q);
     });
-  }, [itineraries, searchQuery, checklistStatusFilter, checklistTourTypeFilter, currentUserName]);
+  }, [itineraries, searchQuery, checklistStatusFilter, checklistTourTypeFilter, checklistConsultantFilter, checklistClientFilter, checklistDateFrom, checklistDateTo, currentUserName]);
 
   /* The checklist shows money for every file, quotation or booking, regardless
      of the report filters selected above it. */
@@ -860,6 +878,30 @@ export const Analytics = () => {
             {/* Checklist-only filters — independent of the report filters above */}
             <SearchableSelect
               className="pricing-select"
+              style={{ ...filterSelectStyle, minWidth: '150px' }}
+              value={checklistConsultantFilter}
+              onChange={(e) => setChecklistConsultantFilter(e.target.value)}
+            >
+              <option value="">All consultants</option>
+              {consultantOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+            </SearchableSelect>
+            <SearchableSelect
+              className="pricing-select"
+              style={{ ...filterSelectStyle, minWidth: '170px' }}
+              value={checklistClientFilter}
+              onChange={(e) => setChecklistClientFilter(e.target.value)}
+            >
+              <option value="">All clients</option>
+              {clientOptions.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
+            </SearchableSelect>
+            <FilterField label="Travel from">
+              <input type="date" style={filterInputStyle} value={checklistDateFrom} onChange={(e) => setChecklistDateFrom(e.target.value)} />
+            </FilterField>
+            <FilterField label="Travel to">
+              <input type="date" style={filterInputStyle} value={checklistDateTo} onChange={(e) => setChecklistDateTo(e.target.value)} />
+            </FilterField>
+            <SearchableSelect
+              className="pricing-select"
               style={filterSelectStyle}
               value={checklistTourTypeFilter}
               onChange={(e) => setChecklistTourTypeFilter(e.target.value)}
@@ -877,6 +919,22 @@ export const Analytics = () => {
               {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               <option value="pending_confirmation">Pending Confirmation</option>
             </SearchableSelect>
+            <button
+              type="button"
+              className="icon-btn outline"
+              onClick={clearChecklistFilters}
+              style={{ padding: '0.5rem 0.7rem', display: 'flex', alignItems: 'center', gap: '0.3rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
+            >
+              <FilterX size={14} /> Clear
+            </button>
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={handleExport}
+              style={{ width: 'auto', padding: '0.55rem 0.9rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}
+            >
+              <FileSpreadsheet size={15} /> Export Excel
+            </button>
           </div>
         </div>
 
