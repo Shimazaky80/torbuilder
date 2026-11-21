@@ -233,6 +233,10 @@ export const Analytics = () => {
   const [itineraries, setItineraries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  /* The checklist keeps its own controls: the report filters must never hide a
+     traveller from the checklist or stop its search from finding one. */
+  const [checklistTourTypeFilter, setChecklistTourTypeFilter] = useState('');
+  const [checklistStatusFilter, setChecklistStatusFilter] = useState('');
   const [tourTypeFilter, setTourTypeFilter] = useState('');
   const [tourTypes, setTourTypes] = useState([]);
   const [statusFilter, setStatusFilter] = useState('');
@@ -453,9 +457,10 @@ export const Analytics = () => {
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return report.rows.filter((row) => {
+    return itineraries.filter((it) => {
+      if (checklistStatusFilter && it.status !== checklistStatusFilter) return false;
+      if (checklistTourTypeFilter && it.itinerary_tour_type !== checklistTourTypeFilter) return false;
       if (!q) return true;
-      const it = row.itinerary;
       const trav = Array.isArray(it.travellers) ? it.travellers : [];
       const haystack = [
         it.reference_number,
@@ -466,7 +471,7 @@ export const Analytics = () => {
       ].filter(Boolean).join(' ').toLowerCase();
       return haystack.includes(q);
     });
-  }, [report.rows, searchQuery, currentUserName]);
+  }, [itineraries, searchQuery, checklistStatusFilter, checklistTourTypeFilter, currentUserName]);
 
   const statusColumns = report.statusColumns;
 
@@ -490,7 +495,7 @@ export const Analytics = () => {
       share: report.totals.itineraries ? Math.round((row.itineraries / report.totals.itineraries) * 100) : 0
     })), [report]);
 
-  const itineraryRows = useMemo(() => filtered.map((row) => ({ ...row, key: row.id })), [filtered]);
+  const itineraryRows = useMemo(() => report.rows.map((row) => ({ ...row, key: row.id })), [report.rows]);
 
   /* ─── Export ────────────────────────────────────────────────────────────── */
 
@@ -786,8 +791,8 @@ export const Analytics = () => {
         ]}
       />
 
-      {/* Checklist Table */}
-      <div className="admin-table-container">
+      {/* Checklist Table — overflow visible so its own dropdowns are not clipped */}
+      <div className="admin-table-container" style={{ overflow: 'visible', position: 'relative', zIndex: 10 }}>
         {/* Table toolbar */}
         <div className="table-header-actions" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <h2 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -797,6 +802,9 @@ export const Analytics = () => {
                 ({filtered.length} of {itineraries.length})
               </span>
             )}
+            <span style={{ fontSize: '0.7rem', fontWeight: 500, color: '#94a3b8', marginLeft: '0.5rem' }}>
+              checklist filters are independent of the report filters
+            </span>
           </h2>
           <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', flex: 1, justifyContent: 'flex-end' }}>
             {/* Search */}
@@ -809,6 +817,26 @@ export const Analytics = () => {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
+            {/* Checklist-only filters — independent of the report filters above */}
+            <SearchableSelect
+              className="pricing-select"
+              style={filterSelectStyle}
+              value={checklistTourTypeFilter}
+              onChange={(e) => setChecklistTourTypeFilter(e.target.value)}
+            >
+              <option value="">All tour types</option>
+              {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
+            </SearchableSelect>
+            <SearchableSelect
+              className="pricing-select"
+              style={filterSelectStyle}
+              value={checklistStatusFilter}
+              onChange={(e) => setChecklistStatusFilter(e.target.value)}
+            >
+              <option value="">All statuses</option>
+              {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              <option value="pending_confirmation">Pending Confirmation</option>
+            </SearchableSelect>
           </div>
         </div>
 
