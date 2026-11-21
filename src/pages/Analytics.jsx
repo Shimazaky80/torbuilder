@@ -31,7 +31,8 @@ import {
   CircleDollarSign,
   TrendingDown,
   FilterX,
-  FileText
+  FileText,
+  AlertTriangle
 } from 'lucide-react';
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
@@ -673,6 +674,28 @@ export const Analytics = () => {
           color="#f59e0b"
         />
       </div>
+
+      {/* An empty report is nearly always a filter, not missing data. Say so,
+          and keep the checklist visible and untouched below. */}
+      {!loading && itineraries.length > 0 && report.rows.length === 0 && (
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', padding: '1rem 1.25rem', marginBottom: '1.5rem', border: '1px solid #fde68a', borderRadius: '12px', background: '#fffbeb', color: '#92400e' }}>
+          <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '0.1rem' }} />
+          <div style={{ fontSize: '0.85rem', lineHeight: 1.5 }}>
+            <strong>No itineraries match the current report filters.</strong>
+            <div>The Travelers Checklist below is unaffected and still shows all {itineraries.length} itineraries.</div>
+            {financialBasis === 'booked' && (
+              <div>All visible files are currently quotations — change <strong>Trip scope</strong> to “All itineraries (quotations included)” to see their financials.</div>
+            )}
+            <button
+              type="button"
+              onClick={clearFilters}
+              style={{ marginTop: '0.5rem', padding: '0.35rem 0.7rem', border: '1px solid #fcd34d', borderRadius: '8px', background: '#fff', color: '#92400e', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}
+            >
+              Reset report filters
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Admin-only management reports */}
       {!isConsultant && (
