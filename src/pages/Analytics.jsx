@@ -851,79 +851,91 @@ export const Analytics = () => {
 
       {/* Checklist Table — overflow visible so its own dropdowns are not clipped */}
       <div className="admin-table-container" style={{ overflow: 'visible', position: 'relative', zIndex: 10 }}>
-        {/* Table toolbar */}
-        <div className="table-header-actions" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
-          <h2 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Users size={18} color="#0d7478" /> Travelers Checklist
-            {filtered.length !== itineraries.length && (
-              <span style={{ fontSize: '0.75rem', fontWeight: 500, color: '#64748b', marginLeft: '0.25rem' }}>
-                ({filtered.length} of {itineraries.length})
-              </span>
-            )}
-            <span style={{ fontSize: '0.7rem', fontWeight: 500, color: '#94a3b8', marginLeft: '0.5rem' }}>
+        {/* Table toolbar — title first, then a full-width filter row that wraps */}
+        <div className="table-header-actions" style={{ display: 'block', padding: '1.25rem 1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+            <h2 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Users size={18} color="#0d7478" /> Travelers Checklist
+            </h2>
+            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#64748b' }}>
+              ({filtered.length} of {itineraries.length})
+            </span>
+            <span style={{ fontSize: '0.7rem', fontWeight: 500, color: '#94a3b8' }}>
               independent filters · financials shown for quotations and bookings
             </span>
-          </h2>
-          <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', flex: 1, justifyContent: 'flex-end' }}>
-            {/* Search */}
-            <div className="search-box" style={{ flex: '1 1 240px', maxWidth: '340px' }}>
-              <Search size={15} />
-              <input
-                type="text"
-                placeholder="Search reference, client, tour, consultant…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
-            {/* Checklist-only filters — independent of the report filters above */}
-            <SearchableSelect
-              className="pricing-select"
-              style={{ ...filterSelectStyle, minWidth: '150px' }}
-              value={checklistConsultantFilter}
-              onChange={(e) => setChecklistConsultantFilter(e.target.value)}
-            >
-              <option value="">All consultants</option>
-              {consultantOptions.map((name) => <option key={name} value={name}>{name}</option>)}
-            </SearchableSelect>
-            <SearchableSelect
-              className="pricing-select"
-              style={{ ...filterSelectStyle, minWidth: '170px' }}
-              value={checklistClientFilter}
-              onChange={(e) => setChecklistClientFilter(e.target.value)}
-            >
-              <option value="">All clients</option>
-              {clientOptions.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
-            </SearchableSelect>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))', gap: '0.85rem', alignItems: 'end' }}>
+            <FilterField label="Search">
+              <div className="search-box" style={{ width: '100%' }}>
+                <Search size={15} />
+                <input
+                  type="text"
+                  placeholder="Reference, client, tour, consultant…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+            </FilterField>
+            <FilterField label="Consultant">
+              <SearchableSelect
+                className="pricing-select"
+                style={{ ...filterSelectStyle, width: '100%', minWidth: 0 }}
+                value={checklistConsultantFilter}
+                onChange={(e) => setChecklistConsultantFilter(e.target.value)}
+              >
+                <option value="">All consultants</option>
+                {consultantOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              </SearchableSelect>
+            </FilterField>
+            <FilterField label="Client">
+              <SearchableSelect
+                className="pricing-select"
+                style={{ ...filterSelectStyle, width: '100%', minWidth: 0 }}
+                value={checklistClientFilter}
+                onChange={(e) => setChecklistClientFilter(e.target.value)}
+              >
+                <option value="">All clients</option>
+                {clientOptions.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
+              </SearchableSelect>
+            </FilterField>
             <FilterField label="Travel from">
-              <input type="date" style={filterInputStyle} value={checklistDateFrom} onChange={(e) => setChecklistDateFrom(e.target.value)} />
+              <input type="date" style={{ ...filterInputStyle, width: '100%' }} value={checklistDateFrom} onChange={(e) => setChecklistDateFrom(e.target.value)} />
             </FilterField>
             <FilterField label="Travel to">
-              <input type="date" style={filterInputStyle} value={checklistDateTo} onChange={(e) => setChecklistDateTo(e.target.value)} />
+              <input type="date" style={{ ...filterInputStyle, width: '100%' }} value={checklistDateTo} onChange={(e) => setChecklistDateTo(e.target.value)} />
             </FilterField>
-            <SearchableSelect
-              className="pricing-select"
-              style={filterSelectStyle}
-              value={checklistTourTypeFilter}
-              onChange={(e) => setChecklistTourTypeFilter(e.target.value)}
-            >
-              <option value="">All tour types</option>
-              {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
-            </SearchableSelect>
-            <SearchableSelect
-              className="pricing-select"
-              style={filterSelectStyle}
-              value={checklistStatusFilter}
-              onChange={(e) => setChecklistStatusFilter(e.target.value)}
-            >
-              <option value="">All statuses</option>
-              {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              <option value="pending_confirmation">Pending Confirmation</option>
-            </SearchableSelect>
+            <FilterField label="Tour type">
+              <SearchableSelect
+                className="pricing-select"
+                style={{ ...filterSelectStyle, width: '100%', minWidth: 0 }}
+                value={checklistTourTypeFilter}
+                onChange={(e) => setChecklistTourTypeFilter(e.target.value)}
+              >
+                <option value="">All tour types</option>
+                {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
+              </SearchableSelect>
+            </FilterField>
+            <FilterField label="Status">
+              <SearchableSelect
+                className="pricing-select"
+                style={{ ...filterSelectStyle, width: '100%', minWidth: 0 }}
+                value={checklistStatusFilter}
+                onChange={(e) => setChecklistStatusFilter(e.target.value)}
+              >
+                <option value="">All statuses</option>
+                {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                <option value="pending_confirmation">Pending Confirmation</option>
+              </SearchableSelect>
+            </FilterField>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.85rem' }}>
             <button
               type="button"
               className="icon-btn outline"
               onClick={clearChecklistFilters}
-              style={{ padding: '0.5rem 0.7rem', display: 'flex', alignItems: 'center', gap: '0.3rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
+              style={{ padding: '0.5rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.3rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
             >
               <FilterX size={14} /> Clear
             </button>
