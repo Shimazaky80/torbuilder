@@ -10,7 +10,6 @@ import { useCurrencies } from '../hooks/useCurrencies';
 import { fmtMoney } from '../lib/invoiceDoc';
 import {
   buildAnalyticsReports,
-  financialsForItems,
   inReportRange,
   moneyOf,
   statusLabel,
@@ -140,7 +139,7 @@ const ReportPanel = ({ title, subtitle, columns, rows, empty = 'No records match
 
 /* ─── Excel Export ─────────────────────────────────────────────────────────── */
 
-const buildChecklistXls = (itineraries, defaultConsultant = '', financialText = () => '') => {
+const buildChecklistXls = (itineraries, defaultConsultant = '') => {
   const esc = htmlEscape;
   const cols = [
     'Reference #',
@@ -153,11 +152,7 @@ const buildChecklistXls = (itineraries, defaultConsultant = '', financialText = 
     'Arrival Date',
     'Departure Date',
     'Consultant',
-    'Status',
-    'Revenue',
-    'Cost',
-    'Net Profit',
-    'Loss'
+    'Status'
   ];
 
   const headerRow = `<tr>${cols.map((c) => `<th style="background:#0d7478;color:#fff;font-weight:700;padding:8px 12px;white-space:nowrap;border:1px solid #0a5c60;">${esc(c)}</th>`).join('')}</tr>`;
@@ -182,11 +177,7 @@ const buildChecklistXls = (itineraries, defaultConsultant = '', financialText = 
       toDisplay(it.travel_start_date),
       toDisplay(it.travel_end_date),
       it.consultant_name || defaultConsultant || '—',
-      STATUS_LABELS[it.status] || it.status || '—',
-      financialText(it, 'revenue'),
-      financialText(it, 'cost'),
-      financialText(it, 'profit'),
-      financialText(it, 'loss')
+      STATUS_LABELS[it.status] || it.status || '—'
     ];
 
     return `<tr>${cells.map((v) => `<td style="${cellStyle}">${esc(v)}</td>`).join('')}</tr>`;
@@ -501,10 +492,6 @@ export const Analytics = () => {
     });
   }, [itineraries, searchQuery, checklistStatusFilter, checklistTourTypeFilter, checklistConsultantFilter, checklistClientFilter, checklistDateFrom, checklistDateTo, currentUserName]);
 
-  /* The checklist shows money for every file, quotation or booking, regardless
-     of the report filters selected above it. */
-  const checklistFinancials = useMemo(() => financialsForItems(dayItems), [dayItems]);
-
   const statusColumns = report.statusColumns;
 
   const consultantRows = useMemo(() => report.byConsultant.map((group) => ({
@@ -536,11 +523,7 @@ export const Analytics = () => {
       showToast('No records to export', 'warning');
       return;
     }
-    const xls = buildChecklistXls(
-      filtered,
-      currentUserName,
-      (it, field) => moneyText(checklistFinancials.get(it.id) || {}, field)
-    );
+    const xls = buildChecklistXls(filtered, currentUserName);
     const date = new Date().toISOString().slice(0, 10);
     downloadBlob(xls, `travelers-checklist-${date}.xls`, 'application/vnd.ms-excel');
     showToast('Travelers checklist exported as Excel', 'success');
@@ -861,7 +844,7 @@ export const Analytics = () => {
               ({filtered.length} of {itineraries.length})
             </span>
             <span style={{ fontSize: '0.7rem', fontWeight: 500, color: '#94a3b8' }}>
-              independent filters · financials shown for quotations and bookings
+              independent filters
             </span>
           </div>
 
@@ -952,7 +935,7 @@ export const Analytics = () => {
 
         {/* Table */}
         <div style={{ overflowX: 'auto' }}>
-          <table className="admin-table" style={{ minWidth: '1500px' }}>
+          <table className="admin-table" style={{ minWidth: '1100px' }}>
             <thead>
               <tr>
                 <th>Reference #</th>
@@ -966,22 +949,18 @@ export const Analytics = () => {
                 <th>Departure Date</th>
                 <th>Consultant</th>
                 <th>Status</th>
-                <th>Revenue</th>
-                <th>Cost</th>
-                <th>Net Profit</th>
-                <th>Loss</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="15" style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>
+                  <td colSpan="11" style={{ padding: '3rem', textAlign: 'center', color: '#94a3b8' }}>
                     Loading checklist…
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan="15" style={{ padding: '3.5rem', textAlign: 'center', color: '#64748b' }}>
+                  <td colSpan="11" style={{ padding: '3.5rem', textAlign: 'center', color: '#64748b' }}>
                     <BarChart3 size={48} style={{ marginBottom: '1rem', opacity: 0.3, display: 'block', margin: '0 auto 1rem' }} />
                     <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#1e293b', marginBottom: '0.4rem' }}>
                       {itineraries.length === 0 ? 'No itineraries yet' : 'No results match your filters'}
@@ -996,7 +975,6 @@ export const Analytics = () => {
               ) : (
                 filtered.map((it) => {
                   const isCancelled = it.status === 'cancelled';
-                  const money = checklistFinancials.get(it.id) || {};
                   const trav = Array.isArray(it.travellers) ? it.travellers : [];
                   const ref = isCancelled
                     ? `XX ${it.reference_number || ''}`
@@ -1125,12 +1103,6 @@ export const Analytics = () => {
                           {STATUS_LABELS[it.status] || it.status || '—'}
                         </span>
                       </td>
-
-                      {/* Financials are shown for quotations and bookings alike */}
-                      <td>{moneyCell(money, 'revenue')}</td>
-                      <td>{moneyCell(money, 'cost')}</td>
-                      <td>{moneyCell(money, 'profit')}</td>
-                      <td>{moneyCell(money, 'loss')}</td>
                     </tr>
                   );
                 })
