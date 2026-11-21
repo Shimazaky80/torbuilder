@@ -19,8 +19,8 @@ export const REPORT_DATE_BASES = [
 ];
 
 export const REPORT_FINANCIAL_BASES = [
-  { id: 'booked', label: 'Booked trips only (confirmed, in progress, completed)' },
-  { id: 'all', label: 'All itineraries, including quotations' }
+  { id: 'all', label: 'All itineraries (quotations included)' },
+  { id: 'booked', label: 'Booked trips only (confirmed, in progress, completed)' }
 ];
 
 export const REPORT_LOSS_FILTERS = [
@@ -176,7 +176,9 @@ const monthOf = (itinerary, basis) => dayOf(basis === 'created' ? itinerary?.cre
    attached by the caller (the table stores the day id, not the itinerary id). */
 export const buildAnalyticsReports = ({ itineraries = [], items = [], filters = {} } = {}) => {
   const financials = financialsForItems(items);
-  const basis = filters.financialBasis || 'booked';
+  /* Quotations carry quoted sell and buy figures too. Hiding them by default
+     was why a company whose files are all still quotations saw no money at all. */
+  const basis = filters.financialBasis || 'all';
 
   const rows = (itineraries || []).map((itinerary) => {
     const byCurrency = financials.get(itinerary.id) || {};

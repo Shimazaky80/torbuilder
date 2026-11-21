@@ -103,7 +103,10 @@ check('profit filter keeps only trips with revenue and no loss', profitOnly.rows
 const revenueFloor = buildAnalyticsReports({ itineraries, items, filters: { ...filters, minRevenue: 1000 } });
 check('revenue floor keeps only the large trip', revenueFloor.rows.map((r) => r.reference), ['IT-1']);
 
-const booked = buildAnalyticsReports({ itineraries, items, filters: { from: '2027-01-01', to: '2027-01-31' } });
+const defaultBasis = buildAnalyticsReports({ itineraries, items, filters: { from: '2027-01-01', to: '2027-01-31' } });
+check('default basis includes quotations', defaultBasis.rows.map((r) => r.reference), ['IT-1', 'IT-3', 'IT-4']);
+
+const booked = buildAnalyticsReports({ itineraries, items, filters: { from: '2027-01-01', to: '2027-01-31', financialBasis: 'booked' } });
 check('booked basis hides quotations', booked.rows.map((r) => r.reference), ['IT-1', 'IT-4']);
 check('quotations still report under the booked basis', booked.quotationsByClient.map((g) => [g.key, g.itineraries]), [['Blue Tours', 1]]);
 
