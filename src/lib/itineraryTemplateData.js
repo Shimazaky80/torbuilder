@@ -1,13 +1,15 @@
-/* The explicit contract between an uploaded itinerary template and the data
-   TorBuilder puts into it. A template is not reverse-engineered from the built-in
-   document: the operator writes the placeholders listed here into a .docx file,
-   and the merge engine fills only those names.
+/* The contract between an uploaded itinerary template and the data TorBuilder
+   puts into it. A template keeps its own layout, wording, branding and policies.
+   Word templates may use the {{placeholders}} listed here or printed labels such
+   as "DATE OF TRAVEL:"; PDF templates are used as the printable base and the
+   same known labels are written onto the uploaded pages.
 
    The built-in document is never removed. `TORBUILDER_DEFAULT_TEMPLATE_ID` is a
    permanent export choice, so an operator who no longer wants a saved template
    can switch back without deleting it. */
 
 export const ITINERARY_DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+export const ITINERARY_PDF_MIME_TYPE = 'application/pdf';
 export const TORBUILDER_DEFAULT_TEMPLATE_ID = 'torbuilder-default';
 
 export const ITINERARY_DOCX_PLACEHOLDER_GROUPS = [
@@ -18,7 +20,9 @@ export const ITINERARY_DOCX_PLACEHOLDER_GROUPS = [
       '{{itinerary_name}}',
       '{{client_name}}',
       '{{client_address}}',
+      '{{operator_ref}}',
       '{{consultant_name}}',
+      '{{programme}}',
       '{{travel_dates}}',
       '{{status}}',
       '{{travellers_count}}',
@@ -86,7 +90,9 @@ export const buildItineraryTemplateData = (source = {}) => {
     itinerary_name: text('itinerary_name'),
     client_name: text('client_name'),
     client_address: text('client_address'),
+    operator_ref: text('operator_ref'),
     consultant_name: text('consultant_name'),
+    programme: text('programme'),
     travel_dates: text('travel_dates'),
     status: text('status'),
     travellers_count: text('travellers_count'),
@@ -119,26 +125,37 @@ export const buildItineraryTemplateData = (source = {}) => {
   };
 };
 
-/* A PDF or legacy .doc can still be kept as a reference document, but only a
-   .docx can be opened by the merge engine. */
+/* A legacy .doc can still be kept as a reference document, but only a real
+   .docx or PDF can be used by an export engine. */
 export const isItineraryDocxTemplate = (template) => {
   const fileName = [template?.file_name, template?.file_path].filter(Boolean).join(' ');
   return /\.docx$/i.test(fileName) || /wordprocessingml/i.test(asText(template?.mime_type));
 };
 
-/* A Word file saved under another document type is still a valid company
-   template, but it is not part of the itinerary export contract. Both checks
-   are deliberate: the Export dialog can then explain why a saved file is only
-   shown as a disabled reference instead of silently hiding it. */
-export const isMergeableItineraryTemplate = (template) => (
-  template?.document_type === 'itinerary' && isItineraryDocxTemplate(template)
-);
+export const isItineraryPdfTemplate = (template) => {
+  const fileName = [template?.file_name, template?.file_path].filter(Boolean).join(' ');
+  return /\.pdf$/i.test(fileName) || /(^|\/)pdf$/i.test(asText(template?.mime_type));
+};
+
+/* Which built-in export a saved template belongs to. A .docx fills Word exports
+   and a PDF becomes the printable base for PDF exports; Excel stays built-in. */
+export const itineraryTemplateExportFormat = (template) => {
+  if (template?.document_type !== 'itinerary') return '';
+  if (isItineraryDocxTemplate(template)) return 'word';
+  if (isItineraryPdfTemplate(template)) return 'pdf';
+  return '';
+};
+
+/* A template saved under another document type, or as a legacy .doc, is still
+   visible in Settings but cannot drive an itinerary export. Both checks are
+   deliberate: the Export dialog can explain why it is disabled. */
+export const isMergeableItineraryTemplate = (template) => !!itineraryTemplateExportFormat(template);
 
 export const itineraryTemplateChoiceStorageKey = (companyId) => `torbuilder:itinerary-export-template:${asText(companyId)}`;
 
 /* A stored choice wins while it still points at a live, mergeable template;
    otherwise the saved default is used, and the original document is the final
-   fallback. Only itinerary .docx files can take over the Word export. */
+   fallback. A PDF default is now a valid choice for PDF exports. */
 export const resolveItineraryTemplateChoice = ({ templates = [], storedChoice = '' } = {}) => {
   const saved = asText(storedChoice);
   if (saved === TORBUILDER_DEFAULT_TEMPLATE_ID) return TORBUILDER_DEFAULT_TEMPLATE_ID;

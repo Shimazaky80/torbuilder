@@ -2689,7 +2689,7 @@ const handleSavePriceProtection = async () => {
               <LayoutTemplate size={18} color="#0d7478" /> Document Templates
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-              Upload a branded source document for itineraries, vouchers, invoices and travel documents. Files stay inside your company&rsquo;s workspace, and one template per type can be marked as the default. For itinerary exports, choose Document type &ldquo;Itinerary&rdquo; and upload a .docx; PDF/DOC files are reference-only.
+              Upload a branded source document for itineraries, vouchers, invoices and travel documents. Files stay inside your company&rsquo;s workspace, and one template per type can be marked as the default. For itinerary exports, choose Document type &ldquo;Itinerary&rdquo;: a .docx fills Word exports and a PDF becomes the printable base for PDF exports. Legacy .doc files remain reference-only.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAddDocumentTemplate}>
@@ -3199,7 +3199,7 @@ const handleSavePriceProtection = async () => {
                     style={{ width: '100%', fontSize: '0.85rem' }}
                   />
                   <small style={{ display: 'block', marginTop: '0.3rem', color: '#94a3b8', fontSize: '0.75rem', lineHeight: 1.45 }}>
-                    PDF, DOC or DOCX, up to 30 MB. {templateForm.documentType === 'itinerary' ? 'Use .docx to merge into itinerary Word exports; PDF/DOC are reference-only.' : ''} {editingTemplateId ? 'Leave empty to keep the current file.' : 'The file is kept in your company workspace.'}
+                    PDF, DOC or DOCX, up to 30 MB. {templateForm.documentType === 'itinerary' ? 'Use .docx for itinerary Word exports or PDF for printable itinerary PDF exports; legacy .doc is reference-only.' : ''} {editingTemplateId ? 'Leave empty to keep the current file.' : 'The file is kept in your company workspace.'}
                   </small>
                   {templateError && (
                     <small style={{ display: 'block', marginTop: '0.3rem', color: '#b91c1c', fontSize: '0.75rem' }}>{templateError}</small>

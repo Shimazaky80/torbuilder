@@ -197,11 +197,14 @@ import { DOCUMENT_TEMPLATE_FIELDS, isDocumentTemplateTableMissing, normalizeDocu
 import {
   ITINERARY_DOCX_MIME_TYPE,
   ITINERARY_DOCX_PLACEHOLDER_GROUPS,
+  ITINERARY_PDF_MIME_TYPE,
   TORBUILDER_DEFAULT_TEMPLATE_ID,
   buildItineraryTemplateData,
   isItineraryDocxTemplate,
+  isItineraryPdfTemplate,
   isMergeableItineraryTemplate,
   itineraryTemplateChoiceStorageKey,
+  itineraryTemplateExportFormat,
   resolveItineraryTemplateChoice
 } from '../lib/itineraryTemplateData';
 /* The DOCX merge engine is imported only when a saved template is used. Keeping
@@ -211,10 +214,12 @@ import {
 /* --- Pure helpers ----------------------------------------------------------- */
 
 /* Uploaded templates live in the existing tenant-scoped contracts bucket. A
-   saved public URL is a fallback for older rows written without a storage path. */
+   saved public URL is a fallback for older rows written without a storage path.
+   Both .docx (Word) and PDF (printable base) templates are valid here. */
 const loadItineraryTemplateBlob = async (template) => {
-  if (!isItineraryDocxTemplate(template)) {
-    throw new Error('Only .docx templates can be merged. Use TorBuilder default or upload a .docx file.');
+  const format = itineraryTemplateExportFormat(template);
+  if (!format) {
+    throw new Error('Only itinerary .docx or PDF templates can be used. Legacy .doc files are reference-only.');
   }
   if (template?.file_path) {
     const { data, error } = await supabase.storage.from('contracts').download(template.file_path);
@@ -231,12 +236,13 @@ const loadItineraryTemplateBlob = async (template) => {
 };
 
 /* Every active company template is listed so an operator can see what was
-   uploaded. The label says why a saved file cannot be used for a Word export. */
+   uploaded. The label says why a saved file cannot drive an itinerary export. */
 const itineraryTemplateOptionLabel = (template) => {
   const name = template?.name || 'Untitled template';
-  if (isMergeableItineraryTemplate(template)) return `${name}${template.is_default ? ' (default)' : ''}`;
+  const format = itineraryTemplateExportFormat(template);
+  if (format) return `${name}${template.is_default ? ' (default)' : ''} - ${format === 'pdf' ? 'PDF' : 'Word'}`;
   if (template?.document_type !== 'itinerary') return `${name} - not an itinerary template`;
-  return `${name} - PDF/DOC reference only`;
+  return `${name} - legacy DOC reference only`;
 };
 
 
@@ -6604,7 +6610,9 @@ return !!sv.time; /* activities / meals / other */
         itinerary_name: meta.itineraryName || '',
         client_name: client.name || '',
         client_address: String(client.address || '').trim(),
+        operator_ref: meta.agencyRef || '',
         consultant_name: designerName === '—' ? '' : designerName,
+        programme: meta.tourType || '',
         travel_dates: timingOf(meta),
         status: statusWord(meta.status),
         travellers_count: paxWord,
@@ -6708,7 +6716,9 @@ return !!sv.time; /* activities / meals / other */
          corrupted or not a .docx, the operator still gets the original document
          rather than a failed export - and the Export dialog always offers the
          original as its own choice. */
-      if (selectedExportTemplate) {
+      if (selectedExportTemplate && !isItineraryDocxTemplate(selectedExportTemplate)) {
+        showToast('The selected template is a PDF; PDF templates apply to PDF exports. Using TorBuilder default for Word.', 'warning');
+      } else if (selectedExportTemplate) {
         try {
           const templateBlob = await loadItineraryTemplateBlob(selectedExportTemplate);
           const arrayBuffer = await templateBlob.arrayBuffer();
@@ -6776,6 +6786,28 @@ return !!sv.time; /* activities / meals / other */
     }
 
     if (format === 'pdf') {
+      /* A saved PDF is the printable base for this branch: the uploaded pages
+         are kept and known label values are written onto them. A Word template
+         stays with the Word export and the built-in PDF remains the fallback. */
+      if (selectedExportTemplate && !isItineraryPdfTemplate(selectedExportTemplate)) {
+        showToast('The selected template is a Word file; .docx templates apply to Word exports. Using TorBuilder default for PDF.', 'warning');
+      } else if (selectedExportTemplate) {
+        try {
+          const templateBlob = await loadItineraryTemplateBlob(selectedExportTemplate);
+          const arrayBuffer = await templateBlob.arrayBuffer();
+          const { renderItineraryPdfBytes, itineraryPdfBlob, itineraryPdfFileName } = await import('../lib/itineraryPdfMerge');
+          const pdfBytes = await renderItineraryPdfBytes({
+            arrayBuffer,
+            data: buildItineraryTemplatePayload()
+          });
+          downloadBlob(itineraryPdfBlob(pdfBytes), itineraryPdfFileName(ref), ITINERARY_PDF_MIME_TYPE);
+          showToast(`Itinerary exported with ${selectedExportTemplate.name}`, 'success');
+          return;
+        } catch (error) {
+          showToast(`${error.message || 'The saved PDF template could not be used.'} Using TorBuilder default.`, 'warning');
+        }
+      }
+
       const w = window.open('', '_blank', 'width=900,height=700');
       if (!w) {
         showToast('Please allow pop-ups to export the PDF', 'warning');
@@ -12284,9 +12316,14 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                     </select>
                     <small style={{ color: '#64748b', fontWeight: 400 }}>
                       {mergeableTemplates.length
-                        ? `${mergeableTemplates.length} itinerary .docx template${mergeableTemplates.length === 1 ? '' : 's'} ready to merge. Word exports only: PDF and Excel always use the TorBuilder document.`
-                        : 'No itinerary .docx template yet. In Settings, upload a .docx with Document type "Itinerary"; Word exports use the TorBuilder document until then.'}
+                        ? `${mergeableTemplates.length} itinerary template${mergeableTemplates.length === 1 ? '' : 's'} ready. A .docx fills Word exports; a PDF becomes the printable base for PDF exports. Excel always uses the built-in sheet.`
+                        : 'No itinerary template yet. In Settings, upload a .docx or PDF with Document type "Itinerary"; the TorBuilder document is used until then.'}
                     </small>
+                    {selectedExportTemplate && (
+                      <small style={{ color: '#0d7478', fontWeight: 500 }}>
+                        Selected: {itineraryTemplateExportFormat(selectedExportTemplate) === 'pdf' ? 'PDF' : 'Word'} template. It applies to that export format; the other format uses the TorBuilder document.
+                      </small>
+                    )}
                     <button
                       type="button"
                       className="secondary-btn"

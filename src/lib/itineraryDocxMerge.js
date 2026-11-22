@@ -1,11 +1,13 @@
 /* DOCX merge engine. The uploaded file is opened as a WordprocessingML package,
-   the explicit placeholders are rendered from the itinerary map, and the result
-   is handed back as real .docx bytes. Nothing here touches the built-in document
-   generator: that stays available as the export fallback. */
+   printed labels such as "DATE OF TRAVEL:" are filled in place, the explicit
+   {{placeholders}} are rendered from the itinerary map, and the result is handed
+   back as real .docx bytes. Nothing here touches the built-in document generator:
+   that stays available as the export fallback. */
 
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { ITINERARY_DOCX_MIME_TYPE } from './itineraryTemplateData';
+import { replaceKnownItineraryFieldsInDocxZip } from './itineraryDocxFields';
 
 export const ITINERARY_DOCX_MIME = ITINERARY_DOCX_MIME_TYPE;
 
@@ -24,6 +26,11 @@ export const renderItineraryDocxBytes = ({ arrayBuffer, data = {} } = {}) => {
   } catch {
     throw new Error('The saved template is not a valid Word document.');
   }
+
+  /* Printed labels are filled before docxtemplater runs, so a document with no
+     {{...}} placeholders still receives current values while every other word,
+     table and policy stays exactly as uploaded. */
+  replaceKnownItineraryFieldsInDocxZip(zip, data);
 
   let doc;
   try {
