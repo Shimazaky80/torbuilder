@@ -254,7 +254,52 @@ const ReportFilters = ({
 
 /* ─── Excel Export ─────────────────────────────────────────────────────────── */
 
-const buildChecklistXls = (itineraries, defaultConsultant = '') => {
+const xlsSummaryHtml = (lines = []) => (lines.length
+  ? `<p style="color:#64748b;font-size:11px;font-family:Calibri,Arial,sans-serif;line-height:1.5;">${lines.map((line) => htmlEscape(line)).join('<br>')}</p>`
+  : '');
+
+const xlsFilename = (label) => String(label || 'analytics')
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-')
+  .replace(/^-+|-+$/g, '') || 'analytics';
+
+/* The report tabs render several panels. Exporting one flat list would no longer
+   match what is on screen, so every visible panel becomes its own section with
+   the same headings and the same plain-text values. */
+const buildAnalyticsXls = ({ title, sections = [], filterSummary = [] }) => {
+  const esc = htmlEscape;
+  const sectionHtml = sections.map((section) => {
+    const columns = section.columns || [];
+    const header = `<tr>${columns.map((column) => `<th style="background:#0d7478;color:#fff;font-weight:700;padding:8px 12px;white-space:nowrap;border:1px solid #0a5c60;">${esc(column.label)}</th>`).join('')}</tr>`;
+    const body = section.rows?.length
+      ? section.rows.map((row) => `<tr>${columns.map((column) => {
+        const value = column.exportValue ? column.exportValue(row) : (row[column.key] ?? '—');
+        return `<td style="border:1px solid #e2e8f0;padding:7px 10px;">${esc(value)}</td>`;
+      }).join('')}</tr>`).join('')
+      : `<tr><td colspan="${Math.max(columns.length, 1)}" style="border:1px solid #e2e8f0;padding:12px;color:#64748b;text-align:center;">${esc(section.empty || 'No records match the selected filters.')}</td></tr>`;
+    return `
+      <h3 style="color:#1e293b;font-family:Calibri,Arial,sans-serif;margin:1.5rem 0 0.25rem;">${esc(section.title)}</h3>
+      ${section.subtitle ? `<p style="color:#94a3b8;font-size:11px;font-family:Calibri,Arial,sans-serif;margin:0 0 0.5rem;">${esc(section.subtitle)}</p>` : ''}
+      <table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><meta name="ProgId" content="Excel.Sheet">
+<style>
+  body { font-family: Calibri, Arial, sans-serif; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 1.25rem; }
+</style>
+</head>
+<body>
+<h2 style="color:#0d7478;font-family:Calibri,Arial,sans-serif;">${esc(title)}</h2>
+<p style="color:#64748b;font-size:11px;font-family:Calibri,Arial,sans-serif;">Generated: ${new Date().toLocaleDateString('en-GB')}</p>
+${xlsSummaryHtml(filterSummary)}
+${sectionHtml}
+</body></html>`;
+};
+
+const buildChecklistXls = (itineraries, defaultConsultant = '', filterSummary = []) => {
   const esc = htmlEscape;
   const cols = [
     'Reference #',
@@ -310,6 +355,7 @@ const buildChecklistXls = (itineraries, defaultConsultant = '') => {
 <body>
 <h3 style="color:#0d7478;font-family:Calibri,Arial,sans-serif;">Travelers Checklist</h3>
 <p style="color:#64748b;font-size:11px;font-family:Calibri,Arial,sans-serif;">Generated: ${new Date().toLocaleDateString('en-GB')} — ${itineraries.length} itineraries</p>
+${xlsSummaryHtml(filterSummary)}
 <table>
   <thead>${headerRow}</thead>
   <tbody>${rows}</tbody>
@@ -521,6 +567,14 @@ export const Analytics = () => {
     return rows.map((row) => `${row.code} ${formatAmount(row[field], row.code)}`).join('  ·  ');
   }, [formatAmount]);
 
+  /* Plain-text twin of marginCell: the grid needs styled per-currency blocks,
+     while the exported workbook needs one line per currency. */
+  const marginText = useCallback((byCurrency) => {
+    const rows = moneyOf(byCurrency);
+    if (!rows.length) return '—';
+    return rows.map((row) => `${row.code} ${row.margin == null ? '—' : `${row.margin}%`}`).join('  ·  ');
+  }, []);
+
   const marginCell = useCallback((byCurrency) => {
     const rows = moneyOf(byCurrency);
     if (!rows.length) return <span style={{ color: '#cbd5e1' }}>—</span>;
@@ -646,17 +700,217 @@ export const Analytics = () => {
 
   const itineraryRows = useMemo(() => report.rows.map((row) => ({ ...row, key: row.id })), [report.rows]);
 
+  const activeTabLabel = ANALYTICS_TABS.find((tab) => tab.id === activeTab)?.label || 'Analytics';
+
+  /* The panels are described once and used twice: the grid renders them and the
+     top-right export writes those same sections out. A report can therefore
+     never export a different figure from the one on screen. */
+  const reportPanels = {
+    overview: [
+      {
+        title: 'Overview summary',
+        columns: [
+          { key: 'metric', label: 'Metric' },
+          { key: 'value', label: 'Value' }
+        ],
+        rows: [
+          { metric: 'Total travelers', value: stats.travellers.toLocaleString() },
+          { metric: 'Total itineraries', value: stats.total.toLocaleString() },
+          { metric: 'Revenue', value: stats.revenue },
+          { metric: 'Loss', value: stats.loss },
+          { metric: 'Quotations', value: stats.quotations.toLocaleString() }
+        ]
+      },
+      {
+        title: 'Monthly trend',
+        subtitle: activeFilters.dateBasis === 'created' ? 'Grouped by itinerary creation month' : 'Grouped by travel start month',
+        rows: report.monthly,
+        columns: [
+          { key: 'month', label: 'Month', render: (row) => <strong>{row.key}</strong>, exportValue: (row) => row.key },
+          { key: 'itineraries', label: 'Trips', align: 'center' },
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss'), exportValue: (row) => moneyText(row.byCurrency, 'loss') }
+        ]
+      },
+      {
+        title: 'Status mix',
+        subtitle: 'Where the current bookings sit in the pipeline',
+        rows: statusRows,
+        columns: [
+          { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{row.label}</span>, exportValue: (row) => row.label },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'share', label: 'Share', align: 'center', render: (row) => `${row.share}%`, exportValue: (row) => `${row.share}%` }
+        ]
+      },
+      {
+        title: 'Tour type mix',
+        rows: report.byTourType,
+        columns: [
+          { key: 'tourType', label: 'Tour type', render: (row) => <strong>{row.key}</strong>, exportValue: (row) => row.key },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss'), exportValue: (row) => moneyText(row.byCurrency, 'loss') }
+        ]
+      }
+    ],
+    consultants: [{
+      title: 'Revenue & loss by consultant',
+      subtitle: 'Itineraries, revenue and loss follow every filter above',
+      rows: consultantRows,
+      columns: [
+        { key: 'consultant', label: 'Consultant', render: (row) => <strong>{row.key}</strong>, exportValue: (row) => row.key },
+        { key: 'itineraries', label: 'Trips', align: 'center' },
+        { key: 'travellers', label: 'Travellers', align: 'center' },
+        ...statusColumns.map((status) => ({
+          key: `status_${status}`,
+          label: statusLabel(status),
+          align: 'center',
+          render: (row) => row.statuses[status] || 0,
+          exportValue: (row) => row.statuses[status] || 0
+        })),
+        { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+        { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+        { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+        { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss'), exportValue: (row) => moneyText(row.byCurrency, 'loss') },
+        { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) }
+      ]
+    }],
+    clients: [
+      {
+        title: 'Itineraries per client and status',
+        subtitle: 'Every client with its status breakdown',
+        rows: clientRows,
+        columns: [
+          { key: 'client', label: 'Client', render: (row) => <strong>{row.key}</strong>, exportValue: (row) => row.key },
+          { key: 'itineraries', label: 'Total trips', align: 'center' },
+          ...statusColumns.map((status) => ({
+            key: `status_${status}`,
+            label: statusLabel(status),
+            align: 'center',
+            render: (row) => row.statuses?.[status] || 0,
+            exportValue: (row) => row.statuses?.[status] || 0
+          })),
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') }
+        ]
+      },
+      {
+        title: 'Revenue & quotations per client',
+        subtitle: 'Quotations are counted even when the trip scope is set to booked only',
+        rows: clientRows,
+        columns: [
+          { key: 'client', label: 'Client', render: (row) => <strong>{row.key}</strong>, exportValue: (row) => row.key },
+          { key: 'itineraries', label: 'Booked trips', align: 'center' },
+          { key: 'quotations', label: 'Quotations', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss'), exportValue: (row) => moneyText(row.byCurrency, 'loss') },
+          { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) }
+        ]
+      }
+    ],
+    financials: [
+      {
+        title: 'Loss-making itineraries',
+        subtitle: 'Trips sold below their buy cost — a profitable month can hide these',
+        rows: report.lossMaking,
+        empty: 'No loss-making itineraries in this period.',
+        columns: [
+          { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span>, exportValue: (row) => row.reference },
+          { key: 'client', label: 'Client' },
+          ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
+          { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}`, exportValue: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue'), exportValue: (row) => moneyText(row.financials, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost'), exportValue: (row) => moneyText(row.financials, 'cost') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss'), exportValue: (row) => moneyText(row.financials, 'loss') }
+        ]
+      },
+      {
+        title: isConsultant ? 'Your itineraries — financials' : 'Itinerary financials',
+        subtitle: 'Per-itinerary figures behind the totals',
+        rows: itineraryRows,
+        columns: [
+          { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span>, exportValue: (row) => row.reference },
+          { key: 'client', label: 'Client' },
+          { key: 'name', label: 'Tour name' },
+          { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}`, exportValue: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
+          ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
+          { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{statusLabel(row.status)}</span>, exportValue: (row) => statusLabel(row.status) },
+          { key: 'travellers', label: 'Travellers', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue'), exportValue: (row) => moneyText(row.financials, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost'), exportValue: (row) => moneyText(row.financials, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.financials, 'profit'), exportValue: (row) => moneyText(row.financials, 'profit') },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss'), exportValue: (row) => moneyText(row.financials, 'loss') }
+        ]
+      }
+    ]
+  };
+
+  /* Export the same slice the person is looking at, including the filter values
+     that produced it. The checklist uses its own independent controls. */
+  const reportFilterSummary = [
+    `Section: ${activeTabLabel}`,
+    `Date basis: ${REPORT_DATE_BASES.find((option) => option.id === activeFilters.dateBasis)?.label || 'Travel dates'}`,
+    activeFilters.from && `From: ${toDisplay(activeFilters.from)}`,
+    activeFilters.to && `To: ${toDisplay(activeFilters.to)}`,
+    !isConsultant && activeFilters.consultant && `Consultant: ${activeFilters.consultant}`,
+    activeFilters.clientId && `Client: ${clientOptions.find((client) => client.id === activeFilters.clientId)?.name || activeFilters.clientId}`,
+    activeFilters.status && `Status: ${statusLabel(activeFilters.status)}`,
+    activeFilters.tourType && `Tour type: ${activeFilters.tourType}`,
+    `Trip scope: ${REPORT_FINANCIAL_BASES.find((option) => option.id === activeFilters.financialBasis)?.label || 'All itineraries'}`,
+    activeFilters.lossFilter !== 'all' && `Profit/loss: ${REPORT_LOSS_FILTERS.find((option) => option.id === activeFilters.lossFilter)?.label || activeFilters.lossFilter}`,
+    activeFilters.minRevenue && `Minimum revenue: ${activeFilters.minRevenue}`
+  ].filter(Boolean);
+
+  const checklistFilterSummary = [
+    'Section: Checklist',
+    searchQuery.trim() && `Search: ${searchQuery.trim()}`,
+    checklistConsultantFilter && `Consultant: ${checklistConsultantFilter}`,
+    checklistClientFilter && `Client: ${clientOptions.find((client) => client.id === checklistClientFilter)?.name || checklistClientFilter}`,
+    checklistDateFrom && `Travel from: ${toDisplay(checklistDateFrom)}`,
+    checklistDateTo && `Travel to: ${toDisplay(checklistDateTo)}`,
+    checklistTourTypeFilter && `Tour type: ${checklistTourTypeFilter}`,
+    checklistStatusFilter && `Status: ${statusLabel(checklistStatusFilter)}`
+  ].filter(Boolean);
+
   /* ─── Export ────────────────────────────────────────────────────────────── */
 
   const handleExport = () => {
-    if (!filtered.length) {
+    const date = new Date().toISOString().slice(0, 10);
+
+    if (activeTab === 'checklist') {
+      if (!filtered.length) {
+        showToast('No records to export', 'warning');
+        return;
+      }
+      downloadBlob(
+        buildChecklistXls(filtered, currentUserName, checklistFilterSummary),
+        `travelers-checklist-${date}.xls`,
+        'application/vnd.ms-excel'
+      );
+      showToast('Travelers checklist exported as Excel', 'success');
+      return;
+    }
+
+    const sections = reportPanels[activeTab] || [];
+    if (!sections.some((section) => section.rows?.length)) {
       showToast('No records to export', 'warning');
       return;
     }
-    const xls = buildChecklistXls(filtered, currentUserName);
-    const date = new Date().toISOString().slice(0, 10);
-    downloadBlob(xls, `travelers-checklist-${date}.xls`, 'application/vnd.ms-excel');
-    showToast('Travelers checklist exported as Excel', 'success');
+    downloadBlob(
+      buildAnalyticsXls({
+        title: `${activeTabLabel} — Analytics`,
+        sections,
+        filterSummary: reportFilterSummary
+      }),
+      `${xlsFilename(activeTabLabel)}-analytics-${date}.xls`,
+      'application/vnd.ms-excel'
+    );
+    showToast(`${activeTabLabel} report exported as Excel`, 'success');
   };
 
   /* The same control card is mounted for whichever report section is active,
@@ -720,8 +974,9 @@ export const Analytics = () => {
             className="primary-btn"
             style={{ width: 'auto', padding: '0.6rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
             onClick={handleExport}
+            title={`Export ${activeTabLabel} data`}
           >
-            <FileSpreadsheet size={17} /> Export checklist
+            <FileSpreadsheet size={17} /> Export {activeTabLabel}
           </button>
         </div>
       </header>
@@ -778,150 +1033,11 @@ export const Analytics = () => {
         </div>
       )}
 
-      {/* Admin-only management reports, split across their own sections */}
-      {activeTab === 'consultants' && (
-        <ReportPanel
-          title="Revenue & loss by consultant"
-          subtitle="Itineraries, revenue and loss follow every filter above"
-          rows={consultantRows}
-          columns={[
-            { key: 'consultant', label: 'Consultant', render: (row) => <strong>{row.key}</strong> },
-            { key: 'itineraries', label: 'Trips', align: 'center' },
-            { key: 'travellers', label: 'Travellers', align: 'center' },
-            ...statusColumns.map((status) => ({
-              key: `status_${status}`,
-              label: statusLabel(status),
-              align: 'center',
-              render: (row) => row.statuses[status] || 0
-            })),
-            { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-            { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost') },
-            { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
-            { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') },
-            { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency) }
-          ]}
-        />
-      )}
-
-      {activeTab === 'clients' && (
-        <>
-          <ReportPanel
-            title="Itineraries per client and status"
-            subtitle="Every client with its status breakdown"
-            rows={clientRows}
-            columns={[
-              { key: 'client', label: 'Client', render: (row) => <strong>{row.key}</strong> },
-              { key: 'itineraries', label: 'Total trips', align: 'center' },
-              ...statusColumns.map((status) => ({
-                key: `status_${status}`,
-                label: statusLabel(status),
-                align: 'center',
-                render: (row) => row.statuses?.[status] || 0
-              })),
-              { key: 'travellers', label: 'Travellers', align: 'center' },
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') }
-            ]}
-          />
-
-          <ReportPanel
-            title="Revenue & quotations per client"
-            subtitle="Quotations are counted even when the trip scope is set to booked only"
-            rows={clientRows}
-            columns={[
-              { key: 'client', label: 'Client', render: (row) => <strong>{row.key}</strong> },
-              { key: 'itineraries', label: 'Booked trips', align: 'center' },
-              { key: 'quotations', label: 'Quotations', align: 'center' },
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost') },
-              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
-              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') },
-              { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency) }
-            ]}
-          />
-        </>
-      )}
-
-      {/* Overview reports — useful to both management and consultants */}
-      {activeTab === 'overview' && (
-        <>
-          <ReportPanel
-            title="Monthly trend"
-            subtitle={activeFilters.dateBasis === 'created' ? 'Grouped by itinerary creation month' : 'Grouped by travel start month'}
-            rows={report.monthly}
-            columns={[
-              { key: 'month', label: 'Month', render: (row) => <strong>{row.key}</strong> },
-              { key: 'itineraries', label: 'Trips', align: 'center' },
-              { key: 'travellers', label: 'Travellers', align: 'center' },
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
-              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
-            ]}
-          />
-
-          <ReportPanel
-            title="Status mix"
-            subtitle="Where the current bookings sit in the pipeline"
-            rows={statusRows}
-            columns={[
-              { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{row.label}</span> },
-              { key: 'itineraries', label: 'Itineraries', align: 'center' },
-              { key: 'share', label: 'Share', align: 'center', render: (row) => `${row.share}%` }
-            ]}
-          />
-
-          <ReportPanel
-            title="Tour type mix"
-            rows={report.byTourType}
-            columns={[
-              { key: 'tourType', label: 'Tour type', render: (row) => <strong>{row.key}</strong> },
-              { key: 'itineraries', label: 'Itineraries', align: 'center' },
-              { key: 'travellers', label: 'Travellers', align: 'center' },
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
-            ]}
-          />
-        </>
-      )}
-
-      {/* Per-itinerary financial reports */}
-      {activeTab === 'financials' && (
-        <>
-          <ReportPanel
-            title="Loss-making itineraries"
-            subtitle="Trips sold below their buy cost — a profitable month can hide these"
-            rows={report.lossMaking}
-            empty="No loss-making itineraries in this period."
-            columns={[
-              { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
-              { key: 'client', label: 'Client' },
-              ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
-              { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
-              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
-              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
-            ]}
-          />
-
-          <ReportPanel
-            title={isConsultant ? 'Your itineraries — financials' : 'Itinerary financials'}
-            subtitle="Per-itinerary figures behind the totals"
-            rows={itineraryRows}
-            columns={[
-              { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
-              { key: 'client', label: 'Client' },
-              { key: 'name', label: 'Tour name' },
-              { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
-              ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
-              { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{statusLabel(row.status)}</span> },
-              { key: 'travellers', label: 'Travellers', align: 'center' },
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
-              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
-              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.financials, 'profit') },
-              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
-            ]}
-          />
-        </>
-      )}
+      {/* One render path for every report panel, driven by the descriptors the
+          export also uses, so the workbook always matches the visible grid. */}
+      {isReportTab && (reportPanels[activeTab] || []).map((panel) => (
+        <ReportPanel key={panel.title} {...panel} />
+      ))}
 
       {/* Checklist Table — overflow visible so its own dropdowns are not clipped */}
       {activeTab === 'checklist' && (
@@ -1013,14 +1129,6 @@ export const Analytics = () => {
               style={{ padding: '0.5rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.3rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
             >
               <FilterX size={14} /> Clear
-            </button>
-            <button
-              type="button"
-              className="primary-btn"
-              onClick={handleExport}
-              style={{ width: 'auto', padding: '0.55rem 0.9rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.85rem' }}
-            >
-              <FileSpreadsheet size={15} /> Export Excel
             </button>
           </div>
         </div>
