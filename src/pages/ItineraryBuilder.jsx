@@ -203,7 +203,9 @@ import {
   itineraryTemplateChoiceStorageKey,
   resolveItineraryTemplateChoice
 } from '../lib/itineraryTemplateData';
-import { itineraryDocxBlob, itineraryDocxFileName, renderItineraryDocxBytes } from '../lib/itineraryDocxMerge';
+/* The DOCX merge engine is imported only when a saved template is used. Keeping
+   its zip/Word libraries out of the page's static import graph prevents a dev
+   dependency re-optimise from blocking the whole Itineraries screen. */
 
 /* --- Pure helpers ----------------------------------------------------------- */
 
@@ -6702,6 +6704,7 @@ return !!sv.time; /* activities / meals / other */
         try {
           const templateBlob = await loadItineraryTemplateBlob(selectedExportTemplate);
           const arrayBuffer = await templateBlob.arrayBuffer();
+          const { itineraryDocxBlob, itineraryDocxFileName, renderItineraryDocxBytes } = await import('../lib/itineraryDocxMerge');
           const docxBytes = renderItineraryDocxBytes({
             arrayBuffer,
             data: buildItineraryTemplatePayload()

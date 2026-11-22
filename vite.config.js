@@ -8,4 +8,8 @@ export default defineConfig({
   // esbuild's default classic runtime made every component in them need a React
   // import none of them have.
   esbuild: { jsx: 'automatic' },
+  // These are only pulled in by the itinerary Word export. Optimising them when
+  // the dev server starts avoids a mid-session dependency re-bundle that leaves
+  // the open page holding stale optimized-module hashes.
+  optimizeDeps: { include: ['pizzip', 'docxtemplater'] },
 })
