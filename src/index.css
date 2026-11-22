@@ -3835,8 +3835,14 @@ aside.sidebar:not(.collapsed) .logo-full {
 .ps-summary-panel h2 { display: flex; align-items: center; gap: .5rem; }
 .ps-summary-grid .ps-sum-season-line { font-size: 15px; font-weight: 700; color: #78350f; }
 .ps-summary-grid .ps-sum-season-num { color: #b45309; font-weight: 600; font-size: 12px; }
-.ps-summary-grid td.ps-sum-travellers { background: #f0fdfa; text-align: center; }
-.ps-summary-grid .ps-sum-travellers .ps-band { justify-content: center; }
+.ps-summary-grid td.ps-sum-travellers { background: #f0fdfa; }
+.ps-summary-grid td.ps-sum-travellers,
+.ps-summary-grid td.ps-sum-sharing-price { text-align: left; }
+.ps-summary-grid td.ps-sum-travellers .ps-band,
+.ps-summary-grid td.ps-sum-sharing-price .ps-band { text-align: left; justify-content: flex-start; }
+.ps-summary-grid td.ps-sum-travellers .ps-band-pax,
+.ps-summary-grid td.ps-sum-sharing-price .ps-band-pax { justify-content: flex-start; }
+.ps-summary-grid td.ps-sum-sharing-price .ps-price { text-align: left; }
 .ps-summary-grid .ps-sum-pax { font-size: 15px; font-weight: 700; color: #0f766e; font-variant-numeric: tabular-nums; }
 .ps-summary-grid .ps-formula { color: #94a3b8; }
 .ps-sum-toggle { display: inline-flex; align-items: center; gap: .35rem; margin-top: 10px; border: 1px solid #cbd5e1; background: #fff; color: #0f766e; border-radius: 8px; padding: .45rem .8rem; font-size: .78rem; font-weight: 600; cursor: pointer; }

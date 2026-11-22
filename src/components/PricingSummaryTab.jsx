@@ -109,19 +109,19 @@ export const PricingSummaryTab = ({
             </tr>
             <tr>
               <td className="ps-grid-label">Travellers</td>
-              {visibleCodes.map((code, index) => <td key={`sum-band-${code}-${index}`} className="ps-sum-travellers" style={{ textAlign: 'right' }}>
-                <div className="ps-bands" style={{ justifyContent: 'flex-end' }}>{(bands[code] || []).map((pax, bandIndex) => <div className="ps-band" key={`sum-band-${code}-${bandIndex}`} style={{ textAlign: 'right', justifyContent: 'flex-end' }}>
-                  <div className="ps-band-pax" style={{ justifyContent: 'flex-end' }}><span className="ps-sum-pax">{pax}</span><span className="ps-band-unit">pax</span></div>
+              {visibleCodes.map((code, index) => <td key={`sum-band-${code}-${index}`} className="ps-sum-travellers">
+                <div className="ps-bands">{(bands[code] || []).map((pax, bandIndex) => <div className="ps-band" key={`sum-band-${code}-${bandIndex}`}>
+                  <div className="ps-band-pax"><span className="ps-sum-pax">{pax}</span><span className="ps-band-unit">pax</span></div>
                 </div>)}</div>
               </td>)}
             </tr>
             <tr>
               <td className="ps-grid-label">Price per person sharing</td>
-              {visibleCodes.map((code, index) => <td key={`sum-price-${code}-${index}`} style={{ textAlign: 'right' }}>
-                <div className="ps-bands" style={{ justifyContent: 'flex-end' }}>{(bands[code] || []).map((pax, bandIndex) => {
+              {visibleCodes.map((code, index) => <td key={`sum-price-${code}-${index}`} className="ps-sum-sharing-price">
+                <div className="ps-bands">{(bands[code] || []).map((pax, bandIndex) => {
                   const each = columnsFor(code)[bandIndex]?.each ?? 0;
-                  return <div className="ps-band" key={`sum-price-${code}-${bandIndex}`} style={{ textAlign: 'right', justifyContent: 'flex-end' }}>
-                    <div className="ps-price" style={{ textAlign: 'right' }}>{money(each, currency)}</div>
+                  return <div className="ps-band" key={`sum-price-${code}-${bandIndex}`}>
+                    <div className="ps-price">{money(each, currency)}</div>
                   </div>;
                 })}</div>
               </td>)}
