@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Lock, ArrowLeft, KeyRound } from 'lucide-react';
 import fullLogo from '../assets/full_logo.png';
@@ -12,6 +12,11 @@ export const ResetPassword = () => {
   const [ready, setReady] = useState(false);
   const { showToast } = useToast();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  /* A reset link can come from either login page. Keep the return trip inside
+     this app: an absolute or protocol-relative next value is ignored. */
+  const requestedNext = searchParams.get('next') || '/login';
+  const nextPath = requestedNext.startsWith('/') && !requestedNext.startsWith('//') ? requestedNext : '/login';
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -35,7 +40,7 @@ export const ResetPassword = () => {
       if (error) throw error;
       await supabase.auth.signOut();
       showToast('You can now log in with your new password.', 'success', 'Password updated.');
-      navigate('/login');
+      navigate(nextPath, { replace: true });
     } catch (err) {
       showToast(err.message, 'error');
     } finally {

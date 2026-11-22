@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   CalendarRange,
@@ -30,6 +30,13 @@ import {
   templateDuration,
   toISODate
 } from '../lib/seriesDepartures';
+import { TOUR_TYPES, VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { contractTypeForTourType, normalizeRateType } from '../lib/rateTypes';
+import { deriveSeriesPricesFromPackage } from '../lib/packageSeriesPricing';
+import { columnExists } from '../lib/schemaColumnProbe';
+import { LIBRARY_ITEM_PACKAGE_FIELDS, LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK } from '../lib/libraryItemFields';
+import { fetchRoomTypesForItems } from '../lib/roomTypeTable';
+import { fetchCarRentalRates } from '../lib/carRentalRates';
 
 /* A series is a fixed tour running on published dates, sold one seat at a time
    out of an allocation held from the supplier. It is deliberately not the quote
@@ -55,6 +62,46 @@ const dateLabel = (iso) => {
 const dayShort = (iso) => WEEKDAYS.find((day) => day.value === isoWeekday(iso))?.short || '';
 
 const money = (amount, currency) => `${currency || 'ZAR'} ${(Number(amount) || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/* The new columns win when present; a row written before the migration falls
+   back to the single seat price, which was the sharing figure. Zero is kept as
+   a visible 0 so a missing package figure is never a blank the desk can miss. */
+const priceField = (value, fallback) => {
+  const figure = Number(value);
+  if (value !== null && value !== undefined && Number.isFinite(figure)) return String(Math.max(0, figure));
+  const old = Number(fallback);
+  return Number.isFinite(old) ? String(Math.max(0, old)) : '';
+};
+
+const priceFieldsOf = (row = {}) => ({
+  sharingPrice: priceField(row.sharing_price, row.price_per_seat),
+  singleSupplementPrice: priceField(row.single_supplement_price, 0),
+  childPrice: priceField(row.child_price, 0)
+});
+
+/* One compact cell for all three figures. Zero across the board still reads as
+   "No price set" rather than three misleading zero prices. */
+const PriceGroup = ({ row, currency }) => {
+  const values = [
+    ['Sharing', Number(row.sharing_price ?? row.price_per_seat) || 0],
+    ['Single supplement', Number(row.single_supplement_price) || 0],
+    ['Child', Number(row.child_price) || 0]
+  ];
+  if (!values.some(([, value]) => value > 0)) return <span style={{ color: '#b45309' }}>No price set</span>;
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+    {values.map(([label, value]) => <div key={label} style={{ fontSize: '0.78rem', color: '#475569' }}>
+      {label}: <strong style={{ color: value > 0 ? '#1e293b' : '#94a3b8' }}>{money(value, currency)}</strong>
+    </div>)}
+  </div>;
+};
+
+/* The pricing engine needs the same library projection the package builder uses.
+   A workspace without the newest optional columns falls back to the long-standing
+   fields rather than losing the whole series page. */
+const selectLibraryItems = async (buildQuery) => {
+  const withAllFields = await buildQuery(LIBRARY_ITEM_PACKAGE_FIELDS);
+  return withAllFields.error ? buildQuery(LIBRARY_ITEM_PACKAGE_FIELDS_FALLBACK) : withAllFields;
+};
 
 const operatesLabel = (days) => {
   const chosen = WEEKDAYS.filter((day) => (Array.isArray(days) ? days : []).map(Number).includes(day.value));
@@ -125,7 +172,9 @@ const emptyForm = {
   guaranteeMin: '0',
   seats: '',
   releaseDays: '30',
-  price: '',
+  sharingPrice: '',
+  singleSupplementPrice: '',
+  childPrice: '',
   currency: 'ZAR',
   status: 'draft',
   notes: ''
@@ -143,7 +192,7 @@ const formOf = (template) => ({
   guaranteeMin: String(template.guarantee_min ?? 0),
   seats: Number(template.seats_per_departure) > 0 ? String(template.seats_per_departure) : '',
   releaseDays: String(template.release_days ?? 30),
-  price: Number(template.price_per_seat) > 0 ? String(Number(template.price_per_seat)) : '',
+  ...priceFieldsOf(template),
   currency: String(template.currency_code || 'ZAR').toUpperCase(),
   status: template.status || 'draft',
   notes: template.notes || ''
@@ -168,6 +217,11 @@ export const SeriesDepartures = () => {
   const [seriesChart, setSeriesChart] = useState([]);
   const [seriesChartMissing, setSeriesChartMissing] = useState(false);
   const [packages, setPackages] = useState([]);
+  const [tourTypes, setTourTypes] = useState([]);
+  const [vehicleTypes, setVehicleTypes] = useState([]);
+  const [seriesPricesReady, setSeriesPricesReady] = useState(false);
+  const [derivedPrices, setDerivedPrices] = useState(null);
+  const [priceLoading, setPriceLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [schemaMissing, setSchemaMissing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -189,31 +243,176 @@ export const SeriesDepartures = () => {
      move under the operator for no reason. */
   const [today] = useState(() => toISODate(Date.now()));
 
+  /* A series may only run a package the company has declared a tour (as opposed
+     to a transfer or another non-tour product). Older workspaces have no
+     tour_type column, so their long-standing rate_type still decides. */
+  const seriesPackages = useMemo(() => packages.filter((pkg) => (
+    contractTypeForTourType(tourTypes, pkg.tour_type) === 'series'
+    || (!pkg.tour_type && normalizeRateType(pkg.rate_type) === 'series')
+  )), [packages, tourTypes]);
+
+  const priceRequestRef = useRef(0);
+
+  /* Read the package's own season, pax band and contract rates and hand them to
+     the shared derivation helper. The three answers are suggestions, never
+     written back to the package; saving a template snapshots them. */
+  const deriveForPackage = useCallback(async (packageId, apply = false) => {
+    if (!packageId || !seriesPricesReady) {
+      setDerivedPrices(null);
+      setPriceLoading(false);
+      return;
+    }
+    const requestId = ++priceRequestRef.current;
+    setPriceLoading(true);
+    try {
+      const [pkgRes, daysRes, periodsRes, bandsRes] = await Promise.all([
+        supabase.from('packages').select('*').eq('id', packageId).maybeSingle(),
+        supabase.from('package_days').select('*').eq('package_id', packageId).order('day_number'),
+        supabase.from('package_validity_periods').select('*').eq('package_id', packageId).order('valid_from'),
+        supabase.from('package_pax_options').select('*').eq('package_id', packageId)
+      ]);
+      const firstError = [pkgRes, daysRes, periodsRes, bandsRes].find((res) => res.error);
+      if (firstError?.error) throw firstError.error;
+      if (!pkgRes.data) throw new Error('Package not found');
+
+      /* A package stores its lines on package_day_items, not on library_items.
+         Load them first, then the library rows and rates those lines refer to,
+         exactly as the builder does before it prices a band. */
+      const dayIds = (daysRes.data || []).map((day) => day.id);
+      const itemRes = dayIds.length
+        ? await supabase.from('package_day_items').select('*').in('package_day_id', dayIds).order('sort_order')
+        : { data: [], error: null };
+      if (itemRes.error) throw itemRes.error;
+      const itemsByDay = new Map();
+      (itemRes.data || []).forEach((item) => {
+        itemsByDay.set(item.package_day_id, [
+          ...(itemsByDay.get(item.package_day_id) || []),
+          { ...item, rental: item.rental_details || null }
+        ]);
+      });
+      const days = (daysRes.data || []).map((day) => ({
+        ...day,
+        services: itemsByDay.get(day.id) || []
+      }));
+
+      const usedIds = [...new Set((itemRes.data || []).map((item) => item.item_id).filter(Boolean))];
+      let library = [];
+      if (usedIds.length) {
+        const [itemsRes, ratesRes, roomsByItem, carRatesByItem] = await Promise.all([
+          selectLibraryItems((fields) => supabase.from('library_items').select(fields).in('id', usedIds)),
+          supabase.from('item_rates').select('*').in('item_id', usedIds),
+          fetchRoomTypesForItems(usedIds),
+          fetchCarRentalRates(usedIds)
+        ]);
+        if (itemsRes.error) throw itemsRes.error;
+        if (ratesRes.error) throw ratesRes.error;
+        library = (itemsRes.data || []).map((item) => ({
+          ...item,
+          room_types: roomsByItem.get(item.id) || [],
+          car_rental_rates: carRatesByItem[item.id] || [],
+          item_rates: (ratesRes.data || []).filter((rate) => rate.item_id === item.id)
+        }));
+      }
+
+      const prices = deriveSeriesPricesFromPackage({
+        pkg: pkgRes.data,
+        days,
+        library,
+        periods: periodsRes.data || [],
+        bands: bandsRes.data || [],
+        vehicleTypes,
+        tourTypes,
+        today
+      });
+      if (requestId !== priceRequestRef.current) return;
+      setDerivedPrices(prices);
+      if (apply) {
+        setForm((current) => current.packageId === packageId
+          ? {
+              ...current,
+              sharingPrice: String(prices.sharingPrice),
+              singleSupplementPrice: String(prices.singleSupplementPrice),
+              childPrice: String(prices.childPrice)
+            }
+          : current);
+      }
+    } catch {
+      if (requestId !== priceRequestRef.current) return;
+      setDerivedPrices(null);
+    } finally {
+      if (requestId === priceRequestRef.current) setPriceLoading(false);
+    }
+  }, [seriesPricesReady, today, tourTypes, vehicleTypes]);
+
+  const missingPriceHint = !form.packageId ? '' : (derivedPrices?.hint
+    || ([form.sharingPrice, form.singleSupplementPrice, form.childPrice].some((value) => !Number.isFinite(Number(value)) || Number(value) <= 0)
+      ? 'The three prices are read from the package. Save a price on the package if they stay at zero.'
+      : ''));
+
   const load = useCallback(async () => {
     if (!companyId) {
       setTemplates([]); setDepartures([]); setBookings([]); setPackages([]);
-      setSeriesChart([]);
+      setSeriesChart([]); setTourTypes([]); setVehicleTypes([]); setDerivedPrices(null);
+      setSeriesPricesReady(false);
       setLoading(false);
       return;
     }
     try {
-      const [templateRes, departureRes, bookingRes, packageRes, chartRes] = await Promise.all([
+      /* tour_type arrives with the package tour-type migration; a workspace that
+         has not run it still gets its packages under the long-standing columns. */
+      const fetchPackages = async () => {
+        const current = await supabase.from('packages')
+          .select('id, name, currency_code, tour_type, rate_type')
+          .eq('company_id', companyId).order('name');
+        if (!current.error) return current;
+        const withRateType = await supabase.from('packages')
+          .select('id, name, currency_code, rate_type')
+          .eq('company_id', companyId).order('name');
+        if (!withRateType.error) return withRateType;
+        return supabase.from('packages').select('id, name, currency_code').eq('company_id', companyId).order('name');
+      };
+      const [templateRes, departureRes, bookingRes, packageRes, chartRes, vehicleRes] = await Promise.all([
         supabase.from('series_templates').select('*').eq('company_id', companyId).order('created_at', { ascending: false }),
         supabase.from('series_departures').select('*').eq('company_id', companyId).order('departure_date'),
         supabase.from('series_bookings').select('departure_id, seats, status').eq('company_id', companyId),
-        supabase.from('packages').select('id, name, currency_code').eq('company_id', companyId).order('name'),
-        supabase.from('series_chart_bookings').select('*').eq('company_id', companyId).order('departure_date')
+        fetchPackages(),
+        supabase.from('series_chart_bookings').select('*').eq('company_id', companyId).order('departure_date'),
+        supabase.from('company_vehicle_types').select(VEHICLE_TYPES.columns).or(vocabularyReadFilter(companyId)).order(...VEHICLE_TYPES.orderBy)
       ]);
       if (templateRes.error) throw templateRes.error;
       if (departureRes.error) throw departureRes.error;
       if (bookingRes.error) throw bookingRes.error;
       if (packageRes.error) throw packageRes.error;
+      if (vehicleRes.error) throw vehicleRes.error;
       const chartMissing = chartRes.error && (
         chartRes.error.code === '42P01'
         || chartRes.error.code === 'PGRST205'
         || /series_chart_bookings.*(does not exist|not found|schema cache)/i.test(chartRes.error.message || '')
       );
       if (chartRes.error && !chartMissing) throw chartRes.error;
+
+      /* Tour types decide which packages are series products and which contract
+         prices them. The fallback reads the pre-rate_type columns as the shared
+         vocabulary does everywhere else. */
+      const readTourTypes = (columns) => supabase
+        .from(TOUR_TYPES.table)
+        .select(columns)
+        .or(vocabularyReadFilter(companyId))
+        .order(...TOUR_TYPES.orderBy);
+      let tourTypeRes = await readTourTypes(TOUR_TYPES.columns);
+      if (tourTypeRes.error) tourTypeRes = await readTourTypes(TOUR_TYPES.baseColumns);
+      if (tourTypeRes.error) throw tourTypeRes.error;
+
+      /* The three snapshot columns are written only where this workspace has
+         them; an older database still saves the one seat price it knows. */
+      const priceColumns = await Promise.all([
+        columnExists('series_templates', 'sharing_price'),
+        columnExists('series_templates', 'single_supplement_price'),
+        columnExists('series_templates', 'child_price'),
+        columnExists('series_departures', 'sharing_price'),
+        columnExists('series_departures', 'single_supplement_price'),
+        columnExists('series_departures', 'child_price')
+      ]);
 
       /* The duration is the package's own day count, read from the rows rather
          than stored a second time here where the two could disagree. */
@@ -233,6 +432,9 @@ export const SeriesDepartures = () => {
       setBookings(bookingRes.data || []);
       setSeriesChart(chartMissing ? [] : chartRes.data || []);
       setSeriesChartMissing(!!chartMissing);
+      setTourTypes(mergeVocabulary(tourTypeRes.data || [], TOUR_TYPES.keyColumn));
+      setVehicleTypes(mergeVocabulary(vehicleRes.data || [], VEHICLE_TYPES.keyColumn));
+      setSeriesPricesReady(priceColumns.every(Boolean));
       setPackages((packageRes.data || []).map((row) => ({
         ...row,
         ...templateDuration(daysByPackage.get(row.id) || [])
@@ -249,6 +451,8 @@ export const SeriesDepartures = () => {
         showToast(`Could not load series departures: ${message}`, 'error');
       }
       setTemplates([]); setDepartures([]); setBookings([]); setSeriesChart([]);
+      setTourTypes([]); setVehicleTypes([]); setDerivedPrices(null);
+      setSeriesPricesReady(false);
     } finally {
       setLoading(false);
     }
@@ -282,6 +486,8 @@ export const SeriesDepartures = () => {
     setEditing(null);
     setForm(emptyForm);
     setFormError('');
+    setDerivedPrices(null);
+    setPriceLoading(false);
     setShowForm(true);
     setTab('templates');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -291,16 +497,38 @@ export const SeriesDepartures = () => {
     setEditing(template);
     setForm(formOf(template));
     setFormError('');
+    setDerivedPrices(null);
+    setPriceLoading(false);
     setShowForm(true);
     setTab('templates');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    /* Saved figures stay authoritative; the derivation only supplies the hint
+       when one of them is absent on an older template. */
+    void deriveForPackage(template.package_id, false);
+  };
+
+  const choosePackage = (packageId) => {
+    const pkg = packageOf(packageId);
+    setForm((current) => ({
+      ...current,
+      packageId: packageId || '',
+      currency: pkg?.currency_code ? String(pkg.currency_code).toUpperCase() : current.currency,
+      sharingPrice: '',
+      singleSupplementPrice: '',
+      childPrice: ''
+    }));
+    setDerivedPrices(null);
+    void deriveForPackage(packageId, true);
   };
 
   const closeForm = () => {
+    priceRequestRef.current += 1;
     setShowForm(false);
     setEditing(null);
     setForm(emptyForm);
     setFormError('');
+    setDerivedPrices(null);
+    setPriceLoading(false);
   };
 
   /* Every refusal names the field and the figure, and stays on the form. A
@@ -317,7 +545,6 @@ export const SeriesDepartures = () => {
     const guarantee = wholeNumber(form.guaranteeMin);
     const seats = form.seats === '' ? 0 : wholeNumber(form.seats);
     const release = form.releaseDays === '' ? 0 : wholeNumber(form.releaseDays);
-    const price = form.price === '' ? 0 : Number(form.price);
     if (!Number.isFinite(min) || min < 1) return 'The minimum party size must be at least 1.';
     if (!Number.isFinite(max) || max < min) return `The maximum party size (${form.maxPax}) cannot be below the minimum (${min}).`;
     if (!Number.isFinite(guarantee) || guarantee < 0) return 'The guarantee minimum cannot be negative. Use 0 for no guarantee rule.';
@@ -325,7 +552,11 @@ export const SeriesDepartures = () => {
     if (!Number.isFinite(seats) || seats < 0) return 'Seats per departure cannot be negative. Leave it blank for no cap yet.';
     if (seats > 0 && max > seats) return `The series takes parties up to ${max} but only offers ${seats} seats. Raise the seats or lower the maximum.`;
     if (!Number.isFinite(release) || release < 0) return 'The release period cannot be negative. Use 0 for no release control.';
-    if (!Number.isFinite(price) || price < 0) return 'The seat price cannot be negative. Leave it blank if it is not agreed yet.';
+    const prices = [form.sharingPrice, form.singleSupplementPrice, form.childPrice]
+      .map((value) => (value === '' ? 0 : Number(value)));
+    if (prices.some((value) => !Number.isFinite(value) || value < 0)) {
+      return 'Prices come from the package and cannot be negative. A zero means the package does not define that figure yet.';
+    }
     if (!generateDepartureDates({ operatesOn: form.operatesOn, validFrom: form.validFrom, validTo: form.validTo }).length) {
       return `No ${operatesLabel(form.operatesOn)} falls between ${dateLabel(form.validFrom)} and ${dateLabel(form.validTo)}. Widen the window or change the weekdays.`;
     }
@@ -353,7 +584,15 @@ export const SeriesDepartures = () => {
         guarantee_min: wholeNumber(form.guaranteeMin),
         seats_per_departure: form.seats === '' ? 0 : wholeNumber(form.seats),
         release_days: form.releaseDays === '' ? 0 : wholeNumber(form.releaseDays),
-        price_per_seat: form.price === '' ? 0 : Number(form.price),
+        /* The migration keeps price_per_seat equal to sharing_price by trigger.
+           Unmigrated workspaces still get the one column they know. */
+        ...(seriesPricesReady
+          ? {
+              sharing_price: Number(form.sharingPrice) || 0,
+              single_supplement_price: Number(form.singleSupplementPrice) || 0,
+              child_price: Number(form.childPrice) || 0
+            }
+          : { price_per_seat: Number(form.sharingPrice) || 0 }),
         currency_code: String(form.currency || 'ZAR').toUpperCase(),
         status: form.status,
         notes: form.notes.trim()
@@ -421,14 +660,18 @@ export const SeriesDepartures = () => {
     }
     const pkg = packageOf(template.package_id);
     const durationDays = pkg?.durationDays || 0;
+    const sharing = Number(template.sharing_price ?? template.price_per_seat) || 0;
+    const priceText = seriesPricesReady
+      ? `${money(sharing, template.currency_code)} sharing, ${money(template.single_supplement_price, template.currency_code)} single supplement, ${money(template.child_price, template.currency_code)} child`
+      : `${money(sharing, template.currency_code)} per seat`;
     const ok = await confirm({
       title: `Add ${dates.length} departure${dates.length === 1 ? '' : 's'}?`,
       message: `${dateLabel(dates[0])} to ${dateLabel(dates[dates.length - 1])}, departing ${operatesLabel(template.operates_on)}.`,
       detail: [
         `${existing.size} departure${existing.size === 1 ? '' : 's'} already on this calendar are left untouched.`,
         Number(template.seats_per_departure) > 0
-          ? `Each is opened with ${template.seats_per_departure} seats at ${money(template.price_per_seat, template.currency_code)} per seat.`
-          : 'No seat cap is stated on the series, so each departure opens with no cap until the allocations are loaded.',
+          ? `Each is opened with ${template.seats_per_departure} seats at ${priceText}.`
+          : `No seat cap is stated on the series, so each departure opens with no cap until the allocations are loaded. Prices are ${priceText}.`,
         durationDays > 0
           ? `Return dates follow the package's ${durationDays} days.`
           : 'The package has no days built yet, so no return date is recorded.'
@@ -447,7 +690,13 @@ export const SeriesDepartures = () => {
         status: 'open',
         seat_capacity: Number(template.seats_per_departure) || 0,
         guarantee_min: Number(template.guarantee_min) || 0,
-        price_per_seat: Number(template.price_per_seat) || 0,
+        ...(seriesPricesReady
+          ? {
+              sharing_price: Number(template.sharing_price ?? template.price_per_seat) || 0,
+              single_supplement_price: Number(template.single_supplement_price) || 0,
+              child_price: Number(template.child_price) || 0
+            }
+          : { price_per_seat: sharing }),
         currency_code: template.currency_code || 'ZAR',
         release_date: releaseDateFor(iso, template.release_days)
       }));
@@ -690,9 +939,11 @@ export const SeriesDepartures = () => {
 
               <form onSubmit={saveTemplate}>
                 <SectionTitle>What runs</SectionTitle>
-                {packages.length === 0 ? (
+                {seriesPackages.length === 0 ? (
                   <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '0.9rem 1.1rem', color: '#92400e', fontSize: '0.85rem' }}>
-                    No packages yet. A series runs a package, so build the fixed itinerary and its contracted rates first.
+                    {packages.length === 0
+                      ? 'No packages yet. A series runs a package, so build the fixed itinerary and its contracted rates first.'
+                      : 'No package is marked as a tour series yet. Give one a Tour type that maps to a series contract on the Packages page.'}
                     <button type="button" className="secondary-btn" style={{ width: 'auto', padding: '0.4rem 1rem', marginLeft: '0.75rem' }} onClick={() => navigate('/packages')}>Open Packages</button>
                   </div>
                 ) : (
@@ -709,13 +960,10 @@ export const SeriesDepartures = () => {
                       <SearchableSelect
                         className="pricing-select"
                         value={form.packageId}
-                        onChange={(e) => {
-                          const pkg = packageOf(e.target.value);
-                          setForm({ ...form, packageId: e.target.value, currency: pkg?.currency_code ? String(pkg.currency_code).toUpperCase() : form.currency });
-                        }}
+                        onChange={(e) => choosePackage(e.target.value)}
                       >
-                        <option value="">Choose a package…</option>
-                        {packages.map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.name}</option>)}
+                        <option value="">Choose a series package…</option>
+                        {seriesPackages.map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.name}</option>)}
                       </SearchableSelect>
                     </Field>
                     <Field label="Status" hint="Only an active series is offered for sale. Archived keeps its history.">
@@ -783,9 +1031,46 @@ export const SeriesDepartures = () => {
                       {currencyOptions.map((code) => <option key={code} value={code}>{code}</option>)}
                     </select>
                   </Field>
-                  <Field label="Selling price per seat" hint="What one place is sold for. The package lines carry the contract cost, not this figure.">
-                    <input type="number" min="0" step="0.01" className="pricing-select" placeholder="Not agreed yet" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} />
-                  </Field>
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <Field
+                      label="Selling prices (read from the package)"
+                      hint="Changing the package refills these from its first active season and smallest priced pax band. Saved figures on an existing series are kept."
+                    >
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.75rem' }}>
+                        {[
+                          ['Price per person sharing', 'sharingPrice'],
+                          ['Single supplement', 'singleSupplementPrice'],
+                          ['Child price', 'childPrice']
+                        ].map(([label, key]) => (
+                          <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b' }}>{label}</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              readOnly
+                              aria-label={label}
+                              className="pricing-select"
+                              placeholder={priceLoading ? 'Reading…' : 'From package'}
+                              value={form[key]}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                      {derivedPrices && (
+                        <small style={{ display: 'block', marginTop: '0.35rem', color: '#64748b' }}>
+                          {derivedPrices.pax ? `${derivedPrices.pax} pax band` : 'No priced pax band'}
+                          {derivedPrices.period ? ` · ${derivedPrices.period}` : ''} · {derivedPrices.currency}
+                        </small>
+                      )}
+                      {missingPriceHint && (
+                        <div role="status" style={{ display: 'flex', gap: '0.4rem', alignItems: 'flex-start', marginTop: '0.5rem', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.5rem 0.7rem', color: '#92400e', fontSize: '0.78rem' }}>
+                          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: '1px' }} />
+                          <span>{missingPriceHint}</span>
+                        </div>
+                      )}
+                    </Field>
+                  </div>
                   <div style={{ gridColumn: '1 / -1' }}>
                     <Field label="Notes">
                       <textarea className="pricing-select" rows="2" placeholder="Anything the desk should know about this series" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={{ width: '100%', resize: 'vertical' }} />
@@ -802,7 +1087,7 @@ export const SeriesDepartures = () => {
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '1.5rem' }}>
                   <button type="button" className="secondary-btn" style={{ width: 'auto', padding: '0.625rem 1.5rem' }} onClick={closeForm} disabled={saving}>Cancel</button>
-                  <button type="submit" className="primary-btn" style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }} disabled={saving || !packages.length}>
+                  <button type="submit" className="primary-btn" style={{ background: '#0d7478', width: 'auto', padding: '0.625rem 1.5rem' }} disabled={saving || !seriesPackages.length}>
                     {saving ? 'Saving…' : editing ? 'Save changes' : 'Create series'}
                   </button>
                 </div>
@@ -856,7 +1141,6 @@ export const SeriesDepartures = () => {
                     const pkg = packageOf(template.package_id);
                     const own = departuresOf(template.id);
                     const seats = Number(template.seats_per_departure) || 0;
-                    const price = Number(template.price_per_seat) || 0;
                     return (
                       <tr key={template.id} style={template.status === 'archived' ? { opacity: 0.6 } : undefined}>
                         <td>
@@ -890,10 +1174,10 @@ export const SeriesDepartures = () => {
                           </div>
                         </td>
                         <td style={{ fontSize: '0.85rem' }}>
-                          <div style={{ fontWeight: 700, color: seats > 0 ? '#1e293b' : '#b45309' }}>{seats > 0 ? `${seats} seats` : 'No cap stated'}</div>
-                          <div style={{ fontSize: '0.78rem', color: price > 0 ? '#475569' : '#b45309' }}>
-                            {price > 0 ? `${money(price, template.currency_code)} per seat` : 'No seat price set'}
+                          <div style={{ fontWeight: 700, color: seats > 0 ? '#1e293b' : '#b45309', marginBottom: '0.35rem' }}>
+                            {seats > 0 ? `${seats} seats` : 'No cap stated'}
                           </div>
+                          <PriceGroup row={template} currency={template.currency_code} />
                         </td>
                         <td style={{ fontSize: '0.85rem', color: '#475569' }}>
                           {Number(template.release_days) > 0 ? `${template.release_days} days before` : <span style={{ color: '#94a3b8' }}>No release control</span>}
@@ -1015,7 +1299,7 @@ export const SeriesDepartures = () => {
                     <th>Seats</th>
                     <th>Status</th>
                     <th>Release back</th>
-                    <th>Price per seat</th>
+                    <th>Prices</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1040,7 +1324,6 @@ export const SeriesDepartures = () => {
                     const template = templateOf(departure.template_id);
                     const releaseDue = departure.release_date && departure.release_date <= today
                       && ['open', 'guaranteed', 'waitlist'].includes(departure.status);
-                    const price = Number(departure.price_per_seat) || 0;
                     return (
                       <tr key={departure.id} style={selected.includes(departure.id) ? { background: '#f0fdfa' } : undefined}>
                         {mayWrite && (
@@ -1073,8 +1356,8 @@ export const SeriesDepartures = () => {
                             ? dateLabel(departure.release_date)
                             : <span style={{ color: '#94a3b8' }}>No release control</span>}
                         </td>
-                        <td style={{ fontSize: '0.85rem', color: price > 0 ? '#1e293b' : '#b45309' }}>
-                          {price > 0 ? money(price, departure.currency_code) : 'No seat price set'}
+                        <td style={{ fontSize: '0.85rem' }}>
+                          <PriceGroup row={departure} currency={departure.currency_code} />
                         </td>
                       </tr>
                     );

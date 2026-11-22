@@ -5,6 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConfirm } from '../hooks/useConfirm';
+import SortableTabs, { readStoredTab, writeStoredTab } from '../components/SortableTabs';
 import {
   Settings as SettingsIcon,
   Plus,
@@ -288,6 +289,17 @@ const emptyForm = () => ({
   isActive: true
 });
 
+/* The canonical section order doubles as the fallback when a stored order or
+   active tab is stale. All four panels keep their state at this page level. */
+const SETTINGS_TABS_KEY = 'torbuilder.settings.tabs.v1';
+const SETTINGS_TABS = [
+  { id: 'catalog', label: 'Catalog', icon: Compass },
+  { id: 'company', label: 'Company', icon: FileText },
+  { id: 'finance', label: 'Finance', icon: Landmark },
+  { id: 'documents', label: 'Documents', icon: Eye }
+];
+const SETTINGS_TAB_IDS = SETTINGS_TABS.map((tab) => tab.id);
+
 export const Settings = () => {
   const { showToast } = useToast();
   const { currencies } = useCurrencies();
@@ -359,6 +371,11 @@ export const Settings = () => {
   const [bankConfirm, setBankConfirm] = useState(null);
   const [editingBankId, setEditingBankId] = useState(null);
   const [bankForm, setBankForm] = useState(emptyBank());
+  const [activeTab, setActiveTab] = useState(() => readStoredTab(SETTINGS_TABS_KEY, SETTINGS_TAB_IDS, 'catalog'));
+
+  useEffect(() => {
+    writeStoredTab(SETTINGS_TABS_KEY, activeTab);
+  }, [activeTab]);
 
   const fetchCompanyId = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -1454,6 +1471,16 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
+      <SortableTabs
+        tabs={SETTINGS_TABS}
+        value={activeTab}
+        onChange={setActiveTab}
+        storageKey={SETTINGS_TABS_KEY}
+        ariaLabel="Settings sections"
+      />
+
+      {activeTab === 'catalog' && (
+      <>
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
           <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1872,6 +1899,11 @@ const handleSavePriceProtection = async () => {
         )}
       </div>
 
+      </>
+      )}
+
+      {activeTab === 'company' && (
+      <>
       {/* Company profile - applies to every document */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
@@ -1965,6 +1997,11 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
+      </>
+      )}
+
+      {activeTab === 'finance' && (
+      <>
       {/* Invoice-only defaults */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
@@ -1992,6 +2029,11 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
+      </>
+      )}
+
+      {activeTab === 'company' && (
+      <>
       {/* Money entry preferences */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
@@ -2084,6 +2126,11 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
+      </>
+      )}
+
+      {activeTab === 'documents' && (
+      <>
       {/* Presentation preferences */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ marginBottom: '1rem' }}>
@@ -2405,6 +2452,11 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
+      </>
+      )}
+
+      {activeTab === 'finance' && (
+      <>
       {/* Bank accounts */}
       <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
@@ -2619,6 +2671,9 @@ const handleSavePriceProtection = async () => {
           <ShieldCheck size={13} /> Saved itineraries keep the tax rate that applied at quote time — changing these rates only affects new services.
         </p>
       </div>
+
+      </>
+      )}
 
       {/* Add / edit tax modal */}
       {modalOpen && (

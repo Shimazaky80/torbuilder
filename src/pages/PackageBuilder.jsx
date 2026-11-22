@@ -41,7 +41,7 @@ packageRateForDates,
   vehicleVectorPrice
 } from '../lib/packagePricing';
 import { ratesForServiceRoom, roomTypesOf } from '../lib/roomTypes';
-import { normalizeRateType, ratesForContract, RATE_TYPES } from '../lib/rateTypes';
+import { contractTypeForTourType, normalizeRateType, ratesForContract } from '../lib/rateTypes';
 import { stripConversionNote } from '../lib/itineraryToPackage';
 import { categoryLabel } from '../lib/i18n/documentTerms';
 import { singleSupplementLadderSummary } from '../lib/singleSupplement';
@@ -338,7 +338,7 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => 
 const initialForm = {
   description: '', inclusions: '', exclusions: '', terms: '', textI18n: null,
   isAvailable: false, acceptsChildren: false, childAgeRange: null,
-  rateType: '', assignedClientIds: []
+  rateType: '', tourType: '', assignedClientIds: []
 };
 
 /* The package form styles its own textareas from `.package-field textarea`. The
@@ -405,7 +405,11 @@ export const PackageBuilder = () => {
   const [companyId, setCompanyId] = useState(null);
   const [pkg, setPkg] = useState(null);
   const [form, setForm] = useState(initialForm);
-  const contractType = normalizeRateType(form.rateType);
+  const [tourTypes, setTourTypes] = useState([]);
+  /* The package's tour type is the source of truth: its company vocabulary row
+     says which contract prices this product. The legacy rate_type stays as the
+     fallback until the tour-type migration has been applied. */
+  const contractType = contractTypeForTourType(tourTypes, form.tourType) || normalizeRateType(form.rateType);
   const [packageDays, setDays] = useState([]);
   const [periods, setPeriods] = useState([]);
   const [paxOptions, setPaxOptions] = useState([]);
@@ -575,7 +579,23 @@ const [bandScope, setBandScope] = useState('');
       const { data: profile, error: profileError } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
       if (profileError) throw profileError;
       if (!scopeCompanyId(profile?.company_id)) throw new Error('Your account is not linked to a company.');
-      setCompanyId(scopeCompanyId(profile.company_id));
+      const company = scopeCompanyId(profile.company_id);
+      setCompanyId(company);
+
+      /* The tour type's contract mapping decides which library rates this package
+         sees. A workspace without the vocabulary keeps the older rate_type. */
+      try {
+        const readTourTypes = (columns) => supabase
+          .from(TOUR_TYPES.table)
+          .select(columns)
+          .or(vocabularyReadFilter(company))
+          .order(...TOUR_TYPES.orderBy);
+        let tourTypeRes = await readTourTypes(TOUR_TYPES.columns);
+        if (tourTypeRes.error) tourTypeRes = await readTourTypes(TOUR_TYPES.baseColumns);
+        if (!tourTypeRes.error) setTourTypes(mergeVocabulary(tourTypeRes.data || [], TOUR_TYPES.keyColumn));
+      } catch {
+        // Keep the legacy contract type when the vocabulary cannot be read.
+      }
 
       /* Whether this database can store the per-season single-room override. A
          probe against the optional column fails when it is absent; the save
@@ -692,6 +712,7 @@ const [bandScope, setBandScope] = useState('');
            per supplier; only the first is kept so the price stays one number. */
         childAgeRange: packageChildAgeRange(Array.isArray(pkgRes.data.child_age_ranges) ? pkgRes.data.child_age_ranges[0] : null),
         rateType: normalizeRateType(pkgRes.data.rate_type),
+        tourType: String(pkgRes.data.tour_type || ''),
         assignedClientIds
       };
       setPkg(pkgRes.data);

@@ -7,6 +7,7 @@ import { vocabularyNames, vocabularyReadFilter } from '../lib/companyVocabulary'
 import { scopeCompanyId } from '../lib/tenantScope';
 import { useSession } from '../hooks/useSession';
 import { useCurrencies } from '../hooks/useCurrencies';
+import SortableTabs, { readStoredTab, writeStoredTab } from '../components/SortableTabs';
 import { fmtMoney } from '../lib/invoiceDoc';
 import {
   buildAnalyticsReports,
@@ -34,6 +35,34 @@ import {
   FileText,
   AlertTriangle
 } from 'lucide-react';
+
+/* ─── Sections ─────────────────────────────────────────────────────────────── */
+
+const ANALYTICS_TABS_KEY = 'torbuilder.analytics.tabs.v1';
+const ANALYTICS_TABS = [
+  { id: 'overview', label: 'Overview', icon: BarChart3 },
+  { id: 'consultants', label: 'Consultants', icon: Users, adminOnly: true },
+  { id: 'clients', label: 'Clients', icon: Building2, adminOnly: true },
+  { id: 'financials', label: 'Financials', icon: CircleDollarSign },
+  { id: 'checklist', label: 'Checklist', icon: FileText }
+];
+const REPORT_TAB_IDS = ['overview', 'consultants', 'clients', 'financials'];
+
+const EMPTY_REPORT_FILTERS = {
+  consultant: '',
+  dateBasis: 'travel',
+  from: '',
+  to: '',
+  status: '',
+  tourType: '',
+  clientId: '',
+  financialBasis: 'all',
+  lossFilter: 'all',
+  minRevenue: ''
+};
+const makeFiltersByTab = () => Object.fromEntries(
+  REPORT_TAB_IDS.map((id) => [id, { ...EMPTY_REPORT_FILTERS }])
+);
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -135,6 +164,92 @@ const ReportPanel = ({ title, subtitle, columns, rows, empty = 'No records match
       </table>
     </div>
   </section>
+);
+
+/* One card, many owners: each report tab passes its own filter object here, so
+   changing a filter in one section cannot leak into another. overflow:visible
+   lets the searchable dropdowns sit above the panels below. */
+const ReportFilters = ({
+  filters,
+  onChange,
+  onClear,
+  isConsultant,
+  consultantOptions,
+  tourTypes,
+  clientOptions
+}) => (
+  <div className="admin-table-container" style={{ padding: '1.15rem 1.25rem', marginBottom: '1.5rem', overflow: 'visible', position: 'relative', zIndex: 20 }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
+      <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <Calculator size={18} color="#0d7478" /> Report filters
+      </h2>
+      <button
+        type="button"
+        className="icon-btn outline"
+        onClick={onClear}
+        style={{ padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
+      >
+        <FilterX size={14} /> Clear filters
+      </button>
+    </div>
+    <div style={{ display: 'flex', gap: '0.85rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+      {!isConsultant && (
+        <FilterField label="Consultant">
+          <SearchableSelect className="pricing-select" style={filterSelectStyle} value={filters.consultant} onChange={(e) => onChange('consultant', e.target.value)}>
+            <option value="">All consultants</option>
+            {consultantOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+          </SearchableSelect>
+        </FilterField>
+      )}
+      <FilterField label="Date basis">
+        <SearchableSelect className="pricing-select" style={filterSelectStyle} value={filters.dateBasis} onChange={(e) => onChange('dateBasis', e.target.value)}>
+          {REPORT_DATE_BASES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+        </SearchableSelect>
+      </FilterField>
+      <FilterField label="From">
+        <input type="date" style={filterInputStyle} value={filters.from} onChange={(e) => onChange('from', e.target.value)} />
+      </FilterField>
+      <FilterField label="To">
+        <input type="date" style={filterInputStyle} value={filters.to} onChange={(e) => onChange('to', e.target.value)} />
+      </FilterField>
+      <FilterField label="Status">
+        <SearchableSelect className="pricing-select" style={filterSelectStyle} value={filters.status} onChange={(e) => onChange('status', e.target.value)}>
+          <option value="">All statuses</option>
+          {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          <option value="pending_confirmation">Pending Confirmation</option>
+        </SearchableSelect>
+      </FilterField>
+      <FilterField label="Tour type">
+        <SearchableSelect className="pricing-select" style={filterSelectStyle} value={filters.tourType} onChange={(e) => onChange('tourType', e.target.value)}>
+          <option value="">All tour types</option>
+          {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
+        </SearchableSelect>
+      </FilterField>
+      <FilterField label="Client">
+        <SearchableSelect className="pricing-select" style={{ ...filterSelectStyle, minWidth: '180px' }} value={filters.clientId} onChange={(e) => onChange('clientId', e.target.value)}>
+          <option value="">All clients</option>
+          {clientOptions.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
+        </SearchableSelect>
+      </FilterField>
+      <FilterField label="Trip scope">
+        <SearchableSelect className="pricing-select" style={{ ...filterSelectStyle, minWidth: '210px' }} value={filters.financialBasis} onChange={(e) => onChange('financialBasis', e.target.value)}>
+          {REPORT_FINANCIAL_BASES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+        </SearchableSelect>
+      </FilterField>
+      <FilterField label="Profit / loss">
+        <SearchableSelect className="pricing-select" style={filterSelectStyle} value={filters.lossFilter} onChange={(e) => onChange('lossFilter', e.target.value)}>
+          {REPORT_LOSS_FILTERS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+        </SearchableSelect>
+      </FilterField>
+      <FilterField label="Min revenue">
+        <input type="number" min="0" step="0.01" style={filterInputStyle} placeholder="Any" value={filters.minRevenue} onChange={(e) => onChange('minRevenue', e.target.value)} />
+      </FilterField>
+    </div>
+    <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0.8rem 0 0' }}>
+      Filters update the reports immediately — no search button needed. Use Refresh to reload the latest data from the database.
+      {isConsultant && ' Reports are limited to itineraries you created.'}
+    </p>
+  </div>
 );
 
 /* ─── Excel Export ─────────────────────────────────────────────────────────── */
@@ -243,21 +358,34 @@ export const Analytics = () => {
   const [checklistClientFilter, setChecklistClientFilter] = useState('');
   const [checklistDateFrom, setChecklistDateFrom] = useState('');
   const [checklistDateTo, setChecklistDateTo] = useState('');
-  const [tourTypeFilter, setTourTypeFilter] = useState('');
   const [tourTypes, setTourTypes] = useState([]);
-  const [statusFilter, setStatusFilter] = useState('');
   const [currentUserName, setCurrentUserName] = useState('');
   const [dayItems, setDayItems] = useState([]);
   const [clientOptions, setClientOptions] = useState([]);
   const [consultantOptions, setConsultantOptions] = useState([]);
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [dateBasis, setDateBasis] = useState('travel');
-  const [consultantFilter, setConsultantFilter] = useState('');
-  const [clientFilter, setClientFilter] = useState('');
-  const [financialBasis, setFinancialBasis] = useState('all');
-  const [lossFilter, setLossFilter] = useState('all');
-  const [minRevenue, setMinRevenue] = useState('');
+  /* Each report section owns a full filter set. The checklist never reads this
+     state — it uses the checklist* controls and searchQuery below. */
+  const [filtersByTab, setFiltersByTab] = useState(makeFiltersByTab);
+  const visibleTabs = useMemo(
+    () => isConsultant ? ANALYTICS_TABS.filter((tab) => !tab.adminOnly) : ANALYTICS_TABS,
+    [isConsultant]
+  );
+  const visibleTabIds = useMemo(() => visibleTabs.map((tab) => tab.id), [visibleTabs]);
+  const [storedActiveTab, setStoredActiveTab] = useState(
+    () => readStoredTab(ANALYTICS_TABS_KEY, visibleTabIds, 'overview')
+  );
+  /* A stored admin section must not survive for a consultant: derive a visible
+     tab instead of keeping an unreachable one on screen. */
+  const activeTab = visibleTabIds.includes(storedActiveTab)
+    ? storedActiveTab
+    : (visibleTabIds[0] ?? 'overview');
+  const setActiveTab = useCallback((id) => {
+    const next = visibleTabIds.includes(id) ? id : (visibleTabIds[0] ?? 'overview');
+    setStoredActiveTab(next);
+  }, [visibleTabIds]);
+  useEffect(() => {
+    writeStoredTab(ANALYTICS_TABS_KEY, activeTab);
+  }, [activeTab]);
   const { currencies } = useCurrencies();
 
   const fetchData = useCallback(async () => {
@@ -420,36 +548,38 @@ export const Analytics = () => {
 
   /* ─── Reports ───────────────────────────────────────────────────────────── */
 
+  const isReportTab = REPORT_TAB_IDS.includes(activeTab);
+  const activeFilters = filtersByTab[activeTab] ?? EMPTY_REPORT_FILTERS;
+
+  const updateActiveFilter = useCallback((key, value) => {
+    setFiltersByTab((prev) => ({
+      ...prev,
+      [activeTab]: { ...(prev[activeTab] ?? EMPTY_REPORT_FILTERS), [key]: value }
+    }));
+  }, [activeTab]);
+
   const reportFilters = useMemo(() => ({
-    from: dateFrom,
-    to: dateTo,
-    dateBasis,
-    consultant: isConsultant ? '' : consultantFilter,
-    clientId: clientFilter,
-    status: statusFilter,
-    tourType: tourTypeFilter,
-    financialBasis,
-    lossFilter,
-    minRevenue
-  }), [dateFrom, dateTo, dateBasis, isConsultant, consultantFilter, clientFilter, statusFilter, tourTypeFilter, financialBasis, lossFilter, minRevenue]);
+    from: activeFilters.from,
+    to: activeFilters.to,
+    dateBasis: activeFilters.dateBasis,
+    consultant: isConsultant ? '' : activeFilters.consultant,
+    clientId: activeFilters.clientId,
+    status: activeFilters.status,
+    tourType: activeFilters.tourType,
+    financialBasis: activeFilters.financialBasis,
+    lossFilter: activeFilters.lossFilter,
+    minRevenue: activeFilters.minRevenue
+  }), [activeFilters, isConsultant]);
 
   const report = useMemo(
     () => buildAnalyticsReports({ itineraries, items: dayItems, filters: reportFilters }),
     [itineraries, dayItems, reportFilters]
   );
 
-  const clearFilters = () => {
-    setDateFrom('');
-    setDateTo('');
-    setDateBasis('travel');
-    setConsultantFilter('');
-    setClientFilter('');
-    setStatusFilter('');
-    setTourTypeFilter('');
-    setFinancialBasis('all');
-    setLossFilter('all');
-    setMinRevenue('');
-  };
+  /* Only the section on screen is reset; the other three keep their filters. */
+  const clearFilters = useCallback(() => {
+    setFiltersByTab((prev) => ({ ...prev, [activeTab]: { ...EMPTY_REPORT_FILTERS } }));
+  }, [activeTab]);
 
   const clearChecklistFilters = () => {
     setSearchQuery('');
@@ -529,6 +659,40 @@ export const Analytics = () => {
     showToast('Travelers checklist exported as Excel', 'success');
   };
 
+  /* The same control card is mounted for whichever report section is active,
+     but it always reads and writes that section's own slice of filtersByTab. */
+  const reportFilterControls = (
+    <ReportFilters
+      filters={activeFilters}
+      onChange={updateActiveFilter}
+      onClear={clearFilters}
+      isConsultant={isConsultant}
+      consultantOptions={consultantOptions}
+      tourTypes={tourTypes}
+      clientOptions={clientOptions}
+    />
+  );
+
+  const emptyReportNotice = !loading && itineraries.length > 0 && report.rows.length === 0 ? (
+    <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', padding: '1rem 1.25rem', marginBottom: '1.5rem', border: '1px solid #fde68a', borderRadius: '12px', background: '#fffbeb', color: '#92400e' }}>
+      <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '0.1rem' }} />
+      <div style={{ fontSize: '0.85rem', lineHeight: 1.5 }}>
+        <strong>No itineraries match the current report filters.</strong>
+        <div>The Travelers Checklist tab is unaffected and still shows all {itineraries.length} itineraries.</div>
+        {activeFilters.financialBasis === 'booked' && (
+          <div>All visible files are currently quotations — change <strong>Trip scope</strong> to “All itineraries (quotations included)” to see their financials.</div>
+        )}
+        <button
+          type="button"
+          onClick={clearFilters}
+          style={{ marginTop: '0.5rem', padding: '0.35rem 0.7rem', border: '1px solid #fcd34d', borderRadius: '8px', background: '#fff', color: '#92400e', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}
+        >
+          Reset report filters
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="super-admin-page" style={{ paddingBottom: '4rem' }}>
       {/* Page Header */}
@@ -557,172 +721,90 @@ export const Analytics = () => {
             style={{ width: 'auto', padding: '0.6rem 1.25rem', background: '#0d7478', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
             onClick={handleExport}
           >
-            <FileSpreadsheet size={17} /> Export Excel
+            <FileSpreadsheet size={17} /> Export checklist
           </button>
         </div>
       </header>
 
-      {/* Report filters — the shared card is overflow:hidden for tables, so let
-          the searchable dropdowns escape it and sit above the panels below. */}
-      <div className="admin-table-container" style={{ padding: '1.15rem 1.25rem', marginBottom: '1.5rem', overflow: 'visible', position: 'relative', zIndex: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
-          <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Calculator size={18} color="#0d7478" /> Report filters
-          </h2>
-          <button
-            type="button"
-            className="icon-btn outline"
-            onClick={clearFilters}
-            style={{ padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', border: '1px solid #e2e8f0', borderRadius: '9px', background: '#fff', color: '#64748b', fontSize: '0.8rem', cursor: 'pointer' }}
-          >
-            <FilterX size={14} /> Clear filters
-          </button>
-        </div>
-        <div style={{ display: 'flex', gap: '0.85rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          {!isConsultant && (
-            <FilterField label="Consultant">
-              <SearchableSelect className="pricing-select" style={filterSelectStyle} value={consultantFilter} onChange={(e) => setConsultantFilter(e.target.value)}>
-                <option value="">All consultants</option>
-                {consultantOptions.map((name) => <option key={name} value={name}>{name}</option>)}
-              </SearchableSelect>
-            </FilterField>
-          )}
-          <FilterField label="Date basis">
-            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={dateBasis} onChange={(e) => setDateBasis(e.target.value)}>
-              {REPORT_DATE_BASES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-            </SearchableSelect>
-          </FilterField>
-          <FilterField label="From">
-            <input type="date" style={filterInputStyle} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-          </FilterField>
-          <FilterField label="To">
-            <input type="date" style={filterInputStyle} value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-          </FilterField>
-          <FilterField label="Status">
-            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-              <option value="">All statuses</option>
-              {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              <option value="pending_confirmation">Pending Confirmation</option>
-            </SearchableSelect>
-          </FilterField>
-          <FilterField label="Tour type">
-            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={tourTypeFilter} onChange={(e) => setTourTypeFilter(e.target.value)}>
-              <option value="">All tour types</option>
-              {tourTypes.map((tourType) => <option key={tourType} value={tourType}>{tourType}</option>)}
-            </SearchableSelect>
-          </FilterField>
-          <FilterField label="Client">
-            <SearchableSelect className="pricing-select" style={{ ...filterSelectStyle, minWidth: '180px' }} value={clientFilter} onChange={(e) => setClientFilter(e.target.value)}>
-              <option value="">All clients</option>
-              {clientOptions.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}
-            </SearchableSelect>
-          </FilterField>
-          <FilterField label="Trip scope">
-            <SearchableSelect className="pricing-select" style={{ ...filterSelectStyle, minWidth: '210px' }} value={financialBasis} onChange={(e) => setFinancialBasis(e.target.value)}>
-              {REPORT_FINANCIAL_BASES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-            </SearchableSelect>
-          </FilterField>
-          <FilterField label="Profit / loss">
-            <SearchableSelect className="pricing-select" style={filterSelectStyle} value={lossFilter} onChange={(e) => setLossFilter(e.target.value)}>
-              {REPORT_LOSS_FILTERS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-            </SearchableSelect>
-          </FilterField>
-          <FilterField label="Min revenue">
-            <input type="number" min="0" step="0.01" style={filterInputStyle} placeholder="Any" value={minRevenue} onChange={(e) => setMinRevenue(e.target.value)} />
-          </FilterField>
-        </div>
-        <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0.8rem 0 0' }}>
-          Filters update the reports immediately — no search button needed. Use Refresh to reload the latest data from the database.
-          {isConsultant && ' Reports are limited to itineraries you created.'}
-        </p>
-      </div>
+      <SortableTabs
+        tabs={visibleTabs}
+        value={activeTab}
+        onChange={setActiveTab}
+        storageKey={ANALYTICS_TABS_KEY}
+        ariaLabel="Analytics sections"
+      />
 
-      {/* Stats Grid */}
-      <div className="admin-stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: '1.5rem' }}>
-        <StatCard
-          icon={Users}
-          label="Total Travelers"
-          value={stats.travellers.toLocaleString()}
-          sub="Within the selected filters"
-          color="#0d7478"
-        />
-        <StatCard
-          icon={TrendingUp}
-          label="Total Itineraries"
-          value={stats.total.toLocaleString()}
-          sub="Matching the selected filters"
-          color="#6366f1"
-        />
-        <StatCard
-          icon={CircleDollarSign}
-          label="Revenue"
-          value={stats.revenue}
-          sub="Tax excluded · per currency"
-          color="#16a34a"
-        />
-        <StatCard
-          icon={TrendingDown}
-          label="Loss"
-          value={stats.loss}
-          sub="Sum of loss-making trips"
-          color="#dc2626"
-        />
-        <StatCard
-          icon={FileText}
-          label="Quotations"
-          value={stats.quotations.toLocaleString()}
-          sub="Counted separately from bookings"
-          color="#f59e0b"
-        />
-      </div>
+      {isReportTab && reportFilterControls}
+      {isReportTab && emptyReportNotice}
 
-      {/* An empty report is nearly always a filter, not missing data. Say so,
-          and keep the checklist visible and untouched below. */}
-      {!loading && itineraries.length > 0 && report.rows.length === 0 && (
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', padding: '1rem 1.25rem', marginBottom: '1.5rem', border: '1px solid #fde68a', borderRadius: '12px', background: '#fffbeb', color: '#92400e' }}>
-          <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '0.1rem' }} />
-          <div style={{ fontSize: '0.85rem', lineHeight: 1.5 }}>
-            <strong>No itineraries match the current report filters.</strong>
-            <div>The Travelers Checklist below is unaffected and still shows all {itineraries.length} itineraries.</div>
-            {financialBasis === 'booked' && (
-              <div>All visible files are currently quotations — change <strong>Trip scope</strong> to “All itineraries (quotations included)” to see their financials.</div>
-            )}
-            <button
-              type="button"
-              onClick={clearFilters}
-              style={{ marginTop: '0.5rem', padding: '0.35rem 0.7rem', border: '1px solid #fcd34d', borderRadius: '8px', background: '#fff', color: '#92400e', fontWeight: 700, cursor: 'pointer', fontSize: '0.8rem' }}
-            >
-              Reset report filters
-            </button>
-          </div>
+      {/* Stats Grid — overview only */}
+      {activeTab === 'overview' && (
+        <div className="admin-stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', marginBottom: '1.5rem' }}>
+          <StatCard
+            icon={Users}
+            label="Total Travelers"
+            value={stats.travellers.toLocaleString()}
+            sub="Within the selected filters"
+            color="#0d7478"
+          />
+          <StatCard
+            icon={TrendingUp}
+            label="Total Itineraries"
+            value={stats.total.toLocaleString()}
+            sub="Matching the selected filters"
+            color="#6366f1"
+          />
+          <StatCard
+            icon={CircleDollarSign}
+            label="Revenue"
+            value={stats.revenue}
+            sub="Tax excluded · per currency"
+            color="#16a34a"
+          />
+          <StatCard
+            icon={TrendingDown}
+            label="Loss"
+            value={stats.loss}
+            sub="Sum of loss-making trips"
+            color="#dc2626"
+          />
+          <StatCard
+            icon={FileText}
+            label="Quotations"
+            value={stats.quotations.toLocaleString()}
+            sub="Counted separately from bookings"
+            color="#f59e0b"
+          />
         </div>
       )}
 
-      {/* Admin-only management reports */}
-      {!isConsultant && (
-        <>
-          <ReportPanel
-            title="Revenue & loss by consultant"
-            subtitle="Itineraries, revenue and loss follow every filter above"
-            rows={consultantRows}
-            columns={[
-              { key: 'consultant', label: 'Consultant', render: (row) => <strong>{row.key}</strong> },
-              { key: 'itineraries', label: 'Trips', align: 'center' },
-              { key: 'travellers', label: 'Travellers', align: 'center' },
-              ...statusColumns.map((status) => ({
-                key: `status_${status}`,
-                label: statusLabel(status),
-                align: 'center',
-                render: (row) => row.statuses[status] || 0
-              })),
-              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost') },
-              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
-              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') },
-              { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency) }
-            ]}
-          />
+      {/* Admin-only management reports, split across their own sections */}
+      {activeTab === 'consultants' && (
+        <ReportPanel
+          title="Revenue & loss by consultant"
+          subtitle="Itineraries, revenue and loss follow every filter above"
+          rows={consultantRows}
+          columns={[
+            { key: 'consultant', label: 'Consultant', render: (row) => <strong>{row.key}</strong> },
+            { key: 'itineraries', label: 'Trips', align: 'center' },
+            { key: 'travellers', label: 'Travellers', align: 'center' },
+            ...statusColumns.map((status) => ({
+              key: `status_${status}`,
+              label: statusLabel(status),
+              align: 'center',
+              render: (row) => row.statuses[status] || 0
+            })),
+            { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+            { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost') },
+            { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
+            { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') },
+            { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency) }
+          ]}
+        />
+      )}
 
+      {activeTab === 'clients' && (
+        <>
           <ReportPanel
             title="Itineraries per client and status"
             subtitle="Every client with its status breakdown"
@@ -759,80 +841,90 @@ export const Analytics = () => {
         </>
       )}
 
-      {/* Reports useful to both management and consultants */}
-      <ReportPanel
-        title="Monthly trend"
-        subtitle={dateBasis === 'created' ? 'Grouped by itinerary creation month' : 'Grouped by travel start month'}
-        rows={report.monthly}
-        columns={[
-          { key: 'month', label: 'Month', render: (row) => <strong>{row.key}</strong> },
-          { key: 'itineraries', label: 'Trips', align: 'center' },
-          { key: 'travellers', label: 'Travellers', align: 'center' },
-          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
-          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
-        ]}
-      />
+      {/* Overview reports — useful to both management and consultants */}
+      {activeTab === 'overview' && (
+        <>
+          <ReportPanel
+            title="Monthly trend"
+            subtitle={activeFilters.dateBasis === 'created' ? 'Grouped by itinerary creation month' : 'Grouped by travel start month'}
+            rows={report.monthly}
+            columns={[
+              { key: 'month', label: 'Month', render: (row) => <strong>{row.key}</strong> },
+              { key: 'itineraries', label: 'Trips', align: 'center' },
+              { key: 'travellers', label: 'Travellers', align: 'center' },
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit') },
+              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
+            ]}
+          />
 
-      <ReportPanel
-        title="Status mix"
-        subtitle="Where the current bookings sit in the pipeline"
-        rows={statusRows}
-        columns={[
-          { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{row.label}</span> },
-          { key: 'itineraries', label: 'Itineraries', align: 'center' },
-          { key: 'share', label: 'Share', align: 'center', render: (row) => `${row.share}%` }
-        ]}
-      />
+          <ReportPanel
+            title="Status mix"
+            subtitle="Where the current bookings sit in the pipeline"
+            rows={statusRows}
+            columns={[
+              { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{row.label}</span> },
+              { key: 'itineraries', label: 'Itineraries', align: 'center' },
+              { key: 'share', label: 'Share', align: 'center', render: (row) => `${row.share}%` }
+            ]}
+          />
 
-      <ReportPanel
-        title="Tour type mix"
-        rows={report.byTourType}
-        columns={[
-          { key: 'tourType', label: 'Tour type', render: (row) => <strong>{row.key}</strong> },
-          { key: 'itineraries', label: 'Itineraries', align: 'center' },
-          { key: 'travellers', label: 'Travellers', align: 'center' },
-          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
-          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
-        ]}
-      />
+          <ReportPanel
+            title="Tour type mix"
+            rows={report.byTourType}
+            columns={[
+              { key: 'tourType', label: 'Tour type', render: (row) => <strong>{row.key}</strong> },
+              { key: 'itineraries', label: 'Itineraries', align: 'center' },
+              { key: 'travellers', label: 'Travellers', align: 'center' },
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue') },
+              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss') }
+            ]}
+          />
+        </>
+      )}
 
-      <ReportPanel
-        title="Loss-making itineraries"
-        subtitle="Trips sold below their buy cost — a profitable month can hide these"
-        rows={report.lossMaking}
-        empty="No loss-making itineraries in this period."
-        columns={[
-          { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
-          { key: 'client', label: 'Client' },
-          ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
-          { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
-          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
-          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
-          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
-        ]}
-      />
+      {/* Per-itinerary financial reports */}
+      {activeTab === 'financials' && (
+        <>
+          <ReportPanel
+            title="Loss-making itineraries"
+            subtitle="Trips sold below their buy cost — a profitable month can hide these"
+            rows={report.lossMaking}
+            empty="No loss-making itineraries in this period."
+            columns={[
+              { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
+              { key: 'client', label: 'Client' },
+              ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
+              { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
+              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
+              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
+            ]}
+          />
 
-      <ReportPanel
-        title={isConsultant ? 'Your itineraries — financials' : 'Itinerary financials'}
-        subtitle="Per-itinerary figures behind the totals"
-        rows={itineraryRows}
-        columns={[
-          { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
-          { key: 'client', label: 'Client' },
-          { key: 'name', label: 'Tour name' },
-          { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
-          ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
-          { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{statusLabel(row.status)}</span> },
-          { key: 'travellers', label: 'Travellers', align: 'center' },
-          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
-          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
-          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.financials, 'profit') },
-          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
-        ]}
-      />
+          <ReportPanel
+            title={isConsultant ? 'Your itineraries — financials' : 'Itinerary financials'}
+            subtitle="Per-itinerary figures behind the totals"
+            rows={itineraryRows}
+            columns={[
+              { key: 'reference', label: 'Reference', render: (row) => <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#0d7478' }}>{row.reference}</span> },
+              { key: 'client', label: 'Client' },
+              { key: 'name', label: 'Tour name' },
+              { key: 'dates', label: 'Travel dates', render: (row) => `${toDisplay(row.start)} – ${toDisplay(row.end)}` },
+              ...(isConsultant ? [] : [{ key: 'consultant', label: 'Consultant' }]),
+              { key: 'status', label: 'Status', render: (row) => <span className={`status-badge ${row.status}`}>{statusLabel(row.status)}</span> },
+              { key: 'travellers', label: 'Travellers', align: 'center' },
+              { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.financials, 'revenue') },
+              { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.financials, 'cost') },
+              { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.financials, 'profit') },
+              { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.financials, 'loss') }
+            ]}
+          />
+        </>
+      )}
 
       {/* Checklist Table — overflow visible so its own dropdowns are not clipped */}
+      {activeTab === 'checklist' && (
       <div className="admin-table-container" style={{ overflow: 'visible', position: 'relative', zIndex: 10 }}>
         {/* Table toolbar — title first, then a full-width filter row that wraps */}
         <div className="table-header-actions" style={{ display: 'block', padding: '1.25rem 1.5rem' }}>
@@ -1123,6 +1215,7 @@ export const Analytics = () => {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 };

@@ -12,13 +12,15 @@ import {
   Copy,
   ExternalLink,
   Clock,
-  ArrowRightLeft
+  ArrowRightLeft,
+  KeyRound
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useSession } from '../hooks/useSession';
 import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../hooks/useConfirm';
 import ConfirmDialog from '../components/ConfirmDialog';
+import CredentialsDialog from '../components/CredentialsDialog';
 import { columnExists } from '../lib/schemaColumnProbe';
 import {
   ACCESS_LEVELS,
@@ -133,6 +135,8 @@ export const Users = () => {
   const [transferItineraries, setTransferItineraries] = useState([]);
   const [transferItinerariesLoading, setTransferItinerariesLoading] = useState(false);
   const [transferItineraryId, setTransferItineraryId] = useState('');
+  const [credentialsFor, setCredentialsFor] = useState(null);
+  const [credentialsMode, setCredentialsMode] = useState('password');
 
   const mayWrite = can('users', 'write');
 
@@ -245,6 +249,12 @@ export const Users = () => {
       return false;
     }
     return true;
+  };
+
+  /* The dialog toasts its own success/error; this only brings the roster and
+     the session back in step with the change. */
+  const handleCredentialsSaved = async () => {
+    await Promise.all([load(), refresh()]);
   };
 
   const changeRole = async (member, roleKey) => {
@@ -642,6 +652,26 @@ export const Users = () => {
                         <SlidersHorizontal size={14} /> Access
                       </button>
                     )}
+                    {mayWrite && (isPlatformAdmin || !locked) && (
+                      <>
+                        <button
+                          className="secondary-btn"
+                          style={{ width: 'auto', padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+                          title={`Reset password for ${nameOf(member)}`}
+                          onClick={() => { setCredentialsFor(member); setCredentialsMode('password'); }}
+                        >
+                          <KeyRound size={14} /> Password
+                        </button>
+                        <button
+                          className="secondary-btn"
+                          style={{ width: 'auto', padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+                          title={`Change email for ${nameOf(member)}`}
+                          onClick={() => { setCredentialsFor(member); setCredentialsMode('email'); }}
+                        >
+                          <Mail size={14} /> Email
+                        </button>
+                      </>
+                    )}
                     {mayWrite && !locked && !isSelf && (
                       <button
                         className="secondary-btn"
@@ -838,6 +868,15 @@ export const Users = () => {
           </div>
         </div>
       )}
+
+      <CredentialsDialog
+        key={`${credentialsFor?.user_id || 'none'}-${credentialsMode}-${!!credentialsFor}`}
+        open={!!credentialsFor}
+        mode={credentialsMode}
+        user={credentialsFor}
+        onClose={() => setCredentialsFor(null)}
+        onSaved={handleCredentialsSaved}
+      />
 
       {confirmDialog && <ConfirmDialog {...confirmDialog} />}
     </div>

@@ -7,12 +7,12 @@ import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../hooks/useConfirm';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { packageBandLabel } from '../lib/packagePricing';
-import { VEHICLE_TYPES, mergeVocabulary, vocabularyReadFilter } from '../lib/companyVocabulary';
+import { TOUR_TYPES, VEHICLE_TYPES, mergeVocabulary, vocabularyNames, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { scopeCompanyId } from '../lib/tenantScope';
 import { isVehicleExtra } from '../lib/extrasChargeTypes';
 import { useSession } from '../hooks/useSession';
 
-const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', cover: null, clearCover: false, vehicleColumns: [] });
+const emptyDraft = () => ({ name: '', description: '', currency: 'ZAR', tourType: '', cover: null, clearCover: false, vehicleColumns: [] });
 const omitFields = (row, fields) => Object.fromEntries(
   Object.entries(row).filter(([key]) => !fields.includes(key))
 );
@@ -64,6 +64,7 @@ export const Packages = () => {
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState(emptyDraft);
   const [vehicleTypes, setVehicleTypes] = useState([]);
+  const [tourTypes, setTourTypes] = useState([]);
   const { currencies } = useCurrencies();
   const lastLoadError = useRef('');
 
@@ -77,7 +78,7 @@ export const Packages = () => {
       const { data: profile, error: profileErr } = await supabase.from('profiles').select('company_id').eq('id', user.id).single();
       if (profileErr) throw profileErr;
       setCompanyId(scopeCompanyId(profile?.company_id) || null);
-      if (!scopeCompanyId(profile?.company_id)) { setRows([]); return; }
+      if (!scopeCompanyId(profile?.company_id)) { setRows([]); setTourTypes([]); return; }
       const { data: packages, error } = await supabase.from('packages').select('*').eq('company_id', scopeCompanyId(profile.company_id)).order('created_at', { ascending: false });
       if (error) throw error;
       /* The vehicle price columns are picked from the national list plus the
@@ -90,6 +91,18 @@ export const Packages = () => {
         .order(...VEHICLE_TYPES.orderBy);
       if (vehicleErr) throw vehicleErr;
       setVehicleTypes(mergeVocabulary(vehicleRes, VEHICLE_TYPES.keyColumn));
+      /* Active company tour types, with the shared national list merged in the
+         same way ClientTourForm reads it. The fallback keeps a workspace that
+         has not run the contract migration from losing the whole page. */
+      const readTourTypes = (columns) => supabase
+        .from(TOUR_TYPES.table)
+        .select(columns)
+        .or(vocabularyReadFilter(scopeCompanyId(profile.company_id)))
+        .order(...TOUR_TYPES.orderBy);
+      let tourTypeRes = await readTourTypes(TOUR_TYPES.columns);
+      if (tourTypeRes.error) tourTypeRes = await readTourTypes(TOUR_TYPES.baseColumns);
+      if (tourTypeRes.error) throw tourTypeRes.error;
+      setTourTypes(vocabularyNames(tourTypeRes.data));
       const packageIds = (packages || []).map((pkg) => pkg.id);
       if (!packageIds.length) { setRows([]); return; }
 
@@ -190,6 +203,7 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
       name: pkg.name || '',
       description: pkg.description || '',
       currency: String(pkg.currency_code || 'ZAR').toUpperCase(),
+      tourType: pkg.tour_type || '',
       cover: null,
       clearCover: false,
       vehicleColumns: Array.isArray(pkg.vehicle_columns) ? pkg.vehicle_columns : []
@@ -201,6 +215,7 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
     event.preventDefault();
     if (!companyId) { showToast('Company not found', 'error'); return; }
     if (!draft.name.trim()) { showToast('Enter a package name', 'warning'); return; }
+    if (!draft.tourType) { showToast('Choose the tour type this package is sold under', 'warning'); return; }
     const currency = String(draft.currency || 'ZAR').trim().toUpperCase();
     if (lockedCurrencies.length && !lockedCurrencies.includes(currency)) {
       showToast(`This package already has ${lockedCurrencies.join(', ')} priced on it, so it cannot be changed to ${currency}. Remove those services first, or create a new package.`, 'warning');
@@ -216,6 +231,7 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
           name: draft.name.trim(),
           description: draft.description.trim(),
           currency_code: currency,
+          tour_type: draft.tourType,
           vehicle_columns: draft.vehicleColumns,
           cover_image_url: coverUrl
         }).eq('id', editingPkg.id).eq('company_id', companyId);
@@ -224,7 +240,7 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
       }
       const { data: pkg, error } = await supabase.from('packages').insert({
         company_id: companyId, name: draft.name.trim(), description: draft.description,
-        currency_code: currency, vehicle_columns: draft.vehicleColumns,
+        currency_code: currency, tour_type: draft.tourType, vehicle_columns: draft.vehicleColumns,
         created_by: userId, created_by_name: currentUserName || null
       }).select().single();
       if (error) throw error;
@@ -369,6 +385,7 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
         return <tr key={pkg.id}>
           <td>
             <button type="button" className="package-list-name" onClick={() => navigate(`/packages/view/${pkg.id}`)}>{pkg.name}</button>
+            {pkg.tour_type && <small style={{ display: 'block', marginTop: '0.2rem', color: '#64748b' }}>Tour type: {pkg.tour_type}</small>}
             {pkg.transferred_from_name && (
               <small title={`Transferred from ${pkg.transferred_from_name} to ${pkg.transferred_to_name || pkg.created_by_name || 'this consultant'}`} style={{ display: 'block', marginTop: '0.2rem', color: '#92400e' }}>
                 Transferred from {pkg.transferred_from_name} to {pkg.transferred_to_name || pkg.created_by_name || 'this consultant'}
@@ -403,6 +420,15 @@ const lockedCurrencies = editingPkg ? currenciesAlreadyUsed(editingPkg) : [];
       <div className="modal-header"><div><h2>{editingPkg ? 'Edit Package' : 'Create Package'}</h2><p>{editingPkg ? 'Update the package name, overview, or cover image.' : 'Add the basic details, then build the package.'}</p></div><button type="button" className="close-btn" onClick={() => { setModal(false); setEditingPkg(null); }} disabled={saving}><X size={20} /></button></div>
       <div className="package-form-scroll">
         <label className="package-field"><span>Package name *</span><input required maxLength={160} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Cape Winelands Escape" /></label>
+        <label className="package-field"><span>Tour type *</span>
+          <select required value={draft.tourType} onChange={(e) => setDraft({ ...draft, tourType: e.target.value })}>
+            <option value="">Choose a tour type…</option>
+            {tourTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+          </select>
+          <small className="package-currency-help">{tourTypes.length
+            ? 'This is the type a series or itinerary will match when it decides which contract prices the package.'
+            : 'No active tour types yet. Add them in Settings, then return here.'}</small>
+        </label>
         <label className="package-field package-currency-field"><span>Package currency *</span>
           <select required value={draft.currency} disabled={lockedCurrencies.length > 0} title={lockedCurrencies.length ? 'This package already has priced services in this currency, so it cannot change.' : 'The package is priced in this currency. The builder only offers library items priced in it.'} onChange={(e) => setDraft({ ...draft, currency: e.target.value.toUpperCase() })}>
             {currencyOptions.map((currency) => <option key={currency.code} value={currency.code}>{currency.code} - {currency.name}</option>)}

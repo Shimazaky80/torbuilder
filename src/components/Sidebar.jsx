@@ -21,10 +21,12 @@ import {
   ChevronRight,
   Plane,
   ShieldCheck,
-  CalendarRange
+  CalendarRange,
+  KeyRound
 } from 'lucide-react';
 import tLogo from '../assets/t_logo.png';
 import fullLogo from '../assets/full_logo.png';
+import CredentialsDialog from './CredentialsDialog';
 
 /* The menu is the company's work cut into the same modules the roles are
    written against (src/lib/rbac.js). An entry the account cannot reach is not
@@ -49,6 +51,7 @@ const navItems = [
 
 export const Sidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [credentialsOpen, setCredentialsOpen] = useState(false);
   const navigate = useNavigate();
   const { requestNavigate } = useNavigationGuard();
   const { name, roleName, isPlatformAdmin, can, companies, viewingCompany, setViewingCompany } = useSession();
@@ -129,12 +132,29 @@ export const Sidebar = () => {
               </div>
             </div>
           )}
+          {!isCollapsed && (
+            <button
+              type="button"
+              onClick={() => setCredentialsOpen(true)}
+              title="Account credentials"
+              aria-label="Account credentials"
+              style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '30px', height: '30px', padding: 0, borderRadius: '0.4rem', background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.25)', color: 'white', cursor: 'pointer' }}
+            >
+              <KeyRound size={16} />
+            </button>
+          )}
         </div>
         <button className="logout-btn" onClick={handleLogout} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.75rem', borderRadius: '0.5rem', background: 'none', border: 'none', color: 'white', cursor: 'pointer', transition: 'all 0.2s' }}>
           <LogOut size={20} />
           {!isCollapsed && <span>Logout</span>}
         </button>
       </div>
+      <CredentialsDialog
+        key={credentialsOpen ? 'credentials-open' : 'credentials-closed'}
+        open={credentialsOpen}
+        mode="self"
+        onClose={() => setCredentialsOpen(false)}
+      />
     </aside>
   );
 };

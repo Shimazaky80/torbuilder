@@ -127,8 +127,16 @@ aside.sidebar:not(.collapsed) .logo-full {
 }
 
 .sidebar-menu {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 1rem 0;
+}
+
+/* The footer holds the tenant picker, user details and logout. It must stay at
+   the bottom even when the menu is long and the viewport is short. */
+.sidebar .sidebar-footer {
+  flex: 0 0 auto;
 }
 
 .nav-item {
@@ -158,6 +166,34 @@ aside.sidebar:not(.collapsed) .logo-full {
 .logout-btn:hover {
   background-color: #ef4444 !important;
   color: white;
+}
+
+/* Short Windows viewports: tighten the fixed chrome so the menu scrolls and the
+   account/logout footer still fits without clipping. */
+@media (max-height: 720px) {
+  .sidebar-header {
+    padding: 1rem 1.5rem;
+  }
+
+  .sidebar-menu {
+    padding: 0.5rem 0;
+  }
+
+  .sidebar .nav-item {
+    padding: 0.65rem 1.5rem;
+  }
+
+  .sidebar .nav-item.active {
+    padding-left: calc(1.5rem - 4px);
+  }
+
+  .sidebar .sidebar-footer {
+    padding: 1rem 1.5rem !important;
+  }
+
+  .sidebar .sidebar-footer .user-profile {
+    margin-bottom: 0.6rem !important;
+  }
 }
 
 .main-content {
@@ -2522,6 +2558,70 @@ aside.sidebar:not(.collapsed) .logo-full {
   background: #fff;
   color: var(--primary-color);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* Reorderable section tabs (Settings, Analytics). Scoped to these classes so
+   .tab-btn, .builder-tab and .package-builder-tabs keep their own looks. */
+.sortable-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1.5rem 0;
+  padding: 4px;
+  border-radius: 12px;
+  background: #e2e8f0;
+}
+
+.sortable-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: grab;
+  transition: all 0.2s;
+}
+
+.sortable-tab:hover {
+  background: #f8fafc;
+  color: var(--primary-color);
+}
+
+.sortable-tab:active {
+  cursor: grabbing;
+}
+
+.sortable-tab:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.sortable-tab.active {
+  background: #e6f5f3;
+  color: var(--primary-color);
+  font-weight: 700;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.sortable-tab.drag-over {
+  border-color: var(--primary-color);
+  border-style: dashed;
+  background: #f0fdfa;
+}
+
+.sortable-tab-drag-icon {
+  flex-shrink: 0;
+  color: #94a3b8;
+}
+
+.sortable-tab.active .sortable-tab-drag-icon {
+  color: var(--primary-color);
 }
 
 /* Builder sub-panels (client / pricing / notes) */

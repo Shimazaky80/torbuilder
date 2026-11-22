@@ -2,12 +2,16 @@ import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Building2, LockKeyhole, Mail } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { useToast } from '../context/ToastContext';
 
 export const PartnerLogin = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [sending, setSending] = useState(false);
   const { showToast } = useToast();
   const navigate = useNavigate();
 
@@ -62,6 +66,24 @@ export const PartnerLogin = () => {
     }
   };
 
+  const handleForgotPassword = async (event) => {
+    event.preventDefault();
+    setSending(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim(), {
+        redirectTo: appUrl('/reset-password?next=/partner/login')
+      });
+      if (error) throw error;
+      showToast('A password reset link has been sent to your email.', 'success', 'Reset link sent.');
+      setShowForgot(false);
+      setForgotEmail('');
+    } catch (err) {
+      showToast(err.message || 'The reset link could not be sent.', 'error');
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <main className="login-page">
       <section className="login-left" style={{ maxWidth: '480px' }}>
@@ -72,39 +94,75 @@ export const PartnerLogin = () => {
             Sign in with your partner credentials to view tariffs, build quotations, and request bookings.
           </p>
         </div>
-        <form onSubmit={handleLogin} className="auth-form">
-          <label className="form-group">
-            <span>Partner Email Address</span>
-            <div className="input-with-icon">
-              <Mail size={18} />
-              <input
-                type="email"
-                autoComplete="email"
-                placeholder="your.email@agency.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-          </label>
-          <label className="form-group">
-            <span>Password</span>
-            <div className="input-with-icon">
-              <LockKeyhole size={18} />
-              <input
-                type="password"
-                autoComplete="current-password"
-                placeholder="Enter your password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-          </label>
-          <button className="primary-btn" disabled={loading}>
-            {loading ? 'Signing in...' : 'Sign in to Partner Portal'}
-          </button>
-        </form>
+        {!showForgot ? (
+          <form onSubmit={handleLogin} className="auth-form">
+            <label className="form-group">
+              <span>Partner Email Address</span>
+              <div className="input-with-icon">
+                <Mail size={18} />
+                <input
+                  type="email"
+                  autoComplete="email"
+                  placeholder="your.email@agency.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              </div>
+            </label>
+            <label className="form-group">
+              <span>Password</span>
+              <div className="input-with-icon">
+                <LockKeyhole size={18} />
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  placeholder="Enter your password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
+            </label>
+            <button className="primary-btn" disabled={loading}>
+              {loading ? 'Signing in...' : 'Sign in to Partner Portal'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setForgotEmail(email); setShowForgot(true); }}
+              style={{ border: 'none', background: 'none', color: '#0d7478', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              Forgot password?
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleForgotPassword} className="auth-form">
+            <label className="form-group">
+              <span>Forgot your password?</span>
+              <div className="input-with-icon">
+                <Mail size={18} />
+                <input
+                  type="email"
+                  autoComplete="email"
+                  placeholder="Enter your registered partner email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  required
+                />
+              </div>
+            </label>
+            <button className="primary-btn" disabled={sending}>
+              {sending ? 'Sending reset link...' : 'Send Reset Link'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowForgot(false)}
+              style={{ border: 'none', background: 'none', color: '#64748b', cursor: 'pointer' }}
+            >
+              Back to login
+            </button>
+          </form>
+        )}
         <div style={{ marginTop: '1.5rem', textAlign: 'center', fontSize: '0.88rem', color: '#64748b' }}>
           Need tour operator login? <Link to="/login" style={{ color: '#0d7478', fontWeight: 600 }}>Tour Operator Login</Link>
         </div>
