@@ -48,7 +48,9 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.3",
+    "docxtemplater": "^3.71.1",
     "lucide-react": "^1.8.0",
+    "pizzip": "^3.3.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hook-form": "^7.72.1",

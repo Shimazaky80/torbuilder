@@ -193,8 +193,40 @@ import {
   statementCsv,
   statementExcelHtml
 } from '../lib/statementOfAccount';
+import { DOCUMENT_TEMPLATE_FIELDS, isDocumentTemplateTableMissing, normalizeDocumentTemplate } from '../lib/documentTemplates';
+import {
+  ITINERARY_DOCX_MIME_TYPE,
+  ITINERARY_DOCX_PLACEHOLDER_GROUPS,
+  TORBUILDER_DEFAULT_TEMPLATE_ID,
+  buildItineraryTemplateData,
+  isItineraryDocxTemplate,
+  itineraryTemplateChoiceStorageKey,
+  resolveItineraryTemplateChoice
+} from '../lib/itineraryTemplateData';
+import { itineraryDocxBlob, itineraryDocxFileName, renderItineraryDocxBytes } from '../lib/itineraryDocxMerge';
 
 /* --- Pure helpers ----------------------------------------------------------- */
+
+/* Uploaded templates live in the existing tenant-scoped contracts bucket. A
+   saved public URL is a fallback for older rows written without a storage path. */
+const loadItineraryTemplateBlob = async (template) => {
+  if (!isItineraryDocxTemplate(template)) {
+    throw new Error('Only .docx templates can be merged. Use TorBuilder default or upload a .docx file.');
+  }
+  if (template?.file_path) {
+    const { data, error } = await supabase.storage.from('contracts').download(template.file_path);
+    if (error) throw new Error(error.message || 'The saved template could not be downloaded.');
+    if (!data) throw new Error('The saved template could not be downloaded.');
+    return data;
+  }
+  if (template?.file_url) {
+    const response = await fetch(template.file_url);
+    if (!response.ok) throw new Error('The saved template could not be downloaded.');
+    return response.blob();
+  }
+  throw new Error('The saved template has no file attached.');
+};
+
 
 const toISODate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 
@@ -1797,6 +1829,69 @@ export const ItineraryBuilder = () => {
   /* What goes into the exported document. Every box starts on the way the
      document reads by default; the operator decides each time they export. */
   const [exportOptions, setExportOptions] = useState(DEFAULT_EXPORT_OPTIONS);
+  /* Saved itinerary templates are an export choice, never a replacement for the
+     built-in document. The sentinel stays in the list even when the workspace has
+     no templates, so switching back is always one click away. */
+  const [itineraryTemplates, setItineraryTemplates] = useState([]);
+  const [exportTemplateChoice, setExportTemplateChoice] = useState(TORBUILDER_DEFAULT_TEMPLATE_ID);
+  const mergeableTemplates = useMemo(
+    () => itineraryTemplates.filter(isItineraryDocxTemplate),
+    [itineraryTemplates]
+  );
+  const selectedExportTemplate = useMemo(() => {
+    if (exportTemplateChoice === TORBUILDER_DEFAULT_TEMPLATE_ID) return null;
+    return itineraryTemplates.find((template) => String(template.id) === String(exportTemplateChoice)) || null;
+  }, [exportTemplateChoice, itineraryTemplates]);
+
+  useEffect(() => {
+    let active = true;
+    const loadTemplates = async () => {
+      if (!companyId) {
+        setItineraryTemplates([]);
+        setExportTemplateChoice(TORBUILDER_DEFAULT_TEMPLATE_ID);
+        return;
+      }
+      const { data, error } = await supabase
+        .from('document_templates')
+        .select(DOCUMENT_TEMPLATE_FIELDS)
+        .eq('company_id', companyId)
+        .eq('document_type', 'itinerary')
+        .eq('is_active', true)
+        .order('is_default', { ascending: false })
+        .order('name', { ascending: true });
+      if (!active) return;
+      if (error && !isDocumentTemplateTableMissing(error)) {
+        showToast(`Could not load document templates: ${error.message}`, 'warning');
+      }
+      const templates = (data || []).map(normalizeDocumentTemplate);
+      let storedChoice = '';
+      try {
+        if (typeof window !== 'undefined') {
+          storedChoice = window.localStorage.getItem(itineraryTemplateChoiceStorageKey(companyId)) || '';
+        }
+      } catch {
+        storedChoice = '';
+      }
+      setItineraryTemplates(templates);
+      setExportTemplateChoice(resolveItineraryTemplateChoice({
+        templates: templates.filter(isItineraryDocxTemplate),
+        storedChoice
+      }));
+    };
+    void loadTemplates();
+    return () => { active = false; };
+  }, [companyId, showToast]);
+
+  const chooseExportTemplate = useCallback((choice) => {
+    setExportTemplateChoice(choice);
+    if (!companyId || typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(itineraryTemplateChoiceStorageKey(companyId), choice);
+    } catch {
+      /* A blocked or full localStorage must not stop the export itself. */
+    }
+  }, [companyId]);
+
   const openExportDialog = () => {
     setExportOptions({ ...DEFAULT_EXPORT_OPTIONS });
     setExportFormat(itineraryDocAllowed ? 'pdf' : 'excel');
@@ -5782,7 +5877,7 @@ return !!sv.time; /* activities / meals / other */
   /* The chosen format and the boxes ticked in the Export dialog are handed over as
      arguments rather than read from state: the document is built from the choices
      made when the button was pressed, not from whatever the dialog holds later. */
-  const handleExport = useCallback((format, sections = DEFAULT_EXPORT_OPTIONS) => {
+  const handleExport = useCallback(async (format, sections = DEFAULT_EXPORT_OPTIONS) => {
     setExportDialog(false);
     const allocCheck = validateAllRoomAllocations();
     if (!allocCheck.isValid) {
@@ -6381,6 +6476,147 @@ return !!sv.time; /* activities / meals / other */
         + `<td${n}>${num(r.tax)}</td><td${n}><b>${num(r.incl)}</b></td></tr>`).join('');
     };
 
+    /* The saved-template merge reads the same rows the built-in document uses,
+       but hands them over as a named contract rather than as HTML. The operator
+       decides which of these names appear in their .docx; every one is listed in
+       the Export dialog. */
+    const buildItineraryTemplatePayload = () => {
+      const pricingRowsOf = (grp) => {
+        if (perPersonView === 'categorySummary') {
+          return categorySummaryRows(grp).map((row) => ({
+            currency: grp.code,
+            day: row.day,
+            date: row.date,
+            description: [row.category, row.service].filter(Boolean).join(': '),
+            qty: '',
+            unit: M(row.buy, grp.symbol),
+            subtotal_excl: M(row.sellWithoutMarkup, grp.symbol),
+            tax: M(row.tax, grp.symbol),
+            total_incl: M(row.sellWithMarkup, grp.symbol)
+          }));
+        }
+        if (perPerson) {
+          return ppRows(grp).map(([day, date, label, qty, unit, subExcl, tax, incl]) => ({
+            currency: grp.code,
+            day,
+            date,
+            description: label,
+            qty,
+            unit: M(unit, grp.symbol),
+            subtotal_excl: M(subExcl, grp.symbol),
+            tax: M(tax, grp.symbol),
+            total_incl: M(incl, grp.symbol)
+          }));
+        }
+        return dayRowsOf(grp).map((row) => ({
+          currency: grp.code,
+          day: dayHeading(row.day),
+          date: row.date,
+          description: rowDesc(row),
+          qty: row.qty,
+          unit: M(round2(row.unit), grp.symbol),
+          subtotal_excl: M(row.subExcl, grp.symbol),
+          tax: M(row.tax, grp.symbol),
+          total_incl: M(row.sell, grp.symbol)
+        }));
+      };
+      const optionalRowsOfGroup = (grp) => (include.optionalExtras ? optionalRowsOf(grp).map((row) => ({
+        currency: grp.code,
+        day: dayHeading(row.day),
+        date: row.date,
+        description: `${rowDesc(row)}${/accommodation/i.test(row.category || '') ? ` ${L('doc.alternativeSuffix')}` : ` ${L('doc.optionalSuffix')}`}`,
+        qty: paxCount,
+        unit: M(round2(row.unit), grp.symbol),
+        subtotal_excl: M(row.subExcl, grp.symbol),
+        tax: M(row.tax, grp.symbol),
+        total_incl: M(row.sell, grp.symbol)
+      })) : []);
+      const pricingTotals = groups.map((grp) => ({
+        currency: grp.code,
+        subtotal_excl: showTripTotals && perPersonView !== 'categorySummary' ? M(grp.totalExcl, grp.symbol) : '',
+        tax_label: showTripTotals && perPersonView !== 'categorySummary'
+          ? `${taxWordUp(grp.code)} (${taxLine(grp.code, taxLabel, taxRateOf(grp.code))} ${taxRateOf(grp.code)}%)`
+          : '',
+        tax: showTripTotals && perPersonView !== 'categorySummary' ? M(grp.totalTax, grp.symbol) : '',
+        total_due: showTripTotals && perPersonView !== 'categorySummary' ? M(grp.totalInclTax, grp.symbol) : ''
+      }));
+      const daySections = include.itinerary ? (days || []).map((day, index) => {
+        const number = day.dayNumber || index + 1;
+        const services = (day.services || [])
+          .filter((sv) => !isFeeLevyOrTollItem(sv))
+          .map((sv) => rowDesc({
+            name: sv.name || L('doc.service'),
+            category: sv.category || '',
+            mealPlan: sv.mealPlan || '',
+            roomType: /accommodation/i.test(sv.category || '') ? allocatedRoomTypeLabel(sv) : '',
+            supplierName: '',
+            supplierStar: supplierStarOfService(sv, libraryItems)
+          }))
+          .filter(Boolean);
+        return {
+          day: number,
+          heading: dayDestinationHeading(day, number, lang),
+          date: day.date ? dateOf(day.date) : '',
+          route: dayRoute(day, days[index - 1], lang),
+          end: dayEndLabel(day, lang),
+          notes: localizedText(day, 'notes', lang).trim(),
+          services: services.join('\n')
+        };
+      }) : [];
+      const inclusionRows = itineraryBlocks.some((block) => block.key === 'inclusions')
+        ? [
+          ...defaultInclusionItems.map((text) => ({ text })),
+          ...dynamicInclusions.map((row) => ({ text: `${row.qty > 1 ? `${row.qty} x ` : ''}${row.label}` }))
+        ]
+        : [];
+      const exclusionText = itineraryBlocks.find((block) => block.key === 'exclusions')?.text || '';
+      const exclusionRows = exclusionText
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\s*[-*•–—✘\u2718]\s*/, '').trim())
+        .filter(Boolean)
+        .map((text) => ({ text }));
+      const travellers = include.travellers
+        ? (meta.travellers || []).filter((tr) => travellerName(tr)).map((tr) => ({
+          name: travellerName(tr),
+          notes: String(tr.notes || '').trim()
+        }))
+        : [];
+      const allPricingRows = include.pricing ? groups.flatMap(pricingRowsOf) : [];
+      const client = meta.client || {};
+      const companyContact = [
+        [L('doc.fieldTel'), [coTel, coCell].filter(Boolean).join(' · ')],
+        [L('doc.fieldEmail'), String(billing?.contact_email || '').trim()],
+        [L('doc.fieldWeb'), String(billing?.contact_website || '').trim()]
+      ].filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`).join('\n');
+
+      return buildItineraryTemplateData({
+        reference: meta.referenceNumber || '',
+        itinerary_name: meta.itineraryName || '',
+        client_name: client.name || '',
+        client_address: String(client.address || '').trim(),
+        consultant_name: designerName === '—' ? '' : designerName,
+        travel_dates: timingOf(meta),
+        status: statusWord(meta.status),
+        travellers_count: paxWord,
+        travellers,
+        generated_by: L('doc.generatedBy'),
+        company_name: companyNameOf(billing),
+        company_address: billing?.billing_address || '',
+        company_contact: companyContact,
+        currency_code: groups[0]?.code || currencyCode,
+        currency_symbol: groups[0]?.symbol || currencySymbol,
+        pricing_summary: groups.map((grp) => `${grp.code}${grp.name ? ` - ${grp.name}` : ''}: ${M(grp.totalInclTax, grp.symbol)}`).join('\n'),
+        terms: itineraryBlocks.find((block) => block.key === 'terms')?.text || '',
+        inclusion_rows: inclusionRows,
+        exclusion_rows: exclusionRows,
+        day_sections: daySections,
+        day_rows: allPricingRows,
+        pricing_rows: allPricingRows,
+        pricing_totals: include.pricing ? pricingTotals : [],
+        optional_rows: groups.flatMap(optionalRowsOfGroup)
+      });
+    };
+
     if (format === 'excel') {
       const lines = [
         `"${L('doc.itinerary')}: ${csvEscape(meta.itineraryName)}"`,
@@ -6458,6 +6694,25 @@ return !!sv.time; /* activities / meals / other */
     }
 
     if (format === 'word') {
+      /* A chosen saved template produces a real .docx. If it is missing,
+         corrupted or not a .docx, the operator still gets the original document
+         rather than a failed export - and the Export dialog always offers the
+         original as its own choice. */
+      if (selectedExportTemplate) {
+        try {
+          const templateBlob = await loadItineraryTemplateBlob(selectedExportTemplate);
+          const arrayBuffer = await templateBlob.arrayBuffer();
+          const docxBytes = renderItineraryDocxBytes({
+            arrayBuffer,
+            data: buildItineraryTemplatePayload()
+          });
+          downloadBlob(itineraryDocxBlob(docxBytes), itineraryDocxFileName(ref), ITINERARY_DOCX_MIME_TYPE);
+          showToast(`Itinerary exported with ${selectedExportTemplate.name}`, 'success');
+          return;
+        } catch (error) {
+          showToast(`${error.message || 'The saved template could not be used.'} Using TorBuilder default.`, 'warning');
+        }
+      }
       /* Word carries no stylesheet, so a right-aligned column is written on the
          cell itself. Counts and money both sit on the right, which is how a client
          reads a column of figures as one figure per line. */
@@ -6563,7 +6818,7 @@ return !!sv.time; /* activities / meals / other */
       setTimeout(() => w.print(), 350);
       showToast('Itinerary PDF opened in a new window', 'success');
     }
-  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent, monthTimed, exportLang, contractType, libraryItems, loggedInUserName, openRoomAllocationModal, stage, taxAppliesForCurrency, validateAllRoomAllocations]);
+  }, [meta, days, paxCount, pricingGroups, currencyCode, currencySymbol, defaultTaxLabel, defaultTaxRate, downloadBlob, showToast, billing, travelWindow, priceProtectionPercent, monthTimed, exportLang, contractType, libraryItems, loggedInUserName, openRoomAllocationModal, stage, taxAppliesForCurrency, validateAllRoomAllocations, selectedExportTemplate]);
 
   const handleSave = useCallback(async ({ silent = false } = {}) => {
     if (isReadOnly && !(isProvisional && mayEditItinerary)) {
@@ -12001,6 +12256,50 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                       </select>
                     </div>
                   )}
+                  <div className="package-export-options">
+                    <span className="package-export-subhead">Document template</span>
+                    <select
+                      className="pricing-select"
+                      aria-label="Itinerary document template"
+                      value={exportTemplateChoice}
+                      onChange={(event) => chooseExportTemplate(event.target.value)}
+                    >
+                      <option value={TORBUILDER_DEFAULT_TEMPLATE_ID}>TorBuilder default (original)</option>
+                      {itineraryTemplates.map((template) => (
+                        <option key={template.id} value={template.id} disabled={!isItineraryDocxTemplate(template)}>
+                          {template.name}{template.is_default ? ' (default)' : ''}
+                          {isItineraryDocxTemplate(template) ? '' : ' - PDF/DOC reference only'}
+                        </option>
+                      ))}
+                    </select>
+                    <small style={{ color: '#64748b', fontWeight: 400 }}>
+                      {mergeableTemplates.length
+                        ? `${mergeableTemplates.length} saved .docx template${mergeableTemplates.length === 1 ? '' : 's'} ready to merge. Word exports only: PDF and Excel always use the TorBuilder document.`
+                        : 'No mergeable .docx template yet. Word exports use the TorBuilder document until one is uploaded.'}
+                    </small>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      style={{ marginTop: '0.35rem', padding: '0.35rem 0.6rem' }}
+                      disabled={exportTemplateChoice === TORBUILDER_DEFAULT_TEMPLATE_ID}
+                      onClick={() => chooseExportTemplate(TORBUILDER_DEFAULT_TEMPLATE_ID)}
+                    >
+                      Use TorBuilder default
+                    </button>
+                    <details style={{ marginTop: '0.4rem', color: '#475569' }}>
+                      <summary style={{ cursor: 'pointer' }}>Placeholders available in Word templates</summary>
+                      <div style={{ display: 'grid', gap: '0.35rem', marginTop: '0.4rem' }}>
+                        {ITINERARY_DOCX_PLACEHOLDER_GROUPS.map((group) => (
+                          <div key={group.title}>
+                            <b>{group.title}</b>
+                            <code style={{ display: 'block', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.72rem' }}>
+                              {group.placeholders.join('  ')}
+                            </code>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  </div>
                   <div className="package-export-options">
                     <span className="package-export-subhead">Include</span>
                     {EXPORT_SECTIONS

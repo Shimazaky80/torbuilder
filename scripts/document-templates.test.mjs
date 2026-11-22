@@ -1,3 +1,4 @@
+import PizZip from 'pizzip';
 import {
   DOCUMENT_TEMPLATE_MAX_BYTES,
   DOCUMENT_TEMPLATE_TYPES,
@@ -11,6 +12,14 @@ import {
   normalizeDocumentTemplateType,
   safeTemplateFileName
 } from '../src/lib/documentTemplates.js';
+import { renderItineraryDocxBytes } from '../src/lib/itineraryDocxMerge.js';
+import {
+  ITINERARY_DOCX_PLACEHOLDER_GROUPS,
+  TORBUILDER_DEFAULT_TEMPLATE_ID,
+  buildItineraryTemplateData,
+  isItineraryDocxTemplate,
+  resolveItineraryTemplateChoice
+} from '../src/lib/itineraryTemplateData.js';
 
 let failures = 0;
 const stable = (value) => {
@@ -87,6 +96,66 @@ check('an unrelated error is not hidden', isDocumentTemplateTableMissing({ code:
 check('small files read in bytes', documentTemplateFileSizeLabel(512), '512 B');
 check('kilobytes round to whole numbers', documentTemplateFileSizeLabel(2048), '2 KB');
 check('megabytes keep one decimal', documentTemplateFileSizeLabel(2.5 * 1024 * 1024), '2.5 MB');
+
+/* --- Itinerary merge contract ------------------------------------------------ */
+
+const mergeData = buildItineraryTemplateData({
+  reference: 'IT-100',
+  itinerary_name: 'Cape Town escape',
+  client_name: 'Acme Travel',
+  travellers: [
+    { name: 'Ada Lovelace', notes: 'VIP' },
+    { name: 'Grace Hopper', notes: '' }
+  ],
+  inclusion_rows: [{ text: 'Return flights' }, { text: 'Daily breakfast' }],
+  exclusion_rows: [{ text: 'Drinks' }],
+  day_rows: [
+    { day: 'Day 1', date: '2026-12-01', description: 'Safari', total_incl: 'R 1,000' },
+    { day: 'Day 2', date: '2026-12-02', description: 'City tour', total_incl: 'R 750' }
+  ],
+  pricing_totals: [{ currency: 'ZAR', total_due: 'R 1,750' }]
+});
+check('an unknown merge value becomes an empty string', mergeData.terms, '');
+check('merge rows are normalised to text', mergeData.day_rows[0], { day: 'Day 1', date: '2026-12-01', description: 'Safari', total_incl: 'R 1,000' });
+check('traveller names are available as one line', mergeData.traveller_names, 'Ada Lovelace\nGrace Hopper');
+check('inclusions are available as one line as well as a loop', mergeData.inclusions, 'Return flights\nDaily breakfast');
+check('pricing summary is derived from the currency totals', mergeData.pricing_summary, 'ZAR R 1,750');
+check('the currency follows the first priced group', mergeData.currency_code, 'ZAR');
+
+const scalarGroups = ITINERARY_DOCX_PLACEHOLDER_GROUPS.slice(0, 4);
+check('every advertised scalar placeholder has a data key', scalarGroups
+  .flatMap((group) => group.placeholders)
+  .map((name) => name.replace(/[{}]/g, ''))
+  .filter((key) => !(key in mergeData)), []);
+
+check('a docx template is mergeable', isItineraryDocxTemplate({ file_name: 'Brand.docx' }), true);
+check('a Word MIME type is mergeable', isItineraryDocxTemplate({ mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), true);
+check('a PDF template is not mergeable', isItineraryDocxTemplate({ file_name: 'Brand.pdf' }), false);
+check('a legacy doc is not mergeable', isItineraryDocxTemplate({ file_name: 'Brand.doc' }), false);
+
+const savedTemplates = [
+  { id: 'one', is_default: false },
+  { id: 'two', is_default: true }
+];
+check('the saved default is chosen when nothing was picked', resolveItineraryTemplateChoice({ templates: savedTemplates }), 'two');
+check('the original document stays a sticky choice', resolveItineraryTemplateChoice({ templates: savedTemplates, storedChoice: TORBUILDER_DEFAULT_TEMPLATE_ID }), TORBUILDER_DEFAULT_TEMPLATE_ID);
+check('a live stored choice is honoured', resolveItineraryTemplateChoice({ templates: savedTemplates, storedChoice: 'one' }), 'one');
+check('a deleted stored choice falls back to the default', resolveItineraryTemplateChoice({ templates: savedTemplates, storedChoice: 'gone' }), 'two');
+check('no templates means the original document', resolveItineraryTemplateChoice({ templates: [] }), TORBUILDER_DEFAULT_TEMPLATE_ID);
+
+const fixtureZip = new PizZip();
+fixtureZip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+fixtureZip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+fixtureZip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{reference}} - {{client_name}}</w:t></w:r></w:p><w:p><w:r><w:t>{{#day_rows}}{{day}}:{{description}};{{/day_rows}}</w:t></w:r></w:p><w:p><w:r><w:t>{{#inclusion_rows}}{{text}} / {{/inclusion_rows}}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>');
+const renderedBytes = renderItineraryDocxBytes({
+  arrayBuffer: fixtureZip.generate({ type: 'arraybuffer' }),
+  data: mergeData
+});
+const renderedXml = new PizZip(renderedBytes).file('word/document.xml').asText();
+check('the merge replaces single placeholders', renderedXml.includes('IT-100 - Acme Travel'), true);
+check('the merge repeats row placeholders', renderedXml.includes('Day 1:Safari;Day 2:City tour;'), true);
+check('the merge repeats text-list placeholders', renderedXml.includes('Return flights / Daily breakfast /'), true);
+check('the result is still a Word package', Boolean(new PizZip(renderedBytes).file('word/document.xml')), true);
 
 if (failures) {
   console.error(`\n${failures} document template checks failed.`);

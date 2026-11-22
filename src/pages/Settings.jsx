@@ -2796,7 +2796,7 @@ const handleSavePriceProtection = async () => {
         )}
 
         <p style={{ margin: '0.9rem 0 0', color: '#94a3b8', fontSize: '0.75rem', lineHeight: 1.5 }}>
-          Accepted files: PDF, DOC and DOCX, up to 30 MB. The document layout engine that consumes the default template ships in a future release; uploading a file here does not change generated documents yet.
+          Accepted files: PDF, DOC and DOCX, up to 30 MB. Itinerary merging uses .docx files with the placeholders listed in the Export dialog; PDF and DOC stay as reference copies. The Export dialog always offers TorBuilder&rsquo;s original document as well.
         </p>
       </div>
 

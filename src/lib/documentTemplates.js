@@ -7,8 +7,9 @@
    tenant policy already limits the first path segment to the signed-in
    company's UUID, so no new bucket is needed.
 
-   The layout engine that consumes the default template is a later release.
-   Nothing here claims an uploaded file already changes generated documents. */
+   Itinerary .docx files are consumed by the explicit merge contract in
+   itineraryTemplateData.js; the original TorBuilder document remains available
+   as an export choice, so a saved template is never a one-way switch. */
 
 export const DOCUMENT_TEMPLATE_TYPES = [
   { id: 'itinerary', label: 'Itinerary' },

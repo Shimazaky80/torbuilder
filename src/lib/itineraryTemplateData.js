@@ -1,0 +1,141 @@
+/* The explicit contract between an uploaded itinerary template and the data
+   TorBuilder puts into it. A template is not reverse-engineered from the built-in
+   document: the operator writes the placeholders listed here into a .docx file,
+   and the merge engine fills only those names.
+
+   The built-in document is never removed. `TORBUILDER_DEFAULT_TEMPLATE_ID` is a
+   permanent export choice, so an operator who no longer wants a saved template
+   can switch back without deleting it. */
+
+export const ITINERARY_DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+export const TORBUILDER_DEFAULT_TEMPLATE_ID = 'torbuilder-default';
+
+export const ITINERARY_DOCX_PLACEHOLDER_GROUPS = [
+  {
+    title: 'Trip details',
+    placeholders: [
+      '{{reference}}',
+      '{{itinerary_name}}',
+      '{{client_name}}',
+      '{{client_address}}',
+      '{{consultant_name}}',
+      '{{travel_dates}}',
+      '{{status}}',
+      '{{travellers_count}}',
+      '{{traveller_names}}',
+      '{{generated_by}}'
+    ]
+  },
+  {
+    title: 'Company details',
+    placeholders: ['{{company_name}}', '{{company_address}}', '{{company_contact}}']
+  },
+  {
+    title: 'Pricing',
+    placeholders: ['{{currency_code}}', '{{currency_symbol}}', '{{pricing_summary}}']
+  },
+  {
+    title: 'Text blocks',
+    placeholders: ['{{terms}}', '{{inclusions}}', '{{exclusions}}']
+  },
+  {
+    title: 'Repeating blocks',
+    placeholders: [
+      '{{#travellers}}{{name}}{{notes}}{{/travellers}}',
+      '{{#day_sections}}{{heading}}{{date}}{{route}}{{end}}{{notes}}{{services}}{{/day_sections}}',
+      '{{#day_rows}}{{day}}{{date}}{{description}}{{qty}}{{unit}}{{subtotal_excl}}{{tax}}{{total_incl}}{{/day_rows}}',
+      '{{#pricing_rows}}{{currency}}{{day}}{{date}}{{description}}{{qty}}{{unit}}{{subtotal_excl}}{{tax}}{{total_incl}}{{/pricing_rows}}',
+      '{{#pricing_totals}}{{currency}}{{subtotal_excl}}{{tax_label}}{{tax}}{{total_due}}{{/pricing_totals}}',
+      '{{#optional_rows}}{{day}}{{date}}{{description}}{{qty}}{{unit}}{{subtotal_excl}}{{tax}}{{total_incl}}{{/optional_rows}}',
+      '{{#inclusion_rows}}{{text}}{{/inclusion_rows}}',
+      '{{#exclusion_rows}}{{text}}{{/exclusion_rows}}'
+    ]
+  }
+];
+
+const asText = (value) => (value === null || value === undefined ? '' : String(value));
+
+const asRow = (row) => Object.fromEntries(
+  Object.entries(row && typeof row === 'object' ? row : {})
+    .map(([key, value]) => [key, asText(value)])
+);
+
+const asRows = (rows) => (Array.isArray(rows) ? rows.map(asRow) : []);
+
+const joinRows = (rows, key) => rows
+  .map((row) => asText(row[key]))
+  .filter(Boolean)
+  .join('\n');
+
+/* Unknown or missing values become empty strings rather than literal `{{...}}`
+   text in the finished Word file. Everything is stringified here so a rendered
+   row can never hand an object to the templater by accident. */
+export const buildItineraryTemplateData = (source = {}) => {
+  const travellers = asRows(source.travellers);
+  const daySections = asRows(source.day_sections);
+  const dayRows = asRows(source.day_rows);
+  const pricingRows = asRows(source.pricing_rows);
+  const pricingTotals = asRows(source.pricing_totals);
+  const optionalRows = asRows(source.optional_rows);
+  const inclusionRows = asRows(source.inclusion_rows);
+  const exclusionRows = asRows(source.exclusion_rows);
+  const text = (key) => asText(source[key]);
+
+  return {
+    reference: text('reference'),
+    itinerary_name: text('itinerary_name'),
+    client_name: text('client_name'),
+    client_address: text('client_address'),
+    consultant_name: text('consultant_name'),
+    travel_dates: text('travel_dates'),
+    status: text('status'),
+    travellers_count: text('travellers_count'),
+    traveller_names: text('traveller_names') || joinRows(travellers, 'name'),
+    generated_by: text('generated_by'),
+
+    company_name: text('company_name'),
+    company_address: text('company_address'),
+    company_contact: text('company_contact'),
+
+    currency_code: text('currency_code') || pricingTotals[0]?.currency || '',
+    currency_symbol: text('currency_symbol') || '',
+    pricing_summary: text('pricing_summary') || pricingTotals
+      .map((row) => [row.currency, row.total_due].filter(Boolean).join(' '))
+      .filter(Boolean)
+      .join('\n'),
+
+    terms: text('terms'),
+    inclusions: text('inclusions') || joinRows(inclusionRows, 'text'),
+    exclusions: text('exclusions') || joinRows(exclusionRows, 'text'),
+
+    travellers,
+    day_sections: daySections,
+    day_rows: dayRows,
+    pricing_rows: pricingRows,
+    pricing_totals: pricingTotals,
+    optional_rows: optionalRows,
+    inclusion_rows: inclusionRows,
+    exclusion_rows: exclusionRows
+  };
+};
+
+/* A PDF or legacy .doc can still be kept as a reference document, but only a
+   .docx can be opened by the merge engine. */
+export const isItineraryDocxTemplate = (template) => {
+  const fileName = [template?.file_name, template?.file_path].filter(Boolean).join(' ');
+  return /\.docx$/i.test(fileName) || /wordprocessingml/i.test(asText(template?.mime_type));
+};
+
+export const itineraryTemplateChoiceStorageKey = (companyId) => `torbuilder:itinerary-export-template:${asText(companyId)}`;
+
+/* A stored choice wins while it still points at a live template; otherwise the
+   saved default is used, and the original document is the final fallback. The
+   caller passes only mergeable templates so a PDF default cannot take over. */
+export const resolveItineraryTemplateChoice = ({ templates = [], storedChoice = '' } = {}) => {
+  const saved = asText(storedChoice);
+  if (saved === TORBUILDER_DEFAULT_TEMPLATE_ID) return TORBUILDER_DEFAULT_TEMPLATE_ID;
+  const available = Array.isArray(templates) ? templates : [];
+  if (saved && available.some((template) => asText(template.id) === saved)) return saved;
+  const defaultTemplate = available.find((template) => template.is_default === true);
+  return defaultTemplate ? asText(defaultTemplate.id) || TORBUILDER_DEFAULT_TEMPLATE_ID : TORBUILDER_DEFAULT_TEMPLATE_ID;
+};
