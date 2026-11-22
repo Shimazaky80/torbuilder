@@ -126,15 +126,23 @@ export const isItineraryDocxTemplate = (template) => {
   return /\.docx$/i.test(fileName) || /wordprocessingml/i.test(asText(template?.mime_type));
 };
 
+/* A Word file saved under another document type is still a valid company
+   template, but it is not part of the itinerary export contract. Both checks
+   are deliberate: the Export dialog can then explain why a saved file is only
+   shown as a disabled reference instead of silently hiding it. */
+export const isMergeableItineraryTemplate = (template) => (
+  template?.document_type === 'itinerary' && isItineraryDocxTemplate(template)
+);
+
 export const itineraryTemplateChoiceStorageKey = (companyId) => `torbuilder:itinerary-export-template:${asText(companyId)}`;
 
-/* A stored choice wins while it still points at a live template; otherwise the
-   saved default is used, and the original document is the final fallback. The
-   caller passes only mergeable templates so a PDF default cannot take over. */
+/* A stored choice wins while it still points at a live, mergeable template;
+   otherwise the saved default is used, and the original document is the final
+   fallback. Only itinerary .docx files can take over the Word export. */
 export const resolveItineraryTemplateChoice = ({ templates = [], storedChoice = '' } = {}) => {
   const saved = asText(storedChoice);
   if (saved === TORBUILDER_DEFAULT_TEMPLATE_ID) return TORBUILDER_DEFAULT_TEMPLATE_ID;
-  const available = Array.isArray(templates) ? templates : [];
+  const available = (Array.isArray(templates) ? templates : []).filter(isMergeableItineraryTemplate);
   if (saved && available.some((template) => asText(template.id) === saved)) return saved;
   const defaultTemplate = available.find((template) => template.is_default === true);
   return defaultTemplate ? asText(defaultTemplate.id) || TORBUILDER_DEFAULT_TEMPLATE_ID : TORBUILDER_DEFAULT_TEMPLATE_ID;

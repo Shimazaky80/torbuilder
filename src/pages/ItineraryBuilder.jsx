@@ -200,6 +200,7 @@ import {
   TORBUILDER_DEFAULT_TEMPLATE_ID,
   buildItineraryTemplateData,
   isItineraryDocxTemplate,
+  isMergeableItineraryTemplate,
   itineraryTemplateChoiceStorageKey,
   resolveItineraryTemplateChoice
 } from '../lib/itineraryTemplateData';
@@ -227,6 +228,15 @@ const loadItineraryTemplateBlob = async (template) => {
     return response.blob();
   }
   throw new Error('The saved template has no file attached.');
+};
+
+/* Every active company template is listed so an operator can see what was
+   uploaded. The label says why a saved file cannot be used for a Word export. */
+const itineraryTemplateOptionLabel = (template) => {
+  const name = template?.name || 'Untitled template';
+  if (isMergeableItineraryTemplate(template)) return `${name}${template.is_default ? ' (default)' : ''}`;
+  if (template?.document_type !== 'itinerary') return `${name} - not an itinerary template`;
+  return `${name} - PDF/DOC reference only`;
 };
 
 
@@ -1837,12 +1847,13 @@ export const ItineraryBuilder = () => {
   const [itineraryTemplates, setItineraryTemplates] = useState([]);
   const [exportTemplateChoice, setExportTemplateChoice] = useState(TORBUILDER_DEFAULT_TEMPLATE_ID);
   const mergeableTemplates = useMemo(
-    () => itineraryTemplates.filter(isItineraryDocxTemplate),
+    () => itineraryTemplates.filter(isMergeableItineraryTemplate),
     [itineraryTemplates]
   );
   const selectedExportTemplate = useMemo(() => {
     if (exportTemplateChoice === TORBUILDER_DEFAULT_TEMPLATE_ID) return null;
-    return itineraryTemplates.find((template) => String(template.id) === String(exportTemplateChoice)) || null;
+    const chosen = itineraryTemplates.find((template) => String(template.id) === String(exportTemplateChoice));
+    return isMergeableItineraryTemplate(chosen) ? chosen : null;
   }, [exportTemplateChoice, itineraryTemplates]);
 
   useEffect(() => {
@@ -1857,8 +1868,8 @@ export const ItineraryBuilder = () => {
         .from('document_templates')
         .select(DOCUMENT_TEMPLATE_FIELDS)
         .eq('company_id', companyId)
-        .eq('document_type', 'itinerary')
         .eq('is_active', true)
+        .order('document_type', { ascending: true })
         .order('is_default', { ascending: false })
         .order('name', { ascending: true });
       if (!active) return;
@@ -1875,10 +1886,7 @@ export const ItineraryBuilder = () => {
         storedChoice = '';
       }
       setItineraryTemplates(templates);
-      setExportTemplateChoice(resolveItineraryTemplateChoice({
-        templates: templates.filter(isItineraryDocxTemplate),
-        storedChoice
-      }));
+      setExportTemplateChoice(resolveItineraryTemplateChoice({ templates, storedChoice }));
     };
     void loadTemplates();
     return () => { active = false; };
@@ -12269,16 +12277,15 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                     >
                       <option value={TORBUILDER_DEFAULT_TEMPLATE_ID}>TorBuilder default (original)</option>
                       {itineraryTemplates.map((template) => (
-                        <option key={template.id} value={template.id} disabled={!isItineraryDocxTemplate(template)}>
-                          {template.name}{template.is_default ? ' (default)' : ''}
-                          {isItineraryDocxTemplate(template) ? '' : ' - PDF/DOC reference only'}
+                        <option key={template.id} value={template.id} disabled={!isMergeableItineraryTemplate(template)}>
+                          {itineraryTemplateOptionLabel(template)}
                         </option>
                       ))}
                     </select>
                     <small style={{ color: '#64748b', fontWeight: 400 }}>
                       {mergeableTemplates.length
-                        ? `${mergeableTemplates.length} saved .docx template${mergeableTemplates.length === 1 ? '' : 's'} ready to merge. Word exports only: PDF and Excel always use the TorBuilder document.`
-                        : 'No mergeable .docx template yet. Word exports use the TorBuilder document until one is uploaded.'}
+                        ? `${mergeableTemplates.length} itinerary .docx template${mergeableTemplates.length === 1 ? '' : 's'} ready to merge. Word exports only: PDF and Excel always use the TorBuilder document.`
+                        : 'No itinerary .docx template yet. In Settings, upload a .docx with Document type "Itinerary"; Word exports use the TorBuilder document until then.'}
                     </small>
                     <button
                       type="button"

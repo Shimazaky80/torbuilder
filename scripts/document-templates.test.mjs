@@ -18,6 +18,7 @@ import {
   TORBUILDER_DEFAULT_TEMPLATE_ID,
   buildItineraryTemplateData,
   isItineraryDocxTemplate,
+  isMergeableItineraryTemplate,
   resolveItineraryTemplateChoice
 } from '../src/lib/itineraryTemplateData.js';
 
@@ -128,20 +129,30 @@ check('every advertised scalar placeholder has a data key', scalarGroups
   .map((name) => name.replace(/[{}]/g, ''))
   .filter((key) => !(key in mergeData)), []);
 
-check('a docx template is mergeable', isItineraryDocxTemplate({ file_name: 'Brand.docx' }), true);
-check('a Word MIME type is mergeable', isItineraryDocxTemplate({ mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), true);
-check('a PDF template is not mergeable', isItineraryDocxTemplate({ file_name: 'Brand.pdf' }), false);
-check('a legacy doc is not mergeable', isItineraryDocxTemplate({ file_name: 'Brand.doc' }), false);
+check('a docx file is Word-mergeable', isItineraryDocxTemplate({ file_name: 'Brand.docx' }), true);
+check('a Word MIME type is Word-mergeable', isItineraryDocxTemplate({ mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), true);
+check('a PDF file is not Word-mergeable', isItineraryDocxTemplate({ file_name: 'Brand.pdf' }), false);
+check('a legacy doc file is not Word-mergeable', isItineraryDocxTemplate({ file_name: 'Brand.doc' }), false);
+
+const itineraryDocx = { document_type: 'itinerary', file_name: 'Brand.docx' };
+check('an itinerary docx is mergeable', isMergeableItineraryTemplate(itineraryDocx), true);
+check('a travel-document docx is not an itinerary template', isMergeableItineraryTemplate({ ...itineraryDocx, document_type: 'travel_document' }), false);
+check('an itinerary PDF is reference-only', isMergeableItineraryTemplate({ ...itineraryDocx, file_name: 'Brand.pdf' }), false);
+check('an itinerary doc is reference-only', isMergeableItineraryTemplate({ ...itineraryDocx, file_name: 'Brand.doc' }), false);
 
 const savedTemplates = [
-  { id: 'one', is_default: false },
-  { id: 'two', is_default: true }
+  { id: 'one', ...itineraryDocx, is_default: false },
+  { id: 'two', ...itineraryDocx, is_default: true }
 ];
 check('the saved default is chosen when nothing was picked', resolveItineraryTemplateChoice({ templates: savedTemplates }), 'two');
 check('the original document stays a sticky choice', resolveItineraryTemplateChoice({ templates: savedTemplates, storedChoice: TORBUILDER_DEFAULT_TEMPLATE_ID }), TORBUILDER_DEFAULT_TEMPLATE_ID);
 check('a live stored choice is honoured', resolveItineraryTemplateChoice({ templates: savedTemplates, storedChoice: 'one' }), 'one');
 check('a deleted stored choice falls back to the default', resolveItineraryTemplateChoice({ templates: savedTemplates, storedChoice: 'gone' }), 'two');
 check('no templates means the original document', resolveItineraryTemplateChoice({ templates: [] }), TORBUILDER_DEFAULT_TEMPLATE_ID);
+check('a travel-document doc cannot take over the itinerary export', resolveItineraryTemplateChoice({
+  templates: [{ id: 'kobo', document_type: 'travel_document', file_name: 'Template.doc', is_default: true }],
+  storedChoice: 'kobo'
+}), TORBUILDER_DEFAULT_TEMPLATE_ID);
 
 const fixtureZip = new PizZip();
 fixtureZip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
