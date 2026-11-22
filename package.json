@@ -43,7 +43,8 @@
     "test:stay-pay": "vite build --ssr scripts/stay-pay.test.mjs --outDir .tmp-stay-pay-test --emptyOutDir --logLevel error && node .tmp-stay-pay-test/stay-pay.test.js",
     "test:fuel-allowance": "vite build --ssr scripts/fuel-allowance.test.mjs --outDir .tmp-fuel-allowance-test --emptyOutDir --logLevel error && node .tmp-fuel-allowance-test/fuel-allowance.test.js",
     "test:day-destinations": "vite build --ssr scripts/day-destinations.test.mjs --outDir .tmp-day-destinations-test --emptyOutDir --logLevel error && node .tmp-day-destinations-test/day-destinations.test.js",
-    "test:places": "vite build --ssr scripts/place-catalog.test.mjs --outDir .tmp-place-catalog-test --emptyOutDir --logLevel error && node .tmp-place-catalog-test/place-catalog.test.js"
+    "test:places": "vite build --ssr scripts/place-catalog.test.mjs --outDir .tmp-place-catalog-test --emptyOutDir --logLevel error && node .tmp-place-catalog-test/place-catalog.test.js",
+    "test:document-templates": "vite build --ssr scripts/document-templates.test.mjs --outDir .tmp-document-templates-test --emptyOutDir --logLevel error && node .tmp-document-templates-test/document-templates.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.3",

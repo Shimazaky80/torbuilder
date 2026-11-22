@@ -35,6 +35,18 @@ import {
 import LanguageText from '../components/LanguageText';
 import { LANGUAGES, SOURCE_LANGUAGE, enabledLanguageCodes, textI18nPayload, translationsOf } from '../lib/i18n';
 import { documentLanguagesColumn, textI18nColumn } from '../lib/i18n/textI18nColumn';
+import {
+  DOCUMENT_TEMPLATE_ACCEPT,
+  DOCUMENT_TEMPLATE_FIELDS,
+  DOCUMENT_TEMPLATE_TYPES,
+  documentTemplateFileError,
+  documentTemplateFileSizeLabel,
+  documentTemplateRowPayload,
+  documentTemplateStoragePath,
+  documentTemplateTypeLabel,
+  isDocumentTemplateTableMissing,
+  normalizeDocumentTemplate
+} from '../lib/documentTemplates';
 import { refreshTenantLanguages } from '../lib/i18n/useTenantLanguages';
 import { TOUR_TYPES, VEHICLE_TYPES, mergeVocabulary, vocabularyKey, vocabularyOverridePayload, vocabularyReadFilter } from '../lib/companyVocabulary';
 import { TOUR_TYPE_CONTRACTS } from '../lib/rateTypes';
@@ -119,6 +131,13 @@ const emptyBank = () => ({
   swift_code: '',
   is_default: false,
   is_active: true
+});
+
+const emptyDocumentTemplateForm = () => ({
+  name: '',
+  documentType: DOCUMENT_TEMPLATE_TYPES[0].id,
+  isDefault: false,
+  isActive: true
 });
 
 const APPLIES_TO_OPTIONS = [
@@ -371,6 +390,14 @@ export const Settings = () => {
   const [bankConfirm, setBankConfirm] = useState(null);
   const [editingBankId, setEditingBankId] = useState(null);
   const [bankForm, setBankForm] = useState(emptyBank());
+  const [documentTemplates, setDocumentTemplates] = useState([]);
+  const [documentTemplatesError, setDocumentTemplatesError] = useState('');
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState(null);
+  const [templateForm, setTemplateForm] = useState(emptyDocumentTemplateForm());
+  const [templateFile, setTemplateFile] = useState(null);
+  const [templateUploading, setTemplateUploading] = useState(false);
+  const [templateError, setTemplateError] = useState('');
   const [activeTab, setActiveTab] = useState(() => readStoredTab(SETTINGS_TABS_KEY, SETTINGS_TAB_IDS, 'catalog'));
 
   useEffect(() => {
@@ -458,6 +485,29 @@ export const Settings = () => {
       .order('created_at', { ascending: true });
     if (error) throw error;
     setBankAccounts(data || []);
+  }, []);
+
+  /* A workspace that has not applied the template migration yet still gets the
+     rest of Settings: the card shows the migration note instead of blocking the
+     page with a failed Promise.all. */
+  const fetchDocumentTemplates = useCallback(async (cid) => {
+    if (!cid) return;
+    const { data, error } = await supabase
+      .from('document_templates')
+      .select(DOCUMENT_TEMPLATE_FIELDS)
+      .eq('company_id', cid)
+      .order('document_type', { ascending: true })
+      .order('name', { ascending: true });
+    if (error) {
+      if (isDocumentTemplateTableMissing(error)) {
+        setDocumentTemplates([]);
+        setDocumentTemplatesError('Apply the Document Templates migration to enable template uploads.');
+        return;
+      }
+      throw error;
+    }
+    setDocumentTemplates((data || []).map(normalizeDocumentTemplate));
+    setDocumentTemplatesError('');
   }, []);
 
   /* Tour types and vehicle sizes are the platform's national lists now: every
@@ -552,7 +602,7 @@ export const Settings = () => {
         const cid = await fetchCompanyId();
         if (cancelled) return;
         setCompanyId(cid);
-        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchTourTypes(cid), fetchVehicleTypes(cid), fetchPlaces(cid)]);
+        await Promise.all([fetchTaxRates(cid), fetchBilling(cid), fetchBankAccounts(cid), fetchDocumentTemplates(cid), fetchTourTypes(cid), fetchVehicleTypes(cid), fetchPlaces(cid)]);
       } catch (err) {
         if (!cancelled) showToast(err.message || 'Failed to load settings', 'error');
       } finally {
@@ -560,7 +610,7 @@ export const Settings = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchTourTypes, fetchVehicleTypes, fetchPlaces, showToast]);
+  }, [fetchCompanyId, fetchTaxRates, fetchBilling, fetchBankAccounts, fetchDocumentTemplates, fetchTourTypes, fetchVehicleTypes, fetchPlaces, showToast]);
 
   const handleTourTypeSubmit = async (event) => {
     event.preventDefault();
@@ -1436,6 +1486,205 @@ const handleSavePriceProtection = async () => {
       showToast(err.message || 'Failed to delete bank account', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const openAddDocumentTemplate = () => {
+    setEditingTemplateId(null);
+    setTemplateForm(emptyDocumentTemplateForm());
+    setTemplateFile(null);
+    setTemplateError('');
+    setTemplateModalOpen(true);
+  };
+
+  const openEditDocumentTemplate = (template) => {
+    setEditingTemplateId(template.id);
+    setTemplateForm({
+      name: template.name || '',
+      documentType: template.document_type,
+      isDefault: template.is_default,
+      isActive: template.is_active
+    });
+    setTemplateFile(null);
+    setTemplateError('');
+    setTemplateModalOpen(true);
+  };
+
+  const handleTemplateFileChange = (event) => {
+    const file = event.target.files?.[0] || null;
+    setTemplateFile(file);
+    setTemplateError(file ? (documentTemplateFileError(file) || '') : '');
+  };
+
+  const handleDocumentTemplateSubmit = async (event) => {
+    event.preventDefault();
+    let cid = companyId;
+    if (!cid) {
+      cid = await fetchCompanyId();
+      if (cid && cid !== companyId) setCompanyId(cid);
+    }
+    if (!cid) {
+      showToast('No active company found', 'error');
+      return;
+    }
+
+    const name = templateForm.name.trim();
+    if (!name) {
+      showToast('Template name is required', 'warning');
+      return;
+    }
+    const fileError = templateFile
+      ? documentTemplateFileError(templateFile)
+      : (editingTemplateId ? null : 'Choose a template document.');
+    if (fileError) {
+      showToast(fileError, 'warning');
+      return;
+    }
+
+    setTemplateUploading(true);
+    let uploadedPath = null;
+    try {
+      let upload = null;
+      if (templateFile) {
+        uploadedPath = documentTemplateStoragePath({ companyId: cid, fileName: templateFile.name });
+        const { error: uploadError } = await supabase
+          .storage
+          .from('contracts')
+          .upload(uploadedPath, templateFile, { upsert: true, cacheControl: '3600' });
+        if (uploadError) throw uploadError;
+        const { data: publicData } = supabase.storage.from('contracts').getPublicUrl(uploadedPath);
+        if (!publicData?.publicUrl) throw new Error('The template uploaded but no public link was returned.');
+        upload = {
+          url: publicData.publicUrl,
+          path: uploadedPath,
+          fileName: templateFile.name,
+          fileSize: templateFile.size,
+          mimeType: templateFile.type
+        };
+      } else {
+        /* Editing the label, type or default flag must not blank the stored
+           file details just because no replacement was chosen. */
+        const current = documentTemplates.find((entry) => entry.id === editingTemplateId);
+        upload = {
+          url: current?.file_url || '',
+          path: current?.file_path || '',
+          fileName: current?.file_name || '',
+          fileSize: current?.file_size || 0,
+          mimeType: current?.mime_type || ''
+        };
+      }
+
+      const payload = documentTemplateRowPayload({
+        companyId: cid,
+        form: { ...templateForm, name },
+        upload,
+        updatedAt: new Date().toISOString()
+      });
+
+      let dbError;
+      if (editingTemplateId) {
+        ({ error: dbError } = await supabase
+          .from('document_templates')
+          .update(payload)
+          .eq('id', editingTemplateId)
+          .eq('company_id', cid));
+      } else {
+        ({ error: dbError } = await supabase.from('document_templates').insert([payload]));
+      }
+      if (dbError) throw dbError;
+
+      if (uploadedPath) {
+        const previous = documentTemplates.find((entry) => entry.id === editingTemplateId)?.file_path;
+        if (previous && previous !== uploadedPath) {
+          const { error: removeError } = await supabase.storage.from('contracts').remove([previous]);
+          if (removeError) showToast('Template saved, but the older file could not be removed.', 'warning');
+        }
+      }
+
+      await fetchDocumentTemplates(cid);
+      setTemplateModalOpen(false);
+      setTemplateFile(null);
+      setTemplateError('');
+      showToast(editingTemplateId ? 'Document template updated' : 'Document template uploaded', 'success');
+    } catch (err) {
+      if (uploadedPath) await supabase.storage.from('contracts').remove([uploadedPath]);
+      showToast(err.message || 'Could not save the document template', 'error');
+    } finally {
+      setTemplateUploading(false);
+    }
+  };
+
+  /* A default is exclusive per document type. The migration's trigger removes
+     the old default and forces the new one active, so this is one small update
+     rather than an unguarded two-step write from the client. */
+  const handleSetDefaultDocumentTemplate = async (template) => {
+    if (!companyId || template.is_default) return;
+    setTemplateUploading(true);
+    try {
+      const { error } = await supabase
+        .from('document_templates')
+        .update({ is_default: true, updated_at: new Date().toISOString() })
+        .eq('id', template.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      await fetchDocumentTemplates(companyId);
+      showToast(`${template.name} is now the default ${documentTemplateTypeLabel(template.document_type).toLowerCase()} template`, 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not set the default template', 'error');
+    } finally {
+      setTemplateUploading(false);
+    }
+  };
+
+  const handleToggleDocumentTemplateActive = async (template) => {
+    if (!companyId) return;
+    setTemplateUploading(true);
+    try {
+      const { error } = await supabase
+        .from('document_templates')
+        .update({ is_active: !template.is_active, updated_at: new Date().toISOString() })
+        .eq('id', template.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      await fetchDocumentTemplates(companyId);
+      showToast(template.is_active ? 'Template deactivated' : 'Template activated', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not update the template', 'error');
+    } finally {
+      setTemplateUploading(false);
+    }
+  };
+
+  const handleDeleteDocumentTemplate = async (template) => {
+    if (!companyId) return;
+    const ok = await confirm({
+      title: 'Delete document template?',
+      message: `"${template.name}" and its uploaded file will be permanently removed.`,
+      detail: template.is_default
+        ? 'This was the default for its document type; the remaining templates stay available but none will be marked as default.'
+        : 'Other templates are unaffected.',
+      confirmLabel: 'Delete template',
+      destructive: true
+    });
+    if (!ok) return;
+    setTemplateUploading(true);
+    try {
+      const { error } = await supabase
+        .from('document_templates')
+        .delete()
+        .eq('id', template.id)
+        .eq('company_id', companyId);
+      if (error) throw error;
+      if (template.file_path) {
+        const { error: removeError } = await supabase.storage.from('contracts').remove([template.file_path]);
+        if (removeError) showToast('Template deleted, but its stored file could not be removed.', 'warning');
+      }
+      await fetchDocumentTemplates(companyId);
+      showToast('Document template deleted', 'success');
+    } catch (err) {
+      showToast(err.message || 'Could not delete the document template', 'error');
+    } finally {
+      setTemplateUploading(false);
     }
   };
 
@@ -2432,24 +2681,123 @@ const handleSavePriceProtection = async () => {
         </div>
       </div>
 
-      {/* Document templates (coming soon) */}
-      <div className="admin-card" style={{ marginTop: '1.5rem', opacity: 0.85 }}>
+      {/* Document templates */}
+      <div className="admin-card" style={{ marginTop: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <h2 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <LayoutTemplate size={18} color="#0d7478" /> Document Templates
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-              Pick a ready-made layout for how your output documents (itineraries, vouchers, invoices, travel documents) are presented. The layout engine ships in a future release — this is just the placeholder setting page.
+              Upload a branded source document for itineraries, vouchers, invoices and travel documents. Files stay inside your company&rsquo;s workspace, and one template per type can be marked as the default.
             </p>
           </div>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#ecfeff', color: '#0d7478', padding: '0.3rem 0.7rem', borderRadius: '999px', fontSize: '0.78rem', fontWeight: 700 }}>
-            Coming soon
-          </span>
+          <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAddDocumentTemplate}>
+            <Upload size={15} /> Upload Template
+          </button>
         </div>
-        <div style={{ marginTop: '1rem', border: '1px dashed #cbd5e1', borderRadius: '12px', padding: '1.2rem 1.4rem', color: '#64748b', fontSize: '0.85rem', background: '#f8fafc' }}>
-          No templates available yet. When this feature ships you will be able to choose (and preview) a branded template here, and it will apply to every company document without re-configuring anything else.
-        </div>
+
+        {documentTemplatesError && (
+          <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', border: '1px solid #fde68a', background: '#fffbeb', color: '#92400e', borderRadius: '10px', padding: '0.7rem 0.85rem', fontSize: '0.82rem' }}>
+            <AlertTriangle size={15} /> {documentTemplatesError}
+          </div>
+        )}
+
+        {loading ? (
+          <div style={{ padding: '1rem 0', color: '#94a3b8', fontSize: '0.85rem' }}>Loading document templates...</div>
+        ) : documentTemplates.length === 0 ? (
+          <div style={{ marginTop: '1rem', border: '1px dashed #cbd5e1', borderRadius: '12px', padding: '1.2rem 1.4rem', color: '#64748b', fontSize: '0.85rem', background: '#f8fafc' }}>
+            No templates uploaded yet. Add a PDF or Word document to keep a branded layout ready for this document type.
+          </div>
+        ) : (
+          <table className="admin-table" style={{ marginTop: '1rem' }}>
+            <thead>
+              <tr>
+                <th>Template</th>
+                <th>Document type</th>
+                <th>File</th>
+                <th>Status</th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documentTemplates.map((template) => (
+                <tr key={template.id} style={template.is_active ? undefined : { opacity: 0.65 }}>
+                  <td style={{ fontWeight: 700 }}>
+                    {template.name}
+                    {template.is_default && (
+                      <span style={{ marginLeft: '0.45rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem', background: '#ecfeff', color: '#0d7478', borderRadius: '999px', padding: '0.15rem 0.5rem', fontSize: '0.7rem', fontWeight: 700 }}>
+                        <Star size={11} /> Default
+                      </span>
+                    )}
+                  </td>
+                  <td>{documentTemplateTypeLabel(template.document_type)}</td>
+                  <td>
+                    {template.file_url ? (
+                      <a href={template.file_url} target="_blank" rel="noopener noreferrer" title="Open the uploaded template" style={{ color: '#0d7478', textDecoration: 'underline' }}>
+                        {template.file_name || 'Open file'}
+                      </a>
+                    ) : '—'}
+                    {Number(template.file_size) > 0 && (
+                      <span style={{ display: 'block', color: '#94a3b8', fontSize: '0.72rem' }}>{documentTemplateFileSizeLabel(template.file_size)}</span>
+                    )}
+                  </td>
+                  <td>{template.is_active ? 'Active' : 'Inactive'}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <div style={{ display: 'inline-flex', gap: '0.35rem', justifyContent: 'flex-end' }}>
+                      {!template.is_default && (
+                        <button
+                          type="button"
+                          className="icon-btn outline"
+                          title="Set as default"
+                          aria-label={`Set ${template.name} as default`}
+                          disabled={templateUploading}
+                          onClick={() => handleSetDefaultDocumentTemplate(template)}
+                        >
+                          <Star size={15} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title={template.is_active ? 'Deactivate template' : 'Activate template'}
+                        aria-label={template.is_active ? `Deactivate ${template.name}` : `Activate ${template.name}`}
+                        disabled={templateUploading}
+                        onClick={() => handleToggleDocumentTemplateActive(template)}
+                      >
+                        <Power size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title="Edit template"
+                        aria-label={`Edit ${template.name}`}
+                        disabled={templateUploading}
+                        onClick={() => openEditDocumentTemplate(template)}
+                      >
+                        <Edit3 size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn outline"
+                        title="Delete template"
+                        aria-label={`Delete ${template.name}`}
+                        disabled={templateUploading}
+                        onClick={() => handleDeleteDocumentTemplate(template)}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <p style={{ margin: '0.9rem 0 0', color: '#94a3b8', fontSize: '0.75rem', lineHeight: 1.5 }}>
+          Accepted files: PDF, DOC and DOCX, up to 30 MB. The document layout engine that consumes the default template ships in a future release; uploading a file here does not change generated documents yet.
+        </p>
       </div>
 
       </>
@@ -2800,6 +3148,85 @@ const handleSavePriceProtection = async () => {
                   <button type="button" className="secondary-btn" onClick={() => setBankModalOpen(false)}>Cancel</button>
                   <button type="submit" className="primary-btn" style={{ flex: 1, display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={saving}>
                     <Check size={16} /> {saving ? 'Saving...' : 'Save Bank Account'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add / edit document template modal */}
+      {templateModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '560px' }}>
+            <div className="modal-header">
+              <h2>{editingTemplateId ? 'Edit Document Template' : 'Upload Document Template'}</h2>
+              <button className="close-btn" onClick={() => setTemplateModalOpen(false)}><X size={20} /></button>
+            </div>
+            <form onSubmit={handleDocumentTemplateSubmit}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div className="sidebar-field" style={{ marginTop: '0.5rem' }}>
+                  <label>Template name *</label>
+                  <input
+                    className="sidebar-select"
+                    style={fieldStyle}
+                    value={templateForm.name}
+                    onChange={(event) => setTemplateForm({ ...templateForm, name: event.target.value })}
+                    placeholder="e.g. Branded itinerary 2026"
+                    maxLength={120}
+                  />
+                </div>
+                <div className="sidebar-field">
+                  <label>Document type</label>
+                  <SearchableSelect
+                    className="sidebar-select"
+                    style={fieldStyle}
+                    value={templateForm.documentType}
+                    onChange={(event) => setTemplateForm({ ...templateForm, documentType: event.target.value })}
+                  >
+                    {DOCUMENT_TEMPLATE_TYPES.map((type) => (
+                      <option key={type.id} value={type.id}>{type.label}</option>
+                    ))}
+                  </SearchableSelect>
+                </div>
+                <div className="sidebar-field">
+                  <label>Template document {editingTemplateId ? '' : '*'}</label>
+                  <input
+                    type="file"
+                    accept={DOCUMENT_TEMPLATE_ACCEPT}
+                    onChange={handleTemplateFileChange}
+                    style={{ width: '100%', fontSize: '0.85rem' }}
+                  />
+                  <small style={{ display: 'block', marginTop: '0.3rem', color: '#94a3b8', fontSize: '0.75rem', lineHeight: 1.45 }}>
+                    PDF, DOC or DOCX, up to 30 MB. {editingTemplateId ? 'Leave empty to keep the current file.' : 'The file is kept in your company workspace.'}
+                  </small>
+                  {templateError && (
+                    <small style={{ display: 'block', marginTop: '0.3rem', color: '#b91c1c', fontSize: '0.75rem' }}>{templateError}</small>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={templateForm.isDefault}
+                      onChange={(event) => setTemplateForm({ ...templateForm, isDefault: event.target.checked })}
+                    />
+                    Default for this document type
+                  </label>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.9rem', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={templateForm.isActive}
+                      onChange={(event) => setTemplateForm({ ...templateForm, isActive: event.target.checked })}
+                    />
+                    Active
+                  </label>
+                </div>
+                <div className="form-actions">
+                  <button type="button" className="secondary-btn" onClick={() => setTemplateModalOpen(false)}>Cancel</button>
+                  <button type="submit" className="primary-btn" style={{ flex: 1, display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} disabled={templateUploading}>
+                    <Check size={16} /> {templateUploading ? 'Saving...' : editingTemplateId ? 'Save Template' : 'Upload Template'}
                   </button>
                 </div>
               </div>
