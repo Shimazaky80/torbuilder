@@ -11,5 +11,5 @@ export default defineConfig({
   // These are only pulled in by the itinerary Word/PDF exports. Optimising them
   // when the dev server starts avoids a mid-session dependency re-bundle that
   // leaves the open page holding stale optimized-module hashes.
-  optimizeDeps: { include: ['pizzip', 'docxtemplater', 'pdf-lib', 'pdfjs-dist'] },
+  optimizeDeps: { include: ['pizzip', 'docxtemplater', 'docx-preview', 'pdf-lib', 'pdfjs-dist'] },
 })

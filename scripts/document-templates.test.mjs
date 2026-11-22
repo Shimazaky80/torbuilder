@@ -1,4 +1,5 @@
 import PizZip from 'pizzip';
+import { StandardFonts } from 'pdf-lib';
 import {
   DOCUMENT_TEMPLATE_MAX_BYTES,
   DOCUMENT_TEMPLATE_TYPES,
@@ -13,7 +14,10 @@ import {
   safeTemplateFileName
 } from '../src/lib/documentTemplates.js';
 import { renderItineraryDocxBytes } from '../src/lib/itineraryDocxMerge.js';
-import { replaceKnownItineraryFieldsInXml } from '../src/lib/itineraryDocxFields.js';
+import { replaceInlineItineraryTokensInXml, replaceKnownItineraryFieldsInXml } from '../src/lib/itineraryDocxFields.js';
+import { buildItinerarySectionXml, readDocxTypography } from '../src/lib/itineraryDocxSections.js';
+import { pdfTypographyOf, wrapStyledParts } from '../src/lib/itineraryPdfMerge.js';
+import { translateTemplateText } from '../src/lib/i18n/documentTemplateTranslations.js';
 import {
   findTemplateField,
   templateFieldValue
@@ -43,6 +47,7 @@ const check = (label, actual, expected) => {
   if (!ok) failures += 1;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(stable(actual))}, expected ${JSON.stringify(stable(expected))}`);
 };
+const countOccurrences = (value, token) => String(value).split(token).length - 1;
 
 console.log('\n--- Running Document Templates Verification Tests ---\n');
 
@@ -121,28 +126,202 @@ const mergeData = buildItineraryTemplateData({
     { name: 'Ada Lovelace', notes: 'VIP' },
     { name: 'Grace Hopper', notes: '' }
   ],
+  section_labels: {
+    subtotal: 'Subtotal (Excl. VAT)',
+    tax: 'VAT',
+    total_due: 'TOTAL DUE (ZAR INCL. VAT)'
+  },
   inclusion_rows: [{ text: 'Return flights' }, { text: 'Daily breakfast' }],
   exclusion_rows: [{ text: 'Drinks' }],
+  day_sections: [
+    {
+      day: 1,
+      heading: 'Day 1 - Cape Town',
+      date: '2026-12-01',
+      route: 'Arrival in Cape Town',
+      end: 'Overnight: Cape Town',
+      overnight_label: 'Overnight:',
+      overnight: 'Silverbirch @ Birchwood (Standard Room) - B&B',
+      notes: 'Private transfer',
+      services: 'Game drive\nDinner',
+      items: [
+        { kind: 'service', text: 'Game drive' },
+        { kind: 'overnight', label: 'Overnight:', text: 'Silverbirch @ Birchwood (Standard Room) - B&B' },
+        { kind: 'service', text: 'Dinner' }
+      ]
+    }
+  ],
   day_rows: [
     { day: 'Day 1', date: '2026-12-01', description: 'Safari', total_incl: 'R 1,000' },
     { day: 'Day 2', date: '2026-12-02', description: 'City tour', total_incl: 'R 750' }
   ],
-  pricing_totals: [{ currency: 'ZAR', total_due: 'R 1,750' }]
+  pricing_rows: [
+    { currency: 'ZAR', day: 'Day 1', date: '2026-12-01', description: 'Safari', total_incl: 'R 1,000' }
+  ],
+  pricing_totals: [{ currency: 'ZAR', subtotal_excl: 'R 1,500', tax: 'R 250', total_due: 'R 1,750' }]
 });
 check('an unknown merge value becomes an empty string', mergeData.terms, '');
 check('merge rows are normalised to text', mergeData.day_rows[0], { day: 'Day 1', date: '2026-12-01', description: 'Safari', total_incl: 'R 1,000' });
 check('traveller names are available as one line', mergeData.traveller_names, 'Ada Lovelace\nGrace Hopper');
+check('PASSENGERS prints the names on one line', mergeData.traveller_names_inline, 'Ada Lovelace, Grace Hopper');
 check('inclusions are available as one line as well as a loop', mergeData.inclusions, 'Return flights\nDaily breakfast');
 check('pricing summary is derived from the currency totals', mergeData.pricing_summary, 'ZAR R 1,750');
 check('the currency follows the first priced group', mergeData.currency_code, 'ZAR');
 check('operator reference and programme are part of the merge data', [mergeData.operator_ref, mergeData.programme], ['Att Jose / Ref 42', 'FIT']);
 
+const appendedSections = buildItinerarySectionXml(mergeData, {});
+check('missing day-by-day, text and pricing sections are generated', [
+  appendedSections.includes('Safari'),
+  appendedSections.includes('Return flights'),
+  appendedSections.includes('Drinks'),
+  appendedSections.includes('R 1,000')
+], [true, true, true, true]);
+check('sections already rendered by placeholders are not duplicated', buildItinerarySectionXml(mergeData, {
+  sourceXml: '{{#day_sections}}{{heading}}{{/day_sections}}{{#inclusion_rows}}{{text}}{{/inclusion_rows}}{{#exclusion_rows}}{{text}}{{/exclusion_rows}}{{#pricing_rows}}{{day}}{{/pricing_rows}}'
+}), '');
+check('price breakdown precedes inclusions and exclusions', [
+  appendedSections.indexOf('Pricing Breakdown') < appendedSections.indexOf('Inclusions'),
+  appendedSections.indexOf('Inclusions') < appendedSections.indexOf('Exclusions')
+], [true, true]);
+check('overnight hotel is printed in bold after its label', appendedSections.includes('<w:b/><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">Silverbirch @ Birchwood (Standard Room) - B&amp;B'), true);
+check('nested day items survive the template data contract', mergeData.day_sections[0].items.map((item) => item.kind), ['service', 'overnight', 'service']);
+check('day items keep the exact drop order', [
+  appendedSections.indexOf('Game drive') < appendedSections.indexOf('Silverbirch @ Birchwood'),
+  appendedSections.indexOf('Silverbirch @ Birchwood') < appendedSections.indexOf('Dinner')
+], [true, true]);
+check('an accommodation is always a bold overnight line, even without an end-of-day', [
+  (() => {
+    const xml = buildItinerarySectionXml({
+      ...mergeData,
+      day_sections: [{
+        ...mergeData.day_sections[0],
+        end: '',
+        overnight_label: '',
+        overnight: '',
+        services: '',
+        items: [{ kind: 'overnight', text: 'Late Arrival Lodge' }]
+      }]
+    }, {});
+    return xml.includes('<w:b/><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">Late Arrival Lodge') && !xml.includes('• Late Arrival Lodge');
+  })()
+], [true]);
+check('price breakdown totals are bold and prices are right aligned', [
+  appendedSections.includes('<w:b/><w:sz w:val="17"/></w:rPr><w:t xml:space="preserve">TOTAL DUE (ZAR INCL. VAT)'),
+  appendedSections.includes('<w:jc w:val="right"/>')
+], [true, true]);
+check('the currency stays on the pricing breakdown heading line', [
+  appendedSections.includes('Pricing Breakdown - ZAR'),
+  appendedSections.includes('<w:t xml:space="preserve">ZAR</w:t>')
+], [true, false]);
+check('pricing totals still print after the heading change', [
+  appendedSections.includes('TOTAL DUE (ZAR INCL. VAT)'),
+  appendedSections.includes('R 1,750')
+], [true, true]);
+
+const twoDayData = {
+  ...mergeData,
+  day_sections: [
+    mergeData.day_sections[0],
+    { ...mergeData.day_sections[0], day: 2, heading: 'Day 2 - Cape Town', services: 'City tour', overnight: '' }
+  ]
+};
+const spacedSections = buildItinerarySectionXml(twoDayData, {});
+check('a paragraph space separates each day section', countOccurrences(
+  spacedSections,
+  '<w:p><w:pPr><w:spacing w:before="160" w:after="160"/></w:pPr></w:p>'
+), 1);
+
+const overnightOnlySections = buildItinerarySectionXml({
+  ...mergeData,
+  day_sections: [{
+    ...mergeData.day_sections[0],
+    services: 'Dinner',
+    overnight: 'The Commodore Hotel (Standard Room)',
+    items: [
+      { kind: 'service', text: 'Dinner' },
+      { kind: 'overnight', label: 'Overnight:', text: 'The Commodore Hotel (Standard Room)' }
+    ]
+  }]
+}, {});
+check('the overnight hotel is not repeated as a bullet', [
+  countOccurrences(overnightOnlySections, 'The Commodore Hotel (Standard Room)'),
+  overnightOnlySections.includes('• The Commodore Hotel')
+], [1, false]);
+
+/* --- Template typography inheritance ---------------------------------------- */
+
+const styledZip = new PizZip();
+styledZip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+styledZip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+styledZip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>KOBO SOUTH AFRICA - POLÍTICA DE CANCELAMENTO</w:t></w:r></w:p><w:sectPr/></w:body></w:document>');
+styledZip.file('word/styles.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Header"><w:name w:val="header"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>');
+check('the DOCX header style supplies the font family and size', readDocxTypography(styledZip), { font: 'Courier New', size: 28 });
+
+const styledBytes = renderItineraryDocxBytes({
+  arrayBuffer: styledZip.generate({ type: 'arraybuffer' }),
+  data: mergeData
+});
+const styledXml = new PizZip(styledBytes).file('word/document.xml').asText();
+check('generated DOCX runs inherit the template header typography', [
+  styledXml.includes('<w:rFonts w:ascii="Courier New"'),
+  styledXml.includes('<w:sz w:val="28"/><w:szCs w:val="28"/>'),
+  styledXml.includes('Pricing Breakdown - ZAR')
+], [true, true, true]);
+check('uploaded wording survives typography inheritance', styledXml.includes('POLÍTICA DE CANCELAMENTO'), true);
+
+/* A letterhead can carry the same mark in its body and its Word header. Only
+   the body image and the footer mark are meant to survive into print. */
+const logoZip = new PizZip();
+logoZip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>');
+logoZip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+logoZip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>');
+logoZip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p><w:r><w:t>Branded letterhead</w:t></w:r><w:r><w:pict><v:imagedata r:id="rIdLogo" o:title="body"/></w:pict></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:footerReference w:type="default" r:id="rIdF"/></w:sectPr></w:body></w:document>');
+logoZip.file('word/header1.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:p><w:r><w:pict><v:imagedata r:id="rIdHLogo" o:title="header"/></w:pict></w:r></w:p></w:hdr>');
+logoZip.file('word/footer1.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:p><w:r><w:pict><v:imagedata r:id="rIdFLogo" o:title="footer"/></w:pict></w:r></w:p></w:ftr>');
+const logoBytes = renderItineraryDocxBytes({
+  arrayBuffer: logoZip.generate({ type: 'arraybuffer' }),
+  data: mergeData
+});
+const logoOutput = new PizZip(logoBytes);
+check('the body and footer logos survive the template merge', [
+  logoOutput.file('word/document.xml').asText().includes('o:title="body"'),
+  logoOutput.file('word/footer1.xml').asText().includes('o:title="footer"')
+], [true, true]);
+check('the duplicate header logo is removed from printed output', logoOutput.file('word/header1.xml').asText().includes('o:title="header"'), false);
+check('a monospace PDF header maps to Courier', pdfTypographyOf('Courier New', 12), {
+  regular: StandardFonts.Courier,
+  bold: StandardFonts.CourierBold,
+  size: 12
+});
+check('a serif PDF header maps to Times', pdfTypographyOf('Georgia', 11), {
+  regular: StandardFonts.TimesRoman,
+  bold: StandardFonts.TimesRomanBold,
+  size: 11
+});
+const measuringFont = { encodeText: () => {}, widthOfTextAtSize: (text, size) => String(text).length * size * 0.5 };
+const wrappedOvernight = wrapStyledParts([
+  { text: 'Overnight: ' },
+  { text: 'Very Long Safari Lodge With Several Words', bold: true }
+], measuringFont, measuringFont, 10, 100);
+check('long overnight lines wrap without losing the bold hotel', [
+  wrappedOvernight.length > 1,
+  wrappedOvernight.every((line) => line.some((part) => part.bold)),
+  wrappedOvernight[0].some((part) => part.text.includes('Overnight'))
+], [true, true, true]);
+
 /* --- Printed-label field matching ------------------------------------------- */
 
 check('the longest known label wins', findTemplateField('OPERATOR REF: Att Jose')?.key, 'operator_ref');
+check('PASSENGERS maps to traveller names rather than a count', findTemplateField('PASSENGERS:')?.key, 'traveller_names_inline');
 check('a label without a printed value is recognised', findTemplateField('DATE OF TRAVEL:')?.key, 'travel_dates');
 check('an ordinary sentence is not a field', findTemplateField('Prezado/a,'), null);
 check('field values are stringified, not dropped', templateFieldValue({ status: 0 }, 'status'), '0');
+check('a single-brace signature token maps to the tour designer', findTemplateField('{Tour Designer}')?.key, 'consultant_name');
+
+const tokenXml = '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Signed: {Tour Designer} / {{reference}}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>';
+const tokenFill = replaceInlineItineraryTokensInXml(tokenXml, { consultant_name: 'Ada Lovelace', reference: 'IT-100' });
+check('single-brace tokens are filled inline', tokenFill.xml.includes('Signed: Ada Lovelace / {{reference}}'), true);
+check('double-brace placeholders are left for docxtemplater', tokenFill.xml.includes('{{reference}}'), true);
 
 const scalarGroups = ITINERARY_DOCX_PLACEHOLDER_GROUPS.slice(0, 4);
 check('every advertised scalar placeholder has a data key', scalarGroups
@@ -233,7 +412,7 @@ check('printed labels are filled with current values', [
   labelledFill.xml.includes('<w:t>IT-100</w:t>'),
   labelledFill.xml.includes('<w:t>Leisure</w:t>'),
   labelledFill.xml.includes('DATE OF TRAVEL: 01 – 05 Feb 2027'),
-  labelledFill.xml.includes('<w:t>4 travellers</w:t>')
+  labelledFill.xml.includes('<w:t>Ada Lovelace, Grace Hopper</w:t>')
 ], [true, true, true, true, true, true]);
 check('an extra value line is cleared', labelledFill.xml.includes('<w:t>4px</w:t>'), false);
 check('the letter and policy wording survive', [
@@ -253,6 +432,108 @@ const labelledRenderedXml = new PizZip(labelledBytes).file('word/document.xml').
 check('the Word merge keeps the uploaded labels', labelledRenderedXml.includes('OPERATOR REF:'), true);
 check('the Word merge replaces the printed value', labelledRenderedXml.includes('NEW REF'), true);
 check('the Word merge keeps the uploaded policy', labelledRenderedXml.includes('POLÍTICA DE CANCELAMENTO'), true);
+check('the Word merge adds the itinerary sections the template lacks', [
+  labelledRenderedXml.includes('Day 1'),
+  labelledRenderedXml.includes('Safari'),
+  labelledRenderedXml.includes('Return flights'),
+  labelledRenderedXml.includes('Drinks')
+], [true, true, true, true]);
+
+/* --- Whole-document translation --------------------------------------------- */
+
+check('a known template sentence is translated', translateTemplateText('PLEASE NOTE: {{reference}}', 'pt-BR'), 'OBSERVAÇÃO: {{reference}}');
+check('a single-brace token survives translation', translateTemplateText('Sincerely, {Tour Designer}', 'pt-BR'), 'Atenciosamente, {Tour Designer}');
+check('a tenant phrase override is honoured', translateTemplateText('Book with Acme', 'pt-BR', {
+  'Book with Acme': 'Reserve com a Acme'
+}), 'Reserve com a Acme');
+check('English exports are left as authored', translateTemplateText('PLEASE NOTE: {{reference}}', 'en'), 'PLEASE NOTE: {{reference}}');
+check('generated-section fallback labels follow the export language', [
+  translateTemplateText('Itinerary details', 'pt-BR'),
+  translateTemplateText('Subtotal (excl. tax)', 'pt-BR'),
+  translateTemplateText('Total (incl. tax)', 'pt-BR')
+], ['Detalhes do itinerário', 'Subtotal (sem imposto)', 'Total (com imposto)']);
+
+const translationData = {
+  ...mergeData,
+  lang: 'pt-BR',
+  operator_ref: 'NEW REF',
+  travel_dates: '11 – 23 Jan 2027',
+  traveller_names_inline: 'Ada Lovelace, Grace Hopper',
+  consultant_name: 'Ada Lovelace'
+};
+const translationZip = new PizZip();
+translationZip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>');
+translationZip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+translationZip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>');
+translationZip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
+  <w:p><w:r><w:t>{{reference}} - {{client_name}}</w:t></w:r></w:p>
+  <w:p><w:r><w:t>OPERATOR REF:</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Att Jose</w:t></w:r></w:p>
+  <w:p><w:r><w:t>DATE OF TRAVEL: 11 – 23 Jan 2027</w:t></w:r></w:p>
+  <w:p><w:r><w:t>PASSENGERS:</w:t></w:r></w:p>
+  <w:p><w:r><w:t>2 x DBL</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Dear</w:t></w:r><w:r><w:t> Sir/</w:t></w:r><w:r><w:t>Madam</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Thank you very much for your request, and I am pleased to send you the following</w:t></w:r></w:p>
+  <w:p><w:r><w:t>PLEASE NOTE</w:t></w:r></w:p>
+  <w:p><w:r><w:t>KOBO SOUTH AFRICA – CANCELLATION POLICY</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Between 40 and 35 days before the start of services: 25% of the total cost of services will be charged.</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Sincerely</w:t></w:r></w:p>
+  <w:p><w:r><w:t>{Tour Designer}</w:t></w:r></w:p>
+  <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Pricing Breakdown</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+  <w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:footerReference w:type="default" r:id="rIdF"/></w:sectPr>
+</w:body></w:document>`);
+translationZip.file('word/header1.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>CANCELLATION POLICY</w:t></w:r></w:p></w:hdr>');
+translationZip.file('word/footer1.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Thank you very much for your request, and I am pleased to send you the following</w:t></w:r></w:p></w:ftr>');
+
+const translatedBytes = renderItineraryDocxBytes({
+  arrayBuffer: translationZip.generate({ type: 'arraybuffer' }),
+  data: translationData,
+  lang: 'pt-BR'
+});
+const translatedOutput = new PizZip(translatedBytes);
+const translatedXml = translatedOutput.file('word/document.xml').asText();
+const translatedHeader = translatedOutput.file('word/header1.xml').asText();
+const translatedFooter = translatedOutput.file('word/footer1.xml').asText();
+const translatedAll = `${translatedXml}${translatedHeader}${translatedFooter}`;
+
+check('all English template prose is translated to Portuguese', [
+  'Dear', 'Thank you very much', 'PLEASE NOTE', 'CANCELLATION POLICY', 'Sincerely'
+].map((phrase) => translatedAll.includes(phrase)), [false, false, false, false, false]);
+check('the translated wording reads in Portuguese throughout', [
+  translatedXml.includes('Prezado'),
+  translatedXml.includes('Muito obrigado'),
+  translatedXml.includes('OBSERVAÇÃO'),
+  translatedXml.includes('POLÍTICA DE CANCELAMENTO'),
+  translatedXml.includes('Entre 40 e 35 dias'),
+  translatedXml.includes('Atenciosamente'),
+  translatedHeader.includes('POLÍTICA DE CANCELAMENTO'),
+  translatedFooter.includes('Muito obrigado')
+], [true, true, true, true, true, true, true, true]);
+check('translated labels still fill their values', [
+  translatedXml.includes('REF DO OPERADOR:'),
+  translatedXml.indexOf('REF DO OPERADOR:') < translatedXml.indexOf('NEW REF'),
+  translatedXml.includes('DATA DE VIAGEM: 11 – 23 Jan 2027'),
+  translatedXml.includes('PASSAGEIROS:'),
+  translatedXml.indexOf('PASSAGEIROS:') < translatedXml.indexOf('Ada Lovelace, Grace Hopper'),
+  translatedXml.includes('Ada Lovelace')
+], [true, true, true, true, true, true]);
+check('placeholders, tables and values survive translation', [
+  translatedXml.includes('IT-100 - Acme Travel'),
+  translatedXml.includes('<w:tbl>'),
+  translatedXml.includes('Preços Detalhados')
+], [true, true, true]);
+
+const englishBytes = renderItineraryDocxBytes({
+  arrayBuffer: translationZip.generate({ type: 'arraybuffer' }),
+  data: { ...translationData, lang: 'en' },
+  lang: 'en'
+});
+const englishOutput = new PizZip(englishBytes);
+check('an English export keeps the template wording as authored', [
+  englishOutput.file('word/document.xml').asText().includes('Dear'),
+  englishOutput.file('word/document.xml').asText().includes('PLEASE NOTE'),
+  englishOutput.file('word/header1.xml').asText().includes('CANCELLATION POLICY')
+], [true, true, true]);
 
 if (failures) {
   console.error(`\n${failures} document template checks failed.`);

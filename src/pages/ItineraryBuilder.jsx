@@ -240,7 +240,7 @@ const loadItineraryTemplateBlob = async (template) => {
 const itineraryTemplateOptionLabel = (template) => {
   const name = template?.name || 'Untitled template';
   const format = itineraryTemplateExportFormat(template);
-  if (format) return `${name}${template.is_default ? ' (default)' : ''} - ${format === 'pdf' ? 'PDF' : 'Word'}`;
+  if (format) return `${name}${template.is_default ? ' (default)' : ''} - ${format === 'pdf' ? 'PDF' : 'Word / PDF'}`;
   if (template?.document_type !== 'itinerary') return `${name} - not an itinerary template`;
   return `${name} - legacy DOC reference only`;
 };
@@ -2953,7 +2953,10 @@ export const ItineraryBuilder = () => {
         .from('itinerary_days')
         .select('*, itinerary_day_items(*)')
         .eq('itinerary_id', id)
-        .order('day_number', { ascending: true });
+        .order('day_number', { ascending: true })
+        /* Supabase's embedded rows need their own order; otherwise the saved
+           sort_order is ignored and the builder reloads services in DB order. */
+        .order('sort_order', { ascending: true, referencedTable: 'itinerary_day_items' });
       if (dayRows && dayRows.length) {
         const storedTravelStart = toISODate(it?.travel_start_date) || meta.travelStart || '';
         const storedTravelEnd = toISODate(it?.travel_end_date) || meta.travelEnd || '';
@@ -5773,7 +5776,10 @@ return !!sv.time; /* activities / meals / other */
         .from('itinerary_days')
         .select('*, itinerary_day_items(*)')
         .eq('itinerary_id', copySourceId)
-        .order('day_number', { ascending: true });
+        .order('day_number', { ascending: true })
+        /* Supabase's embedded rows need their own order; otherwise the saved
+           sort_order is ignored and the builder reloads services in DB order. */
+        .order('sort_order', { ascending: true, referencedTable: 'itinerary_day_items' });
       if (!srcDays || !srcDays.length) {
         showToast('That itinerary has no days copied yet', 'warning');
         setSaving(false);
@@ -6558,25 +6564,46 @@ return !!sv.time; /* activities / meals / other */
       }));
       const daySections = include.itinerary ? (days || []).map((day, index) => {
         const number = day.dayNumber || index + 1;
-        const services = (day.services || [])
-          .filter((sv) => !isFeeLevyOrTollItem(sv))
-          .map((sv) => rowDesc({
-            name: sv.name || L('doc.service'),
-            category: sv.category || '',
-            mealPlan: sv.mealPlan || '',
-            roomType: /accommodation/i.test(sv.category || '') ? allocatedRoomTypeLabel(sv) : '',
-            supplierName: '',
-            supplierStar: supplierStarOfService(sv, libraryItems)
-          }))
-          .filter(Boolean);
+        const overnightLabel = L('doc.overnightAt', { destination: '' }).trim();
+        const descriptionOf = (sv) => rowDesc({
+          name: sv.name || L('doc.service'),
+          category: sv.category || '',
+          mealPlan: sv.mealPlan || '',
+          roomType: /accommodation/i.test(sv.category || '') ? allocatedRoomTypeLabel(sv) : '',
+          supplierName: '',
+          supplierStar: supplierStarOfService(sv, libraryItems)
+        });
+        /* An accommodation is always the bold Overnight line, even on a day
+           whose end-of-day was left unset. `items` keeps the builder's drop
+           order: a transfer, the hotel and a levy print in that exact order,
+           with the hotel bold and never repeated as a bullet. */
+        const items = [];
+        let overnight = '';
+        (day.services || []).forEach((sv) => {
+          if (isFeeLevyOrTollItem(sv)) return;
+          const text = descriptionOf(sv);
+          if (!text) return;
+          if (/accommodation/i.test(sv.category || '')) {
+            if (!overnight) overnight = text;
+            items.push({ kind: 'overnight', label: overnightLabel, text });
+          } else {
+            items.push({ kind: 'service', text });
+          }
+        });
+        const end = dayEndLabel(day, lang);
+        const hasOvernight = items.some((item) => item.kind === 'overnight');
+
         return {
           day: number,
           heading: dayDestinationHeading(day, number, lang),
           date: day.date ? dateOf(day.date) : '',
           route: dayRoute(day, days[index - 1], lang),
-          end: dayEndLabel(day, lang),
+          end: hasOvernight && day.end_of_day === 'overnight' ? '' : end,
+          overnight_label: overnightLabel,
+          overnight,
           notes: localizedText(day, 'notes', lang).trim(),
-          services: services.join('\n')
+          services: items.filter((item) => item.kind === 'service').map((item) => item.text).join('\n'),
+          items
         };
       }) : [];
       const inclusionRows = itineraryBlocks.some((block) => block.key === 'inclusions')
@@ -6604,8 +6631,11 @@ return !!sv.time; /* activities / meals / other */
         [L('doc.fieldEmail'), String(billing?.contact_email || '').trim()],
         [L('doc.fieldWeb'), String(billing?.contact_website || '').trim()]
       ].filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`).join('\n');
+      const templateCurrencyCode = groups[0]?.code || currencyCode;
+      const templateTaxWord = taxWordUp(templateCurrencyCode);
 
       return buildItineraryTemplateData({
+        lang,
         reference: meta.referenceNumber || '',
         itinerary_name: meta.itineraryName || '',
         client_name: client.name || '',
@@ -6618,6 +6648,22 @@ return !!sv.time; /* activities / meals / other */
         travellers_count: paxWord,
         travellers,
         generated_by: L('doc.generatedBy'),
+        section_labels: {
+          details: L('doc.itinerary'),
+          day_by_day: L('doc.itinerary'),
+          inclusions: L('doc.inclusionsTitle'),
+          exclusions: L('doc.exclusionsTitle'),
+          pricing: L('doc.pricingBreakdown'),
+          day: L('doc.thDay'),
+          date: L('doc.thDate'),
+          description: L('doc.thDescription'),
+          qty: L('doc.thQty'),
+          unit: L('doc.thUnit'),
+          subtotal: L('doc.subtotalExcl', { tax: templateTaxWord }),
+          tax: templateTaxWord,
+          total: L('doc.totalIncl', { tax: templateTaxWord }),
+          total_due: L('doc.totalDue', { code: templateCurrencyCode, tax: templateTaxWord })
+        },
         company_name: companyNameOf(billing),
         company_address: billing?.billing_address || '',
         company_contact: companyContact,
@@ -6725,7 +6771,8 @@ return !!sv.time; /* activities / meals / other */
           const { itineraryDocxBlob, itineraryDocxFileName, renderItineraryDocxBytes } = await import('../lib/itineraryDocxMerge');
           const docxBytes = renderItineraryDocxBytes({
             arrayBuffer,
-            data: buildItineraryTemplatePayload()
+            data: buildItineraryTemplatePayload(),
+            lang
           });
           downloadBlob(itineraryDocxBlob(docxBytes), itineraryDocxFileName(ref), ITINERARY_DOCX_MIME_TYPE);
           showToast(`Itinerary exported with ${selectedExportTemplate.name}`, 'success');
@@ -6786,25 +6833,39 @@ return !!sv.time; /* activities / meals / other */
     }
 
     if (format === 'pdf') {
-      /* A saved PDF is the printable base for this branch: the uploaded pages
-         are kept and known label values are written onto them. A Word template
-         stays with the Word export and the built-in PDF remains the fallback. */
-      if (selectedExportTemplate && !isItineraryPdfTemplate(selectedExportTemplate)) {
-        showToast('The selected template is a Word file; .docx templates apply to Word exports. Using TorBuilder default for PDF.', 'warning');
-      } else if (selectedExportTemplate) {
+      /* A saved template drives this branch too. A .docx is merged with the
+         itinerary and rendered for printing, so the operator does not have to
+         upload a second PDF copy of the same branding. An uploaded PDF keeps its
+         own pages as the printable base. The built-in document is the fallback. */
+      if (selectedExportTemplate) {
         try {
           const templateBlob = await loadItineraryTemplateBlob(selectedExportTemplate);
           const arrayBuffer = await templateBlob.arrayBuffer();
-          const { renderItineraryPdfBytes, itineraryPdfBlob, itineraryPdfFileName } = await import('../lib/itineraryPdfMerge');
-          const pdfBytes = await renderItineraryPdfBytes({
-            arrayBuffer,
-            data: buildItineraryTemplatePayload()
-          });
-          downloadBlob(itineraryPdfBlob(pdfBytes), itineraryPdfFileName(ref), ITINERARY_PDF_MIME_TYPE);
-          showToast(`Itinerary exported with ${selectedExportTemplate.name}`, 'success');
-          return;
+          const templateData = buildItineraryTemplatePayload();
+
+          if (isItineraryDocxTemplate(selectedExportTemplate)) {
+            const [
+              { renderItineraryDocxBytes },
+              { openItineraryDocxPrintWindow }
+            ] = await Promise.all([
+              import('../lib/itineraryDocxMerge'),
+              import('../lib/itineraryDocxPrint')
+            ]);
+            const docxBytes = renderItineraryDocxBytes({ arrayBuffer, data: templateData, lang });
+            await openItineraryDocxPrintWindow({ bytes: docxBytes, title: meta.itineraryName || ref });
+            showToast(`Itinerary PDF opened with ${selectedExportTemplate.name}`, 'success');
+            return;
+          }
+
+          if (isItineraryPdfTemplate(selectedExportTemplate)) {
+            const { renderItineraryPdfBytes, itineraryPdfBlob, itineraryPdfFileName } = await import('../lib/itineraryPdfMerge');
+            const pdfBytes = await renderItineraryPdfBytes({ arrayBuffer, data: templateData, lang });
+            downloadBlob(itineraryPdfBlob(pdfBytes), itineraryPdfFileName(ref), ITINERARY_PDF_MIME_TYPE);
+            showToast(`Itinerary exported with ${selectedExportTemplate.name}`, 'success');
+            return;
+          }
         } catch (error) {
-          showToast(`${error.message || 'The saved PDF template could not be used.'} Using TorBuilder default.`, 'warning');
+          showToast(`${error.message || 'The saved template could not be used.'} Using TorBuilder default.`, 'warning');
         }
       }
 
@@ -12238,7 +12299,7 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
           )}
           {exportDialog && (
             <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setExportDialog(false); }}>
-              <section className="modal-content package-export-modal">
+              <section className="modal-content package-export-modal itinerary-export-modal">
                 <div className="modal-header">
                   <div>
                     <h2>Export itinerary</h2>
@@ -12316,12 +12377,12 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                     </select>
                     <small style={{ color: '#64748b', fontWeight: 400 }}>
                       {mergeableTemplates.length
-                        ? `${mergeableTemplates.length} itinerary template${mergeableTemplates.length === 1 ? '' : 's'} ready. A .docx fills Word exports; a PDF becomes the printable base for PDF exports. Excel always uses the built-in sheet.`
+                        ? `${mergeableTemplates.length} itinerary template${mergeableTemplates.length === 1 ? '' : 's'} ready. A .docx fills Word exports and is also used for PDF exports; an uploaded PDF is the printable base for PDF exports. Day-by-day, inclusions, exclusions and pricing are added when the template does not already contain them. Excel always uses the built-in sheet.`
                         : 'No itinerary template yet. In Settings, upload a .docx or PDF with Document type "Itinerary"; the TorBuilder document is used until then.'}
                     </small>
                     {selectedExportTemplate && (
                       <small style={{ color: '#0d7478', fontWeight: 500 }}>
-                        Selected: {itineraryTemplateExportFormat(selectedExportTemplate) === 'pdf' ? 'PDF' : 'Word'} template. It applies to that export format; the other format uses the TorBuilder document.
+                        Selected: {itineraryTemplateExportFormat(selectedExportTemplate) === 'pdf' ? 'PDF' : 'Word / PDF'} template. {itineraryTemplateExportFormat(selectedExportTemplate) === 'pdf' ? 'It is the printable base for PDF exports.' : 'It fills Word exports and is rendered into PDF exports.'}
                       </small>
                     )}
                     <button

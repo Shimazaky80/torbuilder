@@ -48,6 +48,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.3",
+    "docx-preview": "^0.4.1",
     "docxtemplater": "^3.71.1",
     "lucide-react": "^1.8.0",
     "pdf-lib": "^1.17.1",

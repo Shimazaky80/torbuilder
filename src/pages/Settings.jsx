@@ -2689,7 +2689,7 @@ const handleSavePriceProtection = async () => {
               <LayoutTemplate size={18} color="#0d7478" /> Document Templates
             </h2>
             <p style={{ margin: '0.35rem 0 0', color: '#64748b', fontSize: '0.85rem' }}>
-              Upload a branded source document for itineraries, vouchers, invoices and travel documents. Files stay inside your company&rsquo;s workspace, and one template per type can be marked as the default. For itinerary exports, choose Document type &ldquo;Itinerary&rdquo;: a .docx fills Word exports and a PDF becomes the printable base for PDF exports. Legacy .doc files remain reference-only.
+              Upload a branded source document for itineraries, vouchers, invoices and travel documents. Files stay inside your company&rsquo;s workspace, and one template per type can be marked as the default. For itinerary exports, choose Document type &ldquo;Itinerary&rdquo;: a .docx fills Word exports and is also rendered into PDF exports, while an uploaded PDF is the printable base for PDF exports. Day-by-day, inclusions, exclusions and pricing are added to either template when it does not already contain them. Legacy .doc files remain reference-only.
             </p>
           </div>
           <button type="button" className="primary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }} onClick={openAddDocumentTemplate}>

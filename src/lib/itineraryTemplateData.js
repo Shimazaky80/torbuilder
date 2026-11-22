@@ -1,8 +1,12 @@
 /* The contract between an uploaded itinerary template and the data TorBuilder
    puts into it. A template keeps its own layout, wording, branding and policies.
-   Word templates may use the {{placeholders}} listed here or printed labels such
-   as "DATE OF TRAVEL:"; PDF templates are used as the printable base and the
-   same known labels are written onto the uploaded pages.
+   Word templates may use the {{placeholders}} listed here, printed labels such
+   as "DATE OF TRAVEL:", or single-brace tokens such as "{Tour Designer}". A
+   Word template drives both the .docx and the PDF export: the same merged file
+   is rendered for printing. Uploaded PDF templates stay the printable base and
+   the same known labels are written onto their pages. Both formats also receive
+   structured day-by-day, inclusions, exclusions and pricing sections when the
+   uploaded file does not already contain them.
 
    The built-in document is never removed. `TORBUILDER_DEFAULT_TEMPLATE_ID` is a
    permanent export choice, so an operator who no longer wants a saved template
@@ -27,6 +31,7 @@ export const ITINERARY_DOCX_PLACEHOLDER_GROUPS = [
       '{{status}}',
       '{{travellers_count}}',
       '{{traveller_names}}',
+      '{{traveller_names_inline}}',
       '{{generated_by}}'
     ]
   },
@@ -46,13 +51,22 @@ export const ITINERARY_DOCX_PLACEHOLDER_GROUPS = [
     title: 'Repeating blocks',
     placeholders: [
       '{{#travellers}}{{name}}{{notes}}{{/travellers}}',
-      '{{#day_sections}}{{heading}}{{date}}{{route}}{{end}}{{notes}}{{services}}{{/day_sections}}',
+      '{{#day_sections}}{{heading}}{{date}}{{route}}{{end}}{{notes}}{{services}}{{#items}}{{kind}}{{text}}{{/items}}{{/day_sections}}',
       '{{#day_rows}}{{day}}{{date}}{{description}}{{qty}}{{unit}}{{subtotal_excl}}{{tax}}{{total_incl}}{{/day_rows}}',
       '{{#pricing_rows}}{{currency}}{{day}}{{date}}{{description}}{{qty}}{{unit}}{{subtotal_excl}}{{tax}}{{total_incl}}{{/pricing_rows}}',
       '{{#pricing_totals}}{{currency}}{{subtotal_excl}}{{tax_label}}{{tax}}{{total_due}}{{/pricing_totals}}',
       '{{#optional_rows}}{{day}}{{date}}{{description}}{{qty}}{{unit}}{{subtotal_excl}}{{tax}}{{total_incl}}{{/optional_rows}}',
       '{{#inclusion_rows}}{{text}}{{/inclusion_rows}}',
       '{{#exclusion_rows}}{{text}}{{/exclusion_rows}}'
+    ]
+  },
+  {
+    title: 'Automatic sections',
+    placeholders: [
+      '{{section_labels.day_by_day}}',
+      '{{section_labels.inclusions}}',
+      '{{section_labels.exclusions}}',
+      '{{section_labels.pricing}}'
     ]
   }
 ];
@@ -61,15 +75,17 @@ const asText = (value) => (value === null || value === undefined ? '' : String(v
 
 const asRow = (row) => Object.fromEntries(
   Object.entries(row && typeof row === 'object' ? row : {})
-    .map(([key, value]) => [key, asText(value)])
+    /* Day sections carry their services in drop order as nested rows. Flattening
+       that array to a string would lose the exact order the operator built. */
+    .map(([key, value]) => [key, key === 'items' && Array.isArray(value) ? value.map(asRow) : asText(value)])
 );
 
 const asRows = (rows) => (Array.isArray(rows) ? rows.map(asRow) : []);
 
-const joinRows = (rows, key) => rows
+const joinRows = (rows, key, separator = '\n') => rows
   .map((row) => asText(row[key]))
   .filter(Boolean)
-  .join('\n');
+  .join(separator);
 
 /* Unknown or missing values become empty strings rather than literal `{{...}}`
    text in the finished Word file. Everything is stringified here so a rendered
@@ -83,9 +99,15 @@ export const buildItineraryTemplateData = (source = {}) => {
   const optionalRows = asRows(source.optional_rows);
   const inclusionRows = asRows(source.inclusion_rows);
   const exclusionRows = asRows(source.exclusion_rows);
+  const sectionLabels = source.section_labels && typeof source.section_labels === 'object'
+    ? Object.fromEntries(Object.entries(source.section_labels).map(([key, value]) => [key, asText(value)]))
+    : {};
   const text = (key) => asText(source[key]);
 
   return {
+    /* Carried through so the merge engines can translate the saved template's
+       own English wording into the language chosen for this export. */
+    lang: text('lang'),
     reference: text('reference'),
     itinerary_name: text('itinerary_name'),
     client_name: text('client_name'),
@@ -97,6 +119,10 @@ export const buildItineraryTemplateData = (source = {}) => {
     status: text('status'),
     travellers_count: text('travellers_count'),
     traveller_names: text('traveller_names') || joinRows(travellers, 'name'),
+    /* Printed labels such as PASSENGERS sit on one line, so the name list used
+       for those labels is comma separated while {{traveller_names}} stays a
+       newline-separated block for template loops and multi-line fields. */
+    traveller_names_inline: text('traveller_names_inline') || joinRows(travellers, 'name', ', '),
     generated_by: text('generated_by'),
 
     company_name: text('company_name'),
@@ -114,6 +140,7 @@ export const buildItineraryTemplateData = (source = {}) => {
     inclusions: text('inclusions') || joinRows(inclusionRows, 'text'),
     exclusions: text('exclusions') || joinRows(exclusionRows, 'text'),
 
+    section_labels: sectionLabels,
     travellers,
     day_sections: daySections,
     day_rows: dayRows,
@@ -137,8 +164,9 @@ export const isItineraryPdfTemplate = (template) => {
   return /\.pdf$/i.test(fileName) || /(^|\/)pdf$/i.test(asText(template?.mime_type));
 };
 
-/* Which built-in export a saved template belongs to. A .docx fills Word exports
-   and a PDF becomes the printable base for PDF exports; Excel stays built-in. */
+/* Which export a saved template drives. A .docx fills Word exports and is also
+   rendered into the PDF export; a PDF becomes the printable base for PDF exports.
+   Excel always stays built-in. */
 export const itineraryTemplateExportFormat = (template) => {
   if (template?.document_type !== 'itinerary') return '';
   if (isItineraryDocxTemplate(template)) return 'word';

@@ -3233,12 +3233,41 @@ aside.sidebar:not(.collapsed) .logo-full {
 .package-export-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; align-items: start; overflow: auto; padding: .3rem 0 .4rem; }
 .package-export-options { display: grid; gap: .4rem; align-content: start; padding: .55rem .9rem; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
 .package-export-options label { display: flex; align-items: center; gap: .5rem; color: #334155; font-size: .82rem; }
+/* The itinerary dialog has more options, including a placeholder reference. It gets the full
+   width and a fixed footer: `.modal-content` otherwise caps it at 500px, and without a flex
+   column the footer can be pushed below the viewport no matter how the grid scrolls. */
+.package-export-modal.itinerary-export-modal {
+  width: 100%;
+  max-width: min(1040px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.package-export-modal.itinerary-export-modal .modal-header {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+  padding: 1.5rem 1.6rem .8rem;
+}
+.package-export-modal.itinerary-export-modal .package-export-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: .3rem 1.6rem 1rem;
+}
+.package-export-modal.itinerary-export-modal .package-modal-actions {
+  flex: 0 0 auto;
+  padding: 1rem 1.6rem;
+}
 /* Only shown for a package with no assigned partner - a client-assigned one takes its
    markup from the client record and offers nothing to type. */
 .package-export-markup { color: #0d7478; font-weight: 600; }
 .package-export-markup input { width: 4rem; padding: .15rem .35rem; border: 1px solid #cbd5e1; border-radius: 6px; font-size: .82rem; text-align: right; }
 @media (max-width: 620px) {
   .package-export-grid { grid-template-columns: minmax(0, 1fr); }
+  .package-export-modal.itinerary-export-modal { max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .package-export-modal.itinerary-export-modal .modal-header,
+  .package-export-modal.itinerary-export-modal .package-export-grid,
+  .package-export-modal.itinerary-export-modal .package-modal-actions { padding-left: 1rem; padding-right: 1rem; }
 }
 
 /* The price list: three cards stacked, each carrying one column per party size. Real tables

@@ -7,7 +7,7 @@
    a known label is swapped for the current itinerary value. Explicit
    {{placeholders}} are left alone for docxtemplater to render afterwards. */
 
-import { findTemplateField, templateFieldValue } from './itineraryTemplateFields';
+import { findTemplateField, templateFieldValue, templateTokenKey } from './itineraryTemplateFields';
 
 const decodeXml = (value) => String(value ?? '')
   .replace(/&lt;/g, '<')
@@ -25,6 +25,26 @@ const encodeXml = (value) => String(value ?? '')
   .replace(/'/g, '&apos;');
 
 const TEXT_NODE = /<w:t\b([^>]*)>([\s\S]*?)<\/w:t>/g;
+
+/* A single-brace token can sit inside a sentence, e.g. "Signed: {Tour Designer}".
+   Only true single braces are touched, so docxtemplater still owns {{...}}. */
+export const replaceInlineItineraryTokensInXml = (xml, data = {}) => {
+  let replacements = 0;
+  const nextXml = String(xml ?? '').replace(TEXT_NODE, (match, attributes, content) => {
+    const decoded = decodeXml(content);
+    let changed = false;
+    const nextText = decoded.replace(/\{([^{}]{1,80})\}/g, (full, token, offset, whole) => {
+      if (whole[offset - 1] === '{' || whole[offset + full.length] === '}') return full;
+      const key = templateTokenKey(token);
+      if (!key) return full;
+      changed = true;
+      replacements += 1;
+      return templateFieldValue(data, key);
+    });
+    return changed ? `<w:t${attributes}>${encodeXml(nextText)}</w:t>` : match;
+  });
+  return { xml: nextXml, replacements };
+};
 
 const paragraphText = (paragraph) => Array.from(paragraph.matchAll(TEXT_NODE))
   .map((match) => decodeXml(match[2]))
@@ -52,7 +72,7 @@ const looksLikeFieldValue = (text) => {
   if (findTemplateField(value)) return false;
   if (/[.!?,;:]$/.test(value)) return false;
   if (/^[-•*]/.test(value)) return false;
-  if (/^(POR FAVOR|POR FAVOUR|KOBO |PREZADO|DEAR |THANK |MUITO |HELLO |SIR\/MADAM)/i.test(value)) return false;
+  if (/^(POR FAVOR|POR FAVOUR|KOBO |PREZADO|DEAR |THANK |MUITO |HELLO |SIR\/|MADAM|CHER |SEHR |ESTIMADO|SENHOR|SENHORA|JE VOUS|MERCI |VIELEN |GRACIAS |MUCHAS |OBSERVAÇÃO|VEUILLEZ|HINWEIS|NOTA\b|CERTIFIQUE|ENSURE |POLÍTICA|POLITIQUE|STORNO|CANCELLATION|ENTRE |BETWEEN |MENOS |LESS |ESPERO |I TRUST|ATENCIOSAMENTE|SINCERELY|CORDIALEMENT|ATENTAMENTE|MIT FREUNDLICHEN)/i.test(value)) return false;
   return true;
 };
 
@@ -79,6 +99,12 @@ export const replaceKnownItineraryFieldsInXml = (xml, data = {}) => {
     if (!field) continue;
 
     const nextValue = templateFieldValue(data, field.key);
+
+    if (field.isToken) {
+      records[index].xml = replaceParagraphText(records[index].xml, nextValue);
+      replacements += 1;
+      continue;
+    }
 
     if (field.value) {
       records[index].xml = replaceParagraphText(records[index].xml, inlineLabelValue({ ...field, value: nextValue }));
@@ -123,12 +149,14 @@ export const replaceKnownItineraryFieldsInDocxZip = (zip, data = {}) => {
   let replacements = 0;
   const parts = zip.file(/word\/(document|header\d*|footer\d*)\.xml$/);
   parts.forEach((part) => {
-    const result = replaceKnownItineraryFieldsInXml(part.asText(), data);
-    if (result.replacements) {
+    const inline = replaceInlineItineraryTokensInXml(part.asText(), data);
+    const result = replaceKnownItineraryFieldsInXml(inline.xml, data);
+    const changed = inline.replacements + result.replacements;
+    if (changed) {
       /* The regex lookup returns read-only file objects; writing by name is the
          supported PizZip way to update an existing part. */
       zip.file(part.name, result.xml);
-      replacements += result.replacements;
+      replacements += changed;
     }
   });
   return replacements;
