@@ -92,7 +92,11 @@ export default function AccommodationChargeModal({
   defaultRateId = '',
   variant = 'accommodation',
   onConfirm,
-  onCancel
+  onCancel,
+  /* Unfiltered item and active contract, so we can explain when a room's seasons
+     exist in the library but are excluded by the trip's contract type. */
+  sourceItem = null,
+  contractType = ''
 }) {
   const isExtras = variant === 'extras';
   const rooms = isExtras ? [] : accommodationRoomChoices(item);
@@ -170,6 +174,23 @@ export default function AccommodationChargeModal({
   const seasons = seasonGroupsOf(selectedRoom);
   const allBands = bandsOfRoom(selectedRoom);
   const hasNightBands = allBands.some((band) => band.banded);
+  const contractFilteredOut = !isExtras && !seasons.length && !!sourceItem
+    && accommodationSeasonChoices(sourceItem, selectedRoom).length > 0;
+  if (!isExtras && !seasons.length) {
+    console.warn('[AccommodationChargeModal] no seasons resolved', {
+      item: item?.name,
+      contractType,
+      selectedRoom: { id: selectedRoom?.id, key: selectedRoom?.key, name: selectedRoom?.name },
+      rooms: rooms.map((r) => ({ id: r.id, key: r.key, name: r.name })),
+      rateCount: (item?.item_rates || []).length,
+      rates: (item?.item_rates || []).map((r) => ({
+        id: r.id, room_type_id: r.room_type_id, room_type: r.room_type,
+        season_name: r.season_name, valid_from: r.valid_from, valid_to: r.valid_to,
+        rate_type: r.rate_type
+      })),
+      sourceRateCount: (sourceItem?.item_rates || []).length
+    });
+  }
 
   const switchRoom = (room) => {
     setSelectedRoomKey(roomTypeKeyOf(room));
@@ -258,10 +279,15 @@ export default function AccommodationChargeModal({
                 lineHeight: 1.5
               }}
             >
-              <strong>No seasons are priced for {selectedRoom ? roomTypeNameOf(selectedRoom) || 'this room' : 'this item'} yet.</strong>{' '}
-              {rooms.length > 1
-                ? 'Each room type carries its own seasons and validity dates — another room’s seasons do not price this one. Load seasons for this room in the Library, or pick a room type that is priced.'
-                : 'Load its seasons in the Library before this item can be placed on a trip.'}
+              <strong>No seasons are priced for {selectedRoom ? roomTypeNameOf(selectedRoom) || 'this room' : 'this item'}{contractFilteredOut ? ` under the ${String(contractType || 'selected').toUpperCase()} contract` : ' yet'}.</strong>{' '}
+              {contractFilteredOut
+                ? `This room has priced seasons in the Library, but none match the trip’s ${String(contractType || 'selected').toUpperCase()} contract. Add a ${String(contractType || 'matching').toUpperCase()} or generic (Any) rate for this room in the Library, or change the trip/tour contract type.`
+                : rooms.length > 1
+                  ? 'Each room type carries its own seasons and validity dates — another room’s seasons do not price this one. Load seasons for this room in the Library, or pick a room type that is priced.'
+                  : 'Load its seasons in the Library before this item can be placed on a trip.'}
+              <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#a16207' }}>
+                Debug: {rooms.length} room type(s), {(item?.item_rates || []).length} contract rate row(s), {(sourceItem?.item_rates || []).length} library rate row(s), selected room "{roomTypeNameOf(selectedRoom) || '—'}" ({String(selectedRoom?.id || selectedRoom?.key || 'no-id')}).
+              </div>
             </div>
           )}
           {seasons.map((season) => {

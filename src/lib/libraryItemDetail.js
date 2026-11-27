@@ -29,7 +29,8 @@ import { normaliseSingleSupplementLadder, stripWaiverNote, waiverFromLadder } fr
 import { collapseOccupancyLadder, isOccupancyBasis, isOccupancyTiered } from './occupancyPricing';
 import { nightBandLabel, weekendDaysLabel, weekendPriceOf, weekendRatesOf, stripWeekendRatesNote } from './accommodationOptions';
 import { normalizeStayPayPromotions, stayPayRuleScopeLabel, stayPayRuleSummary } from './stayPay';
-import { crewLadderTiers, normaliseStaffTiers, staffCountWord, staffLadderBasis, staffTierBands } from './staffRoomTiers';
+import { crewLadderTiers, hasStaffRate, normaliseStaffTiers, staffCountWord, staffLadderBasis, staffRateValue, staffTierBands } from './staffRoomTiers';
+import { seasonIdentityOf } from './roomSeasons';
 import { starGlyphs } from './starGrading';
 import { carRentalGroups } from './carRentalPricing';
 import { fuelIncludedOf, fuelIncludedLabel } from './fuelAllowance';
@@ -600,68 +601,35 @@ const seasonCard = ({ item, rate, index, kind, money, bands, vehicleName }) => {
 
   if (kind === 'accommodation') {
     const board = rate.meal_plan || item.meal_plan;
-    const guideMeals = rate.guide_meal_plan || board;
-    const driverMeals = rate.driver_meal_plan || board;
     /* A tour leader room can be free, so a 0 is a configured price here; only a
        missing rate reads as "charge the single rate". */
     const tlConfigured = has(rate.tour_leader_rate);
     const tlTiers = normaliseStaffTiers(rate.tour_leader_tiers);
-    /* One pool, one rule: the crew ladder a property typed into either column. */
-    const crewTiers = crewLadderTiers(rate.guide_tiers, rate.driver_tiers);
-    if (priced(rate.guide_rate) || priced(rate.driver_rate) || item.guide_driver_room_offered || crewTiers.length || tlConfigured || item.tour_leader_room_offered) {
+    /* Guide/driver room is property-wide and rendered once at item level, not per
+       guest room type. Tour leader stays per room type because its single-rate
+       fallback depends on the room's own rate. */
+    if (tlConfigured || item.tour_leader_room_offered || tlTiers.length) {
       const rows = [];
-      const crewMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
-      /* The pool is one deal, so the guide figure heads it and the driver figure
-         stands in only where the guide box was left blank. A blank pair means the
-         property beds crew at its own single rate. */
-      const crewConfigured = priced(rate.guide_rate) || priced(rate.driver_rate);
-      const crewHeadline = firstPriced([rate.guide_rate, rate.driver_rate]);
-      const crewSingle = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
-      const crewMealNote = !guideMeals ? '' : (guideMeals === driverMeals ? guideMeals : `${guideMeals} guide \u00b7 ${driverMeals} driver`);
-      if (crewTiers.length) {
-        rows.push(...crewRows({ tiers: crewTiers, meals: crewMealNote, money }));
-      } else if (crewConfigured || item.guide_driver_room_offered) {
-        /* The crew bed follows the same contract shape as the TL deal: the
-           property's crew rate only applies once its minimum client rooms are
-           booked, and a blank rate falls back to the single rate. Print both the
-           threshold and the figure actually charged instead of a dash. */
-        const charged = crewConfigured ? crewHeadline : crewSingle;
+      const boardSuffix = board ? ` \u00b7 ${board}` : '';
+      if (tlTiers.length) {
+        rows.push(...ladderRows({
+          label: 'Tour Leader',
+          ladder: tlTiers,
+          roomLabel: 'TL room',
+          meals: board,
+          money
+        }));
+      } else {
+        const minRooms = Math.max(1, Number(item.tour_leader_min_rooms) || 1);
+        const singleRate = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
+        const headline = tlConfigured ? rate.tour_leader_rate : singleRate;
+        const fallback = !tlConfigured && priced(singleRate) ? ' \u00b7 single rate' : '';
         rows.push({
-          label: `Driver-Guide${crewConfigured
-            ? (crewMinRooms > 1 ? ` (from ${crewMinRooms} client rooms)` : '')
-            : ` (single rate${crewMinRooms > 1 ? ` until ${crewMinRooms} client rooms` : ''})`}`,
-          value: `${charged !== null ? money(charged) : '\u2014'}${crewMealNote ? ` \u00b7 ${crewMealNote}` : ''}`
+          label: `Tour Leader (from ${minRooms} client room${minRooms === 1 ? '' : 's'})`,
+          value: `${headline !== null ? money(headline) : '\u2014'}${boardSuffix}${fallback}`
         });
       }
-      if (tlConfigured || item.tour_leader_room_offered || tlTiers.length) {
-        const boardSuffix = board ? ` \u00b7 ${board}` : '';
-        if (tlTiers.length) {
-          /* A ladder replaces the flat TL rate. One row per client-room band
-             keeps the "how many client rooms include how many TL rooms, at
-             what rate" readable instead of hiding it in a trailing sentence. */
-          rows.push(...ladderRows({
-            label: 'Tour Leader',
-            ladder: tlTiers,
-            roomLabel: 'TL room',
-            meals: board,
-            money
-          }));
-        } else {
-          /* No ladder: one TL room is included from the item's threshold, priced
-             at the TL rate or — when that box was left blank — at the Single
-             rate the pricing engine falls back to. Printing a dash there hides
-             the figure the client is actually charged. */
-          const minRooms = Math.max(1, Number(item.tour_leader_min_rooms) || 1);
-          const singleRate = firstPriced([rate.price_1_adult, rate.single_room_rate, rate.effective_single_rate, rate.unit_price]);
-          const headline = tlConfigured ? rate.tour_leader_rate : singleRate;
-          const fallback = !tlConfigured && priced(singleRate) ? ' \u00b7 single rate' : '';
-          rows.push({
-            label: `Tour Leader (from ${minRooms} client room${minRooms === 1 ? '' : 's'})`,
-            value: `${headline !== null ? money(headline) : '\u2014'}${boardSuffix}${fallback}`
-          });
-        }
-      }
-      sections.push({ key: 'guide-driver', title: 'Guide & driver', rows });
+      sections.push({ key: 'tour-leader', title: 'Tour leader', rows });
     }
   }
 
@@ -731,6 +699,156 @@ const carRentalCard = (group, index, money) => {
   };
 };
 
+const pickEntryLevelRoomType = (item, rates) => {
+  const roomTypes = Array.isArray(item?.room_types) ? item.room_types : [];
+  if (!roomTypes.length) return null;
+  const scoreFor = (rt) => {
+    const rtRates = (rates || []).filter((r) => (
+      (rt.id != null && String(r.room_type_id || '') === String(rt.id))
+      || String(r.room_type || '').trim().toLowerCase() === String(rt.name || '').trim().toLowerCase()
+    ));
+    const prices = rtRates.flatMap((r) => [r.price_1_adult, r.single_room_rate, r.effective_single_rate, r.unit_price, r.price_2_adults])
+      .map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0);
+    return prices.length ? Math.min(...prices) : Infinity;
+  };
+  let best = roomTypes[0];
+  let bestScore = scoreFor(best);
+  for (let i = 1; i < roomTypes.length; i++) {
+    const s = scoreFor(roomTypes[i]);
+    if (s < bestScore) { best = roomTypes[i]; bestScore = s; }
+  }
+  return best;
+};
+
+const groupedAccommodationSeasons = ({ item, rates, money, bands, vehicleName, kind }) => {
+  const groups = new Map();
+  (rates || []).forEach((rate, index) => {
+    const id = seasonIdentityOf(rate);
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push({ rate, index });
+  });
+  return [...groups.values()].map((entries, gi) => {
+    if (entries.length === 1) {
+      const card = seasonCard({ item, rate: entries[0].rate, index: entries[0].index, kind, money, bands, vehicleName });
+      const hasContent = (card.sections?.length || 0) > 0 || !!card.notes;
+      return hasContent ? card : null;
+    }
+    const first = entries[0].rate;
+    const roomGroups = entries.map(({ rate, index }) => {
+      const card = seasonCard({ item, rate, index, kind, money, bands, vehicleName });
+      return {
+        key: card.key,
+        roomType: rate.room_type || 'Room',
+        sections: card.sections,
+        notes: card.notes
+      };
+    }).filter((rg) => (rg.sections?.length || 0) > 0 || !!rg.notes);
+    if (!roomGroups.length) return null;
+    const chips = [
+      `${first.valid_from || 'open'}\u2013${first.valid_to || 'open'}`,
+      BASIS_LABELS[basisOf(first, item)],
+      first.meal_plan,
+      nightBandLabel(first)
+    ].filter(Boolean);
+    return {
+      key: first.id ?? `season-group-${gi}`,
+      title: first.season_name || first.option_name || `Season ${gi + 1}`,
+      chips,
+      roomGroups,
+      sections: [],
+      notes: null
+    };
+  }).filter(Boolean);
+};
+
+const buildPropertyGuideDriver = ({ item, rates, money }) => {
+  if (String(item?.category || '').trim() !== 'Accommodation') return [];
+  const rows = Array.isArray(rates) ? rates : [];
+  const entryRoom = pickEntryLevelRoomType(item, rows);
+  const entryName = String(entryRoom?.name || '').trim().toLowerCase();
+
+  const hasCrewConfig = (r) => hasStaffRate(r?.guide_rate) || hasStaffRate(r?.driver_rate)
+    || crewLadderTiers(r?.guide_tiers, r?.driver_tiers).length > 0;
+  const anyCrewConfig = rows.some(hasCrewConfig);
+  if (!anyCrewConfig && !item?.guide_driver_room_offered) return [];
+
+  // Group by season identity; pick entry-level room row for single-rate fallback, property-wide guide config.
+  const groups = new Map();
+  for (const r of rows) {
+    const id = seasonIdentityOf(r);
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(r);
+  }
+
+  const crewMinRooms = Math.max(1, Number(item.guide_min_rooms) || 1);
+  const cards = [];
+  let idx = 0;
+  for (const [id, group] of groups.entries()) {
+    const guideSource = group.find(hasCrewConfig) || rows.find(hasCrewConfig) || group[0] || null;
+    const crewTiers = crewLadderTiers(guideSource?.guide_tiers, guideSource?.driver_tiers);
+    const crewConfigured = hasStaffRate(guideSource?.guide_rate) || hasStaffRate(guideSource?.driver_rate);
+    if (!crewTiers.length && !crewConfigured && !item?.guide_driver_room_offered) continue;
+
+    const entryRow = entryName
+      ? group.find((r) => String(r.room_type || '').trim().toLowerCase() === entryName)
+        || group.find((r) => entryRoom?.id != null && String(r.room_type_id || '') === String(entryRoom.id))
+      : null;
+    const fallbackRow = entryRow || group[0] || guideSource || {};
+
+    const board = fallbackRow.meal_plan || item.meal_plan;
+    const guideMeals = guideSource?.guide_meal_plan || board;
+    const driverMeals = guideSource?.driver_meal_plan || board;
+    const crewMealNote = !guideMeals ? '' : (guideMeals === driverMeals ? guideMeals : `${guideMeals} guide \u00b7 ${driverMeals} driver`);
+    const crewSingle = firstPriced([fallbackRow.price_1_adult, fallbackRow.single_room_rate, fallbackRow.effective_single_rate, fallbackRow.unit_price]);
+    const crewHeadline = hasStaffRate(guideSource?.guide_rate) ? guideSource.guide_rate
+      : hasStaffRate(guideSource?.driver_rate) ? guideSource.driver_rate : null;
+
+    const outRows = [];
+    if (crewTiers.length) {
+      outRows.push(...crewRows({ tiers: crewTiers, meals: crewMealNote, money }));
+    } else {
+      const charged = crewConfigured ? crewHeadline : crewSingle;
+      outRows.push({
+        label: `Driver-Guide${crewConfigured
+          ? (crewMinRooms > 1 ? ` (from ${crewMinRooms} client rooms)` : '')
+          : ` (single rate${crewMinRooms > 1 ? ` until ${crewMinRooms} client rooms` : ''})`}`,
+        value: `${charged !== null ? money(charged) : '\u2014'}${crewMealNote ? ` \u00b7 ${crewMealNote}` : ''}`
+      });
+    }
+
+    const rep = fallbackRow;
+    cards.push({
+      key: `guide-driver-${id || idx}`,
+      title: rep.season_name || rep.option_name || `Season ${idx + 1}`,
+      chips: [
+        `${rep.valid_from || 'open'}\u2013${rep.valid_to || 'open'}`,
+        rep.meal_plan,
+        nightBandLabel(rep)
+      ].filter(Boolean),
+      rows: outRows,
+      note: 'Property-wide guide/driver room rate, independent of guest room type.'
+    });
+    idx += 1;
+  }
+
+  // Dedupe identical guide/driver outputs (property-wide config often replicated across guest seasons).
+  const seen = new Set();
+  const deduped = [];
+  for (const c of cards) {
+    const sig = JSON.stringify(c.rows);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    deduped.push(c);
+  }
+  if (deduped.length === 1) {
+    // Single property-wide price: show as one clean line, no season label noise.
+    deduped[0] = { ...deduped[0], title: '', chips: [], note: '' };
+  } else {
+    deduped.forEach((c) => { c.note = ''; });
+  }
+  return deduped;
+};
+
 export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
   const kind = libraryItemKind(item.category);
   const currency = item.currency || item.currency_code || '';
@@ -760,7 +878,9 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
      the ladder inside each season. */
   const carGroups = carRentalGroups(item);
 
-  const seasons = rates.map((rate, index) => seasonCard({ item, rate, index, kind, money, bands, vehicleName }));
+  const seasons = kind === 'accommodation'
+    ? groupedAccommodationSeasons({ item, rates, money, bands, vehicleName, kind })
+    : rates.map((rate, index) => seasonCard({ item, rate, index, kind, money, bands, vehicleName }));
 
   const basis = String(item.pricing_model || '').toLowerCase();
   /* A graded hotel carries its stars wherever the property is named, on screen
@@ -789,6 +909,8 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
       scope: stayPayRuleScopeLabel(rule, rooms)
     }));
 
+  const guideDriver = buildPropertyGuideDriver({ item, rates, money });
+
   return {
     kind,
     name: item.name || 'Untitled item',
@@ -798,8 +920,9 @@ export const libraryItemDetail = ({ item = {}, vehicleTypes = [] } = {}) => {
     facts: factsFor({ kind, item, bands, rates }),
     seasons,
     stayPay,
+    guideDriver,
     carRental: carGroups.map((group, index) => carRentalCard(group, index, money)),
-    empty: seasons.length === 0 && carGroups.length === 0
+    empty: seasons.length === 0 && carGroups.length === 0 && guideDriver.length === 0
   };
 };
 
@@ -832,13 +955,20 @@ export const detailDocumentHtml = (model) => {
     </table>`;
 
   const seasonMarkup = model.seasons
-    .map((season) => `
+    .map((season) => {
+      const roomGroupsMarkup = season.roomGroups?.length
+        ? season.roomGroups.map((rg) => `
+      <h3 style="font-size:12px;color:#334155;text-transform:none;letter-spacing:0;margin-top:14px">${escapeHtml(rg.roomType)}</h3>
+      ${rg.sections.map(sectionMarkup).join('')}
+      ${rg.notes ? `<p class="note">${escapeMultiline(rg.notes)}</p>` : ''}`).join('')
+        : `${season.sections.map(sectionMarkup).join('')}${season.notes ? `<p class="note">${escapeMultiline(season.notes)}</p>` : ''}`;
+      return `
     <section class="card">
       <h2>${escapeHtml(season.title)}</h2>
       ${season.chips.length ? `<p class="chips">${season.chips.map(escapeHtml).join(' \u00b7 ')}</p>` : ''}
-      ${season.sections.map(sectionMarkup).join('')}
-      ${season.notes ? `<p class="note">${escapeMultiline(season.notes)}</p>` : ''}
-    </section>`)
+      ${roomGroupsMarkup}
+    </section>`;
+    })
     .join('');
 
   const stayPayMarkup = model.stayPay && model.stayPay.length
@@ -848,6 +978,19 @@ export const detailDocumentHtml = (model) => {
       <p class="chips">${escapeHtml(rule.scope)}</p>
       <p class="note">${escapeHtml(rule.summary)}</p>`)
       .join('')}</section>`
+    : '';
+
+  const guideDriverMarkup = model.guideDriver && model.guideDriver.length
+    ? `<section class="card"><h2>Guide &amp; driver</h2>
+      <p class="note">Property-wide rate, independent of guest room type.</p>
+      ${model.guideDriver.map((season) => {
+        const multi = model.guideDriver.length > 1;
+        const label = [season.title, ...(season.chips || [])].filter(Boolean).join(' \u00b7 ');
+        return `${multi ? `<h3>${escapeHtml(label)}</h3>` : ''}
+      <table class="rows">
+        ${season.rows.map((row) => `<tr><td>${escapeHtml(row.label)}</td><td class="value">${escapeHtml(row.value)}</td></tr>`).join('')}
+      </table>`;
+      }).join('')}</section>`
     : '';
 
   const carMarkup = model.carRental.length
@@ -896,6 +1039,7 @@ export const detailDocumentHtml = (model) => {
 ${facts}
 ${empty}
 ${stayPayMarkup}
+${guideDriverMarkup}
 ${seasonMarkup}
 ${carMarkup}
 </body>

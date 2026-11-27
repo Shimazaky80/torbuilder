@@ -12,10 +12,9 @@ dist
 dist-ssr
 *.local
 
-# Environment variables
-.env
-.env.local
-.env.*.local
+# Environment variables (commit only the safe template)
+.env*
+!.env.example
 
 # Editor directories and files
 .vscode/*

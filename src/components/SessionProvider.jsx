@@ -126,6 +126,13 @@ export const SessionProvider = ({ children }) => {
       /* A remembered tenant that no longer exists is dropped rather than
          silently scoping every page to nothing. */
       viewingCompany = companies.some((c) => c.id === stored) ? stored : (companies[0]?.id || null);
+    } else if (profile?.company_id) {
+      const { data } = await supabase
+        .from('companies')
+        .select('id, name, status')
+        .eq('id', profile.company_id)
+        .maybeSingle();
+      if (data) companies = [data];
     }
     setPlatformScope(isPlatformAdmin ? viewingCompany : null);
 
@@ -174,10 +181,23 @@ export const SessionProvider = ({ children }) => {
 
   const value = useMemo(() => {
     const { access, profile, user } = state;
-    const fullName = [profile?.first_name, profile?.last_name].filter(Boolean).join(' ');
-    const name = fullName
-      || user?.user_metadata?.full_name
-      || user?.user_metadata?.name
+    const companyId = access.isPlatformAdmin
+      ? (state.viewingCompany || profile?.company_id || null)
+      : (profile?.company_id || null);
+    const companyName = (state.companies || []).find((c) => c.id === companyId)?.name
+      || (state.companies || []).find((c) => c.id === profile?.company_id)?.name
+      || '';
+    const companyNameKey = (value) => String(value || '')
+      .toLowerCase()
+      .replace(/\(pty\)|\bpty\b|\bltd\b|\blimited\b|\binc\b|\bllc\b|\bcc\b|\bcompany\b|\bco\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    const fullName = [profile?.first_name, profile?.last_name].filter(Boolean).join(' ').trim();
+    const profileIsCompanyName = !!fullName && !!companyName && companyNameKey(fullName) === companyNameKey(companyName);
+    const metadataName = String(user?.user_metadata?.full_name || user?.user_metadata?.name || '').trim();
+    const name = (!profileIsCompanyName && fullName)
+      || metadataName
+      || (fullName || '')
       || user?.email?.split('@')[0]
       || '';
     return {
@@ -188,9 +208,7 @@ export const SessionProvider = ({ children }) => {
       /* For a company account this is its own row. For the platform it is the
          tenant picked in the sidebar, which is the only way a company-less
          account can reach any of the tenant pages with data in them. */
-      companyId: access.isPlatformAdmin
-        ? (state.viewingCompany || profile?.company_id || null)
-        : (profile?.company_id || null),
+      companyId,
       companies: state.companies,
       viewingCompany: state.viewingCompany,
       setViewingCompany,

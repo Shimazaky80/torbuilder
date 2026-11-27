@@ -1,4 +1,5 @@
 import {
+  accommodationAcceptsGuide,
   driverMealRate,
   flightOffersGuideTicket,
   guideFlightRate,
@@ -376,5 +377,29 @@ const legacyCard = libraryItemDetail({
 check('a legacy ladder keeps counting client rooms',
   rowsOf(legacyCard, 'guide-driver'),
   [['Driver-Guide (5+ client rooms)', `1 crew room @ ${money(0)}`]]);
+
+/* -- Accommodation accepting guide overnight --------------------------------
+   A property can be auto-charged for the guide overnight when it is flagged OR
+   when any rate row carries a contracted guide/driver rate/tier. A typed 0 is a
+   free bed and still counts as a contracted rate. */
+check('flagged accommodation accepts guide', accommodationAcceptsGuide({ guide_driver_room_offered: true, item_rates: [] }), true);
+check('guide rate on rate row accepts guide even without flag', accommodationAcceptsGuide({
+  guide_driver_room_offered: false,
+  item_rates: [{ guide_rate: 365 }]
+}), true);
+check('driver rate on rate row accepts guide', accommodationAcceptsGuide({
+  item_rates: [{ driver_rate: 200 }]
+}), true);
+check('typed zero guide rate is a contracted free bed', accommodationAcceptsGuide({
+  item_rates: [{ guide_rate: 0 }]
+}), true);
+check('guide tier accepts guide', accommodationAcceptsGuide({
+  item_rates: [{ guide_tiers: [{ minRooms: 5, rooms: 1, rate: 0 }] }]
+}), true);
+check('no flag and no guide/driver rate does not accept guide', accommodationAcceptsGuide({
+  guide_driver_room_offered: false,
+  item_rates: [{ price_1_adult: 1200, single_room_rate: 1500 }]
+}), false);
+check('empty item does not accept guide', accommodationAcceptsGuide(null), false);
 
 console.log('\n--- Crew meals & guide flight options suite complete ---\n');

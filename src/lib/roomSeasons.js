@@ -1,10 +1,9 @@
-/* A property's seasons are shared by every room type.
+/* Accommodation seasons can be per room type.
 
    The library item is the property; its rooms are room types, not separate
-   items. A season - its name, validity window, charge types, night bands and
-   weekend days - therefore belongs to the property, and every room prices the
-   same season with its own money. These helpers keep that structure in one
-   place so the editor, the add-room clone and the tests agree.
+   items. Different room types may have different season windows and prices.
+   Helpers here group/identify season rows so the editor and pricing logic can
+   work with room-scoped seasons consistently.
 */
 
 /* A season is identified by what the operator typed as the season itself. The

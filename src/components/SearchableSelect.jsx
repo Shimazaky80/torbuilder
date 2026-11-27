@@ -104,7 +104,7 @@ export default function SearchableSelect({
           id={id}
           type="text"
           className={className}
-          style={{ width: '100%', paddingLeft: '2rem', paddingRight: '2.2rem', ...style }}
+          style={{ width: '100%', ...style, paddingLeft: '2.6rem', paddingRight: '2.2rem' }}
           value={open ? query : (selected?.text ?? '')}
           placeholder={placeholder ?? (!selected ? options.find((option) => option.value === '')?.text : undefined)}
           title={title}

@@ -63,7 +63,11 @@ export const normalizeRoomTypes = (rows) => (Array.isArray(rows) ? rows : [])
   .map(normalizeRoomType)
   .sort((a, b) => (a.sortOrder - b.sortOrder) || a.name.localeCompare(b.name));
 
-export const roomTypesOf = (item) => normalizeRoomTypes(item?.roomTypes || item?.room_types || item?._room_types);
+export const roomTypesOf = (item) => {
+  const candidates = [item?.roomTypes, item?.room_types, item?._room_types];
+  const found = candidates.find((value) => Array.isArray(value) && value.length > 0);
+  return normalizeRoomTypes(found || candidates.find(Array.isArray) || []);
+};
 
 export const roomTypeNameOf = (room) => String(room?.name || '').trim();
 
@@ -87,20 +91,31 @@ export const childAgeRangesForAllocation = (item, allocation) => {
   return Array.isArray(fallback) ? fallback : [];
 };
 
+const rateRoomTypeId = (rate) => String(rate?.room_type_id ?? rate?.roomTypeId ?? '').trim();
+const rateRoomTypeName = (rate) => String(rate?.room_type ?? rate?.roomType ?? rate?.room_name ?? '').trim();
+const normRoomName = (value) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+const roomIdsOf = (room) => {
+  const ids = [room?.id, room?.key, room?.room_type_id, room?.roomTypeId]
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean);
+  return [...new Set(ids)];
+};
+
 /* The room a rate row prices. Older rows have no room, so a null answer means
    "this rate belongs to the item as a whole" and every caller keeps its legacy
    behaviour. */
 export const roomForRate = (rate, rooms) => {
   if (!rate) return null;
   const list = Array.isArray(rooms) ? rooms : [];
-  const id = String(rate.room_type_id || '');
+  const id = rateRoomTypeId(rate);
   if (id) {
-    const byId = list.find((room) => String(room.id || room.key) === id);
+    const byId = list.find((room) => roomIdsOf(room).includes(id));
     if (byId) return byId;
   }
-  const name = String(rate.room_type || '').trim().toLowerCase();
+  const name = normRoomName(rateRoomTypeName(rate));
   if (name) {
-    const byName = list.find((room) => String(room.name || '').trim().toLowerCase() === name);
+    const byName = list.find((room) => normRoomName(roomTypeNameOf(room)) === name);
     if (byName) return byName;
   }
   return null;
@@ -108,24 +123,64 @@ export const roomForRate = (rate, rooms) => {
 
 export const roomMatchesRate = (room, rate) => {
   if (!room || !rate) return false;
-  const id = String(room.id || room.key || '');
-  if (id && String(rate.room_type_id || '') === id) return true;
-  const name = roomTypeNameOf(room).toLowerCase();
-  return !!name && String(rate.room_type || '').trim().toLowerCase() === name;
+  const rateId = rateRoomTypeId(rate);
+  if (rateId && roomIdsOf(room).includes(rateId)) return true;
+  const roomName = normRoomName(roomTypeNameOf(room));
+  const rateName = normRoomName(rateRoomTypeName(rate));
+  return !!roomName && !!rateName && roomName === rateName;
 };
 
 /* Every rate for one room. A pool where no row names a room is the item's
    legacy matrix: every room keeps pricing on it. But once rows name rooms, a
    room with none of its own has no price — falling back to the pool would
    offer a villa the Luxury Room's seasons and validity on a drop. A null room
-   (a caller that never had one) still reads the whole pool. */
-export const ratesForRoom = (rates, room) => {
+   (a caller that never had one) still reads the whole pool.
+
+   If rates are room-scoped but none match this room directly, try to recover
+   orphaned rates (room-scoped rates that match no known room). This prevents
+   false "no seasons priced" when room ids/names are stale or inconsistent. */
+export const ratesForRoom = (rates, room, allRooms = []) => {
   const list = Array.isArray(rates) ? rates : [];
   if (!room) return list;
   const scoped = list.filter((rate) => roomMatchesRate(room, rate));
   if (scoped.length) return scoped;
-  const roomScopedPool = list.some((rate) => String(rate?.room_type_id || '') || String(rate?.room_type || '').trim());
-  return roomScopedPool ? [] : list;
+  const roomScopedPool = list.some((rate) => rateRoomTypeId(rate) || rateRoomTypeName(rate));
+  if (!roomScopedPool) return list;
+
+  const knownRooms = (Array.isArray(allRooms) ? allRooms : []).filter(Boolean);
+  if (knownRooms.length === 0) return [];
+  const orphans = list.filter((rate) => !knownRooms.some((known) => roomMatchesRate(known, rate)));
+  if (!orphans.length) return [];
+
+  // Recover only orphans that plausibly belong to this room. Rates that clearly
+  // name a different room must not leak across rooms.
+  const roomName = normRoomName(roomTypeNameOf(room));
+  const recoverable = orphans.filter((rate) => {
+    const rateName = normRoomName(rateRoomTypeName(rate));
+    if (!rateName) return true; // no name - id may be stale; recoverable if room is the only plausible owner
+    if (roomName && rateName === roomName) return true;
+    return false;
+  });
+  if (!recoverable.length) return [];
+
+  if (knownRooms.length === 1) return recoverable;
+
+  // If this is the only known room with no direct matches, it's the safest owner
+  // for otherwise-unmatched recoverable rates.
+  const unmatched = knownRooms.filter((known) => !list.some((rate) => roomMatchesRate(known, rate)));
+  if (unmatched.length === 1) {
+    const only = unmatched[0];
+    const same = roomIdsOf(only).some((id) => roomIdsOf(room).includes(id))
+      || normRoomName(roomTypeNameOf(only)) === roomName;
+    if (same) return recoverable;
+  }
+
+  // As a last resort, only return rates whose name explicitly matches this room.
+  const explicitNameMatches = recoverable.filter((rate) => {
+    const rateName = normRoomName(rateRoomTypeName(rate));
+    return !!roomName && !!rateName && rateName === roomName;
+  });
+  return explicitNameMatches;
 };
 
 /* Rooms derived from rate rows alone. Used where only the rate snapshot is at
@@ -134,12 +189,14 @@ export const roomsFromRates = (rates) => {
   const list = Array.isArray(rates) ? rates : [];
   const seen = new Map();
   list.forEach((rate) => {
-    const key = String(rate?.room_type_id || '') || String(rate?.room_type || '').trim();
+    const id = rateRoomTypeId(rate);
+    const name = rateRoomTypeName(rate);
+    const key = id || name;
     if (!key || seen.has(key)) return;
     seen.set(key, normalizeRoomType({
-      id: rate.room_type_id || null,
+      id: id || null,
       key,
-      name: rate.room_type || '',
+      name,
       max_occupancy: rate.room_max_occupancy,
       max_adults: rate.room_max_adults,
       max_children: rate.room_max_children,
@@ -260,9 +317,11 @@ export const ratesForServiceRoom = (rates, service, rooms = []) => {
   const identity = serviceRoomIdentity(service);
   const list = Array.isArray(rates) ? rates : [];
   if (!identity) return list;
+  const identityId = String(identity.id || '').trim();
+  const identityName = normRoomName(identity.name);
   const room = (Array.isArray(rooms) ? rooms : []).find((candidate) => (
-    (identity.id && String(candidate?.id ?? candidate?.key ?? '') === identity.id)
-    || (identity.name && roomTypeNameOf(candidate).toLowerCase() === identity.name.toLowerCase())
-  )) || { id: identity.id || null, key: identity.id, name: identity.name };
-  return ratesForRoom(list, room);
+    (identityId && roomIdsOf(candidate).includes(identityId))
+    || (identityName && normRoomName(roomTypeNameOf(candidate)) === identityName)
+  )) || { id: identityId || null, key: identityId || '', name: identity.name };
+  return ratesForRoom(list, room, rooms);
 };

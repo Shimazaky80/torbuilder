@@ -5,8 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/validate-client-env.mjs",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "node scripts/run-tests.mjs",
+    "test:app-url": "vite build --ssr scripts/app-url.test.mjs --outDir .tmp-app-url-test --emptyOutDir --logLevel error && node .tmp-app-url-test/app-url.test.js",
+    "test:client-env": "node scripts/validate-client-env.test.mjs",
     "test:schema-audit": "node scripts/schema-audit-parser.test.mjs",
     "test:analytics-reports": "vite build --ssr scripts/analytics-reports.test.mjs --outDir .tmp-analytics-reports-test --emptyOutDir --logLevel error && node .tmp-analytics-reports-test/analytics-reports.test.js",
     "test:pricing": "vite build --ssr scripts/pricing-season.test.mjs --outDir .tmp-test --emptyOutDir --logLevel error && node .tmp-test/pricing-season.test.js",

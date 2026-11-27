@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Building2, LockKeyhole, Mail, UserRound } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { useToast } from '../context/ToastContext';
 
 export const PartnerRegister = () => {
@@ -63,7 +64,7 @@ export const PartnerRegister = () => {
         password,
         options: {
           data: { full_name: name.trim() },
-          emailRedirectTo: `${window.location.origin}/partner-register?invite=${encodeURIComponent(inviteCode)}`
+          emailRedirectTo: appUrl(`/partner-register?invite=${encodeURIComponent(inviteCode)}`)
         }
       });
       if (error) throw error;

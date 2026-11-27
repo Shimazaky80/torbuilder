@@ -235,7 +235,7 @@ export const Dashboard = () => {
          shown. */
       const [
         tripRes, companyRes, unpaidRes, monthBillRes, monthCashRes,
-        clientRes, supplierRes, itemRes, packageRes, guideRes
+        clientRes, supplierRes, itemRes, packageRes, guideRes, companyNameRes
       ] = await Promise.all([
         supabase
           .from('itineraries')
@@ -265,7 +265,8 @@ export const Dashboard = () => {
         countRows('suppliers'),
         countRows('library_items'),
         countRows('packages'),
-        countRows('guide_members')
+        countRows('guide_members'),
+        supabase.from('companies').select('name').eq('id', cid).maybeSingle()
       ]);
 
       for (const res of [tripRes, companyRes, unpaidRes, monthBillRes, monthCashRes,
@@ -273,10 +274,28 @@ export const Dashboard = () => {
         if (res.error) throw res.error;
       }
 
-      const visibleItineraries = isConsultant
+      const normalizeCompanyKey = (value) => String(value || '')
+        .toLowerCase()
+        .replace(/\(pty\)|\bpty\b|\bltd\b|\blimited\b|\binc\b|\bllc\b|\bcc\b|\bcompany\b|\bco\b/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+      const companyKey = normalizeCompanyKey(companyNameRes?.data?.name || '');
+      const canonicalUsername = String(username || sessionName || '').trim();
+      const isCompanyNameConsultant = (value) => {
+        const k = normalizeCompanyKey(value);
+        return !!k && !!companyKey && k === companyKey;
+      };
+
+      const visibleItineraries = (isConsultant
         ? (tripRes.data || []).filter((it) => it.created_by === userId
-          || (!it.created_by && it.consultant_name === (username || sessionName)))
-        : tripRes.data || [];
+          || (!it.created_by && (String(it.consultant_name || '').trim() === canonicalUsername || isCompanyNameConsultant(it.consultant_name))))
+        : tripRes.data || []
+      ).map((it) => {
+        const rawConsultant = String(it.consultant_name || '').trim();
+        if (!isCompanyNameConsultant(rawConsultant)) return it;
+        const isOwn = it.created_by === userId || (!it.created_by && !!canonicalUsername);
+        return { ...it, consultant_name: isOwn ? (canonicalUsername || rawConsultant) : '' };
+      });
     return {
       win,
       username,

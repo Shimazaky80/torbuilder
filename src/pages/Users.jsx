@@ -16,6 +16,7 @@ import {
   KeyRound
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { useSession } from '../hooks/useSession';
 import { useToast } from '../context/ToastContext';
 import { useConfirm } from '../hooks/useConfirm';
@@ -411,7 +412,7 @@ export const Users = () => {
     await load();
   };
 
-  const joinUrl = `${window.location.origin}/login`;
+  const joinUrl = appUrl('/login');
 
   const copyInvite = async (inv) => {
     const text = `You are invited to join your team on torbuilder. Sign up at ${joinUrl}?code=${inv.code} — or enter that code by hand — with this email address. The invitation carries your job, and it expires in 14 days.`;

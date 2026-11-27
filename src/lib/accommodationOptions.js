@@ -298,7 +298,8 @@ export const seasonKeyOfRate = (rate) => {
    A property can sell several room types. Passing a room scopes the grouping to
    that room's rows, so a season never mixes a standard room with a suite. */
 export const accommodationSeasonGroups = (item, room = null) => {
-  const rows = ratesForRoom(item?.item_rates, room);
+  const allRooms = room ? (roomTypesOf(item).length ? roomTypesOf(item) : roomsFromRates(item?.item_rates)) : [];
+  const rows = ratesForRoom(item?.item_rates, room, allRooms);
   const order = [];
   const byKey = new Map();
   rows.forEach((rate) => {
@@ -476,7 +477,8 @@ export const seasonForRate = (rate, { startDate = '', endDate = '', allowEstimat
 /* The rows for one option, or the whole matrix when no option is named. Passing
    a room scopes the offer to that room's rows first. */
 export const ratesForOption = (item, optionLabel, room = null) => {
-  const rows = ratesForRoom(item?.item_rates, room);
+  const allRooms = room ? (roomTypesOf(item).length ? roomTypesOf(item) : roomsFromRates(item?.item_rates)) : [];
+  const rows = ratesForRoom(item?.item_rates, room, allRooms);
   if (!optionLabel) return rows;
   const wanted = String(optionLabel).trim();
   const scoped = rows.filter((rate) => rateOptionLabel(rate, item) === wanted);

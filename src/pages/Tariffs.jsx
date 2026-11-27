@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import SearchableSelect from '../components/SearchableSelect';
 import { Download, ExternalLink, FileSpreadsheet, FileText, Plus, Send, Tag } from 'lucide-react';
 import { getLoggedInUserName, supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { useToast } from '../context/ToastContext';
 import { withStarGrade } from '../lib/starGrading';
 import { collapseOccupancyLadder, isOccupancyTiered } from '../lib/occupancyPricing';
@@ -471,7 +472,7 @@ export const Tariffs = () => {
         invited_by: user?.id
       }).select('invite_code').single();
       if (error) throw error;
-      const inviteUrl = `${window.location.origin}/partner-register?invite=${invitation.invite_code}`;
+      const inviteUrl = appUrl(`/partner-register?invite=${encodeURIComponent(invitation.invite_code)}`);
       await navigator.clipboard?.writeText(inviteUrl);
       setInviteForm({ clientId: '', email: '' });
       showToast('Partner administrator invitation created; link copied', 'success');
@@ -588,7 +589,7 @@ export const Tariffs = () => {
           </p>
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', padding: '0.85rem 1rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
             <span style={{ fontWeight: 600, fontSize: '0.88rem', color: '#334155' }}>Partner Portal URL:</span>
-            <code style={{ background: '#e2e8f0', padding: '0.3rem 0.6rem', borderRadius: '4px', fontSize: '0.88rem' }}>{window.location.origin}/partner</code>
+            <code style={{ background: '#e2e8f0', padding: '0.3rem 0.6rem', borderRadius: '4px', fontSize: '0.88rem' }}>{appUrl('/partner')}</code>
             <a href="/partner" target="_blank" rel="noopener noreferrer" className="primary-btn" style={{ textDecoration: 'none', padding: '0.45rem 0.85rem', width: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.85rem' }}>
               <ExternalLink size={15} /> Open Partner Portal
             </a>

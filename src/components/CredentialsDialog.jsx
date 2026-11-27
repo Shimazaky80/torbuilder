@@ -1,5 +1,5 @@
 import { useContext, useState } from 'react';
-import { X, KeyRound, Mail } from 'lucide-react';
+import { X, KeyRound, Mail, Info } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { SessionContext } from '../hooks/useSession';
 import { useToast } from '../context/ToastContext';
@@ -29,6 +29,25 @@ const CredentialsDialog = ({ open, mode = 'self', user = null, onClose, onSaved 
   const withPassword = isSelf || mode === 'password';
   const withEmail = isSelf || mode === 'email';
   const target = user?.email || 'this user';
+  const passwordOnly = !isSelf && mode === 'password';
+
+  const title = isSelf
+    ? 'Change your account credentials'
+    : passwordOnly
+      ? `Reset password for ${target}`
+      : `Change email for ${target}`;
+  const intro = isSelf
+    ? 'Update the details you use to sign in. Leave a field blank to keep that detail unchanged.'
+    : passwordOnly
+      ? `Choose a new password for ${target}. They can sign in with it immediately; you do not need their current password.`
+      : `Replace the sign-in email address for ${target}. They will use the new address at their next login.`;
+  const saveLabel = isSelf ? 'Save changes' : passwordOnly ? 'Update password' : 'Update email address';
+  const passwordHelp = isSelf
+    ? `Choose a new sign-in password of at least ${MIN_PASSWORD_LENGTH} characters. Leave it blank to keep your current password.`
+    : `Enter the new sign-in password for ${target} (at least ${MIN_PASSWORD_LENGTH} characters). Share it with them securely.`;
+  const emailHelp = isSelf
+    ? 'Enter the new address you want to sign in with. A confirmation link may be required before it takes effect.'
+    : `Enter the new address ${target} should use to sign in. The change takes effect immediately.`;
 
   const validate = () => {
     if (withPassword && password) {
@@ -96,89 +115,183 @@ const CredentialsDialog = ({ open, mode = 'self', user = null, onClose, onSaved 
     }
   };
 
+  const fieldLabelStyle = {
+    display: 'block',
+    fontSize: '0.8125rem',
+    fontWeight: 600,
+    color: '#334155',
+    marginBottom: '0.375rem',
+    lineHeight: 1.3,
+  };
+  const inputWrapStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.625rem',
+    padding: '0 0.75rem',
+    height: '2.75rem',
+    background: '#fff',
+    border: '1px solid #cbd5e1',
+    borderRadius: '0.5rem',
+    color: '#64748b',
+  };
+  const inputStyle = {
+    border: 'none',
+    background: 'transparent',
+    width: '100%',
+    outline: 'none',
+    fontSize: '0.9375rem',
+    color: '#0f172a',
+    lineHeight: 1.4,
+  };
+  const helpStyle = {
+    display: 'block',
+    marginTop: '0.375rem',
+    fontSize: '0.75rem',
+    color: '#64748b',
+    lineHeight: 1.45,
+  };
+  const sectionTitleStyle = {
+    fontSize: '0.6875rem',
+    fontWeight: 700,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    color: '#64748b',
+    margin: 0,
+  };
+
   return (
     <div
       className="modal-overlay"
       onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose?.(); }}
     >
-      <form className="modal-content" style={{ maxWidth: '480px' }} onSubmit={handleSubmit}>
-        <div className="modal-header">
-          <h2>{isSelf ? 'Account credentials' : mode === 'password' ? 'Reset password' : 'Change email address'}</h2>
-          <button type="button" className="close-btn" onClick={onClose} disabled={saving} aria-label="Close">
+      <form
+        className="modal-content"
+        style={{ maxWidth: '520px', padding: '1.75rem' }}
+        onSubmit={handleSubmit}
+        aria-labelledby="credentials-dialog-title"
+      >
+        <div className="modal-header" style={{ marginBottom: '1rem', alignItems: 'flex-start' }}>
+          <div style={{ paddingRight: '1rem' }}>
+            <h2 id="credentials-dialog-title" style={{ fontSize: '1.25rem', fontWeight: 700, color: '#0f172a', margin: 0, lineHeight: 1.3 }}>
+              {title}
+            </h2>
+            <p
+              id="credentials-intro"
+              style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', color: '#475569', fontSize: '0.8125rem', lineHeight: 1.5, margin: '0.5rem 0 0' }}
+            >
+              <Info size={15} style={{ flexShrink: 0, marginTop: '0.125rem', color: '#0d7478' }} />
+              <span>{intro}</span>
+            </p>
+          </div>
+          <button type="button" className="close-btn" onClick={onClose} disabled={saving} aria-label="Close" style={{ marginTop: '-0.125rem' }}>
             <X size={20} />
           </button>
         </div>
 
-        <p style={{ color: '#64748b', fontSize: '0.87rem', marginTop: 0, marginBottom: '1.25rem' }}>
-          {isSelf
-            ? 'Change your password and/or your sign-in email. Leave a field blank to keep it as it is.'
-            : `Set a new sign-in detail for ${target}. The change takes effect immediately.`}
-        </p>
+        {!isSelf && (
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '0.5rem', padding: '0.625rem 0.75rem', fontSize: '0.8125rem', color: '#475569', marginBottom: '1.25rem' }}>
+            Current sign-in email: <strong style={{ color: '#0f172a', fontWeight: 600 }}>{target}</strong>
+          </div>
+        )}
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           {withPassword && (
-            <>
-              <label className="form-group" style={{ margin: 0 }}>
-                <span>New password{isSelf ? ' (optional)' : ''}</span>
-                <div className="input-with-icon">
-                  <KeyRound size={18} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {isSelf && withEmail && <p style={sectionTitleStyle}>Password</p>}
+              <div>
+                <label htmlFor="credentials-new-password" style={fieldLabelStyle}>
+                  New password{isSelf ? <span style={{ fontWeight: 500, color: '#64748b' }}> (optional)</span> : ''}
+                </label>
+                <div className="credential-input" style={inputWrapStyle}>
+                  <KeyRound size={17} aria-hidden="true" />
                   <input
+                    id="credentials-new-password"
                     type="password"
                     autoComplete="new-password"
+                    placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
+                    minLength={MIN_PASSWORD_LENGTH}
+                    required={!isSelf}
+                    autoFocus={withPassword}
                     value={password}
-                    onChange={(event) => setPassword(event.target.value)}
+                    onChange={(event) => {
+                      setPassword(event.target.value);
+                      if (!event.target.value) setConfirmPassword('');
+                    }}
                     disabled={saving}
+                    aria-describedby="new-password-help"
+                    style={inputStyle}
                   />
                 </div>
-              </label>
+                <small id="new-password-help" style={helpStyle}>{passwordHelp}</small>
+              </div>
               {password && (
-                <label className="form-group" style={{ margin: 0 }}>
-                  <span>Confirm new password</span>
-                  <div className="input-with-icon">
-                    <KeyRound size={18} />
+                <div>
+                  <label htmlFor="credentials-confirm-password" style={fieldLabelStyle}>
+                    Confirm new password
+                  </label>
+                  <div className="credential-input" style={inputWrapStyle}>
+                    <KeyRound size={17} aria-hidden="true" />
                     <input
+                      id="credentials-confirm-password"
                       type="password"
                       autoComplete="new-password"
+                      placeholder="Re-enter the new password"
+                      required
                       value={confirmPassword}
                       onChange={(event) => setConfirmPassword(event.target.value)}
                       disabled={saving}
+                      style={inputStyle}
                     />
                   </div>
-                </label>
+                </div>
               )}
-              <small style={{ color: '#64748b' }}>Use at least {MIN_PASSWORD_LENGTH} characters.</small>
-            </>
+            </div>
+          )}
+
+          {isSelf && withPassword && withEmail && (
+            <div style={{ height: 1, background: '#e2e8f0' }} aria-hidden="true" />
           )}
 
           {withEmail && (
-            <label className="form-group" style={{ margin: 0 }}>
-              <span>New email address{isSelf ? ' (optional)' : ''}</span>
-              <div className="input-with-icon">
-                <Mail size={18} />
-                <input
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  disabled={saving}
-                />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {isSelf && withPassword && <p style={sectionTitleStyle}>Sign-in email</p>}
+              <div>
+                <label htmlFor="credentials-new-email" style={fieldLabelStyle}>
+                  New email address{isSelf ? <span style={{ fontWeight: 500, color: '#64748b' }}> (optional)</span> : ''}
+                </label>
+                <div className="credential-input" style={inputWrapStyle}>
+                  <Mail size={17} aria-hidden="true" />
+                  <input
+                    id="credentials-new-email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="name@company.com"
+                    required={!isSelf}
+                    autoFocus={!withPassword && withEmail}
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    disabled={saving}
+                    aria-describedby="new-email-help"
+                    style={inputStyle}
+                  />
+                </div>
+                <small id="new-email-help" style={helpStyle}>{emailHelp}</small>
               </div>
-              {isSelf && <small style={{ color: '#64748b' }}>A confirmation link may be required before a new email takes effect.</small>}
-            </label>
+            </div>
           )}
         </div>
 
-        <div className="form-actions">
-          <button type="button" className="secondary-btn" onClick={onClose} disabled={saving}>
+        <div className="form-actions" style={{ marginTop: '1.5rem', gap: '0.75rem' }}>
+          <button type="button" className="secondary-btn" onClick={onClose} disabled={saving} style={{ flex: '0 0 auto', minWidth: '6.5rem' }}>
             Cancel
           </button>
           <button
             type="submit"
             className="primary-btn"
-            style={{ flex: 1, background: '#0d7478', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+            style={{ flex: 1, background: '#0d7478', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0.75rem 1rem', fontSize: '0.9375rem' }}
             disabled={saving}
           >
-            {saving ? 'Saving…' : 'Save credentials'}
+            {saving ? 'Saving…' : saveLabel}
           </button>
         </div>
       </form>

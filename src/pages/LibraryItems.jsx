@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import SearchableSelect from '../components/SearchableSelect';
 import CarSpecGrid from '../components/CarSpecGrid';
 import { useLocation } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { supabase, fetchAllRows } from '../lib/supabase';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useToast } from '../context/ToastContext';
 import { useSession } from '../hooks/useSession';
@@ -11,7 +11,7 @@ import LibraryItemDetailModal from '../components/LibraryItemDetailModal';
 import { useConfirm } from '../hooks/useConfirm';
 import { useListRowLimit } from '../hooks/useListRowLimit';
 import { useAmountSettings, stepForAmounts, applyInputRounding } from '../lib/amountSettings';
-import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis, isSurchargeItem, surchargeTypeLabel, feeEditorRowFromRecord, feeRatePayload, moveFeeAmount, feeBasisChargesHeads, emptyFeeWindow, feeWindowKey, feeWindowsFromSeasons, feeWindowOverlapError } from '../lib/surchargeFees';
+import { SURCHARGE_CATEGORY, SURCHARGE_TYPES, CHARGE_BASIS, UNIT_BASES, unitBasesFor, isValidUnitBasis, isSurchargeItem, surchargeTypeLabel, surchargeUnitBasisOf, surchargeBasisOf, surchargeRateAmount, surchargeChildAmount, feeEditorRowFromRecord, feeRatePayload, moveFeeAmount, feeBasisChargesHeads, emptyFeeWindow, feeWindowKey, feeWindowsFromSeasons, feeWindowOverlapError } from '../lib/surchargeFees';
 import { chargesChildRate } from '../lib/servicePricing';
 import { waiverLadder, waiverFromLadder, withWaiverNote } from '../lib/singleSupplement';
 import { nightBandLabel, WEEKEND_DAY_OPTIONS, weekendDaysOf, weekendRatesOf, withWeekendRatesNote } from '../lib/accommodationOptions';
@@ -1190,6 +1190,8 @@ export const LibraryItems = () => {
          accommodation rather than creating a separate library item. */
       linkedFees: [],
       linkedFeeOriginalIds: [],
+      /* Property-wide guide/driver room seasons. Independent of guest room types. */
+      guideRoomSeasons: [],
       /* Stay X Pay Y offers belong to the property, not to a season: the offer
          decides which room-nights are billed, while the season decides what a
          billed night costs. */
@@ -1318,16 +1320,9 @@ export const LibraryItems = () => {
     const room = newRoomTemplate('', `room_${seq}`);
     room.childAgeRanges = (current?.childAgeRanges || []).map((band) => ({ ...band }));
     room.sharingCapacityRules = sharingRulesForRoom(room);
-    /* A property's seasons are shared by its rooms, so a new room starts with
-       the same season skeleton and blank money: the operator only types the
-       room's own rates instead of rebuilding every season and charge type. */
-    const clonedSeasons = current?.category === 'Accommodation'
-      ? seasonSkeletonsFor(current.seasons || []).map((skeleton) => ({
-          ...emptySeasonMoney(),
-          ...skeleton,
-          roomKey: room.key
-        }))
-      : [];
+    /* Room types can have their own season validity and rates. A new room
+       starts without cloned seasons so the operator can define its own contract. */
+    const clonedSeasons = [];
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const newRooms = [...(item.roomTypes || []), room];
@@ -1475,13 +1470,13 @@ export const LibraryItems = () => {
         roomKey
       }));
     if (!missing.length) {
-      showToast('This room already prices every shared season', 'success');
+      showToast('This room already has every season from other room types', 'success');
       return;
     }
     setItemsToSave(prev => prev.map(item => (
       item.tempId === tempId ? { ...item, seasons: [...item.seasons, ...missing] } : item
     )));
-    showToast(`${missing.length} shared season row${missing.length === 1 ? '' : 's'} copied to ${room.name || 'the room'}`, 'success');
+    showToast(`${missing.length} season row${missing.length === 1 ? '' : 's'} copied to ${room.name || 'the room'}`, 'success');
   };
 
   /* The star grade belongs to the supplier (the hotel or lodge), not to one
@@ -1967,9 +1962,9 @@ export const LibraryItems = () => {
 
       const itemIds = (items || []).map(i => i.id);
 
-      // Fetch item_rates separately — no FK join
+      // Fetch item_rates separately — no FK join. Paginate to avoid silent 1000-row truncation.
       const { data: ratesData } = itemIds.length > 0
-        ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
+        ? await fetchAllRows((from, to) => supabase.from('item_rates').select('*').in('item_id', itemIds).range(from, to))
         : { data: [] };
 
       /* Room types are a child of the property, so a hotel with three rooms
@@ -1977,11 +1972,11 @@ export const LibraryItems = () => {
          migration is applied, and a legacy item simply reads as no rooms. */
       const roomsByItem = await fetchRoomTypesForItems(itemIds);
 
-      // Fetch car_rental_rates separately — no FK join
+      // Fetch car_rental_rates separately — no FK join. Paginate to avoid silent 1000-row truncation.
       let carRatesData = [];
       if (itemIds.length > 0) {
         try {
-          const carRes = await supabase.from('car_rental_rates').select('*').in('item_id', itemIds);
+          const carRes = await fetchAllRows((from, to) => supabase.from('car_rental_rates').select('*').in('item_id', itemIds).range(from, to));
           carRatesData = carRes.data || [];
         } catch {
           carRatesData = [];
@@ -2463,12 +2458,9 @@ export const LibraryItems = () => {
       validTo: '',
       ...emptySeasonMoney()
     };
-    /* A property's seasons are shared by its room types, so one new season
-       adds one row per room: every room prices the same season, and each keeps
-       its own money. */
-    const newSeasons = isAccommodationItem && rooms.length
-      ? rooms.map(entry => ({ ...baseSeason, roomKey: entry.key }))
-      : [{ ...baseSeason, roomKey: room?.key || '' }];
+    /* Seasons are per room type: different rooms can have different validity
+       windows and prices. A new season is added to the selected room only. */
+    const newSeasons = [{ ...baseSeason, roomKey: isAccommodationItem ? (room?.key || '') : '' }];
     const startIndex = current.seasons.length;
     const newIndices = newSeasons.map((_, offset) => startIndex + offset);
     setItemsToSave(prev => prev.map(item => (
@@ -2496,18 +2488,20 @@ export const LibraryItems = () => {
     const current = itemsToSave.find((entry) => entry.tempId === tempId);
     if (!current || current.category !== 'Accommodation' || !group) return;
 
+    const targetRoomKey = group?.roomKey || activeRoomKeyFor(current);
     const hasContract = (current.seasons || []).some((season) => (
       String(season.seasonName || '').trim() === String(group.seasonName || '').trim()
       && String(season.validFrom || '') === String(group.validFrom || '')
       && String(season.validTo || '') === String(group.validTo || '')
       && normalizeRateType(season.rateType) === rateType
+      && (!targetRoomKey || season.roomKey === targetRoomKey)
     ));
     if (hasContract) {
-      showToast(`A ${rateType === 'fit' ? 'FIT' : 'Series'} rate already exists for this season.`, 'warning');
+      showToast(`A ${rateType === 'fit' ? 'FIT' : 'Series'} rate already exists for this season in this room.`, 'warning');
       return;
     }
 
-    const roomKeys = (current.roomTypes || []).map((room) => room.key).filter(Boolean);
+    const roomKeys = targetRoomKey ? [targetRoomKey] : (current.roomTypes || []).map((room) => room.key).filter(Boolean);
     const newRows = contractRowsForSeason({
       seasons: current.seasons || [],
       group,
@@ -2645,18 +2639,29 @@ export const LibraryItems = () => {
     }));
   };
 
+  /* Guide/driver room is property-wide (independent of guest room type), like
+     park fees. Editing these fields on any room's season applies to every room
+     type row that shares the same season identity. */
+  const PROPERTY_WIDE_GUIDE_FIELDS = new Set([
+    'guideRate', 'driverRate', 'guideMealPlan', 'driverMealPlan'
+  ]);
+
   const handleSeasonChange = (tempId, seasonIdx, field, value) => {
     setItemsToSave(prev => prev.map(item => {
-      if (item.tempId === tempId) {
-        const updatedSeasons = item.seasons.map((s, idx) => {
-          if (idx === seasonIdx) {
-            return { ...s, [field]: clampNonNegative(value) };
-          }
-          return s;
-        });
-        return { ...item, seasons: updatedSeasons };
-      }
-      return item;
+      if (item.tempId !== tempId) return item;
+      const source = item.seasons[seasonIdx];
+      const isPropertyWideGuide = item.category === 'Accommodation'
+        && PROPERTY_WIDE_GUIDE_FIELDS.has(field)
+        && source;
+      const identity = isPropertyWideGuide ? seasonIdentityOf(source) : null;
+      const updatedSeasons = item.seasons.map((s, idx) => {
+        if (idx === seasonIdx) return { ...s, [field]: clampNonNegative(value) };
+        if (isPropertyWideGuide && seasonIdentityOf(s) === identity) {
+          return { ...s, [field]: clampNonNegative(value) };
+        }
+        return s;
+      });
+      return { ...item, seasons: updatedSeasons };
     }));
   };
 
@@ -2687,14 +2692,24 @@ export const LibraryItems = () => {
   /* The crew and tour leader ladders share one editor shape: a list of
      { minClientRooms, maxClientRooms, rooms, rate } rows held on the season
      under its field. */
+  const PROPERTY_WIDE_TIER_FIELDS = new Set(['crewTiers']);
+
   const updateSeasonTierList = (tempId, seasonIdx, field, updater) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
+      const source = item.seasons[seasonIdx];
+      const isPropertyWide = item.category === 'Accommodation'
+        && PROPERTY_WIDE_TIER_FIELDS.has(field)
+        && source;
+      const identity = isPropertyWide ? seasonIdentityOf(source) : null;
+      const nextValue = updater(source?.[field] || []);
       return {
         ...item,
-        seasons: item.seasons.map((s, idx) => (idx === seasonIdx
-          ? { ...s, [field]: updater(s[field] || []) }
-          : s))
+        seasons: item.seasons.map((s, idx) => {
+          if (idx === seasonIdx) return { ...s, [field]: nextValue };
+          if (isPropertyWide && seasonIdentityOf(s) === identity) return { ...s, [field]: nextValue };
+          return s;
+        })
       };
     }));
   };
@@ -2854,18 +2869,19 @@ export const LibraryItems = () => {
     }));
   };
 
-  /* A night band or weekend rule describes the season's charge type, not one
-     room. Editing it on the room on screen writes the same value to every
-     room's row for that season and charge type, so the rooms cannot drift into
-     different validity rules. Money is never touched here. */
+  /* A night band or weekend rule describes the season's charge type. With
+     per-room seasons, edits apply to the selected room's matching rows only. */
   const handleSharedSeasonFieldChange = (tempId, seasonIdx, field, value) => {
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
       const source = item.seasons[seasonIdx];
       if (!source) return item;
       const identity = seasonIdentityOf(source);
+      const sourceRoom = source.roomKey || '';
       const targets = new Set(
-        seasonChargeRows(item.seasons, identity, source.optionName).map(row => row.index)
+        seasonChargeRows(item.seasons, identity, source.optionName)
+          .filter(row => !sourceRoom || row.season.roomKey === sourceRoom)
+          .map(row => row.index)
       );
       return {
         ...item,
@@ -2875,9 +2891,8 @@ export const LibraryItems = () => {
   };
 
   /* Add a charge type to an EXISTING season: a fresh rate row that copies the
-     season's name, window and shared rules and starts with blank money, so the
-     operator only types the board basis and its prices. A property's rooms all
-     carry the same charge type, so the row is created for every room. */
+     season's name, window and shared rules and starts with blank money, for the
+     selected room only. */
   const handleAddChargeToSeason = (tempId, group, optionName = '') => {
     if (!group) return;
     setItemsToSave(prev => prev.map(item => {
@@ -2892,30 +2907,22 @@ export const LibraryItems = () => {
         validFrom: group.validFrom || '',
         validTo: group.validTo || ''
       };
-      const rooms = item.category === 'Accommodation' ? (item.roomTypes || []) : [];
-      const newRows = rooms.length
-        ? rooms.map(room => ({ ...base, roomKey: room.key }))
-        : [{ ...base, roomKey: group.roomKey || '' }];
+      const targetRoomKey = group.roomKey || activeRoomKeyFor(item) || '';
+      const newRows = [{ ...base, roomKey: targetRoomKey }];
       return { ...item, seasons: [...item.seasons, ...newRows] };
     }));
-    /* Land on the room's new charge row so its prices can be typed straight
-       away instead of the operator hunting for the charge chip. */
+    /* Land on the room's new charge row so its prices can be typed straight away. */
     const current = itemsToSave.find(entry => entry.tempId === tempId);
-    const rooms = current?.category === 'Accommodation' ? (current.roomTypes || []) : [];
     const startIndex = current?.seasons.length || 0;
-    const activeOffset = rooms.length
-      ? Math.max(0, rooms.findIndex(room => room.key === group.roomKey))
-      : 0;
-    setActiveChargeByItem(prev => ({ ...prev, [tempId]: startIndex + activeOffset }));
+    setActiveChargeByItem(prev => ({ ...prev, [tempId]: startIndex }));
   };
 
-  /* Remove a whole season: every charge type it carries, in every room. */
+  /* Remove a whole season for the selected room: every charge type it carries in that room. */
   const handleRemoveSeasonGroup = (tempId, group) => {
     if (!group) return;
-    const identity = group.key || seasonIdentityOf(group);
     setItemsToSave(prev => prev.map(item => {
       if (item.tempId !== tempId) return item;
-      const targets = new Set(seasonRowsWithIdentity(item.seasons, identity).map(row => row.index));
+      const targets = new Set(group.memberIndices || []);
       if (!targets.size) return item;
       const seasons = item.seasons.filter((_, idx) => !targets.has(idx));
       return { ...item, seasons: seasons.length ? seasons : item.seasons };
@@ -2923,8 +2930,8 @@ export const LibraryItems = () => {
     setActiveSeasonByItem(prev => {
       const current = Number.isInteger(prev[tempId]) ? prev[tempId] : 0;
       const item = itemsToSave.find(entry => entry.tempId === tempId);
-      const hadSeason = item ? seasonRowsWithIdentity(item.seasons, identity).length > 0 : true;
-      const total = Math.max(1, sharedSeasonGroupsFor(item?.seasons).length - (hadSeason ? 1 : 0));
+      const roomKey = group.roomKey || activeRoomKeyFor(item);
+      const total = Math.max(1, accommodationSeasonGroupsFor(item?.seasons, roomKey).length - 1);
       return { ...prev, [tempId]: Math.max(0, Math.min(current, total - 1)) };
     });
   };
@@ -2991,6 +2998,61 @@ export const LibraryItems = () => {
         ? { ...item, linkedFees: (item.linkedFees || []).filter((fee) => fee.key !== feeKey) }
         : item
     )));
+  };
+
+  /* Guide/driver room is property-wide (independent of guest room type). */
+  const createGuideRoomSeason = (item) => ({
+    key: `grs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    seasonName: `Season ${(item?.guideRoomSeasons || []).length + 1}`,
+    optionName: '',
+    validFrom: '',
+    validTo: '',
+    rateType: '',
+    guideRate: '',
+    driverRate: '',
+    crewTiers: [],
+    guideMealPlan: item?.mealPlan || 'Bed & Breakfast',
+    driverMealPlan: item?.mealPlan || 'Bed & Breakfast',
+  });
+
+  const handleAddGuideRoomSeason = (tempId) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? { ...item, guideRoomSeasons: [...(item.guideRoomSeasons || []), createGuideRoomSeason(item)] }
+        : item
+    )));
+  };
+
+  const handleGuideRoomSeasonChange = (tempId, seasonKey, field, value) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        guideRoomSeasons: (item.guideRoomSeasons || []).map((s) => (
+          s.key === seasonKey ? { ...s, [field]: clampNonNegative(value) } : s
+        ))
+      };
+    }));
+  };
+
+  const handleRemoveGuideRoomSeason = (tempId, seasonKey) => {
+    setItemsToSave((prev) => prev.map((item) => (
+      item.tempId === tempId
+        ? { ...item, guideRoomSeasons: (item.guideRoomSeasons || []).filter((s) => s.key !== seasonKey) }
+        : item
+    )));
+  };
+
+  const updateGuideRoomSeasonTiers = (tempId, seasonKey, updater) => {
+    setItemsToSave((prev) => prev.map((item) => {
+      if (item.tempId !== tempId) return item;
+      return {
+        ...item,
+        guideRoomSeasons: (item.guideRoomSeasons || []).map((s) => (
+          s.key === seasonKey ? { ...s, crewTiers: updater(s.crewTiers || []) } : s
+        ))
+      };
+    }));
   };
 
   /* Stay X Pay Y is a property-level offer, so it is edited beside the rooms it
@@ -4197,6 +4259,73 @@ export const LibraryItems = () => {
               : row
           ));
 
+          /* Guide/driver room is property-wide. Source from property-level guideRoomSeasons. */
+          if (itemData.category === 'Accommodation' && ratesPayload.length > 0) {
+            const guideFields = ['guide_rate', 'driver_rate', 'guide_tiers', 'driver_tiers', 'guide_meal_plan', 'driver_meal_plan'];
+            const hasGuideCfg = (r) => r && (
+              r.guide_rate !== null && r.guide_rate !== undefined
+              || r.driver_rate !== null && r.driver_rate !== undefined
+              || (Array.isArray(r.guide_tiers) && r.guide_tiers.length > 0)
+              || (Array.isArray(r.driver_tiers) && r.driver_tiers.length > 0)
+            );
+            const copyGuide = (target, src) => {
+              if (!src) return target;
+              const out = { ...target };
+              guideFields.forEach((f) => { if (src[f] !== undefined) out[f] = src[f]; });
+              return out;
+            };
+            const guideSeasons = Array.isArray(itemData.guideRoomSeasons) ? itemData.guideRoomSeasons : [];
+            const guideRowFromSeason = (gs) => ({
+              guide_rate: moneyOrNull(gs.guideRate),
+              driver_rate: moneyOrNull(gs.driverRate),
+              guide_tiers: Array.isArray(gs.crewTiers) && gs.crewTiers.length ? tierLadderPayload(gs.crewTiers) : null,
+              driver_tiers: Array.isArray(gs.crewTiers) && gs.crewTiers.length ? tierLadderPayload(gs.crewTiers) : null,
+              guide_meal_plan: gs.guideMealPlan || itemData.mealPlan || 'Bed & Breakfast',
+              driver_meal_plan: gs.driverMealPlan || itemData.mealPlan || 'Bed & Breakfast',
+            });
+            const guideIdOf = (s) => `${String(s?.seasonName || '').trim().toLowerCase()}|${String(s?.validFrom || '')}|${String(s?.validTo || '')}|${normalizeRateType(s?.rateType)}|${String(s?.optionName || '').trim().toLowerCase()}`;
+            const overlap = (aFrom, aTo, bFrom, bTo) => {
+              if (!aFrom || !aTo || !bFrom || !bTo) return false;
+              return !(aTo < bFrom || bTo < aFrom);
+            };
+
+            if (guideSeasons.length > 0) {
+              const guideById = new Map();
+              guideSeasons.forEach((gs) => {
+                const id = guideIdOf(gs);
+                if (!guideById.has(id)) guideById.set(id, guideRowFromSeason(gs));
+              });
+              const firstGuide = guideRowFromSeason(guideSeasons[0]);
+              // Apply to existing guest season rows
+              for (let i = 0; i < ratesPayload.length; i++) {
+                const s = itemData.seasons[i] || {};
+                const id = guideIdOf(s);
+                const byId = guideById.get(id);
+                const byOverlap = !byId ? guideSeasons.find((gs) => overlap(gs.validFrom, gs.validTo, s.validFrom, s.validTo)) : null;
+                const src = byId || (byOverlap ? guideRowFromSeason(byOverlap) : null) || firstGuide;
+                if (src) ratesPayload[i] = copyGuide(ratesPayload[i], src);
+              }
+              // Guide-only seasons (no matching guest season) are not materialized as
+              // ghost guest rows to avoid duplicating guest seasons per room. Guide config
+              // is already applied to existing guest rows by identity/overlap above.
+            } else {
+              // Backward compat: propagate any existing guide config on rows
+              const firstGlobal = ratesPayload.find(hasGuideCfg) || null;
+              const byIdentity = new Map();
+              ratesPayload.forEach((row, idx) => {
+                if (!hasGuideCfg(row)) return;
+                const s = itemData.seasons[idx] || {};
+                if (!byIdentity.has(guideIdOf(s))) byIdentity.set(guideIdOf(s), row);
+              });
+              for (let i = 0; i < ratesPayload.length; i++) {
+                if (hasGuideCfg(ratesPayload[i])) continue;
+                const s = itemData.seasons[i] || {};
+                const src = byIdentity.get(guideIdOf(s)) || firstGlobal;
+                if (src) ratesPayload[i] = copyGuide(ratesPayload[i], src);
+              }
+            }
+          }
+
           const { error: ratesErr } = await supabase.from('item_rates').insert(ratesPayload);
           if (ratesErr) throw ratesErr;
         }
@@ -4429,7 +4558,7 @@ export const LibraryItems = () => {
 
     const defaultChildRates = {};
 
-    const seasons = (rates.length > 0 ? rates.map(r => {
+    let seasons = (rates.length > 0 ? rates.map(r => {
       if (isGuideCategory(item.category)) {
         return {
           seasonName: r.season_name || r.option_name || 'Base Season',
@@ -4599,6 +4728,14 @@ export const LibraryItems = () => {
          was priced under. Rows saved before the column existed load unstated. */
       rates[index] ? { ...season, rateType: normalizeRateType(rates[index].rate_type) } : season
     ));
+    // Dedupe guest seasons (same room + season identity + option) to clean up ghost/duplicate rows.
+    const _seenSeason = new Set();
+    seasons = seasons.filter((s) => {
+      const k = `${s.roomKey || ''}|${seasonIdentityOf(s)}|${String(s.optionName || '').trim().toLowerCase()}`;
+      if (_seenSeason.has(k)) return false;
+      _seenSeason.add(k);
+      return true;
+    });
 
     /* Rows come back one per (group × season × band), so fold them the same way the
        pricing engine does: a card per vehicle group, a season inside it per Rental
@@ -4656,6 +4793,48 @@ export const LibraryItems = () => {
     const carGroups = Object.keys(carGroupsMap).length > 0
       ? Object.values(carGroupsMap)
       : [createCarRentalGroup()];
+
+    /* Guide/driver room is property-wide, independent of guest room types.
+       Dedupe by season identity across room-type rows into property-level seasons. */
+    const guideRoomSeasons = isAccommodation ? (() => {
+      const seen = new Set();
+      const out = [];
+      for (const s of (seasons || [])) {
+        const id = seasonIdentityOf(s);
+        if (seen.has(id)) continue;
+        const hasCfg = (s.guideRate !== '' && s.guideRate !== undefined && s.guideRate !== null)
+          || (s.driverRate !== '' && s.driverRate !== undefined && s.driverRate !== null)
+          || (Array.isArray(s.crewTiers) && s.crewTiers.length > 0);
+        if (!hasCfg) continue;
+        seen.add(id);
+        out.push({
+          key: `grs_${id}_${out.length}`,
+          seasonName: s.seasonName || 'Base Season',
+          optionName: s.optionName || '',
+          validFrom: s.validFrom || '',
+          validTo: s.validTo || '',
+          rateType: normalizeRateType(s.rateType),
+          guideRate: s.guideRate ?? '',
+          driverRate: s.driverRate ?? '',
+          crewTiers: Array.isArray(s.crewTiers) ? s.crewTiers : [],
+          guideMealPlan: s.guideMealPlan || item.meal_plan || 'Bed & Breakfast',
+          driverMealPlan: s.driverMealPlan || item.meal_plan || 'Bed & Breakfast',
+        });
+      }
+      // Collapse identical property-wide guide configs duplicated across guest season identities.
+      const byCfg = new Set();
+      const deduped = [];
+      for (const gs of out) {
+        const sig = JSON.stringify({
+          guideRate: gs.guideRate, driverRate: gs.driverRate, crewTiers: gs.crewTiers,
+          guideMealPlan: gs.guideMealPlan, driverMealPlan: gs.driverMealPlan
+        });
+        if (byCfg.has(sig)) continue;
+        byCfg.add(sig);
+        deduped.push(gs);
+      }
+      return deduped;
+    })() : [];
 
     return {
       tempId: item.id,
@@ -4737,6 +4916,7 @@ export const LibraryItems = () => {
       roomTypes: roomListWithFloor,
       seasons,
       stayPayPromotions: normalizeStayPayPromotions(item.stay_pay_promotions),
+      guideRoomSeasons,
       linkedFees,
       linkedFeeOriginalIds
     };
@@ -7956,7 +8136,7 @@ export const LibraryItems = () => {
                                 placeholder="e.g. Base / High Season"
                                 value={season.seasonName}
                                 onChange={(e) => (groupsSeasons
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'seasonName', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'seasonName', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'seasonName', e.target.value))} />
                             </div>
                             {groupsSeasons && (
@@ -7993,7 +8173,7 @@ export const LibraryItems = () => {
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validFrom}
                                 onChange={(e) => (groupsSeasons
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'validFrom', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validFrom', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validFrom', e.target.value))} />
                             </div>
                             <div>
@@ -8001,7 +8181,7 @@ export const LibraryItems = () => {
                               <input type="date" className="pricing-select" style={{ padding: '0.4rem', fontSize: '0.85rem' }}
                                 value={season.validTo}
                                 onChange={(e) => (groupsSeasons
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'validTo', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'validTo', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'validTo', e.target.value))} />
                             </div>
                           </div>
@@ -8017,7 +8197,7 @@ export const LibraryItems = () => {
                                 style={{ padding: '0.4rem', fontSize: '0.85rem', maxWidth: '260px' }}
                                 value={normalizeRateType(season.rateType)}
                                 onChange={(e) => (groupsSeasons && activeGroup
-                                  ? handleSeasonGroupChange(item.tempId, activeGroup.sharedMemberIndices || activeGroup.memberIndices, 'rateType', e.target.value)
+                                  ? handleSeasonGroupChange(item.tempId, activeGroup.memberIndices, 'rateType', e.target.value)
                                   : handleSeasonChange(item.tempId, seasonIdx, 'rateType', e.target.value))}
                               >
                                 {RATE_TYPES.map((type) => (
@@ -9233,85 +9413,7 @@ export const LibraryItems = () => {
                             );
                           })()}
 
-                          {/* Driver-Guide room pool (Accommodation, offered hotels only) */}
-                          {item.category === 'Accommodation' && item.guideDriverOffered && dbFeatures.guideDriver && (
-                            <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
-                              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#92400e', display: 'block', marginBottom: '0.35rem' }}>
-                                🚌 Driver-Guide Room Rates (per night — {item.currency})
-                              </span>
-                              <span style={{ fontSize: '0.7rem', color: '#92400e', display: 'block', marginBottom: '0.6rem' }}>
-                                One pool of crew rooms, released from {Math.max(1, parseInt(item.guideMinRooms, 10) || 1)} client room{Math.max(1, parseInt(item.guideMinRooms, 10) || 1) === 1 ? '' : 's'} booked — set that in the Min Client Rooms box above. Whichever of the guide and the driver beds first takes the room, and the next crew bed pays the normal Single rate. A crew rule below replaces the flat rate with the hotel’s own ladder.
-                              </span>
-                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
-                                <div>
-                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Guide Room Rate (prices the pool)</span>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
-                                    placeholder={`Rate (${item.currency})`}
-                                    value={season.guideRate !== undefined ? season.guideRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'guideRate')}
-                                  />
-                                  <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = free room · blank = normal Single rate</span>
-                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
-                                    Guide Meal Plan (same as clients)
-                                  </span>
-                                  <SearchableSelect
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
-                                    value={season.guideMealPlan || item.mealPlan}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'guideMealPlan', e.target.value)}
-                                  >
-                                    {mealPlanOptions.map(mp => (
-                                      <option key={mp} value={mp}>{mp}</option>
-                                    ))}
-                                  </SearchableSelect>
-                                </div>
-                                <div>
-                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Driver Room Rate (stands in only where the Guide box is blank)</span>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
-                                    placeholder={`Rate (${item.currency})`}
-                                    value={season.driverRate !== undefined ? season.driverRate : ''}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverRate', e.target.value)} step={moneyStep} onBlur={(e) => snapSeasonMoney(e, item.tempId, seasonIdx, 'driverRate')}
-                                  />
-                                  <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = free room · blank = normal Single rate</span>
-                                  <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>
-                                    Driver Meal Plan (same as clients)
-                                  </span>
-                                  <SearchableSelect
-                                    className="pricing-select"
-                                    style={{ padding: '0.35rem' }}
-                                    value={season.driverMealPlan || item.mealPlan}
-                                    onChange={(e) => handleSeasonChange(item.tempId, seasonIdx, 'driverMealPlan', e.target.value)}
-                                  >
-                                    {mealPlanOptions.map(mp => (
-                                      <option key={mp} value={mp}>{mp}</option>
-                                    ))}
-                                  </SearchableSelect>
-                                </div>
-                              </div>
-                              {dbFeatures.guideDriverTiers && (
-                                <TierLadderEditor
-                                  legend="Driver-Guide room rule (optional) — one shared allowance"
-                                  roomLabel="Crew"
-                                  currency={item.currency}
-                                  tiers={season.crewTiers || []}
-                                  tone="amber"
-                                  moneyStep={moneyStep}
-                                  onAdd={(basis) => handleTierAdd(item.tempId, seasonIdx, 'crewTiers', Math.max(1, parseInt(item.guideMinRooms, 10) || 1), basis)}
-                                  onBasisChange={(basis) => handleTierBasisChange(item.tempId, seasonIdx, 'crewTiers', basis)}
-                                  onChange={(tierIdx, field, value) => handleTierChange(item.tempId, seasonIdx, 'crewTiers', tierIdx, field, value)}
-                                  onRemove={(tierIdx) => handleTierRemove(item.tempId, seasonIdx, 'crewTiers', tierIdx)}
-                                />
-                              )}
-                            </div>
-                          )}
+                          {/* Driver-Guide room pool moved to property-wide section below. */}
                           {item.category === 'Accommodation' && item.tourLeaderRoomOffered && (
                             <div style={{ background: '#f0fdfa', border: '1px solid #99f6e4', borderRadius: '8px', padding: '0.85rem 1rem', marginTop: '1rem' }}>
                               <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#0f766e', display: 'block', marginBottom: '0.5rem' }}>
@@ -9356,8 +9458,7 @@ export const LibraryItems = () => {
                     {item.category === 'Accommodation' && accommodationSeasonGroupsFor(item.seasons, activeRoomKeyFor(item)).length === 0 && (
                       <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '0.75rem 0.9rem', marginBottom: '0.75rem', fontSize: '0.8rem', color: '#92400e', lineHeight: 1.5 }}>
                         <strong>No seasons are priced for {activeRoomFor(item)?.name || 'this room'} yet.</strong>{' '}
-                        Seasons and charge types are shared by every room type; only the prices differ per room.
-                        Use <strong>Add Season</strong> below to create the property&rsquo;s next season for every room, then set this room&rsquo;s prices in the matrix.
+                        Each room type can have its own seasons and validity dates. Use <strong>Add Season</strong> below to create a season for this room.
                         {accommodationSeasonGroupsFor(item.seasons, '').length > 0 && (
                           <div style={{ marginTop: '0.55rem' }}>
                             <button
@@ -9365,7 +9466,7 @@ export const LibraryItems = () => {
                               className="secondary-btn"
                               onClick={() => handleSyncRoomSeasons(item.tempId, activeRoomKeyFor(item))}
                             >
-                              Copy the shared seasons to this room
+                              Copy seasons from other room types
                             </button>
                           </div>
                         )}
@@ -9560,6 +9661,111 @@ export const LibraryItems = () => {
                           </div>
                         );
                       })}
+                    </div>
+                  )}
+
+                  {/* Guide/Driver room - property-wide, independent of guest room types. */}
+                  {item.category === 'Accommodation' && item.guideDriverOffered && dbFeatures.guideDriver && (
+                    <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '0.85rem 1rem', marginBottom: '1.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <div>
+                          <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#92400e', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            🚌 Driver-Guide Room (property-wide)
+                          </span>
+                          <span style={{ fontSize: '0.74rem', color: '#7c2d12', display: 'block', marginTop: '0.2rem', lineHeight: 1.45 }}>
+                            Guide/driver room is property-wide, independent of guest room type. Add seasons here if guide/driver room rates change by validity period.
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', whiteSpace: 'nowrap' }}
+                          onClick={() => handleAddGuideRoomSeason(item.tempId)}
+                        >
+                          <Plus size={13} /> Add season
+                        </button>
+                      </div>
+
+                      {(item.guideRoomSeasons || []).length === 0 && (
+                        <div style={{ marginTop: '0.75rem', fontSize: '0.78rem', color: '#92400e' }}>
+                          No guide/driver room seasons yet. Add a season to set property-wide guide/driver room rates.
+                        </div>
+                      )}
+
+                      {(item.guideRoomSeasons || []).map((gs, gsIdx) => (
+                        <div key={gs.key || gsIdx} style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid #fed7aa' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', marginBottom: '0.6rem' }}>
+                            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#92400e' }}>Season {gsIdx + 1}</span>
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              style={{ padding: '0.25rem 0.55rem', fontSize: '0.72rem', color: '#b91c1c', borderColor: '#fecaca' }}
+                              onClick={() => handleRemoveGuideRoomSeason(item.tempId, gs.key)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.6rem', marginBottom: '0.7rem' }}>
+                            <div>
+                              <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Season name</label>
+                              <input type="text" className="pricing-select" style={{ padding: '0.4rem 0.55rem', width: '100%' }} value={gs.seasonName || ''} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'seasonName', e.target.value)} />
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Valid from</label>
+                              <input type="date" className="pricing-select" style={{ padding: '0.4rem 0.55rem', width: '100%' }} value={gs.validFrom || ''} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'validFrom', e.target.value)} />
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.72rem', fontWeight: 700, color: '#7c2d12', display: 'block', marginBottom: '0.25rem' }}>Valid to</label>
+                              <input type="date" className="pricing-select" style={{ padding: '0.4rem 0.55rem', width: '100%' }} value={gs.validTo || ''} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'validTo', e.target.value)} />
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+                            <div>
+                              <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Guide Room Rate (per night, {item.currency})</span>
+                              <input type="number" min="0" className="pricing-select" style={{ padding: '0.35rem' }} placeholder={`Rate (${item.currency})`} value={gs.guideRate ?? ''} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'guideRate', e.target.value)} step={moneyStep} />
+                              <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = free room · blank = normal Single rate</span>
+                              <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>Guide Meal Plan</span>
+                              <SearchableSelect className="pricing-select" style={{ padding: '0.35rem' }} value={gs.guideMealPlan || item.mealPlan} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'guideMealPlan', e.target.value)}>
+                                {mealPlanOptions.map(mp => (<option key={mp} value={mp}>{mp}</option>))}
+                              </SearchableSelect>
+                            </div>
+                            <div>
+                              <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block' }}>Driver Room Rate (per night, {item.currency})</span>
+                              <input type="number" min="0" className="pricing-select" style={{ padding: '0.35rem' }} placeholder={`Rate (${item.currency})`} value={gs.driverRate ?? ''} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'driverRate', e.target.value)} step={moneyStep} />
+                              <span style={{ fontSize: '0.68rem', color: '#b45309', display: 'block' }}>0 = free room · blank = normal Single rate</span>
+                              <span style={{ fontSize: '0.75rem', color: '#a16207', fontWeight: 600, display: 'block', marginTop: '0.45rem' }}>Driver Meal Plan</span>
+                              <SearchableSelect className="pricing-select" style={{ padding: '0.35rem' }} value={gs.driverMealPlan || item.mealPlan} onChange={(e) => handleGuideRoomSeasonChange(item.tempId, gs.key, 'driverMealPlan', e.target.value)}>
+                                {mealPlanOptions.map(mp => (<option key={mp} value={mp}>{mp}</option>))}
+                              </SearchableSelect>
+                            </div>
+                          </div>
+                          {dbFeatures.guideDriverTiers && (
+                            <TierLadderEditor
+                              legend="Driver-Guide room rule (optional) — one shared allowance"
+                              roomLabel="Crew"
+                              currency={item.currency}
+                              tiers={gs.crewTiers || []}
+                              tone="amber"
+                              moneyStep={moneyStep}
+                              onAdd={(basis) => updateGuideRoomSeasonTiers(item.tempId, gs.key, (tiers) => {
+                                const previous = tiers[tiers.length - 1];
+                                const minRooms = Math.max(1, parseInt(item.guideMinRooms, 10) || 1);
+                                const next = {
+                                  minRooms: previous ? ((parseInt(previous.maxRooms, 10) || parseInt(previous.minRooms, 10) || minRooms) + 1) : minRooms,
+                                  maxRooms: '',
+                                  rooms: previous ? Math.max(1, (parseInt(previous.rooms, 10) || 1) + 1) : 1,
+                                  rate: ''
+                                };
+                                if (basis) next.basis = basis;
+                                return [...tiers, next];
+                              })}
+                              onBasisChange={(basis) => updateGuideRoomSeasonTiers(item.tempId, gs.key, (tiers) => tiers.map((t) => ({ ...t, basis })))}
+                              onChange={(tierIdx, field, value) => updateGuideRoomSeasonTiers(item.tempId, gs.key, (tiers) => tiers.map((t, i) => i === tierIdx ? { ...t, [field]: clampNonNegative(value) } : t))}
+                              onRemove={(tierIdx) => updateGuideRoomSeasonTiers(item.tempId, gs.key, (tiers) => tiers.filter((_, i) => i !== tierIdx))}
+                            />
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
 
@@ -10559,6 +10765,55 @@ export const LibraryItems = () => {
                                     (÷ occupants for per-person rate)
                                   </span>
                                 </div>
+                              ) : isSurchargeItem(item) ? (
+                                (() => {
+                                  const unitBasis = surchargeUnitBasisOf(item);
+                                  const chargeBasis = surchargeBasisOf(item);
+                                  const nightSuffix = chargeBasis === 'per_night' ? ' / night' : '';
+                                  const type = item.surcharge_type || 'entrance_fee';
+                                  const amt = surchargeRateAmount(rate, item);
+                                  const childAmt = surchargeChildAmount(rate, item);
+                                  const lines = [];
+                                  if (unitBasis === 'per_vehicle') {
+                                    const v = parseFloat(rate.entrance_fee_per_vehicle) || 0;
+                                    if (v > 0) lines.push({ label: 'Per Vehicle', value: v, suffix: nightSuffix });
+                                  } else if (unitBasis === 'per_unit') {
+                                    const u = parseFloat(rate.unit_price) || 0;
+                                    if (u > 0) lines.push({ label: 'Per Unit', value: u, suffix: nightSuffix });
+                                  } else if (unitBasis === 'per_child') {
+                                    const c = parseFloat(rate.conservation_levy_per_child) || 0;
+                                    if (c > 0) lines.push({ label: 'Per Child', value: c, suffix: nightSuffix });
+                                  } else {
+                                    // per_person (default) - use type-appropriate columns
+                                    if (type === 'entrance_fee') {
+                                      const pp = parseFloat(rate.entrance_fee_per_person) || 0;
+                                      if (pp > 0) lines.push({ label: 'Per Person', value: pp, suffix: nightSuffix });
+                                      const pv = parseFloat(rate.entrance_fee_per_vehicle) || 0;
+                                      if (pv > 0) lines.push({ label: 'Per Vehicle', value: pv, suffix: nightSuffix });
+                                    } else {
+                                      const adult = parseFloat(rate.conservation_levy_per_adult) || 0;
+                                      const child = parseFloat(rate.conservation_levy_per_child) || 0;
+                                      if (adult > 0) lines.push({ label: 'Per Adult', value: adult, suffix: nightSuffix });
+                                      if (child > 0) lines.push({ label: 'Per Child', value: child, suffix: nightSuffix });
+                                      if (adult <= 0 && child <= 0 && amt != null && amt > 0) lines.push({ label: 'Per Person', value: amt, suffix: nightSuffix });
+                                    }
+                                  }
+                                  if (lines.length === 0) {
+                                    const fallback = amt != null && amt > 0 ? amt : 0;
+                                    const fallbackLabel = unitBasis === 'per_vehicle' ? 'Per Vehicle' : unitBasis === 'per_unit' ? 'Per Unit' : unitBasis === 'per_child' ? 'Per Child' : 'Per Person';
+                                    lines.push({ label: fallbackLabel, value: fallback, suffix: nightSuffix });
+                                  }
+                                  return (
+                                    <div style={{ color: '#c2410c', fontWeight: 600 }}>
+                                      {lines.map((l, i) => (
+                                        <span key={i}>
+                                          {i > 0 && <span style={{ margin: '0 0.3rem', color: '#94a3b8' }}>|</span>}
+                                          <strong>{l.label}{l.suffix}:</strong> {item.currency} {Number(l.value).toLocaleString()}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                })()
                               ) : (
                                 <>
                                   <div style={{ color: '#334155' }}>
@@ -10598,30 +10853,7 @@ export const LibraryItems = () => {
                                   )}
                                 </div>
                               )}
-                              {/* A Fees & Tickets item shows its fee figures here, on its own rate
-                                  rows, keyed off the surcharge type rather than a legacy flag. */}
-                              {isSurchargeItem(item) && (item.surcharge_type || 'entrance_fee') === 'entrance_fee' && ((parseFloat(rate.entrance_fee_per_person) || 0) > 0 || (parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0) && (
-                                <div style={{ color: '#c2410c', fontWeight: 600, marginTop: '0.15rem' }}>
-                                  {(parseFloat(rate.entrance_fee_per_person) || 0) > 0 && (
-                                    <span><strong>Entrance / Person:</strong> {item.currency} {(parseFloat(rate.entrance_fee_per_person) || 0).toLocaleString()}</span>
-                                  )}
-                                  {(parseFloat(rate.entrance_fee_per_person) || 0) > 0 && (parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0 && <span style={{ margin: '0 0.3rem' }}>|</span>}
-                                  {(parseFloat(rate.entrance_fee_per_vehicle) || 0) > 0 && (
-                                    <span><strong>Entrance / Vehicle:</strong> {item.currency} {(parseFloat(rate.entrance_fee_per_vehicle) || 0).toLocaleString()}</span>
-                                  )}
-                                </div>
-                              )}
-                              {isSurchargeItem(item) && (item.surcharge_type || 'entrance_fee') !== 'entrance_fee' && ((parseFloat(rate.conservation_levy_per_adult) || 0) > 0 || (parseFloat(rate.conservation_levy_per_child) || 0) > 0) && (
-                                <div style={{ color: '#c2410c', fontWeight: 600, marginTop: '0.15rem' }}>
-                                  {(parseFloat(rate.conservation_levy_per_adult) || 0) > 0 && (
-                                    <span><strong>Levy Adult{item.surcharge_charge_basis === 'per_night' ? ' / Night' : ''}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_adult) || 0).toLocaleString()}</span>
-                                  )}
-                                  {(parseFloat(rate.conservation_levy_per_adult) || 0) > 0 && (parseFloat(rate.conservation_levy_per_child) || 0) > 0 && <span style={{ margin: '0 0.3rem' }}>|</span>}
-                                  {(parseFloat(rate.conservation_levy_per_child) || 0) > 0 && (
-                                    <span><strong>Levy Child{item.surcharge_charge_basis === 'per_night' ? ' / Night' : ''}:</strong> {item.currency} {(parseFloat(rate.conservation_levy_per_child) || 0).toLocaleString()}</span>
-                                  )}
-                                </div>
-                              )}
+
                             </div>
                             </div>
                           );

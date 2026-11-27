@@ -363,6 +363,15 @@ aside.sidebar:not(.collapsed) .logo-full {
   font-size: 1rem;
 }
 
+.credential-input:focus-within {
+  border-color: #0d7478;
+  box-shadow: 0 0 0 3px rgba(13, 116, 120, 0.12);
+}
+
+.credential-input input::placeholder {
+  color: #94a3b8;
+}
+
 .primary-btn {
   background-color: var(--primary-color);
   color: white;
@@ -666,6 +675,12 @@ aside.sidebar:not(.collapsed) .logo-full {
   padding: 0.625rem 1rem;
   border-radius: 10px;
   width: 320px;
+}
+
+.search-box > svg,
+.packages-search > svg,
+.sidebar-search > svg {
+  flex-shrink: 0;
 }
 
 .search-box input {
@@ -1056,6 +1071,10 @@ aside.sidebar:not(.collapsed) .logo-full {
   padding: 0.55rem 0.75rem;
   border-radius: 10px;
   color: #94a3b8;
+}
+
+.sidebar-search > svg {
+  flex-shrink: 0;
 }
 
 .sidebar-search input {

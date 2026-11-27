@@ -150,20 +150,67 @@ const LibraryItemDetailModal = ({ item, vehicleTypes = [], onClose }) => {
                 </div>
               </div>
 
-              {season.sections.map((section) => (
-                <Section key={section.key} title={section.title}>
-                  {section.note && <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.2rem' }}>{section.note}</div>}
-                  {section.rows.map((row, index) => (
-                    <Row key={`${row.label}-${index}`} label={row.label} value={row.value} />
+              {season.roomGroups?.length ? season.roomGroups.map((rg) => (
+                <div key={rg.key} style={{ marginTop: '0.75rem', paddingTop: '0.55rem', borderTop: '1px dashed #e2e8f0' }}>
+                  <div style={{ fontWeight: 800, color: '#334155', fontSize: '0.84rem', marginBottom: '0.1rem' }}>{rg.roomType}</div>
+                  {rg.sections.map((section) => (
+                    <Section key={`${rg.key}-${section.key}`} title={section.title}>
+                      {section.note && <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.2rem' }}>{section.note}</div>}
+                      {section.rows.map((row, index) => (
+                        <Row key={`${row.label}-${index}`} label={row.label} value={row.value} />
+                      ))}
+                    </Section>
                   ))}
-                </Section>
-              ))}
-
-              {season.notes && (
-                <Section title="Notes">
-                  <div style={{ fontSize: '0.8rem', color: '#475569', whiteSpace: 'pre-wrap' }}>{season.notes}</div>
-                </Section>
+                  {rg.notes && (
+                    <Section title="Notes">
+                      <div style={{ fontSize: '0.8rem', color: '#475569', whiteSpace: 'pre-wrap' }}>{rg.notes}</div>
+                    </Section>
+                  )}
+                </div>
+              )) : (
+                <>
+                  {season.sections.map((section) => (
+                    <Section key={section.key} title={section.title}>
+                      {section.note && <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.2rem' }}>{section.note}</div>}
+                      {section.rows.map((row, index) => (
+                        <Row key={`${row.label}-${index}`} label={row.label} value={row.value} />
+                      ))}
+                    </Section>
+                  ))}
+                  {season.notes && (
+                    <Section title="Notes">
+                      <div style={{ fontSize: '0.8rem', color: '#475569', whiteSpace: 'pre-wrap' }}>{season.notes}</div>
+                    </Section>
+                  )}
+                </>
               )}
+            </div>
+          ))}
+
+          {detail.guideDriver && detail.guideDriver.length > 0 && detail.guideDriver.map((gd) => (
+            <div key={gd.key} style={{ marginTop: '1rem', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '0.85rem 0.95rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <div style={{ fontWeight: 800, color: '#0f172a', fontSize: '0.92rem' }}>Guide &amp; driver</div>
+                <div>
+                  <span style={chipStyle}>Property-wide</span>
+                  {(gd.chips || []).map((chip) => (
+                    <span key={chip} style={chipStyle}>{chip}</span>
+                  ))}
+                </div>
+              </div>
+              {detail.guideDriver.length > 1 && gd.title && (
+                <div style={{ fontSize: '0.76rem', color: '#64748b', fontWeight: 700, marginTop: '0.35rem' }}>
+                  {[gd.title, ...(gd.chips || [])].filter(Boolean).join(' \u00b7 ')}
+                </div>
+              )}
+              <Section title="Room rate">
+                <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '0.2rem' }}>
+                  Property-wide rate, independent of guest room type.
+                </div>
+                {gd.rows.map((row, index) => (
+                  <Row key={`${row.label}-${index}`} label={row.label} value={row.value} />
+                ))}
+              </Section>
             </div>
           ))}
 
@@ -178,6 +225,8 @@ const LibraryItemDetailModal = ({ item, vehicleTypes = [], onClose }) => {
               ))}
             </Section>
           )}
+
+
 
           {detail.carRental.length > 0 && (
             <Section title="Car rental rates">

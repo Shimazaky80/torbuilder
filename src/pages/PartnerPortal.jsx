@@ -16,6 +16,7 @@ import {
   Users
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { useToast } from '../context/ToastContext';
 import RoomAllocationModal from '../components/RoomAllocationModal';
 import { calculateRoomCharges, defaultAutoAllocation } from '../lib/roomAllocationHelper';
@@ -558,7 +559,7 @@ export const PartnerPortal = () => {
         invited_by: user.id
       }).select('invite_code').single();
       if (error) throw error;
-      const inviteUrl = `${window.location.origin}/partner-register?invite=${invitation.invite_code}`;
+      const inviteUrl = appUrl(`/partner-register?invite=${encodeURIComponent(invitation.invite_code)}`);
       await navigator.clipboard?.writeText(inviteUrl);
       setInviteEmail('');
       showToast('Team invitation created; link copied', 'success');
@@ -1024,7 +1025,7 @@ export const PartnerPortal = () => {
             <h2 style={{ margin: '0 0 .4rem', fontSize: '1.2rem', color: '#0d7478' }}>Team Access</h2>
             <p style={{ color: '#586c70', margin: '0 0 1.2rem', fontSize: '.9rem' }}>Invite colleagues to view tariffs and collaborate on agency quotations.</p>
             <form onSubmit={createUserInvite} style={{ display: 'flex', gap: '.5rem', flexWrap: 'wrap', marginBottom: '1.2rem' }}><input type="email" required placeholder="Colleague email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} style={{ ...fieldStyle, maxWidth: '360px' }} /><button type="submit" style={commandStyle}><Send size={15} /> Invite User</button></form>
-            {invitations.length > 0 && <div style={{ overflowX: 'auto' }}><table style={tableStyle}><thead><tr><th>Email</th><th>Status</th><th>Created</th><th>Link</th></tr></thead><tbody>{invitations.map((invite) => <tr key={invite.id}><td>{invite.email}</td><td>{invite.status}</td><td>{new Date(invite.created_at).toLocaleDateString()}</td><td>{invite.status === 'pending' && <button type="button" style={commandStyle} onClick={async () => { await navigator.clipboard?.writeText(`${window.location.origin}/partner-register?invite=${invite.invite_code}`); showToast('Invitation link copied', 'success'); }}>Copy link</button>}</td></tr>)}</tbody></table></div>}
+            {invitations.length > 0 && <div style={{ overflowX: 'auto' }}><table style={tableStyle}><thead><tr><th>Email</th><th>Status</th><th>Created</th><th>Link</th></tr></thead><tbody>{invitations.map((invite) => <tr key={invite.id}><td>{invite.email}</td><td>{invite.status}</td><td>{new Date(invite.created_at).toLocaleDateString()}</td><td>{invite.status === 'pending' && <button type="button" style={commandStyle} onClick={async () => { await navigator.clipboard?.writeText(appUrl(`/partner-register?invite=${encodeURIComponent(invite.invite_code)}`)); showToast('Invitation link copied', 'success'); }}>Copy link</button>}</td></tr>)}</tbody></table></div>}
           </div>
         </div>}
       </div>

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SearchableSelect from '../components/SearchableSelect';
 import { supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { useSession } from '../hooks/useSession';
 import {
   Building2,
@@ -508,7 +509,7 @@ export const SuperAdmin = () => {
                         className="action-btn"
                         onClick={() => {
                           const subject = encodeURIComponent('Your Invitation to torbuilder');
-                          const body = encodeURIComponent(`Hello,\n\nYou have been invited to join torbuilder.\n\nYour registration code is: ${inv.code}\n\nPlease register at: ${window.location.origin}/login\n\nBest regards,\ntorbuilder Team`);
+                          const body = encodeURIComponent(`Hello,\n\nYou have been invited to join torbuilder.\n\nYour registration code is: ${inv.code}\n\nPlease register at: ${appUrl('/login')}\n\nBest regards,\ntorbuilder Team`);
                           window.location.href = `mailto:${inv.email}?subject=${subject}&body=${body}`;
                         }}
                         title="Send via Email Client"

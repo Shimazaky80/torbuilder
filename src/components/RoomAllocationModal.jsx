@@ -132,6 +132,7 @@ export default function RoomAllocationModal({
   item,
   itineraryTravellers = [],
   beddedElsewhere = [],
+  autoAllocateGuide = false,
   currencyCode = 'ZAR',
   markupPct = 0
 }) {
@@ -222,8 +223,38 @@ export default function RoomAllocationModal({
   );
 
   /* The caller mounts this dialog only while it is open, so the saved
-     allocations are read once as initial state rather than synced by effect. */
-  const initialRooms = useMemo(() => roomsFromItem(item, travellersList), [item, travellersList]);
+     allocations are read once as initial state rather than synced by effect.
+     For an overland guide, the tour guide traveller is auto-picked into a staff
+     room so accommodation can pick them up automatically, but they remain part of
+     the room allocation and must still be allocated/saved by the user. */
+  const initialRooms = useMemo(() => {
+    const base = roomsFromItem(item, travellersList);
+    if (!autoAllocateGuide) return base;
+    const allocated = new Set();
+    base.forEach((rm) => (rm.allocatedTravellers || []).forEach((t) => {
+      if (t?.id) allocated.add(t.id);
+      allocated.add(`${t?.name || ''}|${t?.surname || ''}`);
+    }));
+    const guidesToPlace = travellersList.filter((t) => {
+      if (normaliseTravellerRole(t?.role) !== 'tour_guide') return false;
+      if (isBeddedElsewhere.has(t.id)) return false;
+      if (allocated.has(t.id) || allocated.has(`${t.name}|${t.surname}`)) return false;
+      return true;
+    });
+    if (!guidesToPlace.length) return base;
+    let nextId = base.reduce((max, rm) => Math.max(max, Number(rm.roomId) || 0), 0);
+    const autoRooms = guidesToPlace.map((guide) => {
+      nextId += 1;
+      return {
+        roomId: nextId,
+        roomType: 'staff',
+        staffRole: 'tour_guide',
+        isStaffRoom: true,
+        allocatedTravellers: [guide]
+      };
+    });
+    return [...base, ...autoRooms];
+  }, [item, travellersList, autoAllocateGuide, isBeddedElsewhere]);
   const [rooms, setRooms] = useState(initialRooms);
   /* One room is always the drop target. Rather than every traveller carrying
      their own room dropdown, the operator selects a room once and then moves

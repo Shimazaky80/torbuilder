@@ -1,25 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { UtensilsCrossed, BedDouble, X, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { supabase } from '../lib/supabase';
 import {
   guideMealRate,
   driverMealRate,
   guideTravelRate,
-  driverTravelRate,
-  overnightRiderRate,
   overnightRateRow,
   accommodationAcceptsGuide,
   accommodationDestination,
   singleOvernightRate,
   guideMinClientRooms,
-  guideRateApplies,
   mealAcceptsDriver,
   guideMealChoices,
   crewMealLines,
-  crewRoomLadder,
-  crewPoolRooms,
-  OVERNIGHT_RIDER_LABELS
+  crewRoomLadder
 } from '../lib/guidePricing';
 import { staffCountWord, staffLadderBasis } from '../lib/staffRoomTiers';
+
 
 /* Overland guide detail: the lunch, dinner and overnight the guide and driver are
    fed and bedded on the days the guide is used.
@@ -49,13 +46,12 @@ const mealOptionLabel = (item, currency) => {
     : `${item.name} — ${guide}`;
 };
 
-const riderList = (charge) => (charge === 'both' ? ['guide', 'driver'] : [charge]);
-
 export default function GuideDetailsModal({
   guideName = 'the guide',
   dayLabel = 'this day',
   currency = 'ZAR',
-  libraryItems = [],
+  companyId = null,
+  libraryItems: libraryItemsProp = [],
   currentAccommodationIds = [],
   /* Paying client rooms booked on this day. The property may only release its
      guide rate once a minimum is reached; an unknown count (the package
@@ -72,30 +68,83 @@ export default function GuideDetailsModal({
   travelStart = '',
   travelEnd = '',
   defaultValues = {},
+  detailKinds = { lunch: true, dinner: true, overnight: true },
   onConfirm,
   onCancel
 }) {
+  const [extraItems, setExtraItems] = useState([]);
+  useEffect(() => {
+    if (!companyId) return;
+    const needsMeals = !!detailKinds?.lunch || !!detailKinds?.dinner;
+    const needsAccom = !!detailKinds?.overnight;
+    if (!needsMeals && !needsAccom) return;
+    const categories = [...(needsMeals ? ['Meals', 'Meal'] : []), ...(needsAccom ? ['Accommodation'] : [])];
+    let active = true;
+    (async () => {
+      try {
+        const { data: items, error } = await supabase
+          .from('library_items')
+          .select('*')
+          .eq('company_id', companyId)
+          .eq('is_active', true)
+          .in('category', categories);
+        if (error || !active) return;
+        const ids = (items || []).map((i) => i.id);
+        const { data: rates } = ids.length
+          ? await supabase.from('item_rates').select('*').in('item_id', ids)
+          : { data: [] };
+        if (!active) return;
+        const merged = (items || []).map((item) => ({
+          ...item,
+          item_rates: (rates || []).filter((r) => r.item_id === item.id)
+        }));
+        setExtraItems(merged);
+      } catch {
+        /* modal still works with what it has */
+      }
+    })();
+    return () => { active = false; };
+  }, [companyId, detailKinds?.lunch, detailKinds?.dinner, detailKinds?.overnight]);
+
+  const libraryItems = useMemo(() => {
+    const merged = new Map((libraryItemsProp || []).map((item) => [item.id, item]));
+    extraItems.forEach((item) => {
+      const prev = merged.get(item.id);
+      merged.set(item.id, prev ? { ...prev, ...item, item_rates: item.item_rates?.length ? item.item_rates : prev.item_rates } : item);
+    });
+    return Array.from(merged.values());
+  }, [libraryItemsProp, extraItems]);
+
+  const showLunch = !!detailKinds?.lunch;
+  const showDinner = !!detailKinds?.dinner;
+  const showOvernight = !!detailKinds?.overnight;
+
   const [lunchItemId, setLunchItemId] = useState(defaultValues.lunchItemId || '');
   const [dinnerItemId, setDinnerItemId] = useState(defaultValues.dinnerItemId || '');
-  const [guideOnly, setGuideOnly] = useState(defaultValues.guideOnly !== false);
-  const [riderCharge, setRiderCharge] = useState(
-    defaultValues.riderCharge || (defaultValues.overnightItemId ? 'guide' : 'both')
-  );
 
   const clientAccoms = useMemo(() => (currentAccommodationIds || [])
     .map((id) => libraryItems.find((item) => item.id === id))
     .filter(Boolean), [currentAccommodationIds, libraryItems]);
 
-  const acceptsClientRoom = clientAccoms.some(accommodationAcceptsGuide);
-  /* The clients' own property is the referent for "same destination", and the
-     natural host when it contracts a guide & driver room. */
-  const referentHost = clientAccoms.find(accommodationAcceptsGuide) || clientAccoms[0] || null;
+  const autoGuideHost = useMemo(() => clientAccoms.find(accommodationAcceptsGuide) || null, [clientAccoms]);
+  const hasClientAccom = clientAccoms.length > 0;
+  /* Overland overnight: auto-charge when a guest accommodation has a guide rate;
+     defer when guide is dropped before any guest accommodation; ask only when
+     guest accommodation exists but has no guide rate. */
+  const overnightAuto = !!(showOvernight && autoGuideHost);
+  const overnightDeferred = !!(showOvernight && !autoGuideHost && !hasClientAccom);
+  const overnightNeedsChoice = !!(showOvernight && !autoGuideHost && hasClientAccom);
+  const referentHost = autoGuideHost || clientAccoms[0] || null;
 
   const savedHostId = defaultValues.overnightItemId || '';
   const savedIsAlt = savedHostId && !clientAccoms.some((item) => item.id === savedHostId);
   const [overnightMode, setOvernightMode] = useState(() => {
-    if (!savedHostId) return referentHost ? 'client' : 'none';
-    return savedIsAlt ? 'alt' : 'client';
+    if (!showOvernight) return 'none';
+    if (autoGuideHost) return 'client';
+    if (!hasClientAccom) return 'none';
+    if (savedIsAlt) return 'alt';
+    if (savedHostId) return 'single_rate';
+    return 'single_rate';
   });
   const [altOvernightId, setAltOvernightId] = useState(savedIsAlt ? savedHostId : '');
 
@@ -126,9 +175,15 @@ export default function GuideDetailsModal({
   }, [libraryItems, referentHost]);
 
   const altHost = altOptions.find((item) => item.id === altOvernightId) || null;
-  const overnightHost = overnightMode === 'client' ? referentHost
-    : overnightMode === 'alt' ? altHost
-      : null;
+  const overnightHost = !showOvernight
+    ? null
+    : overnightAuto
+      ? autoGuideHost
+      : overnightMode === 'alt'
+        ? altHost
+        : overnightMode === 'single_rate' || overnightMode === 'client'
+          ? referentHost
+          : null;
 
   const hostRate = overnightHost ? overnightRateRow(overnightHost, currency, travelStart, travelEnd) : null;
   /* A split night books its client rooms across more than one property, so the
@@ -144,69 +199,69 @@ export default function GuideDetailsModal({
   };
   const hostClientRooms = clientRoomsAt(overnightHost);
   const hostPayingGuests = payingGuestsAt(overnightHost);
-  /* A crew ladder states each threshold; the note names the first one. Without
-     a ladder the property's legacy minimum still applies. */
   const hostCrewLadder = crewRoomLadder(hostRate, { minRooms: guideMinClientRooms(overnightHost) });
-  const hostCountWord = staffCountWord(staffLadderBasis(hostCrewLadder));
-  const hostCount = staffLadderBasis(hostCrewLadder) === 'guests' ? hostPayingGuests : hostClientRooms;
   const guideMinRooms = hostCrewLadder[0]?.minRooms ?? 1;
-  const guideThresholdMet = guideRateApplies(hostCount, guideMinRooms);
   const guideRateOptions = {
     clientRooms: hostClientRooms,
     payingGuests: hostPayingGuests,
     minRooms: guideMinRooms
   };
-  const guideCost = overnightHost ? guideTravelRate(hostRate, true, guideRateOptions) : 0;
-  /* The driver beds from the same pool as the guide, so it is priced as its
-     second bed: where the property contracts one crew room the guide takes it
-     and the driver pays the single rate. */
-  const crewPoolSize = overnightHost ? crewPoolRooms(hostRate, guideRateOptions) : 0;
-  const driverCost = overnightHost
-    ? driverTravelRate(hostRate, true, { ...guideRateOptions, crewBed: 1 })
-    : 0;
   const singleCost = overnightHost ? singleOvernightRate(hostRate) : 0;
-  const nights = riderList(riderCharge);
-  const overnightTotal = nights.reduce((sum, who) => sum + overnightRiderRate(hostRate, who, true, guideRateOptions), 0);
 
   const lunchChoice = lunchChoices.find((item) => item.id === lunchItemId);
   const dinnerChoice = dinnerChoices.find((item) => item.id === dinnerItemId);
 
-  const overnightLines = overnightHost
-    ? riderList(riderCharge).map((who) => ({
+  const singleRateChoice = showOvernight && overnightNeedsChoice && overnightMode === 'single_rate';
+  const overnightResolved = showOvernight && !overnightDeferred && (
+    overnightAuto || singleRateChoice || (overnightMode === 'alt' && !!altHost)
+  );
+  const overnightLines = overnightResolved && overnightHost
+    ? [{
       item: overnightHost,
-      who,
-      unitCost: overnightRiderRate(hostRate, who, true, guideRateOptions)
-    }))
+      who: 'guide',
+      unitCost: singleRateChoice
+        ? singleOvernightRate(hostRate)
+        : guideTravelRate(hostRate, true, guideRateOptions),
+      forced: true
+    }]
     : [];
 
   const handleConfirm = () => {
     onConfirm({
-      lunch: crewMealLines(lunchChoice),
-      dinner: crewMealLines(dinnerChoice),
-      overnight: overnightLines.map((line) => ({ ...line, forced: true })),
-      guideOnly
+      lunch: showLunch ? crewMealLines(lunchChoice) : undefined,
+      dinner: showDinner ? crewMealLines(dinnerChoice) : undefined,
+      overnight: showOvernight ? overnightLines : undefined,
+      guideOnly: true,
+      overnightDeferred
     });
   };
 
-  const hasAnyDetail = !!lunchItemId || !!dinnerItemId || overnightLines.length > 0;
+  const hasAnyDetail = (showLunch && !!lunchItemId)
+    || (showDinner && !!dinnerItemId)
+    || overnightResolved
+    || overnightDeferred;
+
+  const heading = showOvernight ? 'Guide details' : 'Guide meal allowance';
+  const intro = showOvernight
+    ? `${guideName} on ${dayLabel} — choose guide meal allowances and overnight accommodation. Overnight is charged to the guide only.`
+    : `${guideName} on ${dayLabel} — choose the lunch meal allowance for this guide.`;
 
   return (
     <div className="modal-overlay service-guide-overlay">
       <div className="modal-content service-guide-modal service-guide-details-modal">
         <div className="modal-header">
           <div>
-            <h2>Guide &amp; driver details</h2>
+            <h2>{heading}</h2>
             <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '0.3rem' }}>
-              {guideName} on {dayLabel} — the meals and the bed the guide &amp; driver get while
-              touring overland. The clients keep their own room; each line is charged to the guide
-              &amp; driver only.
+              {intro}
             </p>
           </div>
           <button className="close-btn" onClick={onCancel}><X size={20} /></button>
         </div>
 
-        <div className="service-guide-section">
-          <h3><UtensilsCrossed size={15} /> Lunch</h3>
+        {showLunch && (
+          <div className="service-guide-section">
+            <h3><UtensilsCrossed size={15} /> Lunch</h3>
           <select value={lunchItemId} onChange={(event) => setLunchItemId(event.target.value)}>
             <option value="">No lunch for the guide on this day</option>
             {lunchChoices.map((item) => (
@@ -221,7 +276,9 @@ export default function GuideDetailsModal({
             </p>
           )}
         </div>
+        )}
 
+        {showDinner && (
         <div className="service-guide-section">
           <h3><UtensilsCrossed size={15} /> Dinner</h3>
           <select value={dinnerItemId} onChange={(event) => setDinnerItemId(event.target.value)}>
@@ -244,172 +301,99 @@ export default function GuideDetailsModal({
             </p>
           )}
         </div>
+        )}
 
+        {showOvernight && (
         <div className="service-guide-section">
-          <h3><BedDouble size={15} /> Guide &amp; driver overnight</h3>
+          <h3><BedDouble size={15} /> Guide overnight</h3>
 
-          {clientAccoms.length > 0 ? (
-            <div className="service-guide-clients">
-              {clientAccoms.map((item) => (
-                <span key={item.id} className={`service-guide-client-tag ${accommodationAcceptsGuide(item) ? 'accepts' : 'declines'}`}>
-                  {accommodationAcceptsGuide(item)
-                    ? <CheckCircle2 size={13} />
-                    : <AlertTriangle size={13} />}
-                  {item.name} — {accommodationAcceptsGuide(item)
-                    ? 'guide & driver room offered'
-                    : 'no contracted guide & driver room'}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <p className="service-guide-empty">No client accommodation is on this day.</p>
-          )}
-
-          {!acceptsClientRoom && referentHost && (
-            <div className="service-guide-choice">
-              <label className={`service-guide-choice-row ${overnightMode === 'client' ? 'selected' : ''}`}>
-                <input
-                  type="radio"
-                  name="overnight-host"
-                  checked={overnightMode === 'client'}
-                  onChange={() => setOvernightMode('client')}
-                />
-                <span>
-                  <strong>Proceed at {referentHost.name}</strong>
-                  <small>The same accommodation as the clients. The guide, driver or both are charged the default single rate each ({money(singleCost, currency)} / night).</small>
-                </span>
-              </label>
-              <label className={`service-guide-choice-row ${overnightMode === 'alt' ? 'selected' : ''}`}>
-                <input
-                  type="radio"
-                  name="overnight-host"
-                  checked={overnightMode === 'alt'}
-                  onChange={() => setOvernightMode('alt')}
-                />
-                <span>
-                  <strong>Use a different property in the same destination that accepts the guide &amp; driver</strong>
-                  <small>Only the chosen party is charged there — the clients keep their own room and are never charged.</small>
-                </span>
-              </label>
+          {overnightAuto && autoGuideHost && (
+            <div className="service-guide-note" style={{ color: '#166534', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '0.6rem 0.75rem' }}>
+              <CheckCircle2 size={14} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
+              Guide overnight will be charged automatically at <strong>{autoGuideHost.name}</strong> — {money(guideTravelRate(overnightRateRow(autoGuideHost, currency, travelStart, travelEnd), true, {
+                clientRooms: clientRoomsAt(autoGuideHost),
+                payingGuests: payingGuestsAt(autoGuideHost),
+                minRooms: (crewRoomLadder(overnightRateRow(autoGuideHost, currency, travelStart, travelEnd), { minRooms: guideMinClientRooms(autoGuideHost) })[0]?.minRooms ?? 1)
+              }), currency)} / night.
             </div>
           )}
 
-          {!acceptsClientRoom && !referentHost && (
-            <div className="service-guide-choice">
-              <label className={`service-guide-choice-row ${overnightMode === 'alt' ? 'selected' : ''}`}>
-                <input
-                  type="radio"
-                  name="overnight-host"
-                  checked={overnightMode === 'alt'}
-                  onChange={() => setOvernightMode('alt')}
-                />
-                <span>
-                  <strong>Choose a property that offers a guide &amp; driver room</strong>
-                  <small>There is no client accommodation on this day to fall back to.</small>
-                </span>
-              </label>
+          {overnightDeferred && (
+            <div className="service-guide-note" style={{ color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '0.6rem 0.75rem' }}>
+              <AlertTriangle size={14} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
+              No guest accommodation is on this day yet. When guest accommodation with a guide rate is added, the guide overnight will be charged automatically.
             </div>
           )}
 
-          {overnightMode === 'alt' && (
-            <select value={altOvernightId} onChange={(event) => setAltOvernightId(event.target.value)}>
-              <option value="">Select a property that offers a guide &amp; driver room</option>
-              {altOptions.map((item) => {
-                const rate = overnightRateRow(item, currency, travelStart, travelEnd);
-                /* One crew pool per property, so the option names the first bed
-                   and the second one rather than the same contracted room twice. */
-                const itemLadder = crewRoomLadder(rate, { minRooms: guideMinClientRooms(item) });
-                const itemWord = staffCountWord(staffLadderBasis(itemLadder));
-                const crewOptions = {
-                  clientRooms: clientRoomsAt(item),
-                  payingGuests: payingGuestsAt(item),
-                  minRooms: itemLadder[0]?.minRooms ?? 1
-                };
-                const guideNight = guideTravelRate(rate, true, crewOptions);
-                const driverNight = driverTravelRate(rate, true, { ...crewOptions, crewBed: 1 });
-                return (
-                  <option key={item.id} value={item.id}>
-                    {item.name} — crew bed {money(guideNight, currency)} then {money(driverNight, currency)} / night{crewOptions.minRooms > 1 ? ` (crew rate from ${crewOptions.minRooms} ${itemWord})` : ''}
-                  </option>
-                );
-              })}
-            </select>
-          )}
-          {overnightMode === 'alt' && altOptions.length === 0 && (
-            <p className="service-guide-empty">No property in the same destination offers a guide &amp; driver room.</p>
-          )}
-
-          <label className={`service-guide-choice-row ${overnightMode === 'none' ? 'selected' : ''}`}>
-            <input
-              type="radio"
-              name="overnight-host"
-              checked={overnightMode === 'none'}
-              onChange={() => setOvernightMode('none')}
-            />
-            <span>
-              <strong>No overnight for the guide &amp; driver</strong>
-              <small>Nothing is bedded on this day.</small>
-            </span>
-          </label>
-
-          {overnightHost && overnightMode !== 'none' && (
-            <div className="service-guide-riders">
-              <div className="service-guide-riders-head">Who is charged for the night</div>
-              {['guide', 'driver', 'both'].map((who) => {
-                const cost = overnightRiderRate(hostRate, who, true, guideRateOptions);
-                return (
-                  <label key={who} className={`service-guide-choice-row ${riderCharge === who ? 'selected' : ''}`}>
-                    <input
-                      type="radio"
-                      name="overnight-rider"
-                      checked={riderCharge === who}
-                      onChange={() => setRiderCharge(who)}
-                    />
-                    <span>
-                      <strong>{OVERNIGHT_RIDER_LABELS[who]}</strong>
-                      <small>
-                        {who === 'both'
-                          ? `Guide ${money(guideCost, currency)} + driver ${money(driverCost, currency)} — `
-                            + (crewPoolSize > 1
-                              ? `${crewPoolSize} crew rooms contracted for this many ${hostCountWord}`
-                              : 'one crew room in the pool, so the second bed pays single')
-                          : `${money(cost, currency)} / night`}
-                      </small>
-                    </span>
-                    <span className="service-guide-rider-total">{money(cost, currency)}</span>
-                  </label>
-                );
-              })}
-              <div className="service-guide-total">
-                Overnight total: <strong>{money(overnightTotal, currency)}</strong>
-                {' '}({nights.length} line{nights.length === 1 ? '' : 's'})
+          {overnightNeedsChoice && (
+            <>
+              <div className="service-guide-clients">
+                {clientAccoms.map((item) => (
+                  <span key={item.id} className="service-guide-client-tag declines">
+                    <AlertTriangle size={13} />
+                    {item.name} — no contracted guide rate
+                  </span>
+                ))}
               </div>
-            </div>
-          )}
+              <div className="service-guide-choice">
+                <label className={`service-guide-choice-row ${overnightMode === 'single_rate' ? 'selected' : ''}`}>
+                  <input
+                    type="radio"
+                    name="overnight-host"
+                    checked={overnightMode === 'single_rate'}
+                    onChange={() => setOvernightMode('single_rate')}
+                  />
+                  <span>
+                    <strong>Charge guide at guest room single room rate</strong>
+                    <small>
+                      {referentHost
+                        ? `Charge the guide at ${referentHost.name}'s single room rate (${money(singleCost, currency)} / night).`
+                        : 'Charge the guide at the guest accommodation single room rate.'}
+                    </small>
+                  </span>
+                </label>
+                <label className={`service-guide-choice-row ${overnightMode === 'alt' ? 'selected' : ''}`}>
+                  <input
+                    type="radio"
+                    name="overnight-host"
+                    checked={overnightMode === 'alt'}
+                    onChange={() => setOvernightMode('alt')}
+                  />
+                  <span>
+                    <strong>Pick guide accommodation in the same destination</strong>
+                    <small>Choose a property that has a contracted guide rate in the same destination.</small>
+                  </span>
+                </label>
+              </div>
 
-          {overnightHost && overnightMode === 'client' && !acceptsClientRoom && (
-            <p className="service-guide-note">
-              {referentHost?.name} does not contract a guide &amp; driver room, so the charged
-              party falls back to its default single rate.
-            </p>
-          )}
-
-          {overnightHost && riderCharge !== 'driver' && guideMinRooms > 1 && hostCount !== undefined && hostCount !== null && (
-            <p className="service-guide-note">
-              {guideThresholdMet
-                ? `${overnightHost.name} guide rate applies from ${guideMinRooms} ${hostCountWord} — ${hostCount} booked, so the guide is charged ${money(guideCost, currency)} / night.`
-                : `${overnightHost.name} guide rate needs ${guideMinRooms} ${hostCountWord} — only ${hostCount} booked, so the guide is charged the single rate (${money(guideCost, currency)} / night).`}
-            </p>
+              {overnightMode === 'alt' && (
+                <select value={altOvernightId} onChange={(event) => setAltOvernightId(event.target.value)}>
+                  <option value="">Select guide accommodation</option>
+                  {altOptions.map((item) => {
+                    const rate = overnightRateRow(item, currency, travelStart, travelEnd);
+                    const itemLadder = crewRoomLadder(rate, { minRooms: guideMinClientRooms(item) });
+                    const itemWord = staffCountWord(staffLadderBasis(itemLadder));
+                    const crewOptions = {
+                      clientRooms: clientRoomsAt(item),
+                      payingGuests: payingGuestsAt(item),
+                      minRooms: itemLadder[0]?.minRooms ?? 1
+                    };
+                    const guideNight = guideTravelRate(rate, true, crewOptions);
+                    return (
+                      <option key={item.id} value={item.id}>
+                        {item.name} — guide {money(guideNight, currency)} / night{crewOptions.minRooms > 1 ? ` (guide rate from ${crewOptions.minRooms} ${itemWord})` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              )}
+              {overnightMode === 'alt' && altOptions.length === 0 && (
+                <p className="service-guide-empty">No property in the same destination offers a contracted guide rate.</p>
+              )}
+            </>
           )}
         </div>
-
-        <label className="service-guide-check-row">
-          <input type="checkbox" checked={guideOnly} onChange={(event) => setGuideOnly(event.target.checked)} />
-          <span>
-            <strong>Only the guide &amp; driver are charged for these</strong>
-            <small>The clients never pay for the guide's meals; the overnight is always charged to the guide &amp; driver alone.</small>
-          </span>
-        </label>
+        )}
 
         <div className="form-actions">
           <button type="button" className="secondary-btn" onClick={onCancel}>Cancel</button>

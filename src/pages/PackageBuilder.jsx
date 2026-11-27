@@ -4,7 +4,7 @@ import {
   ArrowLeft, Backpack, Baby, CalendarDays, Car, Check, ChevronDown, Download, FileText, Link2, MapPin,
   GripVertical, Plus, RefreshCw, Save, Search, Trash2, UtensilsCrossed, X
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { supabase, fetchAllRows } from '../lib/supabase';
 import { PricingSeasonsTab } from '../components/PricingSeasonsTab';
 import { PricingSummaryTab } from '../components/PricingSummaryTab';
 import { usePricingGrid } from '../lib/usePricingGrid';
@@ -41,8 +41,9 @@ packageRateForDates,
   vehicleVectorPrice
 } from '../lib/packagePricing';
 import { ratesForServiceRoom, roomTypesOf } from '../lib/roomTypes';
-import { contractTypeForTourType, normalizeRateType, ratesForContract } from '../lib/rateTypes';
+import { contractTypeForTourType, itemForContract, normalizeRateType, ratesForContract } from '../lib/rateTypes';
 import { stripConversionNote } from '../lib/itineraryToPackage';
+import { clientRoomsBooked, payingGuestsBooked, normaliseTravellerRole } from '../lib/roomAllocationHelper';
 import { categoryLabel } from '../lib/i18n/documentTerms';
 import { singleSupplementLadderSummary } from '../lib/singleSupplement';
 import {
@@ -52,7 +53,13 @@ import {
   guideLabel,
   isGuideItem,
   isOverlandGuide,
-  refreshCrewShare
+  refreshCrewShare,
+  guideSelection,
+  accommodationAcceptsGuide,
+  overnightRateRow,
+  guideTravelRate,
+  crewRoomLadder,
+  guideMinClientRooms
 } from '../lib/guidePricing';
 import {
   feeBasisChargesHeads,
@@ -521,6 +528,9 @@ const [bandScope, setBandScope] = useState('');
      dinner / overnight lines) for an overland guide on one day. */
   const [guideModal, setGuideModal] = useState(null);
   const [guideDetailsModal, setGuideDetailsModal] = useState(null);
+  const [guidePlacementModal, setGuidePlacementModal] = useState(null);
+  const [guidePlacementMode, setGuidePlacementMode] = useState('single');
+  const [guidePlacementDays, setGuidePlacementDays] = useState([]);
 
   /* Accommodation charge detour: the pending add held while the operator picks
      the charge type (and season) a multi-price property is booked on. */
@@ -737,7 +747,7 @@ const [bandScope, setBandScope] = useState('');
       if (usedIds.length) {
         const [itemsRes, ratesRes] = await Promise.all([
           selectLibraryItems((fields) => supabase.from('library_items').select(fields).in('id', usedIds)),
-          supabase.from('item_rates').select('*').in('item_id', usedIds)
+          fetchAllRows((from, to) => supabase.from('item_rates').select('*').in('item_id', usedIds).range(from, to))
         ]);
         if (itemsRes.error) throw itemsRes.error;
         if (ratesRes.error) throw ratesRes.error;
@@ -815,22 +825,31 @@ const [bandScope, setBandScope] = useState('');
       try {
         const safe = term.replace(/[,()]/g, ' ').replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
         const destinations = destinationClause(destinationFilters);
-        const { data, error } = await selectLibraryItems((fields) => {
+        const guideCategories = ['Guide', 'Guide / Driver'];
+        const wantsGuides = !categoryFilter || guideCategories.includes(categoryFilter);
+        const buildQuery = (fields, { skipDestination = false, guidesOnly = false } = {}) => {
           let query = supabase.from('library_items').select(fields)
             .eq('company_id', companyId).eq('is_active', true);
-          if (categoryFilter) query = query.eq('category', categoryFilter);
+          if (guidesOnly) query = query.in('category', guideCategories);
+          else if (categoryFilter) query = query.eq('category', categoryFilter);
           if (term.length >= 2) query = query.or(`name.ilike.%${safe}%,description.ilike.%${safe}%,destination_region.ilike.%${safe}%,destination_area.ilike.%${safe}%,location.ilike.%${safe}%`);
-          /* Filtered on the server, because the search only ever brings back a
-             page of items — narrowing that page locally would hide islands that
-             are contracted but happened to fall past the limit. */
-          if (destinations) query = query.or(destinations);
-          return query.order('name').limit(50);
-        });
+          if (!skipDestination && destinations) query = query.or(destinations);
+          return query.order('name').limit(guidesOnly ? 20 : 50);
+        };
+        const { data, error } = await selectLibraryItems((fields) => buildQuery(fields));
         if (error) throw error;
-        const ids = (data || []).map((item) => item.id);
-        const suppliers = [...new Set((data || []).map((item) => item.supplier_id).filter(Boolean))];
+        let rows = data || [];
+        /* Guides can be flown in from anywhere, so a destination filter never hides them. */
+        if (destinations && wantsGuides) {
+          const { data: guideData, error: guideError } = await selectLibraryItems((fields) => buildQuery(fields, { skipDestination: true, guidesOnly: true }));
+          if (guideError) throw guideError;
+          const seen = new Set(rows.map((item) => item.id));
+          rows = [...rows, ...(guideData || []).filter((item) => !seen.has(item.id))];
+        }
+        const ids = rows.map((item) => item.id);
+        const suppliers = [...new Set(rows.map((item) => item.supplier_id).filter(Boolean))];
         const [ratesRes, suppliersRes] = await Promise.all([
-          ids.length ? supabase.from('item_rates').select('*').in('item_id', ids) : { data: [], error: null },
+          ids.length ? fetchAllRows((from, to) => supabase.from('item_rates').select('*').in('item_id', ids).range(from, to)) : { data: [], error: null },
           suppliers.length ? supabase.from('suppliers').select(await supplierColumns('id, name')).in('id', suppliers) : { data: [], error: null }
         ]);
         if (ratesRes.error) throw ratesRes.error;
@@ -839,7 +858,7 @@ const [bandScope, setBandScope] = useState('');
         const supplierStars = new Map((suppliersRes.data || []).map((supplier) => [supplier.id, supplier.star_rating]));
         const roomsByItem = await fetchRoomTypesForItems(ids);
         const carRatesByItem = await fetchCarRentalRates(ids);
-        const merged = (data || []).map((item) => ({
+        const merged = rows.map((item) => ({
           ...item,
           supplier_name: supplierNames.get(item.supplier_id) || '',
           supplier_star_rating: supplierStars.get(item.supplier_id) || null,
@@ -880,7 +899,8 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
      that produced three competing totals. The currency is set by the first service added
      and reported next to the search box. */
   const visibleResults = useMemo(() => results.filter((item) => {
-    if (!matchesDestinations(item, destinationFilters)) return false;
+    /* Guides can be flown in from anywhere, so a destination filter never hides them. */
+    if (!isGuideItem(item) && !matchesDestinations(item, destinationFilters)) return false;
     /* An item with no rate in the package's currency cannot be priced into this package at
        all, so it is hidden rather than listed as unavailable: with one currency per package
        it is clutter, not information. Before the first service is added there is no currency
@@ -952,6 +972,8 @@ const packageCurrency = packageCurrencyFor(days, pkg?.currency_code);
      travellers is a rule for the working grid, so a band that was saved with fewer (a legacy
      row, or a party of one) keeps its own size and is judged on its own merits. */
   const bandCapacityAlertsRef = useRef('');
+  const daysRefPkg = useRef(days);
+  useEffect(() => { daysRefPkg.current = days; }, [days]);
   useEffect(() => {
     if (!days.length || !mergedBands.length) {
       bandCapacityAlertsRef.current = '';
@@ -1495,10 +1517,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         .eq('linked_item_id', accommodationItem.id);
       feeRows = (data || []).filter(isSurchargeItem);
       if (feeRows.length) {
-        const { data: rates } = await supabase
+        const { data: rates } = await fetchAllRows((from, to) => supabase
           .from('item_rates')
           .select('*')
-          .in('item_id', feeRows.map((fee) => fee.id));
+          .in('item_id', feeRows.map((fee) => fee.id))
+          .range(from, to));
         ratesData = rates || [];
       }
     } catch {
@@ -1734,6 +1757,14 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
        guide's own contract figure (unit_cost / price_1_adult) is 0, so the line
        is built from the selected survey rates and stored so it survives a reload. */
     const guideTypes = isGuideItem(item) ? (scope.guideServiceTypes || []) : [];
+    if (isGuideItem(item) && isOverlandGuide(guideTypes)) {
+      const travellers = pkg?.travellers || form?.travellers || [];
+      const hasTourGuide = (Array.isArray(travellers) ? travellers : []).some((t) => normaliseTravellerRole(t?.role) === 'tour_guide');
+      if (!hasTourGuide) {
+        showToast('Overland guide cannot be added: add a traveller with the Tour Guide role in the header first, then drop the overland guide.', 'warning');
+        return;
+      }
+    }
     const guideTotal = guideTypes.length ? guideChargeTotal(storedRate, guideTypes) : null;
     /* A crew figure on this item's own rate row — the guide's seat on a flight, the
        guide's place on a tour — is bought with the clients' ticket and shared by the
@@ -1787,11 +1818,22 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
         ? { ...day, services: [...day.services, service] }
         : day);
     });
-    /* Overland comes with the guide lived in: everything the guide is fed and bedded
-       on this day is asked for right away so the detour is not something the operator
-       has to remember. */
-    if (isOverlandGuide(guideTypes)) {
-      setGuideDetailsModal({ dayIndex, guideKey: service.item_key, defaultValues: guideDetailsDefaultsFor(dayIndex, service.item_key) });
+    /* Full Day triggers a lunch allowance; Overland triggers lunch, dinner and overnight. */
+    const wantsOverlandGuide = isOverlandGuide(guideTypes);
+    const wantsFullDayLunch = guideSelection(guideTypes).includes('full_day');
+    if (!scope.suppressGuideDetails && (wantsOverlandGuide || wantsFullDayLunch)) {
+      setGuideDetailsModal({
+        dayIndex,
+        dayIndices: [dayIndex],
+        guideKey: service.item_key,
+        guideItemId: item.id,
+        defaultValues: guideDetailsDefaultsFor(dayIndex, service.item_key),
+        detailKinds: { lunch: true, dinner: wantsOverlandGuide, overnight: wantsOverlandGuide }
+      });
+    }
+    if (isStayItem && service.guide_only !== true) {
+      const updatedServices = [...(days[dayIndex]?.services || []), service];
+      syncGuideOvernightForDay(dayIndex, { preferredAccomId: item.id, servicesOverride: updatedServices });
     }
     /* The property's linked fees (park fee, levy, porterage) arrive with it. */
     if (isStayItem) addLinkedFees(item, dayIndex, scope);
@@ -1840,8 +1882,60 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
   const confirmGuideTypes = (types) => {
     const pending = guideModal;
     if (!pending) return;
+    const selectedTypes = guideSelection(types);
+    if (isOverlandGuide(selectedTypes)) {
+      const travellers = pkg?.travellers || form?.travellers || [];
+      const hasTourGuide = (Array.isArray(travellers) ? travellers : []).some((t) => normaliseTravellerRole(t?.role) === 'tour_guide');
+      if (!hasTourGuide) {
+        showToast('Overland guide cannot be added: add a traveller with the Tour Guide role in the header first, then drop the overland guide.', 'warning');
+        return;
+      }
+    }
     setGuideModal(null);
-    addService(pending.item, pending.rateId, pending.dayIndex, { ...pending.scope, guideServiceTypes: types });
+    setGuidePlacementMode('single');
+    setGuidePlacementDays([pending.dayIndex]);
+    setGuidePlacementModal({ ...pending, guideServiceTypes: selectedTypes });
+  };
+
+  const applyGuidePlacement = () => {
+    const pending = guidePlacementModal;
+    if (!pending) return;
+    const targetDays = guidePlacementMode === 'single'
+      ? [pending.dayIndex]
+      : [...new Set(guidePlacementDays.map(Number))]
+        .filter((i) => i >= 0 && i < days.length)
+        .sort((a, b) => a - b);
+    if (!targetDays.length) return;
+    setGuidePlacementModal(null);
+    const isMulti = targetDays.length > 1;
+    targetDays.forEach((dayIndex) => {
+      addService(pending.item, pending.rateId, dayIndex, {
+        ...pending.scope,
+        guideServiceTypes: pending.guideServiceTypes,
+        suppressGuideDetails: isMulti
+      });
+    });
+    if (isMulti) {
+      const wantsOverland = isOverlandGuide(pending.guideServiceTypes);
+      const wantsFullDayLunch = guideSelection(pending.guideServiceTypes).includes('full_day');
+      if (wantsOverland || wantsFullDayLunch) {
+        const baseDay = targetDays[0];
+        setTimeout(() => {
+          const currentDay = daysRefPkg.current[baseDay];
+          const guideSvc = (currentDay?.services || []).find((s) => s.item_id === pending.item.id && Array.isArray(s.guide_service_types) && s.guide_service_types.length);
+          if (guideSvc) {
+            setGuideDetailsModal({
+              dayIndex: baseDay,
+              dayIndices: targetDays,
+              guideKey: guideSvc.item_key,
+              guideItemId: pending.item.id,
+              defaultValues: {},
+              detailKinds: { lunch: true, dinner: wantsOverland, overnight: wantsOverland }
+            });
+          }
+        }, 0);
+      }
+    }
   };
 
   const confirmAccommodationCharge = (choice) => {
@@ -2042,53 +2136,128 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
 
   const cancelCarRental = () => setCarRentalModal(null);
 
+  const syncGuideOvernightForDay = (dayIndex, { preferredAccomId = null, promptIfMissingRate = true, servicesOverride = null } = {}) => {
+    const day = days[dayIndex];
+    if (!day && !servicesOverride) return;
+    const services = servicesOverride || day?.services || [];
+    const overlandGuides = services.filter((s) => Array.isArray(s.guide_service_types) && s.guide_service_types.length && isOverlandGuide(s.guide_service_types));
+    if (!overlandGuides.length) return;
+    const clientAccoms = services.filter((s) => /accommodation/i.test(String(s.category || '')) && !s.is_optional && s.guide_only !== true && !s.guide_for_item_key);
+    if (!clientAccoms.length) return;
+
+    for (const guide of overlandGuides) {
+      const hasOvernight = services.some((s) => s.guide_for_item_key === guide.item_key && /accommodation/i.test(String(s.category || '')));
+      if (hasOvernight) continue;
+      const guideAlreadyBedded = clientAccoms.some((s) =>
+        (Array.isArray(s.roomAllocations) ? s.roomAllocations : []).some((rm) =>
+          (Array.isArray(rm?.allocatedTravellers) ? rm.allocatedTravellers : []).some(
+            (t) => normaliseTravellerRole(t?.role) === 'tour_guide'
+          )
+        )
+      );
+      if (guideAlreadyBedded) continue;
+      const accomItems = clientAccoms
+        .map((s) => library.find((li) => li.id === s.item_id) || results.find((li) => li.id === s.item_id))
+        .filter(Boolean);
+      const preferred = preferredAccomId ? accomItems.find((i) => i.id === preferredAccomId) : null;
+      const acceptingHost = (preferred && accommodationAcceptsGuide(preferred)) ? preferred : accomItems.find(accommodationAcceptsGuide);
+      if (acceptingHost) {
+        const rateRow = overnightRateRow(acceptingHost, packageCurrency, periods[0]?.valid_from || '', periods[0]?.valid_to || '');
+        const hostService = clientAccoms.find((s) => s.item_id === acceptingHost.id);
+        const clientRooms = clientRoomsBooked(hostService?.roomAllocations || []);
+        const payingGuests = payingGuestsBooked(hostService?.roomAllocations || []);
+        const minRooms = (crewRoomLadder(rateRow, { minRooms: guideMinClientRooms(acceptingHost) })[0]?.minRooms ?? 1);
+        const unitCost = guideTravelRate(rateRow, true, { clientRooms, payingGuests, minRooms });
+        const overnightLine = {
+          item_key: uuid(),
+          item_id: acceptingHost.id,
+          rate_id: (acceptingHost.item_rates || [])[0]?.id || null,
+          item_name: acceptingHost.name,
+          category: acceptingHost.category || '',
+          supplier_name: acceptingHost.supplier_name || acceptingHost.supplier?.name || '',
+          currency_code: packageCurrency,
+          rate_basis: 'per_trip',
+          unit_cost: unitCost,
+          unit_price: unitCost,
+          quantity: 1,
+          is_included: true,
+          vehicle_capacity: Number(acceptingHost.max_occupancy || acceptingHost.maxOccupancy) || 0,
+          tier_key: guide.tier_key || null,
+          replaces_item_key: null,
+          rate_snapshot: (acceptingHost.item_rates || [])[0] || {},
+          price_protection_percent: 0,
+          protected_season_name: '',
+          guide_service_types: null,
+          guide_only: true,
+          guide_for_item_key: guide.item_key,
+          guide_charge_type: 'guide'
+        };
+        setDays((previous) => previous.map((row, index) => index !== dayIndex ? row : {
+          ...row,
+          services: [...(row.services || []), overnightLine]
+        }));
+        showToast(`Guide overnight charged at ${acceptingHost.name}.`, 'success');
+        return;
+      }
+      if (promptIfMissingRate) {
+        setGuideDetailsModal({
+          dayIndex,
+          dayIndices: [dayIndex],
+          guideKey: guide.item_key,
+          guideItemId: guide.item_id,
+          defaultValues: guideDetailsDefaultsFor(dayIndex, guide.item_key),
+          detailKinds: { lunch: false, dinner: false, overnight: true }
+        });
+        return;
+      }
+    }
+  };
+
   const applyGuideDetails = (dayIndex, guideKey, plan) => {
     const day = days[dayIndex];
     if (!day) return;
     const guideService = (day.services || []).find((service) => service.item_key === guideKey);
-    /* Re-applying replaces the existing detail lines so reopening the dialog never
-       stacks a second lunch on top of the first. Every answer is an ARRAY of
-       lines — a meal the driver is flagged on writes a guide line and a driver
-       line, an overnight one per charged party — and each carries who it charges
-       (guide_charge_type) so the dialog reopens with the same choice. */
     const linesOf = (value) => (Array.isArray(value) ? value : value ? [value] : []);
-    const lines = [
-      ...linesOf(plan.lunch),
-      ...linesOf(plan.dinner),
-      ...linesOf(plan.overnight)
-    ]
-      .filter(Boolean)
-      .map((detail) => {
-        const item = detail.item;
-        return {
-          item_key: uuid(),
-          item_id: item.id,
-          rate_id: (item.item_rates || [])[0]?.id || null,
-          /* Two parties eating the same meal are two prices, so the driver's copy
-             says whose it is instead of reading as a duplicate line. */
-          item_name: detail.who === 'driver' ? `${item.name} (driver)` : item.name,
-          category: item.category || '',
-          supplier_name: item.supplier_name || item.supplier?.name || '',
-          currency_code: packageCurrency,
-          rate_basis: 'per_trip',
-          unit_cost: Number(detail.unitCost) || 0,
-          unit_price: Number(detail.unitCost) || 0,
-          quantity: 1,
-          is_included: true,
-          vehicle_capacity: Number(item.max_occupancy || item.maxOccupancy) || 0,
-          tier_key: guideService?.tier_key || null,
-          replaces_item_key: null,
-          rate_snapshot: (item.item_rates || [])[0] || {},
-          price_protection_percent: 0,
-          protected_season_name: '',
-          guide_service_types: null,
-          /* The overnight is always charged to the guide & driver alone; the
-             checkbox governs the meal lines, whoever eats them. */
-          guide_only: detail.forced === true ? true : plan.guideOnly,
-          guide_for_item_key: guideKey,
-          guide_charge_type: detail.who || null
-        };
-      });
+    const existing = (day.services || []).filter((service) => service.guide_for_item_key === guideKey);
+    const isMeal = (s) => /meal/i.test(String(s.category || ''));
+    const isAccom = (s) => /accommodation/i.test(String(s.category || ''));
+    const mealOccasion = (s) => String((library.find((li) => li.id === s.item_id) || results.find((li) => li.id === s.item_id))?.meal_type || s.item_name || '').toLowerCase();
+    const keepExisting = (predicate) => existing.filter(predicate);
+    const buildLine = (detail) => {
+      const item = detail.item;
+      return {
+        item_key: uuid(),
+        item_id: item.id,
+        rate_id: (item.item_rates || [])[0]?.id || null,
+        item_name: detail.who === 'driver' ? `${item.name} (driver)` : item.name,
+        category: item.category || '',
+        supplier_name: item.supplier_name || item.supplier?.name || '',
+        currency_code: packageCurrency,
+        rate_basis: 'per_trip',
+        unit_cost: Number(detail.unitCost) || 0,
+        unit_price: Number(detail.unitCost) || 0,
+        quantity: 1,
+        is_included: true,
+        vehicle_capacity: Number(item.max_occupancy || item.maxOccupancy) || 0,
+        tier_key: guideService?.tier_key || null,
+        replaces_item_key: null,
+        rate_snapshot: (item.item_rates || [])[0] || {},
+        price_protection_percent: 0,
+        protected_season_name: '',
+        guide_service_types: null,
+        guide_only: detail.forced === true ? true : plan.guideOnly !== false,
+        guide_for_item_key: guideKey,
+        guide_charge_type: detail.who || null
+      };
+    };
+    const lunchLines = plan.lunch !== undefined ? linesOf(plan.lunch).filter(Boolean).map(buildLine) : keepExisting((s) => isMeal(s) && mealOccasion(s).includes('lunch'));
+    const dinnerLines = plan.dinner !== undefined ? linesOf(plan.dinner).filter(Boolean).map(buildLine) : keepExisting((s) => isMeal(s) && mealOccasion(s).includes('dinner'));
+    const otherMeals = (plan.lunch !== undefined || plan.dinner !== undefined)
+      ? keepExisting((s) => isMeal(s) && !mealOccasion(s).includes('lunch') && !mealOccasion(s).includes('dinner'))
+      : [];
+    const overnightLines = plan.overnight !== undefined ? linesOf(plan.overnight).filter(Boolean).map(buildLine) : keepExisting(isAccom);
+    const lines = [...lunchLines, ...dinnerLines, ...otherMeals, ...overnightLines];
+
     setDays((previous) => previous.map((row, index) => index !== dayIndex ? row : {
       ...row,
       services: [
@@ -2097,9 +2266,11 @@ const persist = useCallback(async (nextDays = days, nextPeriods = periods, nextP
       ]
     }));
     if (lines.length) {
-      showToast(plan.guideOnly
-        ? `Guide details added — only the guide & driver are charged at these.`
+      showToast(plan.guideOnly !== false
+        ? 'Guide details added — only the guide is charged at these.'
         : 'Guide details added.', 'success');
+    } else if (plan.overnightDeferred) {
+      showToast('Guide meal details saved. Overnight will be charged automatically when guest accommodation with a guide rate is added.', 'success');
     }
   };
 
@@ -3543,8 +3714,74 @@ const childRange = packageChildAgeRange(form.childAgeRange);
       onConfirm={confirmGuideTypes}
       onCancel={() => setGuideModal(null)}
     />}
+    {guidePlacementModal && (
+      <div className="modal-overlay service-guide-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setGuidePlacementModal(null); }}>
+        <div className="modal-content service-guide-modal" style={{ maxWidth: 560 }}>
+          <div className="modal-header">
+            <div>
+              <h2>Place guide service</h2>
+              <p style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '0.3rem' }}>
+                Choose which day(s) {guidePlacementModal.item?.name || 'this guide'} should be added to.
+              </p>
+            </div>
+            <button className="close-btn" onClick={() => setGuidePlacementModal(null)}><X size={20} /></button>
+          </div>
+          <div className="service-guide-section">
+            <div className="placement-mode-row" role="group" aria-label="Which days">
+              {[['single', 'This day only'], ['consecutive', 'Consecutive days'], ['specific', 'Specific days']].map(([value, label]) => (
+                <label key={value} className={`placement-mode-pill${guidePlacementMode === value ? ' is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="guide-placement-mode"
+                    checked={guidePlacementMode === value}
+                    onChange={() => {
+                      setGuidePlacementMode(value);
+                      if (value === 'single') setGuidePlacementDays([guidePlacementModal.dayIndex]);
+                      if (value === 'consecutive') setGuidePlacementDays([guidePlacementModal.dayIndex, Math.min(days.length - 1, guidePlacementModal.dayIndex + 1)]);
+                      if (value === 'specific') setGuidePlacementDays([guidePlacementModal.dayIndex]);
+                    }}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {guidePlacementMode !== 'single' && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.75rem' }}>
+                {days.map((_, i) => {
+                  const selected = guidePlacementDays.includes(i);
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      className={`placement-mode-pill${selected ? ' is-active' : ''}`}
+                      onClick={() => {
+                        if (guidePlacementMode === 'consecutive') {
+                          const start = Math.min(guidePlacementModal.dayIndex, i);
+                          const end = Math.max(guidePlacementModal.dayIndex, i);
+                          setGuidePlacementDays(Array.from({ length: end - start + 1 }, (_, k) => start + k));
+                        } else {
+                          setGuidePlacementDays((prev) => prev.includes(i) ? prev.filter((d) => d !== i) : [...prev, i].sort((a, b) => a - b));
+                        }
+                      }}
+                    >
+                      Day {i + 1}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <div className="form-actions">
+            <button type="button" className="secondary-btn" onClick={() => setGuidePlacementModal(null)}>Cancel</button>
+            <button type="button" className="primary-btn" onClick={applyGuidePlacement}>Add guide</button>
+          </div>
+        </div>
+      </div>
+    )}
     {accomChargeModal && <AccommodationChargeModal
-      item={accomChargeModal.item}
+      item={itemForContract(accomChargeModal.item, contractType) || accomChargeModal.item}
+      sourceItem={accomChargeModal.item}
+      contractType={contractType}
       variant={accomChargeModal.variant || 'accommodation'}
       currency={accomChargeModal.item.currency_code || packageCurrency}
       travelStart={periods[0]?.valid_from || ''}
@@ -3634,6 +3871,7 @@ const childRange = packageChildAgeRange(form.childAgeRange);
         guideName={guideLine?.item_name || 'Guide & driver'}
         dayLabel={`Day ${guideDetailsModal.dayIndex + 1}`}
         currency={packageCurrency}
+        companyId={companyId}
         libraryItems={library}
         travelStart={periods[0]?.valid_from || ''}
         travelEnd={periods[0]?.valid_to || ''}
@@ -3641,10 +3879,16 @@ const childRange = packageChildAgeRange(form.childAgeRange);
           .filter((service) => /accommodation/i.test(service.category || '') && service.is_included !== false)
           .map((service) => service.item_id)}
         defaultValues={guideDetailsModal.defaultValues || {}}
+        detailKinds={guideDetailsModal.detailKinds}
         onConfirm={(plan) => {
           const modal = guideDetailsModal;
           setGuideDetailsModal(null);
-          applyGuideDetails(modal.dayIndex, modal.guideKey, plan);
+          const targets = modal.dayIndices?.length ? modal.dayIndices : [modal.dayIndex];
+          targets.forEach((dayIdx) => {
+            const day = days[dayIdx];
+            const guideSvc = (day?.services || []).find((s) => (modal.guideItemId ? s.item_id === modal.guideItemId : s.item_key === modal.guideKey) && Array.isArray(s.guide_service_types) && s.guide_service_types.length);
+            if (guideSvc) applyGuideDetails(dayIdx, guideSvc.item_key, plan);
+          });
         }}
         onCancel={() => setGuideDetailsModal(null)}
       />;

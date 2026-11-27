@@ -261,7 +261,7 @@ function SearchableCountryInput({ value, onChange }) {
         <Search size={15} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none' }} />
         <input
           className="sidebar-select"
-          style={{ width: '100%', padding: '0.6rem 0.75rem 0.6rem 2rem', fontSize: '0.9rem' }}
+          style={{ width: '100%', padding: '0.6rem 0.75rem 0.6rem 2.6rem', fontSize: '0.9rem' }}
           value={open ? query : value}
           placeholder="Type to search country…"
           onFocus={() => { setQuery(''); setOpen(true); }}

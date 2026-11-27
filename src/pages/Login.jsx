@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { appUrl } from '../lib/appUrl';
 import { Mail, Lock, Building2, User, Phone, Check, ArrowLeft, Ticket } from 'lucide-react';
 import fullLogo from '../assets/full_logo.png';
 import { useToast } from '../context/ToastContext';
@@ -50,7 +51,7 @@ export const Login = () => {
     setLoading(true);
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail, {
-        redirectTo: `${window.location.origin}/reset-password`
+        redirectTo: appUrl('/reset-password')
       });
       if (error) throw error;
       showToast('A password reset link has been sent to your email.', 'success', 'Reset link sent.');
@@ -75,7 +76,10 @@ export const Login = () => {
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { full_name: fullName } }
+        options: {
+          data: { full_name: fullName },
+          emailRedirectTo: appUrl(`/login?code=${encodeURIComponent(invitationCode.trim())}`)
+        }
       });
       if (authError) throw authError;
       if (!authData.session) {
@@ -107,7 +111,10 @@ export const Login = () => {
       const { error: authError } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { full_name: fullName } }
+        options: {
+          data: { full_name: fullName },
+          emailRedirectTo: appUrl('/login')
+        }
       });
       if (authError) throw authError;
 

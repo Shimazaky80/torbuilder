@@ -1,4 +1,5 @@
 import { rateForTravel } from './priceValidity';
+import { seasonIdentityOf } from './roomSeasons';
 import { travellersPlusTlCount } from './roomAllocationHelper';
 import { crewLadderTiers, hasStaffRate, staffLadderBasis, staffRateValue, staffRoomLadder, staffRoomRates } from './staffRoomTiers';
 
@@ -311,11 +312,23 @@ export const OVERNIGHT_RIDER_LABELS = {
   both: 'Guide & driver'
 };
 
-/* The property beds a guide & driver when the library item says it offers a
-   guide/driver room. This gates both the pricing (contracted guide_rate /
-   driver_rate rather than the default single rate) and the alternative-property
+/* The property beds a guide & driver when it offers a guide/driver room. This is
+   true when the library item is flagged, or when any rate row carries a contracted
+   guide/driver rate or tier (a typed 0 is a free bed, so presence matters, not
+   magnitude). This gates auto overnight charging, pricing, and the alt-property
    picker. */
-export const accommodationAcceptsGuide = (item) => item?.guide_driver_room_offered === true;
+export const accommodationAcceptsGuide = (item) => {
+  if (item?.guide_driver_room_offered === true) return true;
+  const rates = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  return rates.some((rate) => (
+    hasStaffRate(rate?.guide_rate) || hasStaffRate(rate?.driver_rate)
+    || hasStaffRate(rate?.guideRate) || hasStaffRate(rate?.driverRate)
+    || (Array.isArray(rate?.guide_tiers) && rate.guide_tiers.length > 0)
+    || (Array.isArray(rate?.driver_tiers) && rate.driver_tiers.length > 0)
+    || (Array.isArray(rate?.guideTiers) && rate.guideTiers.length > 0)
+    || (Array.isArray(rate?.driverTiers) && rate.driverTiers.length > 0)
+  ));
+};
 
 /* The default single rate a property charges the guide/driver when it has no
    contracted guide/driver room: one adult in the room alone. */
@@ -424,8 +437,24 @@ export const guidePerPersonRate = (totalCharge = 0, travellers = [], guideNeeded
   return divisor > 0 ? (Number(totalCharge) || 0) / divisor : (Number(totalCharge) || 0);
 };
 
+const hasGuideConfig = (r) => hasStaffRate(r?.guide_rate) || hasStaffRate(r?.guideRate)
+  || hasStaffRate(r?.driver_rate) || hasStaffRate(r?.driverRate)
+  || crewLadderTiers(r?.guide_tiers ?? r?.guideTiers, r?.driver_tiers ?? r?.driverTiers).length > 0;
+
+/* Guide/driver room is property-wide (independent of guest room type). */
+export const propertyGuideRateRow = (item, rate) => {
+  if (hasGuideConfig(rate)) return rate;
+  const rows = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  const identity = rate ? seasonIdentityOf(rate) : '';
+  const pool = identity ? rows.filter((r) => seasonIdentityOf(r) === identity) : rows;
+  return pool.find(hasGuideConfig)
+    || rows.find(hasGuideConfig)
+    || rate || null;
+};
+
 /* The rate row that prices one property's guide bed: the season covering the
-   trip when known, else the first row (the engine's season-blind default). */
+   trip when known, else the first row. Guide room is property-wide, so prefer
+   a same-season row carrying guide config regardless of guest room type. */
 export const overnightRateRow = (item, currencyCode, startDate, endDate) => {
   const rows = Array.isArray(item?.item_rates) ? item.item_rates : [];
   if (!rows.length) return null;
@@ -434,8 +463,8 @@ export const overnightRateRow = (item, currencyCode, startDate, endDate) => {
     currencyCode,
     startDate,
     endDate
-  });
-  return resolved || rows[0] || null;
+  }) || rows[0] || null;
+  return propertyGuideRateRow(item, resolved) || resolved;
 };
 
 /* The destination label used to match an alternative guide-friendly property

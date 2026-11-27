@@ -11,6 +11,7 @@ import {
   soldRoomCapacity
 } from './roomTypes';
 import { homogeneousRoomIdentity, rateForAllocatedRoom } from './roomTypePricing';
+import { seasonIdentityOf } from './roomSeasons';
 import { isOccupancyTiered, occupancyRateForPax } from './occupancyPricing';
 import {
   crewLadderTiers,
@@ -388,6 +389,20 @@ const roomRateProfile = (rate) => {
   };
 };
 
+/* Guide/driver room is property-wide (independent of guest room type). Resolve
+   guide config from the same season across all room-type rate rows, so a guest
+   staying in any room type gets the property's guide rate. */
+const propertyGuideRateRow = (item, rate) => {
+  const hasGuideConfig = (r) => hasStaffRate(r?.guide_rate) || hasStaffRate(r?.guideRate)
+    || hasStaffRate(r?.driver_rate) || hasStaffRate(r?.driverRate)
+    || crewLadderTiers(r?.guide_tiers ?? r?.guideTiers, r?.driver_tiers ?? r?.driverTiers).length > 0;
+  if (hasGuideConfig(rate)) return rate;
+  const rates = Array.isArray(item?.item_rates) ? item.item_rates : [];
+  const identity = rate ? seasonIdentityOf(rate) : '';
+  const pool = identity ? rates.filter((r) => seasonIdentityOf(r) === identity) : rates;
+  return pool.find(hasGuideConfig) || rates.find(hasGuideConfig) || rate;
+};
+
 /* Priced contractually from the Library item:
    - 1 guest alone in a room -> single room rate (an adult); a lone child uses
      the child rate when one is configured, else the single rate.
@@ -483,11 +498,13 @@ export const calculateRoomCharges = (item, roomAllocations = [], currencyCode = 
   /* One threshold gates the whole pool: a property states "from N client rooms
      the crew room is released", not a separate rule per party. */
   const staffMinRooms = Math.max(1, Number(item?.guide_min_rooms ?? item?.guideMinRooms) || 1);
+  /* Guide room is property-wide, not guest-room-type scoped. */
+  const guideRateSource = propertyGuideRateRow(item, rate);
   const crewTiersRaw = crewLadderTiers(
-    rate?.guide_tiers ?? rate?.guideTiers,
-    rate?.driver_tiers ?? rate?.driverTiers
+    guideRateSource?.guide_tiers ?? guideRateSource?.guideTiers,
+    guideRateSource?.driver_tiers ?? guideRateSource?.driverTiers
   );
-  const crewFlatRaw = [rate?.guide_rate, rate?.guideRate, rate?.driver_rate, rate?.driverRate].find(hasStaffRate);
+  const crewFlatRaw = [guideRateSource?.guide_rate, guideRateSource?.guideRate, guideRateSource?.driver_rate, guideRateSource?.driverRate].find(hasStaffRate);
   const crewLadder = staffRoomLadder({
     offered: guideDriverOffered || hasStaffRate(crewFlatRaw) || crewTiersRaw.length > 0,
     tiers: crewTiersRaw,

@@ -1808,7 +1808,7 @@ export const Finance = () => {
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
           <div style={{ position: 'relative', flex: '1 1 240px' }}>
             <Search size={15} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-            <input className="sidebar-select" style={{ width: '100%', padding: '0.55rem 0.75rem 0.55rem 2rem', fontSize: '0.9rem' }} placeholder="Search number, client or itinerary…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <input className="sidebar-select" style={{ width: '100%', padding: '0.55rem 0.75rem 0.55rem 2.6rem', fontSize: '0.9rem' }} placeholder="Search number, client or itinerary…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
           <SearchableSelect className="sidebar-select" style={{ ...fieldStyle, width: 'auto' }} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
             <option value="all">All types</option>

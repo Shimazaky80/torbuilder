@@ -42,9 +42,10 @@ import {
   UtensilsCrossed,
   UserCog,
   MapPin,
-  PackagePlus
+  PackagePlus,
+  Calculator
 } from 'lucide-react';
-import { supabase, getLoggedInUserName } from '../lib/supabase';
+import { supabase, getLoggedInUserName, fetchAllRows } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useCurrencies } from '../hooks/useCurrencies';
 import { useSession } from '../hooks/useSession';
@@ -75,7 +76,12 @@ import {
   crewShareDivisor,
   isGuideItem,
   isOverlandGuide,
-  lineGuideUpliftPercent
+  lineGuideUpliftPercent,
+  accommodationAcceptsGuide,
+  overnightRateRow,
+  guideTravelRate,
+  crewRoomLadder,
+  guideMinClientRooms
 } from '../lib/guidePricing';
 import {
   fetchGuideMembers,
@@ -97,7 +103,7 @@ import {
   isVehicleProviderLine,
   itemHasFuelCharge
 } from '../lib/fuelAllowance';
-import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount, payingGuestsBooked, clientRoomsBooked, withRoomCapacity, tourGuideCount, allocationIdentityPatch } from '../lib/roomAllocationHelper';
+import { validateAccommodationServiceInDay, validateDayAccommodation, beddedTravellerCount, allocatedTravellerCount, hasStaffAccommodation, isAdultTraveller, buildRoomModalItem, joinAccommodationSplitGroup, accommodationRegionConflicts, accommodationRegionOf, canJoinExistingAccommodationDestination, buildShareContext, payingClientCount, payingGuestsBooked, clientRoomsBooked, withRoomCapacity, tourGuideCount, allocationIdentityPatch, normaliseTravellerRole } from '../lib/roomAllocationHelper';
 import { roomTypesOf, ratesForServiceRoom, soldRoomCapacity, allocatedRoomTypeLabel, serviceRoomName } from '../lib/roomTypes';
 import { withRoomTypeRates } from '../lib/roomTypePricing';
 import { contractTypeForTourType, itemForContract, ratesForContract } from '../lib/rateTypes';
@@ -2264,10 +2270,17 @@ export const ItineraryBuilder = () => {
   }, [markEdited]);
 
   const completedRef = useRef(isReadOnly);
+  const daysRef = useRef(days);
+  const syncGuideOvernightRef = useRef(null);
+  const pendingGuideOvernightSyncRef = useRef(null);
 
   useEffect(() => {
     completedRef.current = isReadOnly;
   }, [isReadOnly]);
+
+  useEffect(() => {
+    daysRef.current = days;
+  }, [days]);
 
   /* Linked fees are read from the library asynchronously after an accommodation
      is dropped. Cancelling the room allocation bumps this token so a fee fetch
@@ -2450,7 +2463,7 @@ export const ItineraryBuilder = () => {
   const visibleTabIds = useMemo(() => {
     /* 'itinerary' stays first and is never gated: it holds the day-by-day, and
        every stage must be able to see and edit its days. */
-    const ids = ['itinerary', 'client', 'pricing', 'notes'];
+    const ids = ['itinerary', 'client', 'pricing', 'cost-of-sale', 'notes'];
     if (stage !== 'quotation') ids.push('finance');
     if (isProvisional) ids.push('service-request');
     if (isConfirmed || isInProgress) ids.push('travel-docs', 'vouchers');
@@ -2612,7 +2625,7 @@ export const ItineraryBuilder = () => {
         .in('id', ids));
       const itemIds = items.map((i) => i.id);
       const { data: ratesData } = itemIds.length
-        ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
+        ? await fetchAllRows((from, to) => supabase.from('item_rates').select('*').in('item_id', itemIds).range(from, to))
         : { data: [] };
       let carRates = [];
       if (itemIds.length) {
@@ -2689,6 +2702,8 @@ export const ItineraryBuilder = () => {
   const fetchPickerItems = useCallback(async () => {
     const term = searchTerm.trim();
     const destinations = destinationClause(destinationFilters);
+    const guideCategories = ['Guide', 'Guide / Driver'];
+    const wantsGuides = !categoryFilter || guideCategories.includes(categoryFilter);
     const hasFilter = categoryFilter !== '' || term.length > 0 || !!destinations;
     if (!hasFilter || !companyId) {
       setPickerItems([]);
@@ -2699,26 +2714,35 @@ export const ItineraryBuilder = () => {
     try {
       const safeTerm = term.replace(/[,()]/g, ' ').trim();
       const esc = (s) => s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-      const items = await selectLibraryItems((fields) => {
+      const buildQuery = (fields, { skipDestination = false, guidesOnly = false } = {}) => {
         let q = supabase
           .from('library_items')
           .select(fields)
           .eq('company_id', companyId)
           .order('name', { ascending: true })
-          .limit(30);
-        if (categoryFilter !== '') q = q.eq('category', categoryFilter);
+          .limit(guidesOnly ? 20 : 30);
+        if (guidesOnly) q = q.in('category', guideCategories);
+        else if (categoryFilter !== '') q = q.eq('category', categoryFilter);
         /* Searching by town is how an operator narrows the picker to the destination
            this itinerary is for, so the destination columns match like they do in
            the package sidebar. */
         if (safeTerm) q = q.or(`name.ilike.%${esc(safeTerm)}%,description.ilike.%${esc(safeTerm)}%,destination_region.ilike.%${esc(safeTerm)}%,destination_area.ilike.%${esc(safeTerm)}%,location.ilike.%${esc(safeTerm)}%`);
         /* A second or() ANDs with the search above, so an island filter narrows
-           the server's page of items instead of thinning it after the fact. */
-        if (destinations) q = q.or(destinations);
+           the server's page of items instead of thinning it after the fact.
+           Guides can be flown in from anywhere, so a destination filter never hides them. */
+        if (!skipDestination && destinations) q = q.or(destinations);
         return q;
-      });
-      const itemIds = items.map((i) => i.id);
+      };
+      const items = await selectLibraryItems((fields) => buildQuery(fields));
+      let rows = items;
+      if (destinations && wantsGuides) {
+        const guideItems = await selectLibraryItems((fields) => buildQuery(fields, { skipDestination: true, guidesOnly: true }));
+        const seen = new Set(rows.map((i) => i.id));
+        rows = [...rows, ...guideItems.filter((i) => !seen.has(i.id))];
+      }
+      const itemIds = rows.map((i) => i.id);
       const { data: ratesData } = itemIds.length
-        ? await supabase.from('item_rates').select('*').in('item_id', itemIds)
+        ? await fetchAllRows((from, to) => supabase.from('item_rates').select('*').in('item_id', itemIds).range(from, to))
         : { data: [] };
       let carRates = [];
       if (itemIds.length) {
@@ -2732,12 +2756,12 @@ export const ItineraryBuilder = () => {
           carRates = [];
         }
       }
-      const supIds = [...new Set(items.map((i) => i.supplier_id).filter(Boolean))];
+      const supIds = [...new Set(rows.map((i) => i.supplier_id).filter(Boolean))];
       const { data: suppliersData } = supIds.length
         ? await supabase.from('suppliers').select(await supplierColumns('id, name, email, country, province_state, city, city_location')).in('id', supIds)
         : { data: [] };
       const roomsByItem = await fetchRoomTypesForItems(itemIds);
-      const merged = buildMergedItems(items, ratesData || [], carRates, suppliersData || [])
+      const merged = buildMergedItems(rows, ratesData || [], carRates, suppliersData || [])
         .map((it) => ({ ...it, room_types: roomsByItem.get(it.id) || [] }));
       setPickerItems(merged);
       // Keep looked-up items resolvable for drag/drop, room modal and tax checks.
@@ -3549,6 +3573,13 @@ repeatGroupId: ii.repeat_group_id || null,
        trip and divided across the party so the day total comes back to the flat
        charge no matter how many travellers are on it. */
     const guideServiceTypes = isGuideItem(item) ? guideSelection(options.guideServiceTypes) : [];
+    if (isGuideItem(item) && isOverlandGuide(guideServiceTypes)) {
+      const hasTourGuide = (meta.travellers || []).some((t) => normaliseTravellerRole(t?.role) === 'tour_guide');
+      if (!hasTourGuide) {
+        showToast('Overland guide cannot be added: add a traveller with the Tour Guide role in the itinerary header first, then drop the overland guide.', 'warning');
+        return;
+      }
+    }
     /* A guide line (or one of its detail lines) shares its flat per-trip figure
        across the clients + tour leaders, never the tour guide. */
     const guideNeeded = options.guideNeeded !== false;
@@ -3860,17 +3891,35 @@ repeatGroupId: ii.repeat_group_id || null,
       });
     }
 
-    /* Overland comes with the guide lived in: the operator is asked for the
-       guide & driver's lunch, dinner and overnight on this day right away. The
-       detail lines are linked to this line by the guide's ITEM id (a service key
-       is not persisted on the itinerary), so the grouping survives a reload. */
-    if (guideServiceTypes.length && isOverlandGuide(guideServiceTypes)) {
-      setGuideDetailsModal({ dayIndex, guideKey: svc.itemId, guideName: item.name, defaultValues: {} });
+    /* Full Day triggers a lunch allowance; Overland triggers lunch, dinner and
+       overnight. The detail lines are linked to this line by the guide's ITEM id
+       (a service key is not persisted on the itinerary), so the grouping survives
+       a reload. */
+    const wantsOverland = isOverlandGuide(guideServiceTypes);
+    const wantsFullDayLunch = guideSelection(guideServiceTypes).includes('full_day');
+    if (!options.suppressGuideDetails && (wantsOverland || wantsFullDayLunch)) {
+      setGuideDetailsModal({
+        dayIndex,
+        dayIndices: [dayIndex],
+        guideKey: svc.itemId,
+        guideName: item.name,
+        defaultValues: {},
+        detailKinds: { lunch: true, dinner: wantsOverland, overnight: wantsOverland }
+      });
     }
 
-    /* A flight the supplier sells the guide a seat on needs no question: the seat
-       is priced off the same season row as the clients' ticket and folded into
-       this line, shared by the party — see crewChargeOf above. */
+    /* When a guest accommodation is added, overland guides on the same day may
+       need their overnight auto-charged or a no-guide-rate choice. */
+    if (accomCat && svc.guideOnly !== true && !svc.isOptional && via !== 'guide-detail') {
+      const updatedServices = [...(days[dayIndex]?.services || []), svc];
+      const roomModalWillOpen = accomCat && !options.suppressRoomModal && !options.isOptional;
+      const syncArgs = { preferredAccomId: svc.itemId, servicesOverride: updatedServices, promptIfMissingRate: !roomModalWillOpen };
+      if (roomModalWillOpen) {
+        pendingGuideOvernightSyncRef.current = { dayIndex, ...syncArgs, promptIfMissingRate: true };
+      } else {
+        syncGuideOvernightRef.current?.(dayIndex, syncArgs);
+      }
+    }
   }, [currencyCode, markupPct, paxCount, days, nextId, defaultTaxRate, defaultTaxLabel, showToast, taxAppliesForCurrency, setDays, travelWindow, resolveAddSeason, meta.numChildren, meta.travellers, setSurchargeRepeatPrompt, setGuideDetailsModal, shareContext, guideMembersById, contractType]);
 
   /* The unlinked per-night fee was added optimistically at a repeat count of 1
@@ -3988,10 +4037,11 @@ repeatGroupId: ii.repeat_group_id || null,
       const feeRows = (feeItems || []).filter(isSurchargeItem);
       if (feeRows.length) {
         const feeIds = feeRows.map((fee) => fee.id);
-        const { data: ratesData } = await supabase
+        const { data: ratesData } = await fetchAllRows((from, to) => supabase
           .from('item_rates')
           .select('*')
-          .in('item_id', feeIds);
+          .in('item_id', feeIds)
+          .range(from, to));
         const supIds = [...new Set(feeRows.map((fee) => fee.supplier_id).filter(Boolean))];
         const { data: suppliersData } = supIds.length
           ? await supabase.from('suppliers').select(await supplierColumns('id, name, email, country, province_state, city, city_location')).in('id', supIds)
@@ -4324,23 +4374,34 @@ repeatGroupId: ii.repeat_group_id || null,
   const confirmGuideTypes = useCallback((types, memberId = null) => {
     const pending = guideModal;
     if (!pending) return;
+    const selectedTypes = guideSelection(types);
+    if (isOverlandGuide(selectedTypes)) {
+      const hasTourGuide = (meta.travellers || []).some((t) => normaliseTravellerRole(t?.role) === 'tour_guide');
+      if (!hasTourGuide) {
+        showToast('Overland guide cannot be added: add a traveller with the Tour Guide role in the itinerary header first, then drop the overland guide.', 'warning');
+        return;
+      }
+    }
     setGuideModal(null);
-    const options = { guideServiceTypes: types, guideMemberId: memberId || null };
+    const options = { guideServiceTypes: selectedTypes, guideMemberId: memberId || null };
+    const proceed = (extra = {}) => {
+      const nextOptions = { ...options, ...extra };
+      if (pending.via === 'drop' || pending.via === 'double-click') {
+        openPlacementPrompt(pending.dayIndex, pending.item, pending.via, nextOptions);
+      } else {
+        createService(pending.dayIndex, pending.item, pending.via, nextOptions);
+      }
+    };
     const season = resolveAddSeason(pending.item, options);
     if (CONSENT_SEASON_STATUSES.has(season.status)) {
-      requestEstimate(
-        pending.item,
-        season,
-        (pct) => createService(pending.dayIndex, pending.item, pending.via, {
-          ...options,
-          allowEstimate: true,
-          protectionPercent: pct
-        })
-      );
+      requestEstimate(pending.item, season, (pct) => proceed({
+        allowEstimate: true,
+        protectionPercent: pct
+      }));
       return;
     }
-    createService(pending.dayIndex, pending.item, pending.via, options);
-  }, [createService, guideModal, resolveAddSeason, requestEstimate]);
+    proceed();
+  }, [createService, guideModal, meta.travellers, openPlacementPrompt, resolveAddSeason, requestEstimate, showToast]);
 
   /* One tour normally runs with one guide, so the person already named anywhere
      on this trip is the answer the next guide dialog opens with. */
@@ -4436,38 +4497,45 @@ repeatGroupId: ii.repeat_group_id || null,
      choice. */
   const applyGuideDetails = useCallback((dayIndex, guideItemId, plan) => {
     const linesOf = (value) => (Array.isArray(value) ? value : value ? [value] : []);
-    const details = [
-      ...linesOf(plan.lunch),
-      ...linesOf(plan.dinner),
-      ...linesOf(plan.overnight)
-    ].filter(Boolean);
-    if (!details.length) return;
+    const dayServices = daysRef.current[dayIndex]?.services || [];
+    const existing = dayServices.filter((s) => s.guideForKey === guideItemId);
+    const keep = (categoryTest) => existing.filter(categoryTest).map((s) => {
+      const item = libraryItems.find((li) => li.id === s.itemId) || { id: s.itemId, name: s.name, category: s.category, item_rates: s.item_rates || [] };
+      return { item, who: s.guideChargeType || 'guide', unitCost: Number.isFinite(Number(s.guideDetailCharge)) ? Number(s.guideDetailCharge) : s.buyPP, forced: s.guideOnly === true };
+    });
+    const isMeal = (s) => /meal/i.test(String(s.category || ''));
+    const isAccom = (s) => /accommodation/i.test(String(s.category || ''));
+    const mealOccasion = (s) => String(libraryItems.find((li) => li.id === s.itemId)?.meal_type || s.name || '').toLowerCase();
+    const lunchDetails = plan.lunch !== undefined ? linesOf(plan.lunch) : keep((s) => isMeal(s) && mealOccasion(s).includes('lunch'));
+    const dinnerDetails = plan.dinner !== undefined ? linesOf(plan.dinner) : keep((s) => isMeal(s) && mealOccasion(s).includes('dinner'));
+    const otherMealDetails = (plan.lunch !== undefined || plan.dinner !== undefined)
+      ? keep((s) => isMeal(s) && !mealOccasion(s).includes('lunch') && !mealOccasion(s).includes('dinner'))
+      : [];
+    const overnightDetails = plan.overnight !== undefined ? linesOf(plan.overnight) : keep(isAccom);
+    const details = [...lunchDetails, ...dinnerDetails, ...otherMealDetails, ...overnightDetails].filter(Boolean);
+
     setDays((prev) => prev.map((d, i) => i !== dayIndex ? d : {
       ...d,
       services: (d.services || []).filter((s) => s.guideForKey !== guideItemId)
     }));
     details.forEach((detail) => createService(dayIndex, detail.item, 'guide-detail', {
-      /* The overnight is ALWAYS charged to the guide & driver alone - the
-         clients already have their own room - so the dialog marks it forced.
-         A meal obeys the checkbox instead, and says which party eats it in its
-         own name so two copies of the same lunch never read as a duplicate. */
-      guideOnly: detail.forced === true ? true : plan.guideOnly,
+      guideOnly: detail.forced === true ? true : plan.guideOnly !== false,
       guideForKey: guideItemId,
       guideChargeType: detail.who || null,
       guideDetailCharge: detail.unitCost,
       lineName: detail.who === 'driver' ? `${detail.item.name} (driver)` : '',
-      /* The travellers have their own accommodation and their own room
-         allocation; this overnight beds the guide & driver only. */
       suppressRoomModal: true,
       suppressSurchargeFollowUps: true,
-      /* The crew line is charged at the flat figure the detail dialog pinned, so
-         the guide's own season question already covered it. */
       allowEstimate: true
     }));
-    showToast(plan.guideOnly
-      ? 'Guide details added — only the guide & driver are charged at these.'
-      : 'Guide details added.', 'success');
-  }, [createService, showToast, setDays]);
+    if (details.length) {
+      showToast(plan.guideOnly !== false
+        ? 'Guide details added — only the guide is charged at these.'
+        : 'Guide details added.', 'success');
+    } else if (plan.overnightDeferred) {
+      showToast('Guide meal details saved. Overnight will be charged automatically when guest accommodation with a guide rate is added.', 'success');
+    }
+  }, [createService, showToast, setDays, libraryItems]);
 
   /* What the guide & driver detail lines for one guide already hold, so the
      dialog re-opens with the current choices instead of blank. An overnight in
@@ -4505,6 +4573,76 @@ repeatGroupId: ii.repeat_group_id || null,
       guideOnly: details.some((service) => service.guideOnly === true)
     };
   }, [days, libraryItems]);
+
+  /* When guest accommodation is added after an overland guide, auto-charge the
+     guide overnight if the accommodation has a guide rate. If it has no guide
+     rate, prompt for single-room-rate or same-destination guide accommodation. */
+  const syncGuideOvernightForDay = useCallback((dayIndex, { preferredAccomId = null, promptIfMissingRate = true, servicesOverride = null } = {}) => {
+    const day = daysRef.current[dayIndex];
+    if (!day) return;
+    const services = servicesOverride || day.services || [];
+    const overlandGuides = services.filter((s) => isGuideFeeLine(s) && isOverlandGuide(s.guideServiceTypes));
+    if (!overlandGuides.length) return;
+    const clientAccoms = services.filter((s) => /accommodation/i.test(s.category || '') && !s.isOptional && s.guideOnly !== true && !s.guideForKey);
+    if (!clientAccoms.length) return;
+
+    for (const guide of overlandGuides) {
+      const hasOvernight = services.some((s) => s.guideForKey === guide.itemId && /accommodation/i.test(s.category || ''));
+      if (hasOvernight) continue;
+      /* The guide is already bedded in a guest accommodation staff/guide room -
+         adding a separate guide-only overnight line would duplicate it. */
+      const guideAlreadyBedded = clientAccoms.some((s) =>
+        (Array.isArray(s.roomAllocations) ? s.roomAllocations : []).some((rm) =>
+          (Array.isArray(rm?.allocatedTravellers) ? rm.allocatedTravellers : []).some(
+            (t) => normaliseTravellerRole(t?.role) === 'tour_guide'
+          )
+        )
+      );
+      if (guideAlreadyBedded) continue;
+      const guideItem = libraryItems.find((li) => li.id === guide.itemId) || { id: guide.itemId, name: guide.name };
+      const accomItems = clientAccoms
+        .map((s) => libraryItems.find((li) => li.id === s.itemId))
+        .filter(Boolean);
+      const preferred = preferredAccomId ? accomItems.find((i) => i.id === preferredAccomId) : null;
+      const acceptingHost = (preferred && accommodationAcceptsGuide(preferred))
+        ? preferred
+        : accomItems.find(accommodationAcceptsGuide);
+      if (acceptingHost) {
+        const rateRow = overnightRateRow(acceptingHost, currencyCode, travelWindow.start, travelWindow.end);
+        const hostService = clientAccoms.find((s) => s.itemId === acceptingHost.id);
+        const clientRooms = clientRoomsBooked(hostService?.roomAllocations);
+        const payingGuests = payingGuestsBooked(hostService?.roomAllocations);
+        const minRooms = (crewRoomLadder(rateRow, { minRooms: guideMinClientRooms(acceptingHost) })[0]?.minRooms ?? 1);
+        const unitCost = guideTravelRate(rateRow, true, { clientRooms, payingGuests, minRooms });
+        createService(dayIndex, acceptingHost, 'guide-detail', {
+          guideOnly: true,
+          guideForKey: guide.itemId,
+          guideChargeType: 'guide',
+          guideDetailCharge: unitCost,
+          lineName: '',
+          suppressRoomModal: true,
+          suppressSurchargeFollowUps: true,
+          allowEstimate: true
+        });
+        showToast(`Guide overnight charged at ${acceptingHost.name}.`, 'success');
+        return;
+      }
+      if (promptIfMissingRate) {
+        setGuideDetailsModal({
+          dayIndex,
+          guideKey: guide.itemId,
+          guideName: guide.name || guideItem.name || 'Guide',
+          defaultValues: guideDetailsDefaultsFor(dayIndex, guide.itemId),
+          detailKinds: { lunch: false, dinner: false, overnight: true }
+        });
+        return;
+      }
+    }
+  }, [libraryItems, currencyCode, travelWindow.start, travelWindow.end, createService, showToast, setGuideDetailsModal, guideDetailsDefaultsFor]);
+
+  useEffect(() => {
+    syncGuideOvernightRef.current = syncGuideOvernightForDay;
+  }, [syncGuideOvernightForDay]);
 
   /* The client rooms the guide's own day holds, and which properties they sit
      in: a property beds the guide & driver only from a contracted number of
@@ -4812,6 +4950,7 @@ repeatGroupId: ii.repeat_group_id || null,
         ? rateForNight(nightBasisRate, days[dayIndex]?.date || '')
         : null;
       createService(dayIndex, placementItem, index === 0 ? placementDraft.via : 'copy', {
+        ...chargeChoice,
         repeatGroupId,
         isOptional,
         splitGroupId,
@@ -4831,9 +4970,25 @@ repeatGroupId: ii.repeat_group_id || null,
            sorted, so index 0 is not necessarily that day and testing the index
            silently skipped the dialog whenever a copy landed on an earlier
            day. */
-        suppressRoomModal: isSplit ? false : dayIndex !== baseDay
+        suppressRoomModal: isSplit ? false : dayIndex !== baseDay,
+        suppressGuideDetails: isGuideItem(placementItem) && selectedDays.length > 1
       });
     });
+    if (isGuideItem(placementItem) && selectedDays.length > 1) {
+      const guideTypes = guideSelection(chargeChoice.guideServiceTypes);
+      const wantsOverland = isOverlandGuide(guideTypes);
+      const wantsFullDayLunch = guideTypes.includes('full_day');
+      if (wantsOverland || wantsFullDayLunch) {
+        setGuideDetailsModal({
+          dayIndex: baseDay,
+          dayIndices: selectedDays,
+          guideKey: placementItem.id,
+          guideName: placementItem.name,
+          defaultValues: {},
+          detailKinds: { lunch: true, dinner: wantsOverland, overnight: wantsOverland }
+        });
+      }
+    }
     /* An entrance fee or conservation levy belongs to its accommodation, so it
        travels with it onto every day the property lands on. Not for an
        alternative — the client has not chosen that property, so its fees are
@@ -4994,12 +5149,16 @@ repeatGroupId: ii.repeat_group_id || null,
       modalRates: typedRates,
       season
     });
+    const hasOverlandGuide = (days[dayIndex]?.services || []).some(
+      (s) => isGuideFeeLine(s) && isOverlandGuide(s.guideServiceTypes)
+    );
     setRoomModalState({
       isOpen: true,
       dayIndex,
       serviceKey: sv.key,
       item: libItem,
-      service: sv
+      service: sv,
+      autoAllocateGuide: hasOverlandGuide
     });
   }, [libraryItems, currencyCode, travelWindow.start, travelWindow.end, priceProtectionPercent, meta, days, contractType]);
 
@@ -5115,6 +5274,14 @@ repeatGroupId: ii.repeat_group_id || null,
         }
       }
     }
+    const pendingSync = pendingGuideOvernightSyncRef.current;
+    if (pendingSync && pendingSync.dayIndex === dayIdx) {
+      pendingGuideOvernightSyncRef.current = null;
+      const syncedServices = (days[dayIdx]?.services || []).map((service) => (
+        service.key === svKey ? { ...service, roomAllocations } : service
+      ));
+      setTimeout(() => syncGuideOvernightRef.current?.(dayIdx, { preferredAccomId: pendingSync.preferredAccomId, promptIfMissingRate: true, servicesOverride: syncedServices }), 0);
+    }
   }, [roomModalState, paxCount, days, meta.travellers, showToast, setDays, nextId]);
 
   const closeRoomAllocationModal = useCallback(() => {
@@ -5137,6 +5304,7 @@ repeatGroupId: ii.repeat_group_id || null,
   const handleCancelRoomAllocation = useCallback(() => {
     const { dayIndex, serviceKey, pendingAdd, service } = roomModalState;
     if (pendingAdd && dayIndex !== null && serviceKey) {
+      pendingGuideOvernightSyncRef.current = null;
       /* The property was never added, so a fee read still in flight must not
          land its lines, and any fee line that already arrived goes with the
          accommodation. */
@@ -5895,6 +6063,138 @@ return !!sv.time; /* activities / meals / other */
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, []);
+
+  const exportCostOfSale = useCallback((format) => {
+    const ref = meta.referenceNumber || meta.itineraryName || 'itinerary';
+    const safeRef = String(ref).replace(/[^\w-]+/g, '_') || 'itinerary';
+    const groups = pricingGroups.map((g) => {
+      const rows = g.days.flatMap((d) => (d.services || []).map((sv) => {
+        const buy = round2(Number(sv.buy) || 0);
+        const sell = round2(Number(sv.sell) || 0);
+        const buyTax = round2(vatOfInclusive(buy, numOr(sv.taxRate, defaultTaxRate)));
+        const sellTax = round2(Number(sv.tax) || 0);
+        return {
+          day: d.day,
+          date: d.date || '',
+          name: sv.name || 'Service',
+          supplier: sv.supplierName || '',
+          buy,
+          sell,
+          profitIncl: round2(sell - buy),
+          profitExcl: round2((sell - sellTax) - (buy - buyTax))
+        };
+      }));
+      const totals = rows.reduce((acc, r) => {
+        acc.buy = round2(acc.buy + r.buy);
+        acc.sell = round2(acc.sell + r.sell);
+        acc.profitIncl = round2(acc.profitIncl + r.profitIncl);
+        acc.profitExcl = round2(acc.profitExcl + r.profitExcl);
+        return acc;
+      }, { buy: 0, sell: 0, profitIncl: 0, profitExcl: 0 });
+      return { ...g, rows, totals };
+    });
+
+    const esc = (v) => htmlEscape(v == null ? '' : String(v));
+    const fmt = (n, sym) => fmtMoney(n, sym);
+    const profitLabel = (n) => n < 0 ? 'Loss' : 'Profit';
+    const profitColor = (n) => n < 0 ? '#dc2626' : '#15803d';
+
+    if (format === 'pdf') {
+      const sections = groups.map((g) => {
+        const body = g.rows.length === 0
+          ? `<tr><td colspan="6" style="padding:10px;color:#64748b">No included services.</td></tr>`
+          : g.rows.map((r) => `<tr>
+              <td style="padding:8px;border:1px solid #dbe4ea;font-weight:700">Day ${esc(r.day)}${r.date ? ` · ${esc(r.date)}` : ''}</td>
+              <td style="padding:8px;border:1px solid #dbe4ea"><div style="font-weight:600">${esc(r.name)}</div>${r.supplier ? `<div style="font-size:12px;color:#64748b">${esc(r.supplier)}</div>` : ''}</td>
+              <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:#b45309;font-weight:700">${esc(fmt(r.buy, g.symbol))}</td>
+              <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:#0d7478;font-weight:700">${esc(fmt(r.sell, g.symbol))}</td>
+              <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:${profitColor(r.profitIncl)};font-weight:800">${r.profitIncl < 0 ? '-' : ''}${esc(fmt(Math.abs(r.profitIncl), g.symbol))} ${profitLabel(r.profitIncl)}</td>
+              <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:${profitColor(r.profitExcl)};font-weight:800">${r.profitExcl < 0 ? '-' : ''}${esc(fmt(Math.abs(r.profitExcl), g.symbol))} ${profitLabel(r.profitExcl)}</td>
+            </tr>`).join('');
+        const totalRow = g.rows.length === 0 ? '' : `<tr style="background:#f8fafc;font-weight:900">
+          <td colspan="2" style="padding:8px;border:1px solid #dbe4ea;text-align:right">TOTAL (${esc(g.code)})</td>
+          <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:#b45309">${esc(fmt(g.totals.buy, g.symbol))}</td>
+          <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:#0d7478">${esc(fmt(g.totals.sell, g.symbol))}</td>
+          <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:${profitColor(g.totals.profitIncl)}">${g.totals.profitIncl < 0 ? '-' : ''}${esc(fmt(Math.abs(g.totals.profitIncl), g.symbol))} ${profitLabel(g.totals.profitIncl)}</td>
+          <td style="padding:8px;border:1px solid #dbe4ea;text-align:right;color:${profitColor(g.totals.profitExcl)}">${g.totals.profitExcl < 0 ? '-' : ''}${esc(fmt(Math.abs(g.totals.profitExcl), g.symbol))} ${profitLabel(g.totals.profitExcl)}</td>
+        </tr>`;
+        return `<section style="margin:0 0 22px;page-break-inside:avoid">
+          <h2 style="font-size:14px;margin:0 0 8px;color:#334155">${esc(g.symbol)} ${esc(g.code)}${g.name ? ` — ${esc(g.name)}` : ''}</h2>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="background:#f1f5f9">
+              <th style="padding:8px;border:1px solid #dbe4ea;text-align:left">Day</th>
+              <th style="padding:8px;border:1px solid #dbe4ea;text-align:left">Service</th>
+              <th style="padding:8px;border:1px solid #dbe4ea;text-align:right">Buy (${esc(taxWordOf(g.code))}-incl)</th>
+              <th style="padding:8px;border:1px solid #dbe4ea;text-align:right">Sell (${esc(taxWordOf(g.code))}-incl)</th>
+              <th style="padding:8px;border:1px solid #dbe4ea;text-align:right">Profit / Loss (${esc(taxWordOf(g.code))}-incl)</th>
+              <th style="padding:8px;border:1px solid #dbe4ea;text-align:right">Profit / Loss (After Tax)</th>
+            </tr></thead>
+            <tbody>${body}${totalRow}</tbody>
+          </table>
+        </section>`;
+      }).join('');
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>Cost of Sale - ${esc(ref)}</title>
+        <style>body{font-family:Arial,sans-serif;color:#0f172a;margin:24px}h1{font-size:20px;margin:0 0 4px}p{margin:0 0 16px;color:#475569;font-size:12px}@media print{body{margin:12mm}}</style>
+      </head><body>
+        <h1>Mini Cost of Sale (Tax-Inclusive)</h1>
+        <p>${esc(ref)}${meta.itineraryName ? ` — ${esc(meta.itineraryName)}` : ''}. After-tax overview for internal use. Buy, Sell, and Profit/Loss values are real tax-inclusive figures. Profit/Loss (After Tax) excludes tax.</p>
+        ${sections || '<p style="color:#64748b">No included services.</p>'}
+      </body></html>`;
+      const w = window.open('', '_blank', 'width=1000,height=800');
+      if (!w) { showToast('Allow pop-ups to export the cost of sale as PDF', 'warning'); return; }
+      w.document.write(html.replace('</body>', '<script>window.onload=()=>setTimeout(()=>window.print(),250);</script></body>'));
+      w.document.close();
+      return;
+    }
+
+    const isExcel = format === 'excel';
+    const sections = groups.map((g) => {
+      const body = g.rows.length === 0
+        ? `<tr><td colspan="6" style="padding:8px;color:#64748b">No included services.</td></tr>`
+        : g.rows.map((r) => `<tr>
+            <td style="padding:6px;border:1px solid #cbd5e1">Day ${esc(r.day)}${r.date ? ` ${esc(r.date)}` : ''}</td>
+            <td style="padding:6px;border:1px solid #cbd5e1">${esc(r.name)}${r.supplier ? `<br/><span style="color:#64748b;font-size:11px">${esc(r.supplier)}</span>` : ''}</td>
+            <td style="padding:6px;border:1px solid #cbd5e1;text-align:right">${isExcel ? r.buy.toFixed(2) : esc(fmt(r.buy, g.symbol))}</td>
+            <td style="padding:6px;border:1px solid #cbd5e1;text-align:right">${isExcel ? r.sell.toFixed(2) : esc(fmt(r.sell, g.symbol))}</td>
+            <td style="padding:6px;border:1px solid #cbd5e1;text-align:right;color:${profitColor(r.profitIncl)}">${isExcel ? r.profitIncl.toFixed(2) : `${r.profitIncl < 0 ? '-' : ''}${esc(fmt(Math.abs(r.profitIncl), g.symbol))} ${profitLabel(r.profitIncl)}`}</td>
+            <td style="padding:6px;border:1px solid #cbd5e1;text-align:right;color:${profitColor(r.profitExcl)}">${isExcel ? r.profitExcl.toFixed(2) : `${r.profitExcl < 0 ? '-' : ''}${esc(fmt(Math.abs(r.profitExcl), g.symbol))} ${profitLabel(r.profitExcl)}`}</td>
+          </tr>`).join('');
+      const totalRow = g.rows.length === 0 ? '' : `<tr style="background:#f1f5f9;font-weight:700">
+        <td colspan="2" style="padding:6px;border:1px solid #cbd5e1;text-align:right">TOTAL (${esc(g.code)})</td>
+        <td style="padding:6px;border:1px solid #cbd5e1;text-align:right">${isExcel ? g.totals.buy.toFixed(2) : esc(fmt(g.totals.buy, g.symbol))}</td>
+        <td style="padding:6px;border:1px solid #cbd5e1;text-align:right">${isExcel ? g.totals.sell.toFixed(2) : esc(fmt(g.totals.sell, g.symbol))}</td>
+        <td style="padding:6px;border:1px solid #cbd5e1;text-align:right;color:${profitColor(g.totals.profitIncl)}">${isExcel ? g.totals.profitIncl.toFixed(2) : `${g.totals.profitIncl < 0 ? '-' : ''}${esc(fmt(Math.abs(g.totals.profitIncl), g.symbol))} ${profitLabel(g.totals.profitIncl)}`}</td>
+        <td style="padding:6px;border:1px solid #cbd5e1;text-align:right;color:${profitColor(g.totals.profitExcl)}">${isExcel ? g.totals.profitExcl.toFixed(2) : `${g.totals.profitExcl < 0 ? '-' : ''}${esc(fmt(Math.abs(g.totals.profitExcl), g.symbol))} ${profitLabel(g.totals.profitExcl)}`}</td>
+      </tr>`;
+      return `<h3 style="font:700 13px Arial,sans-serif;margin:18px 0 6px;color:#334155">${esc(g.symbol)} ${esc(g.code)}${g.name ? ` — ${esc(g.name)}` : ''}</h3>
+        <table style="border-collapse:collapse;width:100%;font:12px Arial,sans-serif">
+          <thead><tr style="background:#e2e8f0">
+            <th style="padding:6px;border:1px solid #cbd5e1;text-align:left">Day</th>
+            <th style="padding:6px;border:1px solid #cbd5e1;text-align:left">Service</th>
+            <th style="padding:6px;border:1px solid #cbd5e1;text-align:right">Buy (${esc(taxWordOf(g.code))}-incl)</th>
+            <th style="padding:6px;border:1px solid #cbd5e1;text-align:right">Sell (${esc(taxWordOf(g.code))}-incl)</th>
+            <th style="padding:6px;border:1px solid #cbd5e1;text-align:right">Profit / Loss (${esc(taxWordOf(g.code))}-incl)</th>
+            <th style="padding:6px;border:1px solid #cbd5e1;text-align:right">Profit / Loss (After Tax)</th>
+          </tr></thead>
+          <tbody>${body}${totalRow}</tbody>
+        </table>`;
+    }).join('');
+
+    const head = isExcel
+      ? `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Cost of Sale</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->`
+      : `<!doctype html><html><head><meta charset="utf-8"><title>Cost of Sale - ${esc(ref)}</title>`;
+    const html = `${head}<style>body{font-family:Arial,sans-serif;color:#0f172a;margin:24px}table{border-collapse:collapse}th,td{border:1px solid #cbd5e1;padding:6px;font-size:12px}</style></head><body>
+      <h2 style="font:800 18px Arial,sans-serif;margin:0 0 4px">Mini Cost of Sale (Tax-Inclusive)</h2>
+      <p style="font:12px Arial,sans-serif;color:#475569;margin:0 0 14px">${esc(ref)}${meta.itineraryName ? ` — ${esc(meta.itineraryName)}` : ''}. After-tax overview for internal use. Buy, Sell, and Profit/Loss values are real tax-inclusive figures. Profit/Loss (After Tax) excludes tax.</p>
+      ${sections || '<p style="color:#64748b">No included services.</p>'}
+    </body></html>`;
+
+    if (isExcel) {
+      downloadBlob(html, `cost-of-sale-${safeRef}.xls`, 'application/vnd.ms-excel');
+      return;
+    }
+    downloadBlob(html, `cost-of-sale-${safeRef}.doc`, 'application/msword');
+  }, [pricingGroups, meta.referenceNumber, meta.itineraryName, defaultTaxRate, taxWordOf, fmtMoney, round2, vatOfInclusive, numOr, showToast, downloadBlob, htmlEscape]);
 
   /* The chosen format and the boxes ticked in the Export dialog are handed over as
      arguments rather than read from state: the document is built from the choices
@@ -9697,6 +9997,9 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
             <button type="button" className={`builder-tab ${tab === 'pricing' ? 'active' : ''}`} onClick={() => setActiveTab('pricing')}>
               <Receipt size={15} /> Pricing
             </button>
+            <button type="button" className={`builder-tab ${tab === 'cost-of-sale' ? 'active' : ''}`} onClick={() => setActiveTab('cost-of-sale')}>
+              <Calculator size={15} /> Cost of Sale
+            </button>
             <button type="button" className={`builder-tab ${tab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
               <StickyNote size={15} /> Notes
             </button>
@@ -10068,11 +10371,32 @@ isHiredVehicle ? !(sv.time && sv.vehicleType) :
                             {/accommodation/i.test(sv.category || '') && (
                               <div style={{ marginTop: '0.35rem' }}>
                                 {(() => {
-const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, libraryItems), days[selectedDayIndex]?.services || [], meta.travellers || []);
+                                  const isGuideOnlyAccom = sv.guideOnly === true || sv.guide_only === true;
+                                  const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, libraryItems), days[selectedDayIndex]?.services || [], meta.travellers || []);
                                   const numRooms = sv.roomAllocations?.length || 0;
                                   const partyPax = (meta.travellers || []).length || paxCount;
                                   const paxHere = (sv.roomAllocations || [])
                                     .reduce((n, rm) => n + ((rm.allocatedTravellers || []).length), 0);
+                                  if (isGuideOnlyAccom) {
+                                    return (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '0.35rem',
+                                          padding: '0.25rem 0.65rem',
+                                          borderRadius: '6px',
+                                          fontSize: '0.75rem',
+                                          fontWeight: 600,
+                                          background: '#f0fdf4',
+                                          color: '#166534',
+                                          border: '1px solid #bbf7d0'
+                                        }}
+                                      >
+                                        <CheckCircle2 size={13} /> Guide / driver accommodation
+                                      </span>
+                                    );
+                                  }
                                   if (roomCheck.isValid && numRooms > 0) {
                                     return (
                                       <button
@@ -10276,19 +10600,34 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                     <th>Name</th>
                     <th>Surname</th>
                     <th>Age</th>
+                    <th>Role</th>
                     <th>Note</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(meta.travellers || []).map((t, i) => (
-                    <tr key={i}>
-                      <td style={{ color: '#94a3b8', fontWeight: 700 }}>{i + 1}</td>
-                      <td>{t.name || '—'}</td>
-                      <td>{t.surname || '—'}</td>
-                      <td>{t.age || '—'}</td>
-                      <td style={{ maxWidth: '22rem', whiteSpace: 'pre-wrap' }}>{t.notes || '—'}</td>
-                    </tr>
-                  ))}
+                  {(meta.travellers || []).map((t, i) => {
+                    const role = normaliseTravellerRole(t?.role);
+                    const roleMeta = {
+                      client: { label: 'Client', bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+                      tour_leader: { label: 'Tour Leader', bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
+                      tour_guide: { label: 'Tour Guide', bg: '#fff7ed', color: '#9a3412', border: '#fed7aa' },
+                      driver: { label: 'Driver', bg: '#f5f3ff', color: '#6d28d9', border: '#ddd6fe' }
+                    }[role] || { label: role ? role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : 'Client', bg: '#f8fafc', color: '#334155', border: '#e2e8f0' };
+                    return (
+                      <tr key={i}>
+                        <td style={{ color: '#94a3b8', fontWeight: 700 }}>{i + 1}</td>
+                        <td>{t.name || '-'}</td>
+                        <td>{t.surname || '-'}</td>
+                        <td>{t.age || '-'}</td>
+                        <td>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', padding: '0.18rem 0.55rem', borderRadius: '999px', fontSize: '0.72rem', fontWeight: 700, background: roleMeta.bg, color: roleMeta.color, border: `1px solid ${roleMeta.border}`, whiteSpace: 'nowrap' }}>
+                            {roleMeta.label}
+                          </span>
+                        </td>
+                        <td style={{ maxWidth: '22rem', whiteSpace: 'pre-wrap' }}>{t.notes || '-'}</td>
+                      </tr>
+                    );
+                  })}
                   {!meta.travellers?.length && (
                     <tr>
                       <td colSpan="6" style={{ color: '#94a3b8' }}>No traveller details recorded.</td>
@@ -10431,6 +10770,129 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
                   ? `Prices are grouped by currency, as an itinerary can mix currencies. Buy and Sell are both VAT-inclusive: the Sell price is the supplier amount plus markup (VAT included), so the client is charged the Sell total as-is. Subtotal (Excl VAT) plus the VAT rows equal TOTAL DUE (INCL. VAT). Input VAT (embedded in Buy) and Net VAT to SARS (Output minus Input, i.e. tax on the markup) are shown for internal tax records only and are never sent to the client. Each section uses its own currency.`
                   : 'Prices are grouped by currency, as an itinerary can mix currencies. Buy and Sell are both tax-inclusive: the Sell price is the supplier amount plus markup (tax included), so the client is charged the Sell total as-is. Subtotal (Excl Tax) plus the tax rows equal TOTAL DUE (INCL. TAX). Input Tax (embedded in Buy) and Net Tax (Output minus Input, i.e. tax on the markup) are shown for internal tax records only and are never sent to the client. Each section uses its own currency.'}
               </p>
+
+            </div>
+          )}
+
+          {/* Cost of Sale tab */}
+          {tab === 'cost-of-sale' && (
+            <div className="builder-panel-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+                <div>
+                  <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#1a202c', margin: 0 }}>Mini Cost of Sale (Tax-Inclusive)</h3>
+                  <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0.35rem 0 0' }}>
+                    After-tax overview for internal use. Buy, Sell, and Profit/Loss values are real tax-inclusive figures. Profit/Loss (After Tax) excludes tax.
+                  </p>
+                </div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', padding: '0.55rem 0.9rem' }} onClick={() => exportCostOfSale('excel')}>
+                    <FileSpreadsheet size={15} /> Excel
+                  </button>
+                  <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', padding: '0.55rem 0.9rem' }} onClick={() => exportCostOfSale('word')}>
+                    <FileText size={15} /> Word
+                  </button>
+                  <button type="button" className="secondary-btn" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', padding: '0.55rem 0.9rem' }} onClick={() => exportCostOfSale('pdf')}>
+                    <Download size={15} /> PDF
+                  </button>
+                </div>
+              </div>
+
+              {pricingGroups.length === 0 && (
+                <div style={{ textAlign: 'center', color: '#94a3b8', padding: '2rem 0' }}>Add services to a day to see cost of sale.</div>
+              )}
+
+              {pricingGroups.map((g) => {
+                const rows = g.days.flatMap((d) => (d.services || []).map((sv) => {
+                  const buy = round2(Number(sv.buy) || 0);
+                  const sell = round2(Number(sv.sell) || 0);
+                  const buyTax = round2(vatOfInclusive(buy, numOr(sv.taxRate, defaultTaxRate)));
+                  const sellTax = round2(Number(sv.tax) || 0);
+                  return {
+                    day: d.day,
+                    date: d.date,
+                    name: sv.name || 'Service',
+                    supplier: sv.supplierName || '',
+                    buy,
+                    sell,
+                    profitIncl: round2(sell - buy),
+                    profitExcl: round2((sell - sellTax) - (buy - buyTax))
+                  };
+                }));
+                const totals = rows.reduce((acc, r) => {
+                  acc.buy = round2(acc.buy + r.buy);
+                  acc.sell = round2(acc.sell + r.sell);
+                  acc.profitIncl = round2(acc.profitIncl + r.profitIncl);
+                  acc.profitExcl = round2(acc.profitExcl + r.profitExcl);
+                  return acc;
+                }, { buy: 0, sell: 0, profitIncl: 0, profitExcl: 0 });
+                return (
+                  <section key={`cos-${g.code}`} style={{ marginBottom: '1.25rem' }}>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#334155', marginBottom: '0.5rem' }}>
+                      {g.symbol} {g.code}{g.name ? ` — ${g.name}` : ''}
+                    </div>
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Day</th>
+                          <th>Service</th>
+                          <th>Buy ({taxWordOf(g.code)}-incl)</th>
+                          <th>Sell ({taxWordOf(g.code)}-incl)</th>
+                          <th>Profit / Loss ({taxWordOf(g.code)}-incl)</th>
+                          <th>Profit / Loss (After Tax)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.length === 0 ? (
+                          <tr>
+                            <td colSpan="6" style={{ color: '#94a3b8', padding: '1rem' }}>No included services.</td>
+                          </tr>
+                        ) : rows.map((r, idx) => (
+                          <tr key={`${g.code}-${r.day}-${idx}-${r.name}`}>
+                            <td style={{ fontWeight: 700 }}>Day {r.day}{r.date ? ` · ${r.date}` : ''}</td>
+                            <td>
+                              <div style={{ fontWeight: 600, color: '#1e293b' }}>{r.name}</div>
+                              {r.supplier && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{r.supplier}</div>}
+                            </td>
+                            <td style={{ color: '#b45309', fontWeight: 700 }}>{fmtMoney(r.buy, g.symbol)}</td>
+                            <td style={{ color: '#0d7478', fontWeight: 700 }}>{fmtMoney(r.sell, g.symbol)}</td>
+                            <td style={{ color: r.profitIncl < 0 ? '#dc2626' : '#15803d', fontWeight: 800 }}>
+                              {r.profitIncl < 0 ? '-' : ''}{fmtMoney(Math.abs(r.profitIncl), g.symbol)}
+                              <span style={{ marginLeft: '0.35rem', fontSize: '0.72rem', fontWeight: 700 }}>
+                                {r.profitIncl < 0 ? 'Loss' : 'Profit'}
+                              </span>
+                            </td>
+                            <td style={{ color: r.profitExcl < 0 ? '#dc2626' : '#15803d', fontWeight: 800 }}>
+                              {r.profitExcl < 0 ? '-' : ''}{fmtMoney(Math.abs(r.profitExcl), g.symbol)}
+                              <span style={{ marginLeft: '0.35rem', fontSize: '0.72rem', fontWeight: 700 }}>
+                                {r.profitExcl < 0 ? 'Loss' : 'Profit'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                        {rows.length > 0 && (
+                          <tr style={{ background: '#f8fafc' }}>
+                            <td colSpan="2" style={{ textAlign: 'right', fontWeight: 900 }}>TOTAL ({g.code})</td>
+                            <td style={{ color: '#b45309', fontWeight: 900 }}>{fmtMoney(totals.buy, g.symbol)}</td>
+                            <td style={{ color: '#0d7478', fontWeight: 900 }}>{fmtMoney(totals.sell, g.symbol)}</td>
+                            <td style={{ color: totals.profitIncl < 0 ? '#dc2626' : '#15803d', fontWeight: 900 }}>
+                              {totals.profitIncl < 0 ? '-' : ''}{fmtMoney(Math.abs(totals.profitIncl), g.symbol)}
+                              <span style={{ marginLeft: '0.35rem', fontSize: '0.72rem', fontWeight: 700 }}>
+                                {totals.profitIncl < 0 ? 'Loss' : 'Profit'}
+                              </span>
+                            </td>
+                            <td style={{ color: totals.profitExcl < 0 ? '#dc2626' : '#15803d', fontWeight: 900 }}>
+                              {totals.profitExcl < 0 ? '-' : ''}{fmtMoney(Math.abs(totals.profitExcl), g.symbol)}
+                              <span style={{ marginLeft: '0.35rem', fontSize: '0.72rem', fontWeight: 700 }}>
+                                {totals.profitExcl < 0 ? 'Loss' : 'Profit'}
+                              </span>
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </section>
+                );
+              })}
             </div>
           )}
 
@@ -12115,6 +12577,7 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
             item={roomModalState.item}
             itineraryTravellers={meta.travellers || []}
             beddedElsewhere={roomModalBeddedElsewhere}
+            autoAllocateGuide={!!roomModalState.autoAllocateGuide}
             currencyCode={currencyCode}
             markupPct={markupPct}
           />
@@ -12178,6 +12641,8 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
           {accomChargeModal && (
             <AccommodationChargeModal
               item={itemForContract(accomChargeModal.item, contractType)}
+              sourceItem={accomChargeModal.item}
+              contractType={contractType}
               variant={accomChargeModal.variant || 'accommodation'}
               currency={accomChargeModal.item.currency_code || currencyCode}
               travelStart={travelWindow.start}
@@ -12474,6 +12939,7 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
               guideName={guideDetailsModal.guideName || 'guide'}
               dayLabel={days[guideDetailsModal.dayIndex] ? `Day ${days[guideDetailsModal.dayIndex].dayNumber}` : 'the selected day'}
               currency={currencyCode}
+              companyId={companyId}
               libraryItems={libraryItems}
               travelStart={travelWindow.start}
               travelEnd={travelWindow.end}
@@ -12483,8 +12949,10 @@ const roomCheck = validateAccommodationServiceInDay(withRoomCapacity(sv, library
               payingGuestsByAccommodation={guideModalRooms.payingGuestsByAccommodation}
               payingGuests={guideModalRooms.payingGuests}
               defaultValues={guideDetailsModal.defaultValues || {}}
+              detailKinds={guideDetailsModal.detailKinds}
               onConfirm={(plan) => {
-                applyGuideDetails(guideDetailsModal.dayIndex, guideDetailsModal.guideKey, plan);
+                const targets = guideDetailsModal.dayIndices?.length ? guideDetailsModal.dayIndices : [guideDetailsModal.dayIndex];
+                targets.forEach((dayIdx) => applyGuideDetails(dayIdx, guideDetailsModal.guideKey, plan));
                 setGuideDetailsModal(null);
               }}
               onCancel={() => setGuideDetailsModal(null)}

@@ -9,6 +9,22 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+/* Supabase/PostgREST caps responses (commonly 1000 rows). Paginate to avoid
+   silently dropping rows when loading rates/rows for many items. */
+export async function fetchAllRows(makeQuery, pageSize = 1000) {
+  const rows = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await makeQuery(from, from + pageSize - 1);
+    if (error) return { data: null, error };
+    const chunk = Array.isArray(data) ? data : [];
+    rows.push(...chunk);
+    if (chunk.length < pageSize) break;
+    // Safety valve against runaway loops on unexpected APIs.
+    if (from > 200000) break;
+  }
+  return { data: rows, error: null };
+}
+
 /* Fold a company's legal form and punctuation away so "Test Company (Pty) Ltd"
    and "Test Company" compare equal. A profile whose name is the agency's own is
    not a person, and a client document must not print the agency as its designer. */

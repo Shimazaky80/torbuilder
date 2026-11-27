@@ -11,7 +11,7 @@
    filters; the rules for a date window, a consultant's row and a loss live here
    so they can be tested without a browser or a database. */
 
-import { COST_OF_SALES_STATUSES, costOfSalesFromDayItems, round2 } from './financeJournal';
+import { COST_OF_SALES_STATUSES, costOfSalesFromDayItems, round2 } from './financeJournal.js';
 
 export const REPORT_DATE_BASES = [
   { id: 'travel', label: 'Travel dates' },
@@ -111,12 +111,127 @@ export const moneyOf = (byCurrency) => Object.entries(byCurrency || {}).map(([co
   margin: money.revenue > 0 ? round2((money.profit / money.revenue) * 100) : null
 })).sort((a, b) => a.code.localeCompare(b.code));
 
+const sumByCurrencyField = (byCurrency, field) => Object.values(byCurrency || {}).reduce((s, m) => s + (Number(m[field]) || 0), 0);
+
 const hasProfit = (byCurrency) => Object.values(byCurrency || {}).some((money) => money.revenue > 0 && money.profit >= 0);
 const hasLoss = (byCurrency) => Object.values(byCurrency || {}).some((money) => money.loss > 0);
 const meetsMinimum = (byCurrency, minimum) => {
   const floor = Number(minimum);
   if (!Number.isFinite(floor) || floor <= 0) return true;
   return Object.values(byCurrency || {}).some((money) => money.revenue >= floor);
+};
+
+const vatOfInclusive = (amount, rate) => {
+  const r = Number(rate) || 0;
+  if (!r) return 0;
+  return round2((Number(amount) || 0) * r / (100 + r));
+};
+
+const supplierKeyOf = (item) => item?.supplier_id || `name:${nameOf(item?.supplier_name) || 'Unassigned supplier'}`;
+const supplierNameOf = (item) => nameOf(item?.supplier_name) || 'Unassigned supplier';
+
+const previousPeriod = (filters = {}) => {
+  const from = dayOf(filters.from);
+  const to = dayOf(filters.to);
+  if (!from || !to) return null;
+  const start = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return null;
+  const days = Math.round((end - start) / 86400000) + 1;
+  const prevEnd = new Date(start);
+  prevEnd.setUTCDate(prevEnd.getUTCDate() - 1);
+  const prevStart = new Date(prevEnd);
+  prevStart.setUTCDate(prevStart.getUTCDate() - (days - 1));
+  return {
+    ...filters,
+    from: prevStart.toISOString().slice(0, 10),
+    to: prevEnd.toISOString().slice(0, 10)
+  };
+};
+
+const supplierMoneyFromItems = (items, allowedItineraryIds) => {
+  const bySupplier = new Map();
+  (items || []).forEach((it) => {
+    if (it.is_included === false) return;
+    if (!it.itinerary_id || !allowedItineraryIds.has(it.itinerary_id)) return;
+    const key = supplierKeyOf(it);
+    if (!bySupplier.has(key)) {
+      bySupplier.set(key, {
+        key,
+        supplierId: it.supplier_id || '',
+        supplier: supplierNameOf(it),
+        itineraries: new Set(),
+        categories: new Set(),
+        services: 0,
+        byCurrency: {}
+      });
+    }
+    const row = bySupplier.get(key);
+    if (!row.supplierId && it.supplier_id) row.supplierId = it.supplier_id;
+    if (row.supplier === 'Unassigned supplier' && nameOf(it.supplier_name)) row.supplier = nameOf(it.supplier_name);
+    row.itineraries.add(it.itinerary_id);
+    if (nameOf(it.category)) row.categories.add(nameOf(it.category));
+    row.services += 1;
+
+    const pax = Math.max(1, Number(it.pax) || 1);
+    const buy = Number(it.total_buy) || round2((Number(it.unit_cost) || 0) * pax);
+    const grossSale = Number(it.total_sell) || round2((Number(it.unit_price ?? it.item_price_per_person) || 0) * pax);
+    const tax = vatOfInclusive(grossSale, it.tax_rate);
+    const revenue = round2(grossSale - tax);
+    addMoney(row.byCurrency, ccyOf(it.currency_code), { revenue, cost: buy, gross: grossSale, tax, services: 1 });
+  });
+
+  return [...bySupplier.values()].map((row) => ({
+    key: row.key,
+    supplierId: row.supplierId,
+    supplier: row.supplier,
+    itineraries: row.itineraries.size,
+    categories: [...row.categories].sort((a, b) => a.localeCompare(b)),
+    services: row.services,
+    byCurrency: row.byCurrency,
+    money: moneyOf(row.byCurrency)
+  })).sort((a, b) => {
+    const ar = Object.values(a.byCurrency).reduce((s, m) => s + m.revenue, 0);
+    const br = Object.values(b.byCurrency).reduce((s, m) => s + m.revenue, 0);
+    return br - ar || a.supplier.localeCompare(b.supplier);
+  });
+};
+
+const buildSupplierComparison = (current, previous) => {
+  const prevMap = new Map((previous || []).map((r) => [r.key, r]));
+  const keys = new Set([...(current || []).map((r) => r.key), ...prevMap.keys()]);
+  const pct = (cur, prev) => prev > 0 ? round2(((cur - prev) / prev) * 100) : (cur > 0 ? 100 : null);
+  return [...keys].map((key) => {
+    const cur = (current || []).find((r) => r.key === key);
+    const prev = prevMap.get(key);
+    const codes = new Set([...Object.keys(cur?.byCurrency || {}), ...Object.keys(prev?.byCurrency || {})]);
+    const deltaByCurrency = {};
+    [...codes].forEach((code) => {
+      const c = cur?.byCurrency?.[code] || emptyMoney();
+      const p = prev?.byCurrency?.[code] || emptyMoney();
+      deltaByCurrency[code] = {
+        code,
+        revenue: { current: c.revenue, previous: p.revenue, delta: round2(c.revenue - p.revenue), pct: pct(c.revenue, p.revenue) },
+        cost: { current: c.cost, previous: p.cost, delta: round2(c.cost - p.cost), pct: pct(c.cost, p.cost) },
+        profit: { current: c.profit, previous: p.profit, delta: round2(c.profit - p.profit), pct: pct(c.profit, p.profit) },
+        loss: { current: c.loss, previous: p.loss, delta: round2(c.loss - p.loss), pct: pct(c.loss, p.loss) }
+      };
+    });
+    return {
+      key,
+      supplierId: cur?.supplierId || prev?.supplierId || '',
+      supplier: cur?.supplier || prev?.supplier || 'Unassigned supplier',
+      current: cur || null,
+      previous: prev || null,
+      deltaByCurrency,
+      servicesDelta: (cur?.services || 0) - (prev?.services || 0),
+      itinerariesDelta: (cur?.itineraries || 0) - (prev?.itineraries || 0)
+    };
+  }).sort((a, b) => {
+    const ar = Object.values(a.current?.byCurrency || {}).reduce((s, m) => s + m.revenue, 0);
+    const br = Object.values(b.current?.byCurrency || {}).reduce((s, m) => s + m.revenue, 0);
+    return br - ar || a.supplier.localeCompare(b.supplier);
+  });
 };
 
 /* Tax-free revenue, buy cost and loss per itinerary and currency, derived from
@@ -174,7 +289,7 @@ const monthOf = (itinerary, basis) => dayOf(basis === 'created' ? itinerary?.cre
 
 /* The one call the page makes. `items` are day items with `itinerary_id`
    attached by the caller (the table stores the day id, not the itinerary id). */
-export const buildAnalyticsReports = ({ itineraries = [], items = [], filters = {} } = {}) => {
+export const buildAnalyticsReports = ({ itineraries = [], items = [], filters = {}, suppliers = [] } = {}) => {
   const financials = financialsForItems(items);
   /* Quotations carry quoted sell and buy figures too. Hiding them by default
      was why a company whose files are all still quotations saw no money at all. */
@@ -273,6 +388,210 @@ export const buildAnalyticsReports = ({ itineraries = [], items = [], filters = 
   const byConsultant = groupBy(scoped, (row) => row.consultant);
   const byClient = [...clientStatus.values()].sort((a, b) => a.key.localeCompare(b.key));
 
+  const supplierAllowed = new Set(scoped.map((r) => r.id));
+  const bySupplier = supplierMoneyFromItems(items, supplierAllowed);
+  const prevFilters = previousPeriod(filters);
+  let bySupplierPrevious = [];
+  let supplierComparison = [];
+  if (prevFilters) {
+    const prevCommon = rows.filter((row) => {
+      if (filters.consultant && row.consultant !== filters.consultant) return false;
+      if (filters.clientId && row.clientId !== filters.clientId) return false;
+      if (filters.client && row.client !== filters.client) return false;
+      if (filters.status && row.status !== filters.status) return false;
+      if (filters.tourType && row.tourType !== filters.tourType) return false;
+      if (!inReportRange(row.itinerary, prevFilters)) return false;
+      if (!meetsMinimum(row.financials, filters.minRevenue)) return false;
+      if (filters.lossFilter === 'loss' && !hasLoss(row.financials)) return false;
+      if (filters.lossFilter === 'profit' && !hasProfit(row.financials)) return false;
+      return true;
+    });
+    const prevScoped = financialStatuses
+      ? prevCommon.filter((row) => financialStatuses.includes(row.status))
+      : prevCommon;
+    bySupplierPrevious = supplierMoneyFromItems(items, new Set(prevScoped.map((r) => r.id)));
+    supplierComparison = buildSupplierComparison(bySupplier, bySupplierPrevious);
+  }
+
+  const bySupplierCategory = (() => {
+    const map = new Map();
+    (items || []).forEach((it) => {
+      if (it.is_included === false) return;
+      if (!it.itinerary_id || !supplierAllowed.has(it.itinerary_id)) return;
+      const supplier = supplierNameOf(it);
+      const category = nameOf(it.category) || 'Uncategorized';
+      const key = `${supplierKeyOf(it)}|${category}`;
+      if (!map.has(key)) map.set(key, { key, supplier, category, services: 0, itineraries: new Set(), byCurrency: {} });
+      const row = map.get(key);
+      row.itineraries.add(it.itinerary_id);
+      row.services += 1;
+      const pax = Math.max(1, Number(it.pax) || 1);
+      const buy = Number(it.total_buy) || round2((Number(it.unit_cost) || 0) * pax);
+      const grossSale = Number(it.total_sell) || round2((Number(it.unit_price ?? it.item_price_per_person) || 0) * pax);
+      const tax = vatOfInclusive(grossSale, it.tax_rate);
+      addMoney(row.byCurrency, ccyOf(it.currency_code), { revenue: round2(grossSale - tax), cost: buy, gross: grossSale, tax, services: 1 });
+    });
+    return [...map.values()].map((row) => ({
+      ...row,
+      itineraries: row.itineraries.size,
+      money: moneyOf(row.byCurrency)
+    })).sort((a, b) => {
+      const ar = Object.values(a.byCurrency).reduce((s, m) => s + m.revenue, 0);
+      const br = Object.values(b.byCurrency).reduce((s, m) => s + m.revenue, 0);
+      return br - ar || a.supplier.localeCompare(b.supplier) || a.category.localeCompare(b.category);
+    });
+  })();
+
+  const topSuppliersByRevenue = [...bySupplier].sort((a, b) => sumByCurrencyField(a.byCurrency, 'revenue') - sumByCurrencyField(b.byCurrency, 'revenue')).reverse().slice(0, 10);
+  const topSuppliersByProfit = [...bySupplier].sort((a, b) => sumByCurrencyField(a.byCurrency, 'profit') - sumByCurrencyField(b.byCurrency, 'profit')).reverse().slice(0, 10);
+  const highestMarginSuppliers = [...bySupplier]
+    .map((r) => {
+      const moneys = moneyOf(r.byCurrency);
+      const best = moneys.reduce((acc, m) => (m.margin != null && m.margin > acc ? m.margin : acc), -Infinity);
+      return { ...r, bestMargin: Number.isFinite(best) ? best : null };
+    })
+    .filter((r) => r.bestMargin != null)
+    .sort((a, b) => b.bestMargin - a.bestMargin || sumByCurrencyField(b.byCurrency, 'revenue') - sumByCurrencyField(a.byCurrency, 'revenue'))
+    .slice(0, 10);
+
+  const now = filters.now ? new Date(filters.now) : new Date();
+  const last12Months = new Date(now);
+  last12Months.setMonth(last12Months.getMonth() - 12);
+  const last12Cutoff = last12Months.toISOString().slice(0, 10);
+
+  const bookedSet = new Set((itineraries || []).filter((it) => {
+    const day = dayOf(it.travel_start_date) || dayOf(it.created_at);
+    return day && day >= last12Cutoff;
+  }).map((it) => it.id));
+
+  const suppliersBooked12 = new Set();
+  (items || []).forEach((it) => {
+    if (it.is_included === false) return;
+    if (!it.itinerary_id || !bookedSet.has(it.itinerary_id)) return;
+    suppliersBooked12.add(supplierKeyOf(it));
+  });
+
+  const suppliersNoBookingsLast12Months = (suppliers || [])
+    .filter((s) => s && s.is_active !== false)
+    .filter((s) => !suppliersBooked12.has(s.id) && !suppliersBooked12.has(`name:${nameOf(s.name)}`))
+    .map((s) => ({
+      key: s.id,
+      supplierId: s.id,
+      supplier: s.name || 'Unnamed supplier',
+      category: s.category || '',
+      contactPerson: s.contact_person || '',
+      email: s.email || '',
+      phone: s.phone || ''
+    }))
+    .sort((a, b) => a.supplier.localeCompare(b.supplier));
+
+  const cancelledItineraryIds = new Set((itineraries || []).filter((it) => it.status === 'cancelled').map((it) => it.id));
+  const mostCancelledSuppliers = (() => {
+    const map = new Map();
+    (items || []).forEach((it) => {
+      if (it.is_included === false) return;
+      if (!it.itinerary_id || !cancelledItineraryIds.has(it.itinerary_id)) return;
+      const key = supplierKeyOf(it);
+      if (!map.has(key)) map.set(key, { key, supplierId: it.supplier_id || '', supplier: supplierNameOf(it), cancelledItineraries: new Set(), services: 0, byCurrency: {} });
+      const row = map.get(key);
+      row.cancelledItineraries.add(it.itinerary_id);
+      row.services += 1;
+      const pax = Math.max(1, Number(it.pax) || 1);
+      const buy = Number(it.total_buy) || round2((Number(it.unit_cost) || 0) * pax);
+      const grossSale = Number(it.total_sell) || round2((Number(it.unit_price ?? it.item_price_per_person) || 0) * pax);
+      const tax = vatOfInclusive(grossSale, it.tax_rate);
+      addMoney(row.byCurrency, ccyOf(it.currency_code), { revenue: round2(grossSale - tax), cost: buy, gross: grossSale, tax, services: 1 });
+    });
+    return [...map.values()].map((row) => ({ ...row, cancelledItineraries: row.cancelledItineraries.size, money: moneyOf(row.byCurrency) }))
+      .sort((a, b) => b.cancelledItineraries - a.cancelledItineraries || b.services - a.services || a.supplier.localeCompare(b.supplier));
+  })();
+
+  const outstandingSupplierPayments = (() => {
+    const confirmedIds = new Set((itineraries || []).filter((it) => it.status === 'confirmed').map((it) => it.id));
+    const map = new Map();
+    (items || []).forEach((it) => {
+      if (it.is_included === false) return;
+      if (!it.itinerary_id || !confirmedIds.has(it.itinerary_id)) return;
+      if (it.supplier_paid === true) return;
+      const key = supplierKeyOf(it);
+      if (!map.has(key)) map.set(key, { key, supplierId: it.supplier_id || '', supplier: supplierNameOf(it), itineraries: new Set(), services: 0, byCurrency: {} });
+      const row = map.get(key);
+      row.itineraries.add(it.itinerary_id);
+      row.services += 1;
+      const pax = Math.max(1, Number(it.pax) || 1);
+      const buy = Number(it.total_buy) || round2((Number(it.unit_cost) || 0) * pax);
+      addMoney(row.byCurrency, ccyOf(it.currency_code), { revenue: 0, cost: buy, gross: 0, tax: 0, services: 1 });
+    });
+    return [...map.values()].map((row) => ({ ...row, itineraries: row.itineraries.size, money: moneyOf(row.byCurrency) }))
+      .sort((a, b) => sumByCurrencyField(b.byCurrency, 'cost') - sumByCurrencyField(a.byCurrency, 'cost') || a.supplier.localeCompare(b.supplier));
+  })();
+
+  const suppliersOnCredit = (suppliers || []).filter((s) => {
+    if (!s) return false;
+    const terms = String(s.payment_terms || s.account_terms || s.credit_terms || '').toLowerCase();
+    const accountType = String(s.account_type || '').toLowerCase();
+    const onCredit = s.on_credit === true || s.is_credit === true || s.credit_account === true;
+    const hasAccount = !!(s.account_number || s.account_holder_name || s.bank_account_number);
+    return onCredit || /credit|account|30 days|60 days|90 days/.test(terms) || /credit|account/.test(accountType) || (hasAccount && /credit|account/.test(terms));
+  }).map((s) => ({
+    key: s.id,
+    supplierId: s.id,
+    supplier: s.name || 'Unnamed supplier',
+    category: s.category || '',
+    paymentTerms: s.payment_terms || s.account_terms || s.credit_terms || '',
+    accountType: s.account_type || '',
+    email: s.email || '',
+    phone: s.phone || ''
+  })).sort((a, b) => a.supplier.localeCompare(b.supplier));
+
+  const contractsExpiringNext90Days = (() => {
+    const today = dayOf(now.toISOString());
+    const in90 = new Date(now);
+    in90.setDate(in90.getDate() + 90);
+    const in90Day = dayOf(in90.toISOString());
+    const fields = ['contract_expiry', 'contract_end_date', 'contract_end', 'expiry_date', 'expires_at', 'contract_expires_at'];
+    return (suppliers || []).flatMap((s) => {
+      if (!s) return [];
+      const field = fields.find((f) => dayOf(s[f]));
+      const expiry = field ? dayOf(s[field]) : '';
+      if (!expiry || expiry < today || expiry > in90Day) return [];
+      const daysLeft = Math.round((new Date(`${expiry}T00:00:00Z`) - new Date(`${today}T00:00:00Z`)) / 86400000);
+      return [{
+        key: s.id,
+        supplierId: s.id,
+        supplier: s.name || 'Unnamed supplier',
+        category: s.category || '',
+        expiryDate: expiry,
+        daysLeft,
+        email: s.email || '',
+        phone: s.phone || ''
+      }];
+    }).sort((a, b) => a.expiryDate.localeCompare(b.expiryDate) || a.supplier.localeCompare(b.supplier));
+  })();
+
+  const supplierMonthly = (() => {
+    const map = new Map();
+    (items || []).forEach((it) => {
+      if (it.is_included === false) return;
+      if (!it.itinerary_id || !supplierAllowed.has(it.itinerary_id)) return;
+      const itn = (itineraries || []).find((x) => x.id === it.itinerary_id);
+      const month = monthOf(itn || { travel_start_date: '' }, filters.dateBasis);
+      if (!month) return;
+      const key = `${supplierKeyOf(it)}|${month}`;
+      if (!map.has(key)) map.set(key, { key, supplier: supplierNameOf(it), supplierId: it.supplier_id || '', month, services: 0, itineraries: new Set(), byCurrency: {} });
+      const row = map.get(key);
+      row.itineraries.add(it.itinerary_id);
+      row.services += 1;
+      const pax = Math.max(1, Number(it.pax) || 1);
+      const buy = Number(it.total_buy) || round2((Number(it.unit_cost) || 0) * pax);
+      const grossSale = Number(it.total_sell) || round2((Number(it.unit_price ?? it.item_price_per_person) || 0) * pax);
+      const tax = vatOfInclusive(grossSale, it.tax_rate);
+      addMoney(row.byCurrency, ccyOf(it.currency_code), { revenue: round2(grossSale - tax), cost: buy, gross: grossSale, tax, services: 1 });
+    });
+    return [...map.values()].map((row) => ({ ...row, itineraries: row.itineraries.size, money: moneyOf(row.byCurrency) }))
+      .sort((a, b) => a.month.localeCompare(b.month) || sumByCurrencyField(b.byCurrency, 'revenue') - sumByCurrencyField(a.byCurrency, 'revenue'));
+  })();
+
   return {
     rows: scoped,
     totals: { ...totals, money: moneyOf(totals.byCurrency) },
@@ -287,7 +606,21 @@ export const buildAnalyticsReports = ({ itineraries = [], items = [], filters = 
     lossMaking: scoped
       .filter((row) => hasLoss(row.financials))
       .sort((a, b) => Object.values(b.financials).reduce((s, m) => s + m.loss, 0)
-        - Object.values(a.financials).reduce((s, m) => s + m.loss, 0))
+        - Object.values(a.financials).reduce((s, m) => s + m.loss, 0)),
+    bySupplier,
+    bySupplierPrevious,
+    supplierComparison,
+    bySupplierCategory,
+    supplierPeriod: prevFilters ? { from: filters.from, to: filters.to, previousFrom: prevFilters.from, previousTo: prevFilters.to } : null,
+    topSuppliersByRevenue,
+    topSuppliersByProfit,
+    highestMarginSuppliers,
+    suppliersNoBookingsLast12Months,
+    mostCancelledSuppliers,
+    outstandingSupplierPayments,
+    suppliersOnCredit,
+    contractsExpiringNext90Days,
+    supplierMonthly
   };
 };
 

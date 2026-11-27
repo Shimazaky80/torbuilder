@@ -33,7 +33,9 @@ import {
   TrendingDown,
   FilterX,
   FileText,
-  AlertTriangle
+  AlertTriangle,
+  Truck,
+  ChevronDown
 } from 'lucide-react';
 
 /* ─── Sections ─────────────────────────────────────────────────────────────── */
@@ -43,10 +45,11 @@ const ANALYTICS_TABS = [
   { id: 'overview', label: 'Overview', icon: BarChart3 },
   { id: 'consultants', label: 'Consultants', icon: Users, adminOnly: true },
   { id: 'clients', label: 'Clients', icon: Building2, adminOnly: true },
+  { id: 'suppliers', label: 'Suppliers', icon: Truck, adminOnly: true },
   { id: 'financials', label: 'Financials', icon: CircleDollarSign },
   { id: 'checklist', label: 'Checklist', icon: FileText }
 ];
-const REPORT_TAB_IDS = ['overview', 'consultants', 'clients', 'financials'];
+const REPORT_TAB_IDS = ['overview', 'consultants', 'clients', 'suppliers', 'financials'];
 
 const EMPTY_REPORT_FILTERS = {
   consultant: '',
@@ -68,6 +71,7 @@ const makeFiltersByTab = () => Object.fromEntries(
 
 const htmlEscape = (v) =>
   String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 const downloadBlob = (content, filename, mimeType) => {
   const blob = new Blob([content], { type: mimeType });
@@ -135,36 +139,84 @@ const FilterField = ({ label, children }) => (
   </label>
 );
 
-const ReportPanel = ({ title, subtitle, columns, rows, empty = 'No records match the selected filters.' }) => (
-  <section className="admin-table-container" style={{ marginBottom: '1.5rem', overflow: 'hidden' }}>
-    <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
-      <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0 }}>{title}</h2>
-      {subtitle && <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{subtitle}</span>}
-    </div>
-    <div style={{ overflowX: 'auto' }}>
-      <table className="admin-table" style={{ minWidth: '760px' }}>
-        <thead>
-          <tr>{columns.map((column) => <th key={column.key} style={column.align ? { textAlign: column.align } : undefined}>{column.label}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
-            <tr>
-              <td colSpan={columns.length} style={{ padding: '2.5rem', textAlign: 'center', color: '#94a3b8' }}>{empty}</td>
-            </tr>
-          ) : rows.map((row, index) => (
-            <tr key={row.key || row.id || index}>
-              {columns.map((column) => (
-                <td key={column.key} style={column.align ? { textAlign: column.align } : undefined}>
-                  {column.render ? column.render(row) : (row[column.key] ?? '—')}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  </section>
-);
+const PREVIEW_ROWS = 10;
+
+const ReportPanel = ({ title, subtitle, columns, rows, empty = 'No records match the selected filters.', onExport, headerExtra }) => {
+  const [collapsed, setCollapsed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const visibleRows = showAll ? rows : rows.slice(0, PREVIEW_ROWS);
+  const hasMore = rows.length > PREVIEW_ROWS;
+
+  return (
+    <section className="admin-table-container" style={{ marginBottom: '1.5rem', overflow: 'hidden' }}>
+      <div
+        style={{ padding: '1rem 1.25rem', borderBottom: collapsed ? 'none' : '1px solid #f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setCollapsed((v) => !v)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCollapsed((v) => !v); } }}
+        aria-expanded={!collapsed}
+      >
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap', minWidth: 0 }}>
+          <ChevronDown size={16} color="#64748b" style={{ flexShrink: 0, transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }} />
+          <h2 style={{ fontSize: '1rem', fontWeight: 700, color: '#1e293b', margin: 0 }}>{title}</h2>
+          <span style={{ fontSize: '0.72rem', color: '#64748b', background: '#f1f5f9', borderRadius: '999px', padding: '0.1rem 0.5rem', fontWeight: 600 }}>{rows.length}</span>
+          {subtitle && <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{subtitle}</span>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }} onClick={(e) => e.stopPropagation()}>
+          {headerExtra}
+          {onExport && (
+            <button
+              type="button"
+              onClick={onExport}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.35rem 0.7rem', border: '1px solid #e2e8f0', borderRadius: '8px', background: '#fff', color: '#475569', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
+              title={`Export ${title}`}
+            >
+              <FileSpreadsheet size={14} /> Export
+            </button>
+          )}
+        </div>
+      </div>
+      {!collapsed && (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="admin-table" style={{ minWidth: '760px' }}>
+              <thead>
+                <tr>{columns.map((column) => <th key={column.key} style={column.align ? { textAlign: column.align } : undefined}>{column.label}</th>)}</tr>
+              </thead>
+              <tbody>
+                {rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={columns.length} style={{ padding: '2.5rem', textAlign: 'center', color: '#94a3b8' }}>{empty}</td>
+                  </tr>
+                ) : visibleRows.map((row, index) => (
+                  <tr key={row.key || row.id || index}>
+                    {columns.map((column) => (
+                      <td key={column.key} style={column.align ? { textAlign: column.align } : undefined}>
+                        {column.render ? column.render(row) : (row[column.key] ?? '-')}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {hasMore && (
+            <div style={{ padding: '0.75rem 1.25rem', borderTop: '1px solid #f1f5f9', display: 'flex', justifyContent: 'center' }}>
+              <button
+                type="button"
+                onClick={() => setShowAll((v) => !v)}
+                style={{ padding: '0.4rem 0.9rem', border: '1px solid #e2e8f0', borderRadius: '8px', background: '#f8fafc', color: '#0d7478', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer' }}
+              >
+                {showAll ? 'Show less' : `Show all ${rows.length} rows`}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+};
 
 /* One card, many owners: each report tab passes its own filter object here, so
    changing a filter in one section cannot leak into another. overflow:visible
@@ -408,6 +460,9 @@ export const Analytics = () => {
   const [currentUserName, setCurrentUserName] = useState('');
   const [dayItems, setDayItems] = useState([]);
   const [clientOptions, setClientOptions] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  const [rateAnalysisRows, setRateAnalysisRows] = useState([]);
+  const [topPerformerType, setTopPerformerType] = useState('all');
   const [consultantOptions, setConsultantOptions] = useState([]);
   /* Each report section owns a full filter set. The checklist never reads this
      state — it uses the checklist* controls and searchQuery below. */
@@ -451,7 +506,9 @@ export const Analytics = () => {
     const [
       { data, error },
       { data: tourTypeRows, error: tourTypeError },
-      { data: clientRows, error: clientError }
+      { data: clientRows, error: clientError },
+      { data: supplierRows, error: supplierError },
+      { data: companyRow }
     ] = await Promise.all([
       supabase
         .from('itineraries')
@@ -467,16 +524,49 @@ export const Analytics = () => {
         .from('clients')
         .select('id, name')
         .eq('company_id', companyId)
-        .order('name', { ascending: true })
+        .order('name', { ascending: true }),
+      supabase
+        .from('suppliers')
+        .select('*')
+        .eq('company_id', companyId)
+        .order('name', { ascending: true }),
+      supabase
+        .from('companies')
+        .select('name')
+        .eq('id', companyId)
+        .maybeSingle()
     ]);
 
     if (error) throw error;
     if (tourTypeError) throw tourTypeError;
     if (clientError) throw clientError;
-    const visibleItineraries = isConsultant
+    if (supplierError) throw supplierError;
+    const companyName = companyRow?.name || '';
+    const normalizeCompanyKey = (value) => String(value || '')
+      .toLowerCase()
+      .replace(/\(pty\)|\bpty\b|\bltd\b|\blimited\b|\binc\b|\bllc\b|\bcc\b|\bcompany\b|\bco\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    const companyKey = normalizeCompanyKey(companyName);
+    const canonicalUsername = String(username || sessionName || '').trim();
+
+    const isCompanyNameConsultant = (value) => {
+      const k = normalizeCompanyKey(value);
+      return !!k && !!companyKey && k === companyKey;
+    };
+
+    const visibleItineraries = (isConsultant
       ? (data || []).filter((it) => it.created_by === userId
-        || (!it.created_by && it.consultant_name === (username || sessionName)))
-      : data || [];
+        || (!it.created_by && (String(it.consultant_name || '').trim() === canonicalUsername || isCompanyNameConsultant(it.consultant_name))))
+      : data || []
+    ).map((it) => {
+      const rawConsultant = String(it.consultant_name || '').trim();
+      const consultantKey = normalizeCompanyKey(rawConsultant);
+      const isCompanyName = !!consultantKey && !!companyKey && consultantKey === companyKey;
+      if (!isCompanyName) return it;
+      const isOwn = it.created_by === userId || (!it.created_by && !!canonicalUsername);
+      return { ...it, consultant_name: isOwn ? (canonicalUsername || rawConsultant) : '' };
+    });
 
     /* Money lives on the day items, which store a day id rather than an
        itinerary id. Resolve that link here so the report engine only sees rows
@@ -490,7 +580,7 @@ export const Analytics = () => {
       if (dayIds.length) {
         const rawItems = await fetchInBatches(
           'itinerary_day_items',
-          'itinerary_day_id, item_name, currency_code, total_buy, total_sell, unit_cost, unit_price, item_price_per_person, pax, tax_rate, is_included',
+          'itinerary_day_id, item_name, category, supplier_id, supplier_name, currency_code, total_buy, total_sell, unit_cost, unit_price, item_price_per_person, pax, tax_rate, is_included, supplier_paid, supplier_paid_at, supplier_paid_ref',
           'itinerary_day_id',
           dayIds
         );
@@ -498,6 +588,27 @@ export const Analytics = () => {
           .map((item) => ({ ...item, itinerary_id: itineraryOfDay.get(item.itinerary_day_id) }))
           .filter((item) => item.itinerary_id);
       }
+    }
+
+    let rateAnalysisRows = [];
+    try {
+      const { data: libItems } = await supabase
+        .from('library_items')
+        .select('id, name, supplier_id, category, currency')
+        .eq('company_id', companyId);
+      const libItemIds = (libItems || []).map((li) => li.id);
+      let rateRows = [];
+      if (libItemIds.length) {
+        rateRows = await fetchInBatches('item_rates', 'id, item_id, option_name, room_type, season_name, valid_from, valid_to, unit_cost, unit_price, currency', 'item_id', libItemIds);
+      }
+      const supplierNameById = new Map((supplierRows || []).map((s) => [s.id, s.name || '']));
+      const libById = new Map((libItems || []).map((li) => [li.id, li]));
+      rateAnalysisRows = (rateRows || []).map((r) => {
+        const li = libById.get(r.item_id);
+        return { ...r, item_name: li?.name || '', supplier_id: li?.supplier_id || '', supplier_name: supplierNameById.get(li?.supplier_id) || '', category: li?.category || '', item_currency: li?.currency || r.currency || 'ZAR' };
+      });
+    } catch (_) {
+      rateAnalysisRows = [];
     }
 
     const configuredTypes = vocabularyNames(tourTypeRows);
@@ -508,6 +619,8 @@ export const Analytics = () => {
       tourTypes: [...new Set([...configuredTypes, ...previouslyUsedTypes])].sort((a, b) => a.localeCompare(b)),
       dayItems: items,
       clients: clientRows || [],
+      suppliers: supplierRows || [],
+      rateAnalysisRows,
       consultants: [...new Set(visibleItineraries.map((it) => it.consultant_name).filter(Boolean))]
         .sort((a, b) => a.localeCompare(b))
     };
@@ -519,6 +632,8 @@ export const Analytics = () => {
     setTourTypes(result.tourTypes);
     setDayItems(result.dayItems || []);
     setClientOptions(result.clients || []);
+    setSuppliers(result.suppliers || []);
+    setRateAnalysisRows(result.rateAnalysisRows || []);
     setConsultantOptions(result.consultants || []);
   }, []);
 
@@ -586,6 +701,42 @@ export const Analytics = () => {
     ));
   }, []);
 
+  const deltaText = useCallback((deltaByCurrency, field) => {
+    const rows = Object.values(deltaByCurrency || {}).sort((a, b) => a.code.localeCompare(b.code));
+    if (!rows.length) return '—';
+    return rows.map((row) => {
+      const d = row[field] || {};
+      const delta = Number(d.delta) || 0;
+      const pct = d.pct;
+      const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+      const pctText = pct == null ? 'new' : `${sign}${Math.abs(pct)}%`;
+      return `${row.code} ${sign}${formatAmount(Math.abs(delta), row.code)} (${pctText})`;
+    }).join('  ·  ');
+  }, [formatAmount]);
+
+  const deltaCell = useCallback((deltaByCurrency, field, goodWhenUp = true) => {
+    const rows = Object.values(deltaByCurrency || {}).sort((a, b) => a.code.localeCompare(b.code));
+    if (!rows.length) return <span style={{ color: '#cbd5e1' }}>—</span>;
+    return rows.map((row) => {
+      const d = row[field] || {};
+      const delta = Number(d.delta) || 0;
+      const pct = d.pct;
+      if (delta === 0 && pct == null) return <div key={row.code} style={{ whiteSpace: 'nowrap', color: '#94a3b8' }}><span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#94a3b8', marginRight: '0.25rem' }}>{row.code}</span>—</div>;
+      if (delta === 0) return <div key={row.code} style={{ whiteSpace: 'nowrap', color: '#94a3b8' }}><span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#94a3b8', marginRight: '0.25rem' }}>{row.code}</span>0%</div>;
+      const up = delta > 0;
+      const good = goodWhenUp ? up : !up;
+      const color = good ? '#16a34a' : '#dc2626';
+      const sign = up ? '+' : '-';
+      const pctText = pct == null ? 'new' : `${sign}${Math.abs(pct)}%`;
+      return (
+        <div key={row.code} style={{ whiteSpace: 'nowrap', color, fontWeight: 700 }}>
+          <span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#94a3b8', marginRight: '0.25rem' }}>{row.code}</span>
+          {sign}{formatAmount(Math.abs(delta), row.code)} <span style={{ fontWeight: 600 }}>({pctText})</span>
+        </div>
+      );
+    });
+  }, [formatAmount]);
+
   const moneyCell = useCallback((byCurrency, field = 'revenue') => {
     const rows = moneyOf(byCurrency);
     if (!rows.length) return <span style={{ color: '#cbd5e1' }}>—</span>;
@@ -626,9 +777,50 @@ export const Analytics = () => {
   }), [activeFilters, isConsultant]);
 
   const report = useMemo(
-    () => buildAnalyticsReports({ itineraries, items: dayItems, filters: reportFilters }),
-    [itineraries, dayItems, reportFilters]
+    () => buildAnalyticsReports({ itineraries, items: dayItems, filters: reportFilters, suppliers }),
+    [itineraries, dayItems, reportFilters, suppliers]
   );
+
+  const rateIncreaseAnalysis = useMemo(() => {
+    const byKey = new Map();
+    (rateAnalysisRows || []).forEach((r) => {
+      const year = String(r.valid_from || r.valid_to || '').slice(0, 4);
+      if (!/^\d{4}$/.test(year)) return;
+      const key = [r.supplier_id || r.supplier_name || '', r.item_id || '', r.option_name || '', r.room_type || '', r.season_name || ''].join('|');
+      if (!byKey.has(key)) byKey.set(key, { supplier: r.supplier_name || 'Unassigned supplier', item: r.item_name || '', option: r.option_name || r.season_name || 'Base Season', roomType: r.room_type || '', category: r.category || '', currency: r.item_currency || r.currency || 'ZAR', years: {} });
+      const entry = byKey.get(key);
+      const y = entry.years[year] || { cost: 0, price: 0, count: 0 };
+      y.cost += Number(r.unit_cost) || 0;
+      y.price += Number(r.unit_price) || 0;
+      y.count += 1;
+      entry.years[year] = y;
+    });
+    const out = [];
+    byKey.forEach((entry) => {
+      const years = Object.keys(entry.years).sort();
+      for (let i = 1; i < years.length; i++) {
+        const prevY = years[i - 1];
+        const curY = years[i];
+        const prev = entry.years[prevY];
+        const cur = entry.years[curY];
+        const prevCost = prev.count ? prev.cost / prev.count : 0;
+        const curCost = cur.count ? cur.cost / cur.count : 0;
+        const prevPrice = prev.count ? prev.price / prev.count : 0;
+        const curPrice = cur.count ? cur.price / cur.count : 0;
+        const costPct = prevCost > 0 ? round2(((curCost - prevCost) / prevCost) * 100) : (curCost > 0 ? 100 : null);
+        const pricePct = prevPrice > 0 ? round2(((curPrice - prevPrice) / prevPrice) * 100) : (curPrice > 0 ? 100 : null);
+        if (prevCost === 0 && curCost === 0 && prevPrice === 0 && curPrice === 0) continue;
+        out.push({
+          key: `${entry.supplier}|${entry.item}|${entry.option}|${entry.roomType}|${prevY}-${curY}`,
+          supplier: entry.supplier, item: entry.item, category: entry.category, option: entry.option, roomType: entry.roomType,
+          currency: entry.currency, previousYear: prevY, currentYear: curY,
+          previousCost: round2(prevCost), currentCost: round2(curCost), costIncreasePct: costPct,
+          previousPrice: round2(prevPrice), currentPrice: round2(curPrice), priceIncreasePct: pricePct
+        });
+      }
+    });
+    return out.sort((a, b) => (b.costIncreasePct ?? -Infinity) - (a.costIncreasePct ?? -Infinity) || a.supplier.localeCompare(b.supplier));
+  }, [rateAnalysisRows]);
 
   /* Only the section on screen is reset; the other three keep their filters. */
   const clearFilters = useCallback(() => {
@@ -708,17 +900,141 @@ export const Analytics = () => {
   const reportPanels = {
     overview: [
       {
-        title: 'Overview summary',
+        title: 'Top performers',
+        subtitle: topPerformerType === 'all'
+          ? 'Top suppliers, consultants and clients by revenue in the selected period'
+          : `Top ${topPerformerType === 'consultant' ? 'consultants' : topPerformerType === 'supplier' ? 'suppliers' : 'clients'} by revenue in the selected period`,
+        headerExtra: (
+          <select
+            value={topPerformerType}
+            onChange={(e) => setTopPerformerType(e.target.value)}
+            style={{ padding: '0.35rem 0.55rem', border: '1px solid #e2e8f0', borderRadius: '8px', background: '#fff', color: '#334155', fontSize: '0.75rem', fontWeight: 600 }}
+            title="Filter top performers by type"
+          >
+            <option value="all">All types</option>
+            <option value="supplier">Suppliers</option>
+            <option value="consultant">Consultants</option>
+            <option value="client">Clients</option>
+          </select>
+        ),
+        rows: (() => {
+          const limit = topPerformerType === 'all' ? 5 : 10;
+          const supplierRows = (report.bySupplier || []).slice(0, limit).map((r, i) => ({ key: `s-${r.key}`, rank: i + 1, type: 'Supplier', name: r.supplier, itineraries: r.itineraries, byCurrency: r.byCurrency }));
+          const consultantRows = (report.byConsultant || []).slice(0, limit).map((r, i) => ({ key: `c-${r.key}`, rank: i + 1, type: 'Consultant', name: r.key, itineraries: r.itineraries, byCurrency: r.byCurrency }));
+          const clientRows = (report.byClient || []).slice(0, limit).map((r, i) => ({ key: `cl-${r.key}`, rank: i + 1, type: 'Client', name: r.key, itineraries: r.itineraries, byCurrency: r.byCurrency }));
+          if (topPerformerType === 'supplier') return supplierRows;
+          if (topPerformerType === 'consultant') return consultantRows;
+          if (topPerformerType === 'client') return clientRows;
+          return [...supplierRows, ...consultantRows, ...clientRows];
+        })(),
+        empty: 'No performance data for the selected filters.',
         columns: [
-          { key: 'metric', label: 'Metric' },
-          { key: 'value', label: 'Value' }
-        ],
-        rows: [
-          { metric: 'Total travelers', value: stats.travellers.toLocaleString() },
-          { metric: 'Total itineraries', value: stats.total.toLocaleString() },
-          { metric: 'Revenue', value: stats.revenue },
-          { metric: 'Loss', value: stats.loss },
-          { metric: 'Quotations', value: stats.quotations.toLocaleString() }
+          { key: 'type', label: 'Type' },
+          { key: 'rank', label: '#', align: 'center' },
+          { key: 'name', label: 'Name', render: (row) => <strong>{row.name}</strong>, exportValue: (row) => row.name },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') }
+        ]
+      },
+      {
+        title: 'Top 10 Suppliers by Revenue',
+        rows: report.topSuppliersByRevenue || [],
+        empty: 'No supplier revenue data for the selected filters.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'services', label: 'Service lines', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') }
+        ]
+      },
+      {
+        title: 'Top 10 Suppliers by Profit',
+        rows: report.topSuppliersByProfit || [],
+        empty: 'No supplier profit data for the selected filters.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+          { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) }
+        ]
+      },
+      {
+        title: 'Suppliers With No Bookings Last 12 Months',
+        subtitle: 'Active suppliers with no included service lines in the last 12 months',
+        rows: report.suppliersNoBookingsLast12Months || [],
+        empty: 'All active suppliers have bookings in the last 12 months.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'category', label: 'Category', exportValue: (row) => row.category || '—' },
+          { key: 'contactPerson', label: 'Contact', exportValue: (row) => row.contactPerson || '—' },
+          { key: 'email', label: 'Email', exportValue: (row) => row.email || '—' },
+          { key: 'phone', label: 'Phone', exportValue: (row) => row.phone || '—' }
+        ]
+      },
+      {
+        title: 'Most Cancelled Suppliers',
+        subtitle: 'Suppliers appearing on cancelled itineraries (all visible data)',
+        rows: report.mostCancelledSuppliers || [],
+        empty: 'No cancelled supplier service lines found.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'cancelledItineraries', label: 'Cancelled itineraries', align: 'center' },
+          { key: 'services', label: 'Service lines', align: 'center' },
+          { key: 'revenue', label: 'Lost revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost exposure', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') }
+        ]
+      },
+      {
+        title: 'Highest Margin Suppliers',
+        rows: report.highestMarginSuppliers || [],
+        empty: 'No supplier margin data for the selected filters.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+          { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) }
+        ]
+      },
+      {
+        title: 'Outstanding Supplier Payments',
+        subtitle: 'Unpaid included service lines on confirmed bookings only',
+        rows: report.outstandingSupplierPayments || [],
+        empty: 'No outstanding supplier payments for confirmed bookings.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'itineraries', label: 'Confirmed itineraries', align: 'center' },
+          { key: 'services', label: 'Unpaid lines', align: 'center' },
+          { key: 'cost', label: 'Outstanding (buy cost)', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') }
+        ]
+      },
+      {
+        title: 'All Suppliers on Credit/Account',
+        subtitle: 'Suppliers marked with credit/account payment terms or credit flags',
+        rows: report.suppliersOnCredit || [],
+        empty: 'No suppliers with credit/account terms found.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'category', label: 'Category', exportValue: (row) => row.category || '—' },
+          { key: 'paymentTerms', label: 'Payment terms', exportValue: (row) => row.paymentTerms || '—' },
+          { key: 'accountType', label: 'Account type', exportValue: (row) => row.accountType || '—' },
+          { key: 'email', label: 'Email', exportValue: (row) => row.email || '—' }
+        ]
+      },
+      {
+        title: 'Contracts Expiring Next 90 Days',
+        subtitle: 'Supplier contracts with expiry dates in the next 90 days (if contract expiry fields are captured)',
+        rows: report.contractsExpiringNext90Days || [],
+        empty: 'No supplier contracts expiring in the next 90 days, or contract expiry dates are not captured on supplier records.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'category', label: 'Category', exportValue: (row) => row.category || '—' },
+          { key: 'expiryDate', label: 'Expiry date', render: (row) => toDisplay(row.expiryDate), exportValue: (row) => toDisplay(row.expiryDate) },
+          { key: 'daysLeft', label: 'Days left', align: 'center' },
+          { key: 'email', label: 'Email', exportValue: (row) => row.email || '—' }
         ]
       },
       {
@@ -810,6 +1126,136 @@ export const Analytics = () => {
           { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
           { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss'), exportValue: (row) => moneyText(row.byCurrency, 'loss') },
           { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) }
+        ]
+      }
+    ],
+    suppliers: [
+      {
+        title: 'Supplier services sold',
+        subtitle: report.supplierPeriod
+          ? `Selected period: ${toDisplay(report.supplierPeriod.from)} – ${toDisplay(report.supplierPeriod.to)}`
+          : 'How much supplier services were sold in the selected period',
+        rows: report.bySupplier,
+        empty: 'No supplier service lines match the selected filters.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'categories', label: 'Categories', render: (row) => row.categories.length ? row.categories.join(', ') : '—', exportValue: (row) => row.categories.join(', ') || '—' },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'services', label: 'Service lines', align: 'center' },
+          { key: 'revenue', label: 'Revenue (sell)', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost (buy)', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+          { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) },
+          { key: 'loss', label: 'Loss', render: (row) => moneyCell(row.byCurrency, 'loss'), exportValue: (row) => moneyText(row.byCurrency, 'loss') }
+        ]
+      },
+      {
+        title: 'Supplier period comparison',
+        subtitle: report.supplierPeriod
+          ? `Current: ${toDisplay(report.supplierPeriod.from)} – ${toDisplay(report.supplierPeriod.to)} vs Previous: ${toDisplay(report.supplierPeriod.previousFrom)} – ${toDisplay(report.supplierPeriod.previousTo)}`
+          : 'Set a From and To date to compare supplier performance against the previous equivalent period.',
+        rows: report.supplierPeriod ? report.supplierComparison : [],
+        empty: report.supplierPeriod ? 'No supplier comparison data for the selected periods.' : 'Select a date range to see period-over-period supplier changes.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'curRevenue', label: 'Current revenue', render: (row) => moneyCell(row.current?.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.current?.byCurrency, 'revenue') },
+          { key: 'prevRevenue', label: 'Previous revenue', render: (row) => moneyCell(row.previous?.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.previous?.byCurrency, 'revenue') },
+          { key: 'revenueDelta', label: 'Revenue change', render: (row) => deltaCell(row.deltaByCurrency, 'revenue', true), exportValue: (row) => deltaText(row.deltaByCurrency, 'revenue') },
+          { key: 'curCost', label: 'Current cost', render: (row) => moneyCell(row.current?.byCurrency, 'cost'), exportValue: (row) => moneyText(row.current?.byCurrency, 'cost') },
+          { key: 'prevCost', label: 'Previous cost', render: (row) => moneyCell(row.previous?.byCurrency, 'cost'), exportValue: (row) => moneyText(row.previous?.byCurrency, 'cost') },
+          { key: 'costDelta', label: 'Cost change', render: (row) => deltaCell(row.deltaByCurrency, 'cost', false), exportValue: (row) => deltaText(row.deltaByCurrency, 'cost') },
+          { key: 'profitDelta', label: 'Profit change', render: (row) => deltaCell(row.deltaByCurrency, 'profit', true), exportValue: (row) => deltaText(row.deltaByCurrency, 'profit') },
+          { key: 'servicesDelta', label: 'Service lines Δ', align: 'center', render: (row) => {
+            const d = Number(row.servicesDelta) || 0;
+            if (d === 0) return <span style={{ color: '#94a3b8' }}>—</span>;
+            const color = d > 0 ? '#16a34a' : '#dc2626';
+            return <span style={{ color, fontWeight: 700 }}>{d > 0 ? '+' : ''}{d}</span>;
+          }, exportValue: (row) => { const d = Number(row.servicesDelta) || 0; return d === 0 ? '—' : `${d > 0 ? '+' : ''}${d}`; } }
+        ]
+      },
+      {
+        title: 'Supplier monthly booking trends',
+        subtitle: activeFilters.dateBasis === 'created' ? 'Monthly supplier service activity by creation month — detect seasonality and forecast demand' : 'Monthly supplier service activity by travel month — detect seasonality and forecast demand',
+        rows: report.supplierMonthly || [],
+        empty: 'No supplier monthly data for the selected filters.',
+        columns: [
+          { key: 'month', label: 'Month', render: (row) => <strong>{row.month}</strong>, exportValue: (row) => row.month },
+          { key: 'supplier', label: 'Supplier', exportValue: (row) => row.supplier },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'services', label: 'Service lines', align: 'center' },
+          { key: 'revenue', label: 'Revenue', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') }
+        ]
+      },
+      {
+        title: 'Supplier spend concentration',
+        subtitle: 'Share of total supplier buy cost and sell revenue in the selected period — useful for negotiation leverage',
+        rows: report.bySupplier.map((row) => {
+          const totalRevenue = report.bySupplier.reduce((s, r) => s + Object.values(r.byCurrency || {}).reduce((a, m) => a + (Number(m.revenue) || 0), 0), 0);
+          const totalCost = report.bySupplier.reduce((s, r) => s + Object.values(r.byCurrency || {}).reduce((a, m) => a + (Number(m.cost) || 0), 0), 0);
+          const rev = Object.values(row.byCurrency || {}).reduce((a, m) => a + (Number(m.revenue) || 0), 0);
+          const cost = Object.values(row.byCurrency || {}).reduce((a, m) => a + (Number(m.cost) || 0), 0);
+          return {
+            ...row,
+            revenueShare: totalRevenue > 0 ? round2((rev / totalRevenue) * 100) : 0,
+            costShare: totalCost > 0 ? round2((cost / totalCost) * 100) : 0
+          };
+        }),
+        empty: 'No supplier service lines match the selected filters.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'revenue', label: 'Revenue (sell)', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'revenueShare', label: 'Revenue share', align: 'center', render: (row) => `${row.revenueShare}%`, exportValue: (row) => `${row.revenueShare}%` },
+          { key: 'cost', label: 'Cost (buy)', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'costShare', label: 'Cost share', align: 'center', render: (row) => `${row.costShare}%`, exportValue: (row) => `${row.costShare}%` },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'services', label: 'Service lines', align: 'center' }
+        ]
+      },
+      {
+        title: 'Supplier services by category',
+        subtitle: 'Which supplier service categories drive spend and revenue in the selected period',
+        rows: report.bySupplierCategory || [],
+        empty: 'No supplier service lines match the selected filters.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'category', label: 'Category', exportValue: (row) => row.category },
+          { key: 'itineraries', label: 'Itineraries', align: 'center' },
+          { key: 'services', label: 'Service lines', align: 'center' },
+          { key: 'revenue', label: 'Revenue (sell)', render: (row) => moneyCell(row.byCurrency, 'revenue'), exportValue: (row) => moneyText(row.byCurrency, 'revenue') },
+          { key: 'cost', label: 'Cost (buy)', render: (row) => moneyCell(row.byCurrency, 'cost'), exportValue: (row) => moneyText(row.byCurrency, 'cost') },
+          { key: 'profit', label: 'Net profit', render: (row) => moneyCell(row.byCurrency, 'profit'), exportValue: (row) => moneyText(row.byCurrency, 'profit') },
+          { key: 'margin', label: 'Margin', render: (row) => marginCell(row.byCurrency), exportValue: (row) => marginText(row.byCurrency) }
+        ]
+      },
+      {
+        title: 'Rate increase analysis',
+        subtitle: 'Year-to-year supplier rate comparison from library item rates — evaluate if increases are justified',
+        rows: rateIncreaseAnalysis,
+        empty: 'No year-to-year rate comparison data available.',
+        columns: [
+          { key: 'supplier', label: 'Supplier', render: (row) => <strong>{row.supplier}</strong>, exportValue: (row) => row.supplier },
+          { key: 'item', label: 'Item', exportValue: (row) => row.item },
+          { key: 'option', label: 'Season/Option', render: (row) => [row.option, row.roomType].filter(Boolean).join(' · '), exportValue: (row) => [row.option, row.roomType].filter(Boolean).join(' · ') },
+          { key: 'previousYear', label: 'Prev year', align: 'center' },
+          { key: 'previousCost', label: 'Prev cost', render: (row) => `${row.currency} ${formatAmount(row.previousCost, row.currency)}`, exportValue: (row) => `${row.currency} ${formatAmount(row.previousCost, row.currency)}` },
+          { key: 'currentYear', label: 'Curr year', align: 'center' },
+          { key: 'currentCost', label: 'Curr cost', render: (row) => `${row.currency} ${formatAmount(row.currentCost, row.currency)}`, exportValue: (row) => `${row.currency} ${formatAmount(row.currentCost, row.currency)}` },
+          { key: 'costIncreasePct', label: 'Cost change', align: 'center', render: (row) => {
+            const p = row.costIncreasePct;
+            if (p == null) return <span style={{ color: '#94a3b8' }}>—</span>;
+            const up = p > 0;
+            const color = p === 0 ? '#94a3b8' : (up ? '#dc2626' : '#16a34a');
+            return <span style={{ color, fontWeight: 700 }}>{up ? '+' : ''}{p}%</span>;
+          }, exportValue: (row) => row.costIncreasePct == null ? '—' : `${row.costIncreasePct > 0 ? '+' : ''}${row.costIncreasePct}%` },
+          { key: 'priceIncreasePct', label: 'Sell change', align: 'center', render: (row) => {
+            const p = row.priceIncreasePct;
+            if (p == null) return <span style={{ color: '#94a3b8' }}>—</span>;
+            const up = p > 0;
+            const color = p === 0 ? '#94a3b8' : (up ? '#16a34a' : '#dc2626');
+            return <span style={{ color, fontWeight: 700 }}>{up ? '+' : ''}{p}%</span>;
+          }, exportValue: (row) => row.priceIncreasePct == null ? '—' : `${row.priceIncreasePct > 0 ? '+' : ''}${row.priceIncreasePct}%` }
         ]
       }
     ],
@@ -1036,7 +1482,27 @@ export const Analytics = () => {
       {/* One render path for every report panel, driven by the descriptors the
           export also uses, so the workbook always matches the visible grid. */}
       {isReportTab && (reportPanels[activeTab] || []).map((panel) => (
-        <ReportPanel key={panel.title} {...panel} />
+        <ReportPanel
+          key={panel.title}
+          {...panel}
+          onExport={() => {
+            if (!panel.rows?.length) {
+              showToast('No records to export', 'warning');
+              return;
+            }
+            const date = new Date().toISOString().slice(0, 10);
+            downloadBlob(
+              buildAnalyticsXls({
+                title: `${panel.title} — ${activeTabLabel}`,
+                sections: [panel],
+                filterSummary: reportFilterSummary
+              }),
+              `${xlsFilename(panel.title)}-${date}.xls`,
+              'application/vnd.ms-excel'
+            );
+            showToast(`${panel.title} exported as Excel`, 'success');
+          }}
+        />
       ))}
 
       {/* Checklist Table — overflow visible so its own dropdowns are not clipped */}

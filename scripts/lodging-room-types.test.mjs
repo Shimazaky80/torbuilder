@@ -188,6 +188,37 @@ check('a one-room property whose rows name another room offers nothing', accommo
   ...item, roomTypes: [villa], item_rates: rates
 }, villa).length, 0);
 
+/* Room matching must be robust: rates may carry camelCase roomTypeId/roomType,
+   ids may be stale while names match, and names may differ only by whitespace.
+   A false "no seasons priced" blocks valid drops for all properties. */
+const luxuryRoom = normalizeRoomTypes([{ id: 'room-luxury', name: 'Luxury Room', max_occupancy: 2 }])[0];
+const luxuryRatesCamel = [{
+  id: 'rate-lux-camel', roomTypeId: 'room-luxury', roomType: 'Luxury Room',
+  season_name: 'High season', valid_from: '2027-01-08', valid_to: '2027-12-19',
+  currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 7030, price_2_adults: 6270
+}];
+check('ratesForRoom matches camelCase roomTypeId/roomType', ratesForRoom(luxuryRatesCamel, luxuryRoom).length, 1);
+check('accommodationSeasonChoices finds camelCase room-rate seasons', accommodationSeasonChoices({
+  roomTypes: [luxuryRoom], item_rates: luxuryRatesCamel
+}, luxuryRoom).length, 1);
+
+const luxuryRatesStaleId = [{
+  id: 'rate-lux-stale', room_type_id: 'old-id', room_type: 'Luxury Room',
+  season_name: 'High season', valid_from: '2027-01-08', valid_to: '2027-12-19',
+  currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 7030, price_2_adults: 6270
+}];
+check('ratesForRoom matches by room name when rate room id is stale', ratesForRoom(luxuryRatesStaleId, luxuryRoom).length, 1);
+check('accommodationSeasonChoices finds season when rate room id is stale but name matches', accommodationSeasonChoices({
+  roomTypes: [luxuryRoom], item_rates: luxuryRatesStaleId
+}, luxuryRoom).length, 1);
+
+const luxuryRatesSpacedName = [{
+  id: 'rate-lux-space', room_type_id: 'room-luxury', room_type: '  Luxury   Room  ',
+  season_name: 'High season', valid_from: '2027-01-08', valid_to: '2027-12-19',
+  currency: 'ZAR', rate_basis: 'per_person_sharing', price_1_adult: 7030, price_2_adults: 6270
+}];
+check('ratesForRoom matches normalized whitespace room names', ratesForRoom(luxuryRatesSpacedName, luxuryRoom).length, 1);
+
 /* --- Packages size rooms from the room that was sold -------------------- */
 const stay = (snapshot, capacity) => ({
   category: 'Accommodation',
